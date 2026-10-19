@@ -54,6 +54,7 @@ pub enum GraphError {
     DuplicateCallExpression { function: String, statement: String, path: String },
     InvalidCallOperands { function: String, statement: String, path: String },
     InvalidCallOperandPath { function: String, statement: String, path: String },
+    InvalidExpressionOperandPath { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -349,6 +350,22 @@ impl Graph {
                 }
             }
         }
+        // Every expression's child indices must be dense. Otherwise a
+        // truncated native snapshot can silently change operand semantics,
+        // even when the parent is not a function call.
+        for node in &graph.expressions {
+            for (index, child) in node.operands.iter().enumerate() {
+                if graph.expressions[child.0].data.path
+                    != format!("{}.{}", node.data.path, index)
+                {
+                    return Err(GraphError::InvalidExpressionOperandPath {
+                        function: node.data.function.clone(),
+                        statement: node.data.statement_path.clone(),
+                        path: node.data.path.clone(),
+                    });
+                }
+            }
+        }
         // A call's first operand is its callee; member calls additionally
         // carry an object operand. Missing required operands indicate a
         // truncated native snapshot rather than a valid zero-argument call.
@@ -586,6 +603,26 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
         assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
+    #[test]
+    fn rejects_non_call_expression_operand_gaps() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent) in [("0", None), ("0.1", Some("0"))] {
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: "0".into(),
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_kind: None, reference: None,
+                type_size: None, type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None, symbol_id: None,
+            });
+        }
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidExpressionOperandPath { .. })));
     }
 
     #[test]
