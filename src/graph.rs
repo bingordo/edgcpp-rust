@@ -399,6 +399,29 @@ fn graph_path_index(path: &str) -> usize {
 mod tests {
     use super::*;
     #[test]
+    fn initializer_tree_queries_preserve_operand_order() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "value".into() });
+        for (path, parent) in [
+            ("0.2", Some("0")), ("0", None), ("0.1", Some("0")),
+            ("0.0", Some("0")),
+        ] {
+            il.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(1), path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+                operator: None, type_id: None, symbol_id: None,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let root = graph.initializer_root(SymbolId(1)).unwrap();
+        assert_eq!(root.path, "0");
+        let paths: Vec<_> = graph.initializer_operands(root)
+            .iter().map(|node| node.path.as_str()).collect();
+        assert_eq!(paths, ["0.0", "0.1", "0.2"]);
+        assert!(graph.initializer_root(SymbolId(99)).is_none());
+    }
+
+    #[test]
     fn links_statement_and_ordered_operands() {
         let mut il = Il::default();
         il.statements.push(Statement { function:"f".into(), path:"0".into(), parent:None, kind:11 });
