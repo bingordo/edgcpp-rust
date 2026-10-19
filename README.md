@@ -73,15 +73,18 @@ discriminant, a stable statement path, and an optional parent path. The bridge
 recurses into blocks, if/else branches, while loops, and for-loop bodies.
 Unknown statement kinds are retained as opaque records.
 
-The statement snapshot does **not** yet include expression children, resolved
-types, or a complete control-flow graph. The original EDG node pointers are
-never retained.
+`Compilation::il.expressions` snapshots the primary expression on a statement,
+including ordered operands of EDG operation nodes. Records retain function,
+statement path, expression path, parent expression path, EDG expression kind,
+operator kind when applicable, and the basic result type kind. Other expression
+kinds remain opaque. Full type graphs, some non-operation expression children,
+and CFG edges are not yet represented. No EDG pointers escape the callback.
 
 The bridge defines `edg::back_end()` in place of the archive's C-code-generating
 back end. EDG invokes it after front-end processing, while IL is still alive.
 It copies the relevant data through a C callback. Rust keeps only owned data.
 
-This initial interface does **not** expose a full C++ AST or function-body IL.
+This initial interface does **not** expose a complete C++ AST or full function-body IL.
 That requires extending the IL visitor within the C++ bridge. The underlying
 EDG archive may change implementation and macro configurations; build the
 bridge and archive from the **same commit and configuration**.
@@ -91,8 +94,8 @@ bridge and archive from the **same commit and configuration**.
 - The callable EDG library is not thread-safe; `compile()` serializes calls
   within this process.
 - EDG manages its own diagnostics and source-file options.
-- The snapshot recurses into named namespaces, but not class members or
-  function bodies yet.
+- The declaration snapshot recurses into named namespaces, but not class members;
+  function bodies have a partial statement/expression snapshot.
 - The custom back-end symbol relies on static archive resolution; link tests
   against the exact archive version are necessary.
 - Exceptions do not cross the C ABI.
