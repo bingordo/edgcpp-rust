@@ -90,6 +90,8 @@ jobs:
             grep -F 'indexed symbols=' il_result.txt
             grep -F 'variable outer::constant_answer' il_result.txt
             grep -E 'initializer integer symbol=[0-9]+ value=42' il_result.txt
+            grep -F 'variable outer::initialized_from_count' il_result.txt
+            grep -E 'dynamic initializer symbol=[0-9]+ kind=3 expression=Some' il_result.txt
             grep -F 'symbol reference ' il_result.txt
             grep -F 'statement outer::overloaded(int) path=' il_result.txt
             grep -F 'statement outer::overloaded(long) path=' il_result.txt
