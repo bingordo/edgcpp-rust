@@ -62,5 +62,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("indexed symbols={}", graph.symbols.len());
+    for init in &graph.variable_initializers {
+        println!("variable initializer id={} kind={} explicit={} uninitialized={}",
+                 init.symbol.0, init.kind, init.explicit, init.uninitialized);
+    }
     Ok(())
 }
