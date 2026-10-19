@@ -624,7 +624,7 @@ mod tests {
     fn rejects_initializer_operand_gaps() {
         let mut il = Il::default();
         il.symbols.push(Symbol {
-            id: SymbolId(1), kind: 2, name: "x".into(), type_id: None,
+            id: SymbolId(1), kind: 2, name: "x".into(),
         });
         for (path, parent) in [("0", None), ("0.1", Some("0"))] {
             il.initializer_expressions.push(InitializerExpression {
