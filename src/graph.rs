@@ -473,6 +473,21 @@ mod tests {
     }
 
     #[test]
+    fn validates_integer_initializer_values() {
+        let mut il = Il::default();
+        il.initializer_integers.push(InitializerInteger {
+            symbol: SymbolId(3), value: -17,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingSymbol(SymbolId(3)));
+        il.symbols.push(Symbol { id: SymbolId(3), kind: 2, name: "x".into() });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.initializer_integer(SymbolId(3)), Some(-17));
+        il.initializer_integers.push(il.initializer_integers[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::DuplicateInitializerInteger(SymbolId(3)));
+    }
+
+    #[test]
     fn rejects_duplicate_type_ids() {
         let mut il = Il::default();
         let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };
