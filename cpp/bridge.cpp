@@ -193,6 +193,15 @@ static expression_children children_of(an_expr_node_ptr node)
   if (node == nullptr) return {nullptr, false};
   if (node->kind == enk_operation)
     return {node->variant.operation.operands, true};
+  // EDG il_def.h: these variants directly own linked expression lists.
+  // Function calls and constructor invocations are enk_operation nodes,
+  // already handled by the branch above.
+  if (node->kind == enk_braced_init_list)
+    return {node->variant.braced_init_list, true};
+  if (node->kind == enk_typeid)
+    return {node->variant.typeid_info.type_with_opt_expr, true};
+  if (node->kind == enk_c11_generic)
+    return {node->variant.c11_generic.operands, true};
   if (node->kind == enk_object_lifetime)
     return {node->variant.object_lifetime.expr, false};
   if ((node->kind == enk_sizeof || node->kind == enk_alignof ||
