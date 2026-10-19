@@ -12,7 +12,7 @@ It is not yet a complete EDG IL binding, AST, or stable serialized IL format.
 
 - A matching checkout of [bingundu/edgcpp](https://github.com/bingundu/edgcpp)
   on branch `ci/x86_64-callable-release`, with its callable-library CMake option.
-- Its generated `libedgcpfe.a` release archive and the corresponding CMake
+- Its generated **PIC-enabled** `libedgcpfe.a` release archive and the corresponding CMake
   `compile_commands.json`.
 - Rust/Cargo, Python 3, g++, GNU ar, and the same C++ toolchain configuration
   used for the EDG archive.
