@@ -252,6 +252,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
     if (source_name(r->source_corresp) != nullptr) {
       std::string name = declaration_name(r->source_corresp, true);
+      emit_type(r->type, 0);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
@@ -265,12 +266,14 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
     if (source_name(v->source_corresp) != nullptr) {
       std::string name = declaration_name(v->source_corresp, false);
+      emit_type(v->type, 0);
       current_callback(current_user_data, 2, name.c_str(), 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
+      emit_type(t, 0);
       current_callback(current_user_data, 3, name.c_str(), 0);
     }
   }
