@@ -1,5 +1,6 @@
 namespace outer {
 int count = 4;
+const int constant_answer = 42;
 int uninitialized_global;
 struct Widget { int member; unsigned flags : 3; };
 Widget widget{};

@@ -341,6 +341,30 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
+      // Only scalar static integer constants representable in i64 are
+      // exported as values. Aggregate and dynamic initializers stay opaque.
+      if (v->init_kind == initk_static && v->initializer.constant != nullptr &&
+          v->initializer.constant->kind == ck_integer) {
+        a_constant_ptr c = v->initializer.constant;
+        a_boolean overflow = FALSE;
+        bool have_value = false;
+        int64_t value = 0;
+        if (int_constant_is_signed(c)) {
+          a_host_large_integer n = value_of_integer_constant(c, &overflow);
+          if (!overflow && sizeof(n) <= sizeof(int64_t)) {
+            value = static_cast<int64_t>(n);
+            have_value = true;
+          }
+        } else {
+          a_host_large_unsigned n = unsigned_value_of_integer_constant(c, &overflow);
+          if (!overflow && n <= static_cast<a_host_large_unsigned>(
+              std::numeric_limits<int64_t>::max())) {
+            value = static_cast<int64_t>(n);
+            have_value = true;
+          }
+        }
+        if (have_value) emit_record(15, {num(symbol_id), signed_num(value)});
+      }
       emit_record(2, {txt(name)}, 0);
     }
   }

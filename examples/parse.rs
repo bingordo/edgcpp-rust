@@ -66,5 +66,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("variable initializer id={} kind={} explicit={} uninitialized={}",
                  init.symbol.0, init.kind, init.explicit, init.uninitialized);
     }
+    for init in &graph.initializer_integers {
+        println!("initializer integer symbol={} value={}", init.symbol.0, init.value);
+    }
     Ok(())
 }
