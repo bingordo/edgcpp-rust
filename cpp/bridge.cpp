@@ -7,6 +7,8 @@
 #include "fe_common.h"
 #include <cstdint>
 #include <string>
+#include <cxxabi.h>
+#include <cstdlib>
 
 extern "C" {
 typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
@@ -49,26 +51,49 @@ static std::string namespace_prefix(a_scope_ptr parent)
   return result;
 }
 
+static std::string declaration_name(const a_source_correspondence &sc,
+                                    bool is_routine)
+{
+#if NEED_NAME_MANGLING
+  if (sc.name_has_been_mangled && sc.name != nullptr) {
+    int status = 0;
+    char *decoded = abi::__cxa_demangle(sc.name, nullptr, nullptr, &status);
+    if (status == 0 && decoded != nullptr) {
+      std::string qualified(decoded);
+      std::free(decoded);
+      if (is_routine) {
+        const auto param = qualified.find('(');
+        if (param != std::string::npos) qualified.resize(param);
+      }
+      return qualified;
+    }
+    std::free(decoded);
+  }
+#endif
+  return namespace_prefix(sc.parent_scope) +
+         (source_name(sc) != nullptr ? source_name(sc) : "");
+}
+
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
   if (scope == nullptr || current_callback == nullptr || depth > 128) return;
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
     if (source_name(r->source_corresp) != nullptr) {
-      std::string name = namespace_prefix(r->source_corresp.parent_scope) + source_name(r->source_corresp);
+      std::string name = declaration_name(r->source_corresp, true);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);
     }
   }
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
     if (source_name(v->source_corresp) != nullptr) {
-      std::string name = namespace_prefix(v->source_corresp.parent_scope) + source_name(v->source_corresp);
+      std::string name = declaration_name(v->source_corresp, false);
       current_callback(current_user_data, 2, name.c_str(), 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
-      std::string name = namespace_prefix(t->source_corresp.parent_scope) + source_name(t->source_corresp);
+      std::string name = declaration_name(t->source_corresp, false);
       current_callback(current_user_data, 3, name.c_str(), 0);
     }
   }
