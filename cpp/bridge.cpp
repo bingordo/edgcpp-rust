@@ -77,28 +77,28 @@ static std::string declaration_name(const a_source_correspondence &sc,
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
 static void emit_statements(a_statement_ptr head, const std::string &function,
-                            const std::string &parent, unsigned depth)
+                            const std::string &parent, const std::string &edge, unsigned depth)
 {
   if (head == nullptr || depth > 64 || current_callback == nullptr) return;
   unsigned index = 0;
   for (a_statement_ptr stmt = head; stmt != nullptr && index < 10000;
        stmt = stmt->next, ++index) {
     std::string path = parent.empty() ? std::to_string(index) :
-                         parent + "." + std::to_string(index);
+                         parent + "." + edge + "." + std::to_string(index);
     std::string record = function + "\t" + path + "\t" + parent;
     current_callback(current_user_data, 5, record.c_str(),
                      static_cast<uint32_t>(stmt->kind));
     if (stmt->kind == stmk_block) {
-      emit_statements(stmt->variant.block.statements, function, path, depth + 1);
+      emit_statements(stmt->variant.block.statements, function, path, "block", depth + 1);
     } else if (stmt->kind == stmk_if) {
       emit_statements(stmt->variant.if_stmt.then_statement,
-                      function, path + ".then", depth + 1);
+                      function, path, "then", depth + 1);
       emit_statements(stmt->variant.if_stmt.else_statement,
-                      function, path + ".else", depth + 1);
+                      function, path, "else", depth + 1);
     } else if (stmt->kind == stmk_while ||
                stmt->kind == stmk_end_test_while) {
       emit_statements(stmt->variant.loop_statement,
-                      function, path + ".body", depth + 1);
+                      function, path, "body", depth + 1);
     } else if (stmt->kind == stmk_for) {
       emit_statements(stmt->variant.for_loop.statement,
                       function, path + ".body", depth + 1);
@@ -118,7 +118,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
-          emit_statements(body->assoc_block, name, "", 0);
+          emit_statements(body->assoc_block, name, "", "", 0);
         }
       }
     }
