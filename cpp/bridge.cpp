@@ -180,6 +180,27 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   return id;
 }
 
+// Keep function-body and dynamic-initializer traversal in sync. EDG operation
+// operands are linked lists; wrapper expressions own a single child.
+// Other variants remain deliberately opaque until their native layout is verified.
+struct expression_children {
+  an_expr_node_ptr first;
+  bool linked_list;
+};
+
+static expression_children children_of(an_expr_node_ptr node)
+{
+  if (node == nullptr) return {nullptr, false};
+  if (node->kind == enk_operation)
+    return {node->variant.operation.operands, true};
+  if (node->kind == enk_object_lifetime)
+    return {node->variant.object_lifetime.expr, false};
+  if ((node->kind == enk_sizeof || node->kind == enk_alignof ||
+       node->kind == enk_datasizeof) && !node->variant.sizeof_info.is_type)
+    return {node->variant.sizeof_info.variant.expr, false};
+  return {nullptr, false};
+}
+
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
 // Each expression receives a local path and parent path. Operation operands
@@ -262,21 +283,11 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
-  an_expr_node_ptr operands = nullptr;
-  bool list = false;
-  if (node->kind == enk_operation) {
-    operands = node->variant.operation.operands;
-    list = true;
-  } else if (node->kind == enk_object_lifetime) {
-    operands = node->variant.object_lifetime.expr;
-  } else if ((node->kind == enk_sizeof || node->kind == enk_alignof ||
-              node->kind == enk_datasizeof) && !node->variant.sizeof_info.is_type) {
-    operands = node->variant.sizeof_info.variant.expr;
-  }
+  const auto children = children_of(node);
   unsigned index = 0;
-  for (an_expr_node_ptr operand = operands;
+  for (an_expr_node_ptr operand = children.first;
        operand != nullptr && index < 10000;
-       operand = list ? operand->next : nullptr, ++index) {
+       operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_expr(operand, function, stmt_path,
               path + "." + std::to_string(index), path, depth + 1);
   }
@@ -339,21 +350,11 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                        num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
                    type_id ? num(type_id) : absent(),
                    symbol ? num(symbol) : absent()});
-  an_expr_node_ptr operands = nullptr;
-  bool list = false;
-  if (expr->kind == enk_operation) {
-    operands = expr->variant.operation.operands;
-    list = true;
-  } else if (expr->kind == enk_object_lifetime) {
-    operands = expr->variant.object_lifetime.expr;
-  } else if ((expr->kind == enk_sizeof || expr->kind == enk_alignof ||
-              expr->kind == enk_datasizeof) && !expr->variant.sizeof_info.is_type) {
-    operands = expr->variant.sizeof_info.variant.expr;
-  }
+  const auto children = children_of(expr);
   unsigned index = 0;
   for (an_expr_node_ptr operand = operands;
        operand != nullptr && index < 10000;
-       operand = list ? operand->next : nullptr, ++index) {
+       operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
                           path, depth + 1);
   }
