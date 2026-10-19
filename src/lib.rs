@@ -15,7 +15,7 @@ use std::{
 
 static COMPILER_LOCK: Mutex<()> = Mutex::new(());
 
-type Callback = unsafe extern "C" fn(*mut c_void, u32, *const c_char, u32);
+type Callback = unsafe extern "C" fn(*mut c_void, u32, *const u8, usize, u32);
 
 extern "C" {
     fn edgcpp_compile(
@@ -255,13 +255,13 @@ struct Collector {
 /// Never allow a Rust panic to cross the C ABI into EDG.
 /// Native callbacks are synchronous and serialized by COMPILER_LOCK.
 unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
-                              name: *const c_char, defined: u32) {
+                              name: *const u8, length: usize, defined: u32) {
     if context.is_null() || name.is_null() { return; }
     let state = &mut *(context as *mut Collector);
     if state.panicked || state.malformed { return; }
     let before = callback_record_count(&state.il, kind);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        collect_event(&mut state.il, kind, name, defined);
+        collect_event(&mut state.il, kind, name, length, defined);
     }));
     if result.is_err() {
         state.panicked = true;
@@ -289,10 +289,11 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
 }
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
-                        name: *const c_char, defined: u32) {
+                        name: *const u8, length: usize, defined: u32) {
     // Invalid UTF-8 must not silently change a compiler symbol.
     // A missing record is reported by the enclosing callback.
-    let Ok(name) = CStr::from_ptr(name).to_str() else {
+    let bytes = std::slice::from_raw_parts(name, length);
+    let Ok(name) = std::str::from_utf8(bytes) else {
         return;
     };
     match kind {
@@ -531,7 +532,7 @@ mod tests {
         };
         let broken = CString::new("not-a-type-record").unwrap();
         unsafe {
-            collect(&mut state as *mut Collector as *mut c_void, 7, broken.as_ptr(), 0);
+            collect(&mut state as *mut Collector as *mut c_void, 7, broken.as_ptr().cast(), broken.as_bytes().len(), 0);
         }
         assert!(state.malformed);
         assert!(state.il.types.is_empty());
@@ -545,7 +546,7 @@ mod tests {
         let bad = [0xff_u8, 0];
         unsafe {
             collect(&mut state as *mut Collector as *mut c_void,
-                    1, bad.as_ptr().cast(), 0);
+                    1, bad.as_ptr(), 1, 0);
         }
         assert!(state.malformed);
     }

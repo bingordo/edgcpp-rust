@@ -7,6 +7,7 @@
 #include "fe_common.h"
 #include "const_ints.h"
 #include <cstdint>
+#include <cstddef>
 #include <limits>
 #include <string>
 #include <cxxabi.h>
@@ -15,7 +16,7 @@
 
 extern "C" {
 typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
-                                    const char *name, uint32_t defined);
+                                    const char *name, size_t length, uint32_t defined);
 }
 
 namespace {
@@ -26,6 +27,16 @@ thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 }
 
 namespace edg {
+static void emit_record(uint32_t kind, const std::string &data, uint32_t value)
+{
+  current_callback(current_user_data, kind, data.data(), data.size(), value);
+}
+static void emit_record(uint32_t kind, const char *data, uint32_t value)
+{
+  if (data != nullptr) {
+    emit_record(kind, std::string(data), value);
+  }
+}
 static const char *source_name(const a_source_correspondence &sc)
 {
 #if NEED_NAME_MANGLING
@@ -90,7 +101,7 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   symbol_ids.emplace(ptr, id);
   std::string record = std::to_string(id) + "\t" +
                        std::to_string(kind) + "\t" + name;
-  current_callback(current_user_data, 13, record.c_str(), 0);
+  emit_record(13, record, 0);
   return id;
 }
 
@@ -131,7 +142,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           std::to_string(field->offset) + "\t" +
           std::to_string(field->offset_bit_remainder) + "\t" +
           std::to_string(field->is_bit_field ? field->bit_size : 0);
-      current_callback(current_user_data, 10, field_record.c_str(), 0);
+      emit_record(10, field_record, 0);
     }
   }
   // Preserve the calling interface shape, including variadic functions.
@@ -140,7 +151,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     std::string signature = std::to_string(id) + "\t" +
         std::to_string(info->prototyped ? 1 : 0) + "\t" +
         std::to_string(info->has_ellipsis ? 1 : 0);
-    current_callback(current_user_data, 12, signature.c_str(), 0);
+    emit_record(12, signature, 0);
   }
   // Send additional parameter type edges in declaration order.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
@@ -150,13 +161,13 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       uint32_t parameter = emit_type(p->type, depth + 1);
       std::string edge = std::to_string(id) + "\t" +
           std::to_string(position) + "\t" + std::to_string(parameter);
-      current_callback(current_user_data, 8, edge.c_str(), 0);
+      emit_record(8, edge, 0);
     }
   }
   std::string record = std::to_string(id) + "\t" +
       std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
       std::to_string(relation) + "\t" + std::to_string(child);
-  current_callback(current_user_data, 7, record.c_str(), 0);
+  emit_record(7, record, 0);
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {
@@ -169,7 +180,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
         std::to_string(static_cast<unsigned>(type->variant.typeref.qualifiers)) : "";
     std::string detail = std::to_string(id) + "\t" +
         std::to_string(flags) + "\t" + qualifiers;
-    current_callback(current_user_data, 11, detail.c_str(), 0);
+    emit_record(11, detail, 0);
   }
   if (type->kind == tk_array &&
       !type->variant.array.is_variable_size_array &&
@@ -177,7 +188,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       !type->incomplete) {
     std::string count = std::to_string(type->variant.array.variant.number_of_elements);
     std::string bound = std::to_string(id) + "\t" + count;
-    current_callback(current_user_data, 9, bound.c_str(), 0);
+    emit_record(9, bound, 0);
   }
   return id;
 }
@@ -323,8 +334,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           declaration_name(r->source_corresp, true, true) : base;
       emit_type(r->type, 0);
       emit_symbol(r, 1, name);
-      current_callback(current_user_data, 1, name.c_str(),
-                       r->function_def_number != NULL_function_def_number);
+      emit_record(1, name, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
@@ -338,21 +348,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(v->source_corresp, false);
       emit_type(v->type, 0);
       emit_symbol(v, 2, name);
-      current_callback(current_user_data, 2, name.c_str(), 0);
+      emit_record(2, name, 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       emit_type(t, 0);
-      current_callback(current_user_data, 3, name.c_str(), 0);
+      emit_record(3, name, 0);
     }
   }
   for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
     if (ns->is_namespace_alias) continue;
     const char *name = ns->source_corresp.name;
     std::string qualified = prefix + (name != nullptr ? name : "<anonymous>");
-    current_callback(current_user_data, 4, qualified.c_str(), 0);
+    emit_record(4, qualified, 0);
     collect_scope(ns->variant.assoc_scope, qualified + "::", depth + 1);
   }
 }
