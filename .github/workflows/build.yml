@@ -1,0 +1,63 @@
+name: Rust EDG bridge (Linux x86-64)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/edgcpp/ci-runner@sha256:14b3948c2ce12cfa5472e5a6c468393d15426f3a67685cc35d830ea5db2acdf8
+    defaults:
+      run:
+        shell: edg-container-exec "bash -eo pipefail {0}"
+    steps:
+      - name: Check out Rust bindings
+        uses: actions/checkout@v7
+        with:
+          path: edgcpp-rust
+
+      - name: Check out matching EDG source
+        uses: actions/checkout@v7
+        with:
+          repository: bingundu/edgcpp
+          ref: ci/x86_64-callable-release
+          path: edgcpp
+
+      - name: Configure EDG
+        env:
+          EDG_BASE: ${{ github.workspace }}/edgcpp/bases/docker/dev-env/gcc
+        working-directory: edgcpp
+        run: |
+          cmake --preset linux-gcc-release \
+            -DEDG_BUILD_LIB=OFF \
+            -DEDG_BUILD_CALLABLE_LIBRARY=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build EDG static archive
+        env:
+          EDG_BASE: ${{ github.workspace }}/edgcpp/bases/docker/dev-env/gcc
+        working-directory: edgcpp
+        run: cmake --build build/gcc-release --target edgcpfe --parallel 2
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v cargo >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+
+      - name: Build bindings and tests
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --all-targets
