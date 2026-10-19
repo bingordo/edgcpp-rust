@@ -80,6 +80,27 @@ operator kind when applicable, and the basic result type kind. Other expression
 kinds remain opaque. Full type graphs, some non-operation expression children,
 and CFG edges are not yet represented. No EDG pointers escape the callback.
 
+## Indexed IL graph
+
+`edgcpp::graph::Graph::from_il(&compilation.il)` converts the owned
+snapshot into dense IDs, explicit statement-child edges, statement-to-root-
+expression edges and ordered expression operands. `StatementId` and
+`ExpressionId` identify nodes within one graph. Invalid references and
+duplicate paths return `GraphError`, rather than silently dropping nodes.
+The legacy `Il` records remain available unchanged.
+
+```rust
+let graph = edgcpp::graph::Graph::from_il(&result.il)?;
+for statement in &graph.statements {
+    if let Some(root) = statement.expression {
+        println!("{:?}", graph.expression(root));
+    }
+}
+```
+
+The graph is a structurally indexed **partial EDG snapshot**, not yet a
+complete typed compiler IR. EDG enum values are still native discriminants.
+
 The bridge defines `edg::back_end()` in place of the archive's C-code-generating
 back end. EDG invokes it after front-end processing, while IL is still alive.
 It copies the relevant data through a C callback. Rust keeps only owned data.
