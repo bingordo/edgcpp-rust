@@ -15,7 +15,26 @@ use std::{
 
 static COMPILER_LOCK: Mutex<()> = Mutex::new(());
 
-type Callback = unsafe extern "C" fn(*mut c_void, u32, *const u8, usize, u32);
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WireField {
+    data: *const u8,
+    length: usize,
+    value: u64,
+    tag: u32,
+}
+type Callback = unsafe extern "C" fn(*mut c_void, u32, *const WireField, usize, u32);
+impl WireField {
+    fn string(self) -> Option<String> {
+        if self.tag != 1 || self.data.is_null() { return None; }
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(self.data, self.length) })
+            .ok().map(str::to_owned)
+    }
+    fn unsigned(self) -> Option<u64> { (self.tag == 2).then_some(self.value) }
+    fn u32(self) -> Option<u32> { self.unsigned().and_then(|n| n.try_into().ok()) }
+    fn signed(self) -> Option<i64> { (self.tag == 3).then_some(self.value as i64) }
+    fn present(self) -> bool { self.tag != 0 }
+}
 
 extern "C" {
     fn edgcpp_compile(
@@ -255,8 +274,9 @@ struct Collector {
 /// Never allow a Rust panic to cross the C ABI into EDG.
 /// Native callbacks are synchronous and serialized by COMPILER_LOCK.
 unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
-                              name: *const u8, length: usize, defined: u32) {
-    if context.is_null() || name.is_null() { return; }
+                              name: *const WireField, length: usize, defined: u32) {
+    if context.is_null() { return; }
+    if name.is_null() && length != 0 { return; }
     let state = &mut *(context as *mut Collector);
     if state.panicked || state.malformed { return; }
     let before = callback_record_count(&state.il, kind);
@@ -289,133 +309,87 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
 }
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
-                        name: *const u8, length: usize, defined: u32) {
-    // Invalid UTF-8 must not silently change a compiler symbol.
-    // A missing record is reported by the enclosing callback.
-    let bytes = std::slice::from_raw_parts(name, length);
-    let Ok(name) = std::str::from_utf8(bytes) else {
-        return;
+                        data: *const WireField, length: usize, aux: u32) {
+    let fields = if length == 0 { &[][..] } else {
+        if data.is_null() { return; }
+        std::slice::from_raw_parts(data, length)
     };
+    let expected = match kind {
+        1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, _ => return,
+    };
+    if length != expected || fields.iter().any(|f|
+        f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
+    let t = |i: usize| fields[i].string();
+    let n = |i: usize| fields[i].u32();
     match kind {
-        1 => output.entities.push(Entity::Routine {
-            name: name.to_owned(), has_definition: defined != 0,
-        }),
-        2 => output.entities.push(Entity::Variable { name: name.to_owned() }),
-        3 => output.entities.push(Entity::Type { name: name.to_owned() }),
-        4 => output.entities.push(Entity::Namespace { name: name.to_owned() }),
-        6 => {
-            let fields: Vec<_> = name.splitn(15, '\t').collect();
-            if fields.len() == 15 {
-                output.expressions.push(Expression {
-                    function: fields[0].into(),
-                    statement_path: fields[1].into(),
-                    path: fields[2].into(),
-                    parent: if fields[3].is_empty() { None } else { Some(fields[3].into()) },
-                    kind: defined,
-                    operator: fields[4].parse().ok().filter(|_| defined == 1),
-                    type_kind: fields[5].parse().ok(),
-                    reference: if fields[6].is_empty() { None } else { Some(fields[6].into()) },
-                    type_size: fields[7].parse().ok(),
-                    type_alignment: fields[8].parse().ok(),
-                    constant_kind: fields[9].parse().ok(),
-                    constant_integer: fields[10].parse().ok(),
-                    related_type_role: fields[11].parse().ok().filter(|v| *v != 0),
-                    related_type_kind: fields[12].parse().ok(),
-                    type_id: fields[13].parse::<u32>().ok().filter(|v| *v != 0).map(TypeId),
-                    symbol_id: fields[14].parse::<u32>().ok().filter(|v| *v != 0).map(SymbolId),
-                });
-            }
-        },
-        13 => {
-            let f: Vec<_> = name.splitn(3, '\t').collect();
-            if f.len() == 3 {
-                if let (Ok(id), Ok(kind)) = (f[0].parse(), f[1].parse()) {
-                    output.symbols.push(Symbol { id: SymbolId(id), kind, name: f[2].into() });
-                }
-            }
-        },
-        12 => {
-            let f: Vec<_> = name.splitn(3, '\t').collect();
-            if f.len() == 3 {
-                if let (Ok(owner), Ok(prototyped), Ok(variadic)) =
-                    (f[0].parse(), f[1].parse::<u32>(), f[2].parse::<u32>()) {
-                    output.function_signatures.push(FunctionSignature {
-                        owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0,
-                    });
-                }
-            }
-        },
-        11 => {
-            let f: Vec<_> = name.splitn(3, '\t').collect();
-            if f.len() == 3 {
-                if let (Ok(id), Ok(flags)) = (f[0].parse(), f[1].parse::<u32>()) {
-                    output.type_details.push(TypeDetail {
-                        owner: TypeId(id),
-                        is_reference: flags & 1 != 0,
-                        is_rvalue_reference: flags & 2 != 0,
-                        qualifiers: f[2].parse().ok(),
-                    });
-                }
-            }
-        },
-        10 => {
-            let f: Vec<_> = name.splitn(7, '\t').collect();
-            if f.len() == 7 {
-                if let (Ok(owner), Ok(position), Ok(ty)) =
-                    (f[0].parse(), f[1].parse(), f[2].parse()) {
-                    if let (Ok(byte_offset), Ok(bit_offset), Ok(bit_width)) =
-                        (f[4].parse(), f[5].parse(), f[6].parse()) {
-                        output.record_fields.push(RecordField {
-                            owner: TypeId(owner), position, ty: TypeId(ty),
-                            name: f[3].into(), byte_offset, bit_offset, bit_width,
-                        });
-                    }
-                }
-            }
-        },
-        9 => {
-            let mut fields = name.splitn(2, '\t');
-            if let (Some(id), Some(count)) = (fields.next(), fields.next()) {
-                if let (Ok(id), Ok(elements)) = (id.parse(), count.parse()) {
-                    output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
-                }
-            }
-        },
-        8 => {
-            let f: Vec<_> = name.splitn(3, '\t').collect();
-            if f.len() == 3 {
-                if let (Ok(owner), Ok(position), Ok(ty)) =
-                    (f[0].parse(), f[1].parse(), f[2].parse()) {
-                    output.type_parameters.push(TypeParameter {
-                        owner: TypeId(owner), position, ty: TypeId(ty),
-                    });
-                }
-            }
-        },
-        7 => {
-            let fields: Vec<_> = name.splitn(4, '\t').collect();
-            if fields.len() == 4 {
-                if let (Ok(id), Ok(kind), Ok(role), Ok(child)) =
-                    (fields[0].parse(), fields[1].parse(), fields[2].parse::<u32>(), fields[3].parse::<u32>()) {
-                    output.types.push(TypeDef {
-                        id: TypeId(id), kind,
-                        related_role: if role == 0 { None } else { Some(role) },
-                        related: if child == 0 { None } else { Some(TypeId(child)) },
-                    });
-                }
-            }
-        },
+        1..=4 => {
+            let Some(name) = t(0) else { return; };
+            output.entities.push(match kind {
+                1 => Entity::Routine { name, has_definition: aux != 0 },
+                2 => Entity::Variable { name },
+                3 => Entity::Type { name },
+                _ => Entity::Namespace { name },
+            });
+        }
         5 => {
-            let mut parts = name.splitn(3, '\t');
-            if let (Some(function), Some(path), Some(parent)) =
-                (parts.next(), parts.next(), parts.next()) {
-                output.statements.push(Statement {
-                    function: function.into(), path: path.into(),
-                    parent: if parent.is_empty() { None } else { Some(parent.into()) },
-                    kind: defined,
-                });
-            }
-        },
+            let (Some(function), Some(path)) = (t(0), t(1)) else { return; };
+            let parent = if fields[2].present() { let Some(v) = t(2) else { return; }; Some(v) } else { None };
+            output.statements.push(Statement { function, path, parent, kind: aux });
+        }
+        6 => {
+            let (Some(function), Some(statement_path), Some(path)) = (t(0), t(1), t(2)) else { return; };
+            let opt_text = |i| if fields[i].present() { t(i) } else { Some(String::new()) };
+            let (Some(parent), Some(reference)) = (opt_text(3), opt_text(6)) else { return; };
+            output.expressions.push(Expression {
+                function, statement_path, path,
+                parent: fields[3].present().then_some(parent),
+                kind: aux, operator: n(4), type_kind: n(5),
+                reference: fields[6].present().then_some(reference),
+                type_size: fields[7].unsigned(),
+                type_alignment: fields[8].unsigned(),
+                constant_kind: n(9), constant_integer: fields[10].signed(),
+                related_type_role: n(11), related_type_kind: n(12),
+                type_id: n(13).map(TypeId), symbol_id: n(14).map(SymbolId),
+            });
+        }
+        7 => {
+            let (Some(id), Some(kind), Some(role), Some(child)) = (n(0), n(1), n(2), n(3)) else { return; };
+            output.types.push(TypeDef { id: TypeId(id), kind,
+                related_role: (role != 0).then_some(role),
+                related: (child != 0).then_some(TypeId(child)) });
+        }
+        8 => {
+            let (Some(owner), Some(position), Some(ty)) = (n(0), n(1), n(2)) else { return; };
+            output.type_parameters.push(TypeParameter { owner: TypeId(owner), position, ty: TypeId(ty) });
+        }
+        9 => {
+            let (Some(id), Some(elements)) = (n(0), fields[1].unsigned()) else { return; };
+            output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
+        }
+        10 => {
+            let (Some(owner), Some(position), Some(ty), Some(name),
+                 Some(byte_offset), Some(bit_offset), Some(bit_width)) =
+                (n(0), n(1), n(2), t(3), fields[4].unsigned(), n(5), n(6)) else { return; };
+            output.record_fields.push(RecordField {
+                owner: TypeId(owner), position, ty: TypeId(ty), name,
+                byte_offset, bit_offset, bit_width });
+        }
+        11 => {
+            let (Some(owner), Some(flags)) = (n(0), n(1)) else { return; };
+            output.type_details.push(TypeDetail {
+                owner: TypeId(owner), is_reference: flags & 1 != 0,
+                is_rvalue_reference: flags & 2 != 0, qualifiers: n(2) });
+        }
+        12 => {
+            let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
+            output.function_signatures.push(FunctionSignature {
+                owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        13 => {
+            let (Some(id), Some(kind), Some(name)) = (n(0), n(1), t(2)) else { return; };
+            output.symbols.push(Symbol { id: SymbolId(id), kind, name });
+        }
         _ => {}
     }
 }
@@ -499,7 +473,7 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0.0".into(), parent: Some("0".into()), kind: 2,
-            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None,
+            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None, symbol_id: None,
         });
         assert_eq!(il.expressions[1].parent.as_deref(), Some("0"));
         assert_eq!(il.expressions[1].path, "0.0");
@@ -526,28 +500,30 @@ mod tests {
     }
 
     #[test]
-    fn malformed_callback_is_reported() {
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
-        let broken = CString::new("not-a-type-record").unwrap();
-        unsafe {
-            collect(&mut state as *mut Collector as *mut c_void, 7, broken.as_ptr().cast(), broken.as_bytes().len(), 0);
-        }
-        assert!(state.malformed);
-        assert!(state.il.types.is_empty());
+    fn typed_callback_preserves_tabs_and_nul_bytes() {
+        let name = b"outer::a\tb\0c";
+        let fields = [WireField { data: name.as_ptr(), length: name.len(), value: 0, tag: 1 }];
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        unsafe { collect((&mut state as *mut Collector).cast(), 2, fields.as_ptr(), 1, 0); }
+        assert_eq!(state.il.entities, vec![Entity::Variable {
+            name: String::from_utf8(name.to_vec()).unwrap()
+        }]);
+        assert!(!state.malformed);
     }
 
     #[test]
     fn invalid_utf8_callback_is_reported() {
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
-        let bad = [0xff_u8, 0];
-        unsafe {
-            collect(&mut state as *mut Collector as *mut c_void,
-                    1, bad.as_ptr(), 1, 0);
-        }
+        let bad = [0xff_u8];
+        let fields = [WireField { data: bad.as_ptr(), length: 1, value: 0, tag: 1 }];
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        unsafe { collect((&mut state as *mut Collector).cast(), 1, fields.as_ptr(), 1, 0); }
+        assert!(state.malformed);
+    }
+
+    #[test]
+    fn malformed_callback_is_reported() {
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        unsafe { collect((&mut state as *mut Collector).cast(), 7, std::ptr::null(), 0, 0); }
         assert!(state.malformed);
     }
 
