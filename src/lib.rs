@@ -76,6 +76,8 @@ pub struct Il {
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
+    /// Call sites with the operand index of the first explicit argument.
+    pub calls: Vec<CallSite>,
 }
 
 /// Per-compilation identity for a declaration or referenced symbol.
@@ -221,6 +223,16 @@ pub struct Expression {
     pub symbol_id: Option<SymbolId>,
 }
 
+/// An EDG operation call. Operand zero is the callee; member calls use
+/// operand one for the object, so explicit arguments start at index two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSite {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub first_argument: u32,
+}
+
 /// Owned namespace tree. Declarations are grouped by the namespace in
 /// which they occur; all strings and nodes are independent of EDG memory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -349,6 +361,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         15 => Some(il.initializer_integers.len()),
         16 => Some(il.dynamic_initializers.len()),
         17 => Some(il.initializer_expressions.len()),
+        18 => Some(il.calls.len()),
         _ => None,
     }
 }
@@ -361,7 +374,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -430,6 +443,12 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        18 => {
+            let (Some(function), Some(statement_path), Some(path), Some(first_argument)) =
+                (t(0), t(1), t(2), n(3)) else { return; };
+            if first_argument != 1 && first_argument != 2 { return; }
+            output.calls.push(CallSite { function, statement_path, path, first_argument });
         }
         17 => {
             let (Some(owner), Some(path), Some(kind)) = (n(0), t(1), n(3)) else { return; };
