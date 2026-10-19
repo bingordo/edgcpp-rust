@@ -100,15 +100,15 @@ impl Graph {
             }
         }
         // Preserve operand order from sequence-indexed paths (not callback order).
+        let expr_order: Vec<usize> = graph.expressions.iter()
+            .map(|n| graph_path_index(&n.data.path)).collect();
+        let stmt_order: Vec<usize> = graph.statements.iter()
+            .map(|n| graph_path_index(&n.data.path)).collect();
         for node in &mut graph.expressions {
-            node.operands.sort_by_key(|id| {
-                graph_path_index(&graph.expressions[id.0].data.path)
-            });
+            node.operands.sort_by_key(|id| expr_order[id.0]);
         }
         for node in &mut graph.statements {
-            node.children.sort_by_key(|id| {
-                graph_path_index(&graph.statements[id.0].data.path)
-            });
+            node.children.sort_by_key(|id| stmt_order[id.0]);
         }
         Ok(graph)
     }
