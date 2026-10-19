@@ -65,6 +65,18 @@ if let Some(scope) = namespaces.namespace(&["outer", "inner"]) {
 }
 ```
 
+## Function statements (prototype)
+
+`Compilation::il.statements` now contains a bounded snapshot of function-body
+statements. Each record has a qualified function name, an EDG statement-kind
+discriminant, a stable statement path, and an optional parent path. The bridge
+recurses into blocks, if/else branches, while loops, and for-loop bodies.
+Unknown statement kinds are retained as opaque records.
+
+The statement snapshot does **not** yet include expression children, resolved
+types, or a complete control-flow graph. The original EDG node pointers are
+never retained.
+
 The bridge defines `edg::back_end()` in place of the archive's C-code-generating
 back end. EDG invokes it after front-end processing, while IL is still alive.
 It copies the relevant data through a C callback. Rust keeps only owned data.
