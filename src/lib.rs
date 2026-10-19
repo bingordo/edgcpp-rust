@@ -229,11 +229,13 @@ pub enum Error {
     NativeFailure,
     CallbackPanicked,
     EmptyArguments,
+    MalformedCallback,
 }
 
 struct Collector {
     il: Il,
     panicked: bool,
+    malformed: bool,
 }
 
 /// Never allow a Rust panic to cross the C ABI into EDG.
@@ -242,11 +244,33 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                               name: *const c_char, defined: u32) {
     if context.is_null() || name.is_null() { return; }
     let state = &mut *(context as *mut Collector);
-    if state.panicked { return; }
+    if state.panicked || state.malformed { return; }
+    let before = callback_record_count(&state.il, kind);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         collect_event(&mut state.il, kind, name, defined);
     }));
-    if result.is_err() { state.panicked = true; }
+    if result.is_err() {
+        state.panicked = true;
+    } else if let Some(before) = before {
+        if callback_record_count(&state.il, kind) == Some(before) {
+            state.malformed = true;
+        }
+    }
+}
+
+fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
+    match kind {
+        1 | 2 | 3 | 4 => Some(il.entities.len()),
+        5 => Some(il.statements.len()),
+        6 => Some(il.expressions.len()),
+        7 => Some(il.types.len()),
+        8 => Some(il.type_parameters.len()),
+        9 => Some(il.array_bounds.len()),
+        10 => Some(il.record_fields.len()),
+        11 => Some(il.type_details.len()),
+        12 => Some(il.function_signatures.len()),
+        _ => None,
+    }
 }
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
@@ -387,12 +411,13 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     let mut argv: Vec<*mut c_char> =
         cstrings.iter().map(|s| s.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
-    let mut collector = Collector { il: Il::default(), panicked: false };
+    let mut collector = Collector { il: Il::default(), panicked: false, malformed: false };
     let code = unsafe {
         edgcpp_compile(cstrings.len() as c_int, argv.as_mut_ptr(),
                        Some(collect), &mut collector as *mut Collector as *mut c_void)
     };
     if collector.panicked { return Err(Error::CallbackPanicked); }
+    if collector.malformed { return Err(Error::MalformedCallback); }
     if code < 0 {
         return Err(Error::NativeFailure);
     }
@@ -469,6 +494,19 @@ mod tests {
             parent: Some("0".into()), kind: 0,
         });
         assert_eq!(il.statements[0].parent.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn malformed_callback_is_reported() {
+        let mut state = Collector {
+            il: Il::default(), panicked: false, malformed: false,
+        };
+        let broken = CString::new("not-a-type-record").unwrap();
+        unsafe {
+            collect(&mut state as *mut Collector as *mut c_void, 7, broken.as_ptr(), 0);
+        }
+        assert!(state.malformed);
+        assert!(state.il.types.is_empty());
     }
 
     #[test]
