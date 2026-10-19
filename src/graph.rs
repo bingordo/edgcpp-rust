@@ -293,8 +293,8 @@ mod tests {
         let mut il = Il::default();
         il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
         il.types.push(TypeDef { id: TypeId(2), kind: 0, related_role: None, related: None });
-        il.record_fields.push(RecordField { owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into() });
-        il.record_fields.push(RecordField { owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into() });
+        il.record_fields.push(RecordField { owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into(), byte_offset: 4, bit_offset: 0, bit_width: 0 });
+        il.record_fields.push(RecordField { owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.fields(TypeId(1)).map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }

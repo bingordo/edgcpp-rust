@@ -106,7 +106,10 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       const char *field_name = source_name(field->source_corresp);
       std::string field_record = std::to_string(id) + "\t" +
           std::to_string(index) + "\t" + std::to_string(field_type) +
-          "\t" + (field_name == nullptr ? "" : field_name);
+          "\t" + (field_name == nullptr ? "" : field_name) + "\t" +
+          std::to_string(field->offset) + "\t" +
+          std::to_string(field->offset_bit_remainder) + "\t" +
+          std::to_string(field->is_bit_field ? field->bit_size : 0);
       current_callback(current_user_data, 10, field_record.c_str(), 0);
     }
   }

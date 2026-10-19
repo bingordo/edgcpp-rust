@@ -150,4 +150,4 @@ both referenced type IDs and rejects duplicate parameter positions. Query
 `Graph::parameters(TypeId)` for ordered parameter edges. Array dimensions and
 full qualifiers are not yet represented.
 
-Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.\n
+Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.\n\nRecord fields include byte offsets, bit offsets within the byte, and bit-field widths from the target EDG layout. Zero bit width denotes an ordinary field in this snapshot.\n

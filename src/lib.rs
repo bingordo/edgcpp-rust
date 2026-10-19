@@ -86,6 +86,10 @@ pub struct RecordField {
     pub position: u32,
     pub ty: TypeId,
     pub name: String,
+    pub byte_offset: u64,
+    pub bit_offset: u32,
+    /// Zero for ordinary fields; nonzero for bit-fields.
+    pub bit_width: u32,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -240,14 +244,17 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
             }
         },
         10 => {
-            let f: Vec<_> = name.splitn(4, '\t').collect();
-            if f.len() == 4 {
+            let f: Vec<_> = name.splitn(7, '\t').collect();
+            if f.len() == 7 {
                 if let (Ok(owner), Ok(position), Ok(ty)) =
                     (f[0].parse(), f[1].parse(), f[2].parse()) {
-                    output.record_fields.push(RecordField {
-                        owner: TypeId(owner), position, ty: TypeId(ty),
-                        name: f[3].into(),
-                    });
+                    if let (Ok(byte_offset), Ok(bit_offset), Ok(bit_width)) =
+                        (f[4].parse(), f[5].parse(), f[6].parse()) {
+                        output.record_fields.push(RecordField {
+                            owner: TypeId(owner), position, ty: TypeId(ty),
+                            name: f[3].into(), byte_offset, bit_offset, bit_width,
+                        });
+                    }
                 }
             }
         },
