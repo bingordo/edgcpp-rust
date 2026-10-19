@@ -163,11 +163,20 @@ references; graph construction rejects duplicate or dangling symbol IDs.
 These IDs are **not** stable across compilations. Type/namespace declarations
 and expression forms outside the current visitor still need symbol capture.
 
-## Callback wire format (transitional)
+## Typed in-memory callback ABI
 
-The native callback now receives `(user_data, event_kind, bytes, byte_length,
-auxiliary_kind)`. Rust validates the exact UTF-8 byte slice; it no longer reads
-past the payload looking for a terminator. **Field encoding is still tab-separated**
-inside the byte slice, so this does not yet support arbitrary tabs in names or
-structured binary values. Replacing field encoding with explicitly sized fields
-remains necessary before treating this as a general-purpose lossless IL protocol.
+The native bridge now calls Rust with a borrowed `edgcpp_field[]` for each
+event, rather than formatting a tab-separated string. Each field carries
+either a pointer and byte length (UTF-8), an unsigned 64-bit integer, a
+signed 64-bit integer, or an explicit absent marker. The callback copies
+strings into the owned Rust IL before returning. Numeric fields never pass
+through decimal formatting or parsing.
+
+The C and Rust structures have matching field order and native C layout.
+The pointer and length are valid **only during the synchronous callback**.
+No EDG pointers are stored in the returned `Il` or `Graph`.
+
+The wire contract currently includes 13 event kinds and supports arbitrary
+UTF-8 in string fields, including tabs and embedded NUL bytes. This
+protocol is private to the in-process bridge and is not a stable file
+format or public extension ABI.
