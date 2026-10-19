@@ -180,3 +180,5 @@ The wire contract currently includes 13 event kinds and supports arbitrary
 UTF-8 in string fields, including tabs and embedded NUL bytes. This
 protocol is private to the in-process bridge and is not a stable file
 format or public extension ABI.
+
+Variable declarations now preserve EDG's native `init_kind`, explicit-initializer flag and uninitialized flag, attached to the declaration's `SymbolId`. This is initial classification metadata, not yet a full initializer expression or aggregate value tree.

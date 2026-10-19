@@ -337,7 +337,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
     if (source_name(v->source_corresp) != nullptr) {
       std::string name = declaration_name(v->source_corresp, false);
       emit_type(v->type, 0);
-      emit_symbol(v, 2, name);
+      uint32_t symbol_id = emit_symbol(v, 2, name);
+      emit_record(14, {num(symbol_id), num(v->init_kind),
+                       num(v->has_explicit_initializer ? 1 : 0),
+                       num(v->uninitialized ? 1 : 0)});
       emit_record(2, {txt(name)}, 0);
     }
   }

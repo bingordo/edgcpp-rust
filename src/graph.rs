@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -44,6 +44,7 @@ pub enum GraphError {
     InvalidTypeRelation(TypeId),
     DuplicateSymbol(SymbolId),
     MissingSymbol(SymbolId),
+    DuplicateVariableInitializer(SymbolId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -58,6 +59,7 @@ pub struct Graph {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    pub variable_initializers: Vec<VariableInitializer>,
 }
 
 impl Graph {
@@ -147,6 +149,16 @@ impl Graph {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
+        }
+        let mut initialized = std::collections::HashSet::new();
+        for init in &il.variable_initializers {
+            if !symbol_ids.contains(&init.symbol) {
+                return Err(GraphError::MissingSymbol(init.symbol));
+            }
+            if !initialized.insert(init.symbol) {
+                return Err(GraphError::DuplicateVariableInitializer(init.symbol));
+            }
+            graph.variable_initializers.push(init.clone());
         }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
@@ -262,6 +274,9 @@ impl Graph {
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
+    }
+    pub fn variable_initializer(&self, id: SymbolId) -> Option<&VariableInitializer> {
+        self.variable_initializers.iter().find(|v| v.symbol == id)
     }
     pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
         self.symbols.iter().find(|s| s.id == id)

@@ -72,6 +72,7 @@ pub struct Il {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    pub variable_initializers: Vec<VariableInitializer>,
 }
 
 /// Per-compilation identity for a declaration or referenced symbol.
@@ -84,6 +85,15 @@ pub struct Symbol {
     /// 1=routine, 2=variable, 3=field.
     pub kind: u32,
     pub name: String,
+}
+
+/// Native EDG initialization classification for a variable declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableInitializer {
+    pub symbol: SymbolId,
+    pub kind: u32,
+    pub explicit: bool,
+    pub uninitialized: bool,
 }
 
 /// Stable type identifier within one compilation. Zero means no type.
@@ -304,6 +314,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         11 => Some(il.type_details.len()),
         12 => Some(il.function_signatures.len()),
         13 => Some(il.symbols.len()),
+        14 => Some(il.variable_initializers.len()),
         _ => None,
     }
 }
@@ -316,7 +327,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -386,6 +397,14 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
         }
+        14 => {
+            let (Some(symbol), Some(kind), Some(explicit), Some(uninitialized)) =
+                (n(0), n(1), n(2), n(3)) else { return; };
+            output.variable_initializers.push(VariableInitializer {
+                symbol: SymbolId(symbol), kind, explicit: explicit != 0,
+                uninitialized: uninitialized != 0,
+            });
+        }
         13 => {
             let (Some(id), Some(kind), Some(name)) = (n(0), n(1), t(2)) else { return; };
             output.symbols.push(Symbol { id: SymbolId(id), kind, name });
@@ -437,7 +456,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![], symbols: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![], symbols: vec![], variable_initializers: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
