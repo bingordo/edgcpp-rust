@@ -4,8 +4,8 @@ A lightweight Rust wrapper for the EDG C/C++ front end on **Linux x86-64**.
 It invokes the callable front-end entry point from `libedgcpfe.a` and captures
 a lifetime-safe subset of EDG's intermediate language (IL) before EDG frees it.
 
-**Status:** initial integration. The current IL API snapshots file-scope routine
-names, whether a routine has a definition, and file-scope variable names.
+**Status:** initial integration. The current IL API snapshots namespace-qualified routine names, definition flags, variables, named types,
+and namespaces.
 It is not yet a complete EDG IL binding, AST, or stable serialized IL format.
 
 ## Build prerequisites
@@ -67,8 +67,8 @@ bridge and archive from the **same commit and configuration**.
 - The callable EDG library is not thread-safe; `compile()` serializes calls
   within this process.
 - EDG manages its own diagnostics and source-file options.
-- File-scope snapshots do not recurse into namespaces/classes or function
-  bodies yet.
+- The snapshot recurses into named namespaces, but not class members or
+  function bodies yet.
 - The custom back-end symbol relies on static archive resolution; link tests
   against the exact archive version are necessary.
 - Exceptions do not cross the C ABI.

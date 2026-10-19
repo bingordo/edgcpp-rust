@@ -6,7 +6,7 @@
  */
 #include "fe_common.h"
 #include <cstdint>
-#include <exception>
+#include <string>
 
 extern "C" {
 typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
@@ -19,28 +19,42 @@ thread_local void *current_user_data = nullptr;
 }
 
 namespace edg {
+static void collect_scope(a_scope_ptr scope, const std::string &prefix,
+                          unsigned depth)
+{
+  if (scope == nullptr || current_callback == nullptr || depth > 128) return;
+  for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
+    if (r->source_corresp.name != nullptr) {
+      std::string name = prefix + r->source_corresp.name;
+      current_callback(current_user_data, 1, name.c_str(),
+                       r->function_def_number != NULL_function_def_number);
+    }
+  }
+  for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
+    if (v->source_corresp.name != nullptr) {
+      std::string name = prefix + v->source_corresp.name;
+      current_callback(current_user_data, 2, name.c_str(), 0);
+    }
+  }
+  for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
+    if (t->source_corresp.name != nullptr) {
+      std::string name = prefix + t->source_corresp.name;
+      current_callback(current_user_data, 3, name.c_str(), 0);
+    }
+  }
+  for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
+    if (ns->is_namespace_alias) continue;
+    const char *name = ns->source_corresp.name;
+    std::string qualified = prefix + (name != nullptr ? name : "<anonymous>");
+    current_callback(current_user_data, 4, qualified.c_str(), 0);
+    collect_scope(ns->variant.assoc_scope, qualified + "::", depth + 1);
+  }
+}
+
 void back_end(void)
 {
-  if (current_callback == nullptr || il_header.primary_scope == nullptr) {
-    return;
-  }
-  // Snapshot only scalar data and names while EDG owns the live IL.
-  // No EDG pointers may escape this callback.
-  for (a_routine_ptr routine = il_header.primary_scope->routines;
-       routine != nullptr; routine = routine->next) {
-    const char *name = routine->source_corresp.name;
-    if (name != nullptr) {
-      current_callback(current_user_data, 1, name,
-                       routine->function_def_number != NULL_function_def_number);
-    }
-  }
-  for (a_variable_ptr var = il_header.primary_scope->variables;
-       var != nullptr; var = var->next) {
-    const char *name = var->source_corresp.name;
-    if (name != nullptr) {
-      current_callback(current_user_data, 2, name, 0);
-    }
-  }
+  // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
+  collect_scope(il_header.primary_scope, "", 0);
 }
 } // namespace edg
 

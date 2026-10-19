@@ -3,7 +3,7 @@
 //! This is a **Linux x86-64** C++ ABI bridge. Both sides must be built from
 //! matching EDG sources and configuration (see README).
 //!
-//! The IL snapshot contains file-scope functions and variables for now. The
+//! The IL snapshot contains named functions, variables, types, and namespaces. The
 //! native IL is far richer; this crate intentionally does not expose dangling
 //! raw EDG pointers after `edg_main` returns.
 use std::{
@@ -29,9 +29,11 @@ extern "C" {
 pub enum Entity {
     Routine { name: String, has_definition: bool },
     Variable { name: String },
+    Type { name: String },
+    Namespace { name: String },
 }
 
-/// Owned snapshot from a compilation. Currently includes file-scope entities.
+/// Owned snapshot from a compilation. Names use C++ namespace qualification.
 #[derive(Debug, Clone, Default)]
 pub struct Il {
     pub entities: Vec<Entity>,
@@ -66,6 +68,8 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
             name, has_definition: defined != 0,
         }),
         2 => output.entities.push(Entity::Variable { name }),
+        3 => output.entities.push(Entity::Type { name }),
+        4 => output.entities.push(Entity::Namespace { name }),
         _ => {}
     }
 }

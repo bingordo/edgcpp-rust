@@ -15,6 +15,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Entity::Routine { name, has_definition } =>
                 println!("routine {name}, defined={has_definition}"),
             Entity::Variable { name } => println!("variable {name}"),
+            Entity::Type { name } => println!("type {name}"),
+            Entity::Namespace { name } => println!("namespace {name}"),
         }
     }
     Ok(())
