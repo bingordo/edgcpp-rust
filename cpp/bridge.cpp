@@ -13,10 +13,11 @@
 #include <cxxabi.h>
 #include <cstdlib>
 #include <unordered_map>
+#include <initializer_list>
 
 extern "C" {
-typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
-                                    const char *name, size_t length, uint32_t defined);
+struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
+typedef void (*edgcpp_il_callback)(void *, uint32_t, const edgcpp_field *, size_t, uint32_t);
 }
 
 namespace {
@@ -27,15 +28,13 @@ thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 }
 
 namespace edg {
-static void emit_record(uint32_t kind, const std::string &data, uint32_t value)
+static edgcpp_field txt(const std::string &s) { return {s.data(), s.size(), 0, 1}; }
+static edgcpp_field num(uint64_t n) { return {nullptr, 0, n, 2}; }
+static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint64_t>(n), 3}; }
+static edgcpp_field absent() { return {nullptr, 0, 0, 0}; }
+static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
-  current_callback(current_user_data, kind, data.data(), data.size(), value);
-}
-static void emit_record(uint32_t kind, const char *data, uint32_t value)
-{
-  if (data != nullptr) {
-    emit_record(kind, std::string(data), value);
-  }
+  current_callback(current_user_data, kind, fields.begin(), fields.size(), aux);
 }
 static const char *source_name(const a_source_correspondence &sc)
 {
@@ -99,9 +98,7 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   if (found != symbol_ids.end()) return found->second;
   uint32_t id = static_cast<uint32_t>(symbol_ids.size() + 1);
   symbol_ids.emplace(ptr, id);
-  std::string record = std::to_string(id) + "\t" +
-                       std::to_string(kind) + "\t" + name;
-  emit_record(13, record, 0);
+  emit_record(13, {num(id), num(kind), txt(name)});
   return id;
 }
 
@@ -136,22 +133,17 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
          field != nullptr && index < 10000; field = field->next, ++index) {
       uint32_t field_type = emit_type(field->type, depth + 1);
       const char *field_name = source_name(field->source_corresp);
-      std::string field_record = std::to_string(id) + "\t" +
-          std::to_string(index) + "\t" + std::to_string(field_type) +
-          "\t" + (field_name == nullptr ? "" : field_name) + "\t" +
-          std::to_string(field->offset) + "\t" +
-          std::to_string(field->offset_bit_remainder) + "\t" +
-          std::to_string(field->is_bit_field ? field->bit_size : 0);
-      emit_record(10, field_record, 0);
+      std::string field_text = field_name == nullptr ? "" : field_name;
+      emit_record(10, {num(id), num(index), num(field_type), txt(field_text),
+                       num(field->offset), num(field->offset_bit_remainder),
+                       num(field->is_bit_field ? field->bit_size : 0)});
     }
   }
   // Preserve the calling interface shape, including variadic functions.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     const auto *info = type->variant.routine.extra_info;
-    std::string signature = std::to_string(id) + "\t" +
-        std::to_string(info->prototyped ? 1 : 0) + "\t" +
-        std::to_string(info->has_ellipsis ? 1 : 0);
-    emit_record(12, signature, 0);
+    emit_record(12, {num(id), num(info->prototyped ? 1 : 0),
+                     num(info->has_ellipsis ? 1 : 0)});
   }
   // Send additional parameter type edges in declaration order.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
@@ -159,15 +151,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     for (a_param_type_ptr p = type->variant.routine.extra_info->param_type_list;
          p != nullptr && position < 10000; p = p->next, ++position) {
       uint32_t parameter = emit_type(p->type, depth + 1);
-      std::string edge = std::to_string(id) + "\t" +
-          std::to_string(position) + "\t" + std::to_string(parameter);
-      emit_record(8, edge, 0);
+      emit_record(8, {num(id), num(position), num(parameter)});
     }
   }
-  std::string record = std::to_string(id) + "\t" +
-      std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
-      std::to_string(relation) + "\t" + std::to_string(child);
-  emit_record(7, record, 0);
+  emit_record(7, {num(id), num(static_cast<unsigned>(type->kind)),
+                  num(relation), num(child)});
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {
@@ -176,19 +164,16 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       if (type->variant.pointer.is_reference) flags |= 1;
       if (type->variant.pointer.is_rvalue_reference) flags |= 2;
     }
-    std::string qualifiers = type->kind == tk_typeref ?
-        std::to_string(static_cast<unsigned>(type->variant.typeref.qualifiers)) : "";
-    std::string detail = std::to_string(id) + "\t" +
-        std::to_string(flags) + "\t" + qualifiers;
-    emit_record(11, detail, 0);
+    emit_record(11, {num(id), num(flags),
+                     type->kind == tk_typeref ?
+                       num(static_cast<unsigned>(type->variant.typeref.qualifiers)) :
+                       absent()});
   }
   if (type->kind == tk_array &&
       !type->variant.array.is_variable_size_array &&
       !type->variant.array.is_template_dependent_size_array &&
       !type->incomplete) {
-    std::string count = std::to_string(type->variant.array.variant.number_of_elements);
-    std::string bound = std::to_string(id) + "\t" + count;
-    emit_record(9, bound, 0);
+    emit_record(9, {num(id), num(type->variant.array.variant.number_of_elements)});
   }
   return id;
 }
@@ -222,14 +207,10 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   // Report target type layout only when EDG has a complete nonzero-sized type.
   const bool layout_known = node->type != nullptr &&
                              !node->type->incomplete && node->type->size != 0;
-  const std::string type_size = layout_known ?
-      std::to_string(node->type->size) : "";
-  const std::string type_align = layout_known ?
-      std::to_string(node->type->alignment) : "";
-  const std::string constant_kind = node->kind == enk_constant &&
-      node->variant.constant.ptr != nullptr ?
-      std::to_string(static_cast<unsigned>(node->variant.constant.ptr->kind)) : "";
-  std::string integer_value;
+  const bool has_constant = node->kind == enk_constant &&
+      node->variant.constant.ptr != nullptr;
+  bool has_integer = false;
+  int64_t integer_value = 0;
   if (node->kind == enk_constant && node->variant.constant.ptr != nullptr &&
       node->variant.constant.ptr->kind == ck_integer) {
     a_constant_ptr constant = node->variant.constant.ptr;
@@ -237,14 +218,16 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     if (int_constant_is_signed(constant)) {
       a_host_large_integer value = value_of_integer_constant(constant, &overflow);
       if (!overflow && sizeof(value) <= sizeof(int64_t)) {
-        integer_value = std::to_string(static_cast<int64_t>(value));
+        integer_value = static_cast<int64_t>(value);
+        has_integer = true;
       }
     } else {
       a_host_large_unsigned value =
           unsigned_value_of_integer_constant(constant, &overflow);
       if (!overflow && value <=
           static_cast<a_host_large_unsigned>(std::numeric_limits<int64_t>::max())) {
-        integer_value = std::to_string(static_cast<int64_t>(value));
+        integer_value = static_cast<int64_t>(value);
+        has_integer = true;
       }
     }
   }
@@ -262,14 +245,21 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       relationship = 3;
     }
   }
-  const std::string related_kind = related_type == nullptr ? "" :
-      std::to_string(static_cast<unsigned>(related_type->kind));
   const uint32_t type_id = emit_type(node->type, 0);
-  std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
-                       parent + "\t" + std::to_string(op) + "\t" +
-                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value + "\t" +
-                       std::to_string(relationship) + "\t" + related_kind + "\t" + std::to_string(type_id) + "\t" + std::to_string(symbol);
-  emit_record(6, record, static_cast<uint32_t>(node->kind));
+  emit_record(6, {txt(function), txt(stmt_path), txt(path),
+                  parent.empty() ? absent() : txt(parent),
+                  node->kind == enk_operation ? num(op) : absent(),
+                  node->type != nullptr ? num(ty) : absent(),
+                  referenced.empty() ? absent() : txt(referenced),
+                  layout_known ? num(node->type->size) : absent(),
+                  layout_known ? num(node->type->alignment) : absent(),
+                  has_constant ? num(node->variant.constant.ptr->kind) : absent(),
+                  has_integer ? signed_num(integer_value) : absent(),
+                  relationship ? num(relationship) : absent(),
+                  related_type ? num(related_type->kind) : absent(),
+                  type_id ? num(type_id) : absent(),
+                  symbol ? num(symbol) : absent()},
+              static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
     unsigned index = 0;
     for (an_expr_node_ptr operand = node->variant.operation.operands;
@@ -290,8 +280,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
        stmt = stmt->next, ++index) {
     std::string path = parent.empty() ? std::to_string(index) :
                          parent + "." + edge + "." + std::to_string(index);
-    std::string record = function + "\t" + path + "\t" + parent;
-    emit_record(5, record, static_cast<uint32_t>(stmt->kind));
+    emit_record(5, {txt(function), txt(path), parent.empty() ? absent() : txt(parent)},
+                static_cast<uint32_t>(stmt->kind));
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
@@ -332,7 +322,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           declaration_name(r->source_corresp, true, true) : base;
       emit_type(r->type, 0);
       emit_symbol(r, 1, name);
-      emit_record(1, name, r->function_def_number != NULL_function_def_number);
+      emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
@@ -346,21 +336,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(v->source_corresp, false);
       emit_type(v->type, 0);
       emit_symbol(v, 2, name);
-      emit_record(2, name, 0);
+      emit_record(2, {txt(name)}, 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       emit_type(t, 0);
-      emit_record(3, name, 0);
+      emit_record(3, {txt(name)}, 0);
     }
   }
   for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
     if (ns->is_namespace_alias) continue;
     const char *name = ns->source_corresp.name;
     std::string qualified = prefix + (name != nullptr ? name : "<anonymous>");
-    emit_record(4, qualified, 0);
+    emit_record(4, {txt(qualified)});
     collect_scope(ns->variant.assoc_scope, qualified + "::", depth + 1);
   }
 }
