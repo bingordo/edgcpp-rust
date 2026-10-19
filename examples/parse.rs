@@ -31,5 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             expression.function, expression.statement_path, expression.path,
             expression.parent, expression.kind, expression.operator, expression.type_kind);
     }
+    let graph = edgcpp::graph::Graph::from_il(&result.il)
+        .map_err(|e| format!("Invalid EDG IL graph: {e:?}"))?;
+    println!("indexed IL statements={} expressions={}",
+             graph.statements.len(), graph.expressions.len());
     Ok(())
 }
