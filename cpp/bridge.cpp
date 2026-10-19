@@ -210,6 +210,22 @@ static expression_children children_of(an_expr_node_ptr node)
   return {nullptr, false};
 }
 
+// EDG's call operators encode the callee as operand zero. Member calls
+// additionally encode the object as operand one. Keep the classification
+// symbolic here: numeric enum values depend on EDG's build configuration.
+static unsigned call_argument_offset(an_expr_node_ptr node)
+{
+  if (node == nullptr || node->kind != enk_operation) return 0;
+  switch (node->variant.operation.kind) {
+    case eok_call: return 1;
+    case eok_dot_member_call:
+    case eok_points_to_member_call:
+    case eok_dot_pm_call:
+    case eok_points_to_pm_call: return 2;
+    default: return 0;
+  }
+}
+
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
 // Each expression receives a local path and parent path. Operation operands
@@ -292,6 +308,12 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
+  const unsigned call_offset = call_argument_offset(node);
+  if (call_offset != 0) {
+    // Event 18: call site (function, statement, expression path,
+    // first argument operand index). The callee is always operand zero.
+    emit_record(18, {txt(function), txt(stmt_path), txt(path), num(call_offset)});
+  }
   const auto children = children_of(node);
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
