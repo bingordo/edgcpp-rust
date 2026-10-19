@@ -260,7 +260,7 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
 
 fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
     match kind {
-        1 | 2 | 3 | 4 => Some(il.entities.len()),
+        1..=4 => Some(il.entities.len()),
         5 => Some(il.statements.len()),
         6 => Some(il.expressions.len()),
         7 => Some(il.types.len()),
