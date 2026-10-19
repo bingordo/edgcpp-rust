@@ -41,6 +41,7 @@ pub enum GraphError {
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
+    InvalidTypeRelation(TypeId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -70,6 +71,9 @@ impl Graph {
             graph.types.push(ty.clone());
         }
         for ty in &graph.types {
+            if ty.related.is_some() != ty.related_role.is_some() {
+                return Err(GraphError::InvalidTypeRelation(ty.id));
+            }
             if let Some(child) = ty.related {
                 if !type_map.contains_key(&child) { return Err(GraphError::MissingType(child)); }
             }
@@ -354,6 +358,15 @@ mod tests {
         il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
         il.array_bounds.push(ArrayBound { array: TypeId(1), elements: 12 });
         assert_eq!(Graph::from_il(&il).unwrap().array_bound(TypeId(1)), Some(12));
+    }
+
+    #[test]
+    fn rejects_inconsistent_type_edge() {
+        let mut il = Il::default();
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 7, related_role: Some(1), related: None,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::InvalidTypeRelation(TypeId(1)));
     }
 
     #[test]
