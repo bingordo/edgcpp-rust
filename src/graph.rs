@@ -31,6 +31,8 @@ pub enum GraphError {
     DuplicateExpression { function: String, statement: String, path: String },
     MissingExpression { function: String, statement: String, path: String },
     MultipleStatementExpressions { function: String, path: String },
+    InvalidStatementParent { function: String, path: String },
+    InvalidExpressionParent { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -75,6 +77,12 @@ impl Graph {
                 let function = graph.statements[idx].data.function.clone();
                 let id = *smap.get(&(function.clone(), path.clone()))
                     .ok_or(GraphError::MissingStatement { function, path })?;
+                if id.0 == idx || !graph.statements[idx].data.path.starts_with(&(path.clone() + ".")) {
+                    return Err(GraphError::InvalidStatementParent {
+                        function: graph.statements[idx].data.function.clone(),
+                        path: graph.statements[idx].data.path.clone(),
+                    });
+                }
                 graph.statements[idx].parent = Some(id);
                 graph.statements[id.0].children.push(StatementId(idx));
             }
@@ -87,6 +95,14 @@ impl Graph {
                     .ok_or_else(|| GraphError::MissingExpression {
                         function: key.0, statement: key.1, path: key.2,
                     })?;
+                if parent.0 == idx ||
+                    !graph.expressions[idx].data.path.starts_with(&(path.clone() + ".")) {
+                    return Err(GraphError::InvalidExpressionParent {
+                        function: graph.expressions[idx].data.function.clone(),
+                        statement: graph.expressions[idx].data.statement_path.clone(),
+                        path: graph.expressions[idx].data.path.clone(),
+                    });
+                }
                 graph.expressions[idx].parent = Some(parent);
                 graph.expressions[parent.0].operands.push(ExpressionId(idx));
             } else {
@@ -111,6 +127,18 @@ impl Graph {
             node.children.sort_by_key(|id| stmt_order[id.0]);
         }
         Ok(graph)
+    }
+    /// Root statements belonging to the specified function.
+    pub fn roots<'a>(&'a self, function: &'a str)
+        -> impl Iterator<Item = (StatementId, &'a StatementNode)> + 'a {
+        self.statements.iter().enumerate()
+            .filter(move |(_, n)| n.parent.is_none() && n.data.function == function)
+            .map(|(i, n)| (StatementId(i), n))
+    }
+    /// Expression operands in the original IL order.
+    pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
+        self.expression(id).into_iter()
+            .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
     pub fn statement(&self, id: StatementId) -> Option<&StatementNode> {
         self.statements.get(id.0)
@@ -143,6 +171,12 @@ mod tests {
         let root = graph.statements[1].expression.unwrap();
         assert_eq!(graph.expressions[root.0].operands, vec![ExpressionId(2), ExpressionId(1)]);
         assert_eq!(graph.expressions[2].parent, Some(root));
+    }
+    #[test]
+    fn rejects_non_descendant_parents() {
+        let mut il = Il::default();
+        il.statements.push(Statement { function:"f".into(), path:"0".into(), parent:Some("0".into()), kind:1 });
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidStatementParent { .. })));
     }
     #[test]
     fn rejects_dangling_statement() {
