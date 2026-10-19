@@ -49,6 +49,7 @@ pub enum GraphError {
     DuplicateDynamicInitializer(SymbolId),
     DuplicateInitializerExpression { owner: SymbolId, path: String },
     InvalidInitializerParent { owner: SymbolId, path: String },
+    MissingInitializerRoot(SymbolId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -202,6 +203,15 @@ impl Graph {
                 });
             }
             graph.initializer_expressions.push(node.clone());
+        }
+        // Every captured initializer tree must have its root. Otherwise
+        // navigation could silently return None for a malformed snapshot.
+        let owners: std::collections::HashSet<_> = graph.initializer_expressions
+            .iter().map(|node| node.owner).collect();
+        for owner in owners {
+            if !init_paths.contains(&(owner, String::from("0"))) {
+                return Err(GraphError::MissingInitializerRoot(owner));
+            }
         }
         for node in &graph.initializer_expressions {
             let valid = match &node.parent {
@@ -398,6 +408,19 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_initializer_tree_without_root() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "x".into() });
+        il.initializer_expressions.push(InitializerExpression {
+            owner: SymbolId(1), path: "0.0".into(),
+            parent: Some("0".into()), kind: 1, operator: None,
+            type_id: None, symbol_id: None,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::MissingInitializerRoot(SymbolId(1)));
+    }
+
     #[test]
     fn initializer_tree_queries_preserve_operand_order() {
         let mut il = Il::default();
