@@ -410,6 +410,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dangling_expression_symbol() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 8,
+        });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None, kind: 3, operator: None,
+            type_kind: None, reference: Some("x".into()),
+            type_size: None, type_alignment: None, constant_kind: None,
+            constant_integer: None, related_type_role: None,
+            related_type_kind: None, type_id: None, symbol_id: Some(SymbolId(7)),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::MissingSymbol(SymbolId(7)));
+        il.symbols.push(Symbol { id: SymbolId(7), kind: 2, name: "x".into() });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.symbol(SymbolId(7)).unwrap().name, "x");
+    }
+
+    #[test]
     fn rejects_duplicate_type_ids() {
         let mut il = Il::default();
         let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };
