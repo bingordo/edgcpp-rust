@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -38,6 +38,7 @@ pub enum GraphError {
     InvalidTypeId(TypeId),
     DuplicateParameter { owner: TypeId, position: u32 },
     DuplicateArrayBound(TypeId),
+    DuplicateRecordField { owner: TypeId, position: u32 },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -48,6 +49,7 @@ pub struct Graph {
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
     pub array_bounds: Vec<ArrayBound>,
+    pub record_fields: Vec<RecordField>,
 }
 
 impl Graph {
@@ -93,6 +95,21 @@ impl Graph {
             }
             graph.array_bounds.push(bound.clone());
         }
+        let mut field_positions = std::collections::HashSet::new();
+        for field in &il.record_fields {
+            for id in [field.owner, field.ty] {
+                if !type_map.contains_key(&id) {
+                    return Err(GraphError::MissingType(id));
+                }
+            }
+            if !field_positions.insert((field.owner, field.position)) {
+                return Err(GraphError::DuplicateRecordField {
+                    owner: field.owner, position: field.position,
+                });
+            }
+            graph.record_fields.push(field.clone());
+        }
+        graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
                 if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
@@ -191,6 +208,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn fields(&self, owner: TypeId) -> impl Iterator<Item = &RecordField> {
+        self.record_fields.iter().filter(move |f| f.owner == owner)
+    }
     pub fn array_bound(&self, array: TypeId) -> Option<u64> {
         self.array_bounds.iter().find(|b| b.array == array).map(|b| b.elements)
     }
@@ -266,6 +286,17 @@ mod tests {
             related_role: None, related: None });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.parameters(TypeId(1)).next().unwrap().ty, TypeId(2));
+    }
+
+    #[test]
+    fn record_fields_are_linked_and_ordered() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.types.push(TypeDef { id: TypeId(2), kind: 0, related_role: None, related: None });
+        il.record_fields.push(RecordField { owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into() });
+        il.record_fields.push(RecordField { owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into() });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.fields(TypeId(1)).map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]

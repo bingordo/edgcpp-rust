@@ -98,6 +98,18 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     relation = 3;
   }
   uint32_t child = emit_type(related, depth + 1);
+  if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
+    unsigned index = 0;
+    for (a_field_ptr field = type->variant.class_struct_union.field_list;
+         field != nullptr && index < 10000; field = field->next, ++index) {
+      uint32_t field_type = emit_type(field->type, depth + 1);
+      const char *field_name = source_name(field->source_corresp);
+      std::string field_record = std::to_string(id) + "\t" +
+          std::to_string(index) + "\t" + std::to_string(field_type) +
+          "\t" + (field_name == nullptr ? "" : field_name);
+      current_callback(current_user_data, 10, field_record.c_str(), 0);
+    }
+  }
   // Send additional parameter type edges in declaration order.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     unsigned position = 0;
