@@ -179,7 +179,10 @@ impl Il {
                 | Entity::Type { name } => (name.as_str(), false),
                 Entity::Namespace { name } => (name.as_str(), true),
             };
-            let parts: Vec<&str> = qualified.split("::").collect();
+            // Ignore namespace delimiters inside function parameter types.
+            let prefix_end = qualified.find('(').unwrap_or(qualified.len());
+            let prefix = &qualified[..prefix_end];
+            let parts: Vec<&str> = prefix.split("::").collect();
             let mut scope = &mut root;
             let limit = if is_namespace { parts.len() } else { parts.len().saturating_sub(1) };
             for part in &parts[..limit] {
@@ -193,7 +196,8 @@ impl Il {
                 scope = &mut scope.namespaces[index];
             }
             if !is_namespace {
-                let local = parts.last().copied().unwrap_or("");
+                let local_prefix = parts.last().copied().unwrap_or("");
+                let local = &qualified[prefix_end - local_prefix.len()..];
                 let record = match entity {
                     Entity::Routine { has_definition, .. } => Entity::Routine {
                         name: local.into(), has_definition: *has_definition,
@@ -414,6 +418,20 @@ mod tests {
         let inner = root.namespace(&["outer", "inner"]).unwrap();
         assert_eq!(inner.declarations, vec![Entity::Variable { name: "value".into() }]);
         assert!(root.namespace(&["absent"]).is_none());
+    }
+
+    #[test]
+    fn qualified_parameters_do_not_create_namespaces() {
+        let mut il = Il::default();
+        il.entities.push(Entity::Routine {
+            name: "outer::f(other::Widget)".into(), has_definition: true,
+        });
+        let tree = il.scope_tree();
+        let outer = tree.namespace(&["outer"]).unwrap();
+        assert!(outer.declarations.contains(&Entity::Routine {
+            name: "f(other::Widget)".into(), has_definition: true,
+        }));
+        assert!(tree.namespace(&["outer", "f(other"]).is_none());
     }
 
     #[test]
