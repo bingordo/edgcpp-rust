@@ -141,6 +141,22 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
                        num(field->is_bit_field ? field->bit_size : 0)});
     }
   }
+  // Direct base classes are linked in source declaration order, unlike
+  // the transitive postorder base_classes list.
+  if ((type->kind == tk_class || type->kind == tk_struct) &&
+      type->variant.class_struct_union.extra_info != nullptr) {
+    unsigned position = 0;
+    for (a_base_class_ptr base =
+             type->variant.class_struct_union.extra_info->direct_base_classes;
+         base != nullptr && position < 10000;
+         base = base->next_direct, ++position) {
+      const uint32_t base_id = emit_type(base->type, depth + 1);
+      if (base_id != 0) {
+        emit_record(19, {num(id), num(position), num(base_id),
+                         num(base->is_virtual ? 1 : 0)});
+      }
+    }
+  }
   // Preserve the calling interface shape, including variadic functions.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     const auto *info = type->variant.routine.extra_info;
