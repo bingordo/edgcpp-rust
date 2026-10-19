@@ -10,6 +10,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     edg_args.extend(args.into_iter().skip(1));
     let result = compile(&edg_args).map_err(|e| format!("{e:?}"))?;
     println!("EDG status: {}", result.status);
+    if result.status != 0 {
+        return Err(format!("EDG reported compilation failure: {}", result.status).into());
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>
