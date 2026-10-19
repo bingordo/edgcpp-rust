@@ -6,6 +6,8 @@
 //! The IL snapshot contains named functions, variables, types, and namespaces. The
 //! native IL is far richer; this crate intentionally does not expose dangling
 //! raw EDG pointers after `edg_main` returns.
+pub mod graph;
+
 use std::{
     ffi::{c_char, c_int, c_void, CStr, CString},
     sync::Mutex,
