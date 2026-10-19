@@ -68,6 +68,8 @@ pub struct Graph {
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
+    initializer_index: HashMap<(SymbolId, String), usize>,
+    initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
 }
 
 impl Graph {
@@ -203,6 +205,7 @@ impl Graph {
                 });
             }
             graph.initializer_expressions.push(node.clone());
+            graph.initializer_index.insert((node.owner, node.path.clone()), graph.initializer_expressions.len() - 1);
         }
         // Every captured initializer tree must have its root. Otherwise
         // navigation could silently return None for a malformed snapshot.
@@ -226,6 +229,15 @@ impl Graph {
                     owner: node.owner, path: node.path.clone(),
                 });
             }
+        }
+        for (idx, node) in graph.initializer_expressions.iter().enumerate() {
+            if let Some(parent) = &node.parent {
+                graph.initializer_children.entry((node.owner, parent.clone()))
+                    .or_default().push(idx);
+            }
+        }
+        for children in graph.initializer_children.values_mut() {
+            children.sort_by_key(|&idx| graph_path_index(&graph.initializer_expressions[idx].path));
         }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
@@ -347,21 +359,23 @@ impl Graph {
     }
     /// Root expression of a variable's dynamic initializer, if captured.
     pub fn initializer_root(&self, owner: SymbolId) -> Option<&InitializerExpression> {
-        self.initializer_expressions.iter()
-            .find(|node| node.owner == owner && node.parent.is_none())
+        self.initializer_expression(owner, "0")
     }
 
-    /// Direct operands of an initializer expression, ordered by their path index.
-    ///
-    /// This does not interpret EDG expression-kind or operator discriminants.
+    /// Look up an initializer expression by its compilation-local tree path.
+    pub fn initializer_expression(&self, owner: SymbolId, path: &str)
+        -> Option<&InitializerExpression> {
+        self.initializer_index.get(&(owner, path.to_owned()))
+            .map(|&idx| &self.initializer_expressions[idx])
+    }
+
+    /// Direct operands in source traversal order. Kind and operator values remain EDG-native.
     pub fn initializer_operands<'a>(&'a self, node: &InitializerExpression)
         -> Vec<&'a InitializerExpression> {
-        let mut children: Vec<_> = self.initializer_expressions.iter()
-            .filter(|child| child.owner == node.owner
-                && child.parent.as_deref() == Some(node.path.as_str()))
-            .collect();
-        children.sort_by_key(|child| graph_path_index(&child.path));
-        children
+        self.initializer_children.get(&(node.owner, node.path.clone()))
+            .map(|children| children.iter()
+                .map(|&idx| &self.initializer_expressions[idx]).collect())
+            .unwrap_or_default()
     }
 
     pub fn dynamic_initializer(&self, id: SymbolId) -> Option<&DynamicInitializer> {
@@ -441,6 +455,8 @@ mod tests {
         let paths: Vec<_> = graph.initializer_operands(root)
             .iter().map(|node| node.path.as_str()).collect();
         assert_eq!(paths, ["0.0", "0.1", "0.2"]);
+        assert_eq!(graph.initializer_expression(SymbolId(1), "0.1").unwrap().path, "0.1");
+        assert!(graph.initializer_expression(SymbolId(1), "0.9").is_none());
         assert!(graph.initializer_root(SymbolId(99)).is_none());
     }
 
