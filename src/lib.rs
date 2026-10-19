@@ -39,6 +39,68 @@ pub struct Il {
     pub entities: Vec<Entity>,
 }
 
+/// Owned namespace tree. Declarations are grouped by the namespace in
+/// which they occur; all strings and nodes are independent of EDG memory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Scope {
+    pub name: String,
+    pub declarations: Vec<Entity>,
+    pub namespaces: Vec<Scope>,
+}
+
+impl Scope {
+    /// Look up a nested namespace by its components.
+    pub fn namespace(&self, path: &[&str]) -> Option<&Scope> {
+        let mut scope = self;
+        for part in path {
+            scope = scope.namespaces.iter().find(|n| n.name == *part)?;
+        }
+        Some(scope)
+    }
+}
+
+impl Il {
+    /// Reconstruct a structured namespace tree from the snapshot.
+    ///
+    /// Names are currently qualified by C++ namespace, not by classes.
+    pub fn scope_tree(&self) -> Scope {
+        let mut root = Scope::default();
+        for entity in &self.entities {
+            let (qualified, is_namespace) = match entity {
+                Entity::Routine { name, .. } | Entity::Variable { name }
+                | Entity::Type { name } => (name.as_str(), false),
+                Entity::Namespace { name } => (name.as_str(), true),
+            };
+            let parts: Vec<&str> = qualified.split("::").collect();
+            let mut scope = &mut root;
+            let limit = if is_namespace { parts.len() } else { parts.len().saturating_sub(1) };
+            for part in &parts[..limit] {
+                let index = match scope.namespaces.iter().position(|n| n.name == *part) {
+                    Some(index) => index,
+                    None => {
+                        scope.namespaces.push(Scope { name: (*part).into(), ..Scope::default() });
+                        scope.namespaces.len() - 1
+                    }
+                };
+                scope = &mut scope.namespaces[index];
+            }
+            if !is_namespace {
+                let local = parts.last().copied().unwrap_or("");
+                let record = match entity {
+                    Entity::Routine { has_definition, .. } => Entity::Routine {
+                        name: local.into(), has_definition: *has_definition,
+                    },
+                    Entity::Variable { .. } => Entity::Variable { name: local.into() },
+                    Entity::Type { .. } => Entity::Type { name: local.into() },
+                    Entity::Namespace { .. } => unreachable!(),
+                };
+                scope.declarations.push(record);
+            }
+        }
+        root
+    }
+}
+
 /// Result of invoking the EDG front end.
 #[derive(Debug, Clone)]
 pub struct Compilation {
@@ -107,6 +169,24 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn builds_owned_namespace_tree() {
+        let il = Il { entities: vec![
+            Entity::Namespace { name: "outer".into() },
+            Entity::Namespace { name: "outer::inner".into() },
+            Entity::Variable { name: "outer::inner::value".into() },
+            Entity::Routine { name: "outer::compute".into(), has_definition: true },
+        ] };
+        let root = il.scope_tree();
+        let outer = root.namespace(&["outer"]).unwrap();
+        assert!(outer.declarations.contains(&Entity::Routine {
+            name: "compute".into(), has_definition: true,
+        }));
+        let inner = root.namespace(&["outer", "inner"]).unwrap();
+        assert_eq!(inner.declarations, vec![Entity::Variable { name: "value".into() }]);
+        assert!(root.namespace(&["absent"]).is_none());
+    }
+
     #[test]
     fn rejects_interior_nul() {
         assert_eq!(compile(&["edgcpfe", "a\0b"]).unwrap_err(), Error::NulArgument);
