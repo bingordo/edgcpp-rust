@@ -73,6 +73,8 @@ pub struct Expression {
     pub type_alignment: Option<u64>,
     /// EDG constant representation kind, when this is a constant expression.
     pub constant_kind: Option<u32>,
+    /// Signed integer value if representable as i64 (otherwise absent).
+    pub constant_integer: Option<i64>,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -169,8 +171,8 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         3 => output.entities.push(Entity::Type { name }),
         4 => output.entities.push(Entity::Namespace { name }),
         6 => {
-            let fields: Vec<_> = name.splitn(10, '\t').collect();
-            if fields.len() == 10 {
+            let fields: Vec<_> = name.splitn(11, '\t').collect();
+            if fields.len() == 11 {
                 output.expressions.push(Expression {
                     function: fields[0].into(),
                     statement_path: fields[1].into(),
@@ -183,6 +185,7 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                     type_size: fields[7].parse().ok(),
                     type_alignment: fields[8].parse().ok(),
                     constant_kind: fields[9].parse().ok(),
+                    constant_integer: fields[10].parse().ok(),
                 });
             }
         },
@@ -258,7 +261,7 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None, kind: 1,
-            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None,
+            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None,
         });
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),

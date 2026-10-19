@@ -5,6 +5,7 @@
  * Its back_end() replaces the C-generating back end when the archive is linked.
  */
 #include "fe_common.h"
+#include "const_ints.h"
 #include <cstdint>
 #include <string>
 #include <cxxabi.h>
@@ -106,9 +107,19 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   const std::string constant_kind = node->kind == enk_constant &&
       node->variant.constant.ptr != nullptr ?
       std::to_string(static_cast<unsigned>(node->variant.constant.ptr->kind)) : "";
+  std::string integer_value;
+  if (node->kind == enk_constant && node->variant.constant.ptr != nullptr &&
+      node->variant.constant.ptr->kind == ck_integer) {
+    a_boolean overflow = FALSE;
+    a_host_large_integer value =
+        value_of_integer_constant(node->variant.constant.ptr, &overflow);
+    if (!overflow && sizeof(value) <= sizeof(int64_t)) {
+      integer_value = std::to_string(static_cast<int64_t>(value));
+    }
+  }
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
-                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind;
+                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value;
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
