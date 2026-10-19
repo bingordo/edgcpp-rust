@@ -396,6 +396,33 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    /// Resolve the expression associated with a call-site record.
+    pub fn call_expression(&self, call: &CallSite) -> Option<ExpressionId> {
+        self.expressions.iter().position(|node|
+            node.data.function == call.function &&
+            node.data.statement_path == call.statement_path &&
+            node.data.path == call.path).map(ExpressionId)
+    }
+
+    /// Callee expression (operand zero) of an EDG call.
+    pub fn call_callee(&self, call: &CallSite) -> Option<ExpressionId> {
+        let id = self.call_expression(call)?;
+        self.expressions[id.0].operands.first().copied()
+    }
+
+    /// Implicit object operand for member calls; absent for ordinary calls.
+    pub fn call_object(&self, call: &CallSite) -> Option<ExpressionId> {
+        if call.first_argument != 2 { return None; }
+        let id = self.call_expression(call)?;
+        self.expressions[id.0].operands.get(1).copied()
+    }
+
+    /// Explicit argument expressions in EDG operand order.
+    pub fn call_arguments(&self, call: &CallSite) -> Option<&[ExpressionId]> {
+        let id = self.call_expression(call)?;
+        self.expressions[id.0].operands.get(call.first_argument as usize..)
+    }
+
     pub fn dynamic_initializer(&self, id: SymbolId) -> Option<&DynamicInitializer> {
         self.dynamic_initializers.iter().find(|v| v.symbol == id)
     }
@@ -496,6 +523,36 @@ mod tests {
         assert_eq!(graph.expressions[root.0].operands, vec![ExpressionId(2), ExpressionId(1)]);
         assert_eq!(graph.expressions[2].parent, Some(root));
     }
+    #[test]
+    fn resolves_call_callee_object_and_arguments() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent) in [
+            ("0", None), ("0.3", Some("0")), ("0.1", Some("0")),
+            ("0.0", Some("0")), ("0.2", Some("0")),
+        ] {
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: "0".into(),
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_kind: None, reference: None,
+                type_size: None, type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None, symbol_id: None,
+            });
+        }
+        il.calls.push(CallSite {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), first_argument: 2,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        let call = &graph.calls[0];
+        assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
+        assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
+        assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
     #[test]
     fn rejects_non_descendant_parents() {
         let mut il = Il::default();
