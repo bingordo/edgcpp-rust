@@ -365,6 +365,17 @@ impl Graph {
                 }
             }
         }
+        // Preserve operand order from sequence-indexed paths (not callback order).
+        let expr_order: Vec<usize> = graph.expressions.iter()
+            .map(|n| graph_path_index(&n.data.path)).collect();
+        let stmt_order: Vec<usize> = graph.statements.iter()
+            .map(|n| graph_path_index(&n.data.path)).collect();
+        for node in &mut graph.expressions {
+            node.operands.sort_by_key(|id| expr_order[id.0]);
+        }
+        for node in &mut graph.statements {
+            node.children.sort_by_key(|id| stmt_order[id.0]);
+        }
         // Every expression's child indices must be dense. Otherwise a
         // truncated native snapshot can silently change operand semantics,
         // even when the parent is not a function call.
@@ -413,17 +424,6 @@ impl Graph {
                     });
                 }
             }
-        }
-        // Preserve operand order from sequence-indexed paths (not callback order).
-        let expr_order: Vec<usize> = graph.expressions.iter()
-            .map(|n| graph_path_index(&n.data.path)).collect();
-        let stmt_order: Vec<usize> = graph.statements.iter()
-            .map(|n| graph_path_index(&n.data.path)).collect();
-        for node in &mut graph.expressions {
-            node.operands.sort_by_key(|id| expr_order[id.0]);
-        }
-        for node in &mut graph.statements {
-            node.children.sort_by_key(|id| stmt_order[id.0]);
         }
         Ok(graph)
     }
