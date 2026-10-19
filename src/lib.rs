@@ -518,6 +518,49 @@ mod tests {
     }
 
     #[test]
+    fn typed_callback_decodes_numeric_and_optional_fields() {
+        let text = b"f";
+        let path = b"0";
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let absent = WireField {
+            data: std::ptr::null(), length: 0, value: 0, tag: 0,
+        };
+        let mut state = Collector {
+            il: Il::default(), panicked: false, malformed: false,
+        };
+        let statement = [string(text), string(path), absent];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 5,
+                    statement.as_ptr(), statement.len(), 8);
+        }
+        let expression = [
+            string(text), string(path), string(path), absent,
+            absent, number(2), absent, number(4), number(4),
+            number(1), WireField {
+                data: std::ptr::null(), length: 0,
+                value: (-9_i64) as u64, tag: 3,
+            },
+            absent, absent, absent, absent,
+        ];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 6,
+                    expression.as_ptr(), expression.len(), 2);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statements.len(), 1);
+        assert_eq!(state.il.statements[0].parent, None);
+        assert_eq!(state.il.expressions.len(), 1);
+        assert_eq!(state.il.expressions[0].constant_integer, Some(-9));
+        assert_eq!(state.il.expressions[0].type_size, Some(4));
+        assert_eq!(state.il.expressions[0].symbol_id, None);
+    }
+
+    #[test]
     fn invalid_utf8_callback_is_reported() {
         let bad = [0xff_u8];
         let fields = [WireField { data: bad.as_ptr(), length: 1, value: 0, tag: 1 }];
