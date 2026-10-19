@@ -69,5 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for init in &graph.initializer_integers {
         println!("initializer integer symbol={} value={}", init.symbol.0, init.value);
     }
+    for init in &graph.dynamic_initializers {
+        println!("dynamic initializer symbol={} kind={} expression={:?} operator={:?}",
+                 init.symbol.0, init.kind, init.expression_kind, init.operator);
+    }
     Ok(())
 }

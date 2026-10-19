@@ -182,3 +182,4 @@ protocol is private to the in-process bridge and is not a stable file
 format or public extension ABI.
 
 Variable declarations now preserve EDG's native `init_kind`, explicit-initializer flag and uninitialized flag, attached to the declaration's `SymbolId`. This is initial classification metadata, not yet a full initializer expression or aggregate value tree.
+\nDynamic variable initializers now also report their native EDG `dik_*` category, and where applicable the root expression kind and operator. This is not yet a copied full expression tree.\n

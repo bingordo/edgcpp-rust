@@ -2,6 +2,7 @@ namespace outer {
 int count = 4;
 extern const int constant_answer = 42;
 int uninitialized_global;
+int initialized_from_count = count + 5;
 struct Widget { int member; unsigned flags : 3; };
 Widget widget{};
 int variadic(int first, ...) { return first; }

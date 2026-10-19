@@ -365,6 +365,17 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         }
         if (have_value) emit_record(15, {num(symbol_id), signed_num(value)});
       }
+      if (v->init_kind == initk_dynamic && v->initializer.dynamic != nullptr) {
+        a_dynamic_init_ptr dyn = v->initializer.dynamic;
+        an_expr_node_ptr expr = nullptr;
+        if (dyn->kind == dik_expression || dyn->kind == dik_class_result_via_ctor) {
+          expr = dyn->variant.expression;
+        }
+        emit_record(16, {num(symbol_id), num(static_cast<unsigned>(dyn->kind)),
+                         expr != nullptr ? num(static_cast<unsigned>(expr->kind)) : absent(),
+                         expr != nullptr && expr->kind == enk_operation ?
+                             num(static_cast<unsigned>(expr->variant.operation.kind)) : absent()});
+      }
       emit_record(2, {txt(name)}, 0);
     }
   }

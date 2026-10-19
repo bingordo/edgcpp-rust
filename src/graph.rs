@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -46,6 +46,7 @@ pub enum GraphError {
     MissingSymbol(SymbolId),
     DuplicateVariableInitializer(SymbolId),
     DuplicateInitializerInteger(SymbolId),
+    DuplicateDynamicInitializer(SymbolId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -62,6 +63,7 @@ pub struct Graph {
     pub symbols: Vec<Symbol>,
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
+    pub dynamic_initializers: Vec<DynamicInitializer>,
 }
 
 impl Graph {
@@ -171,6 +173,14 @@ impl Graph {
                 return Err(GraphError::DuplicateInitializerInteger(val.symbol));
             }
             graph.initializer_integers.push(val.clone());
+        }
+        let mut dynamic_inits = std::collections::HashSet::new();
+        for init in &il.dynamic_initializers {
+            if !symbol_ids.contains(&init.symbol) { return Err(GraphError::MissingSymbol(init.symbol)); }
+            if !dynamic_inits.insert(init.symbol) {
+                return Err(GraphError::DuplicateDynamicInitializer(init.symbol));
+            }
+            graph.dynamic_initializers.push(init.clone());
         }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
@@ -286,6 +296,9 @@ impl Graph {
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
+    }
+    pub fn dynamic_initializer(&self, id: SymbolId) -> Option<&DynamicInitializer> {
+        self.dynamic_initializers.iter().find(|v| v.symbol == id)
     }
     pub fn initializer_integer(&self, id: SymbolId) -> Option<i64> {
         self.initializer_integers.iter().find(|v| v.symbol == id).map(|v| v.value)
