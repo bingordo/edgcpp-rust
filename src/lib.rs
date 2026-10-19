@@ -301,7 +301,7 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0.0".into(), parent: Some("0".into()), kind: 2,
-            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None,
+            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None,
         });
         assert_eq!(il.expressions[1].parent.as_deref(), Some("0"));
         assert_eq!(il.expressions[1].path, "0.0");
