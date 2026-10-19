@@ -196,7 +196,7 @@ impl Graph {
             if let Some(ref path) = item.parent {
                 let key = (item.function.clone(), item.statement_path.clone(), path.clone());
                 let parent = *emap.get(&key)
-                    .ok_or_else(|| GraphError::MissingExpression {
+                    .ok_or(GraphError::MissingExpression {
                         function: key.0, statement: key.1, path: key.2,
                     })?;
                 let rest = graph.expressions[idx].data.path
