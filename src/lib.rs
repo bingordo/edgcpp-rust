@@ -500,6 +500,12 @@ mod tests {
     }
 
     #[test]
+    fn wire_field_layout_matches_native() {
+        assert_eq!(std::mem::size_of::<WireField>(), 32);
+        assert_eq!(std::mem::align_of::<WireField>(), 8);
+    }
+
+    #[test]
     fn typed_callback_preserves_tabs_and_nul_bytes() {
         let name = b"outer::a\tb\0c";
         let fields = [WireField { data: name.as_ptr(), length: name.len(), value: 0, tag: 1 }];
