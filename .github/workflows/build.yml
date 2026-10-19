@@ -61,4 +61,15 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --all-targets
-          cargo run --example parse -- --c++20 tests/fixtures/namespaces.cpp
+          cargo build --example parse
+          cp tests/fixtures/namespaces.cpp ../edgcpp/build/gcc-release/il_fixture.cpp
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../edgcpp-rust/target/debug/examples/parse --c++20 il_fixture.cpp > il_result.txt
+            cat il_result.txt
+            grep -F 'namespace outer' il_result.txt
+            grep -F 'variable outer::count' il_result.txt
+            grep -F 'routine outer::calculate, defined=true' il_result.txt
+            grep -F 'variable outer::inner::nested' il_result.txt
+          )
