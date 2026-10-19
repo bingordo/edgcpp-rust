@@ -10,6 +10,7 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
+#include <unordered_map>
 
 extern "C" {
 typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
@@ -19,6 +20,7 @@ typedef void (*edgcpp_il_callback)(void *user_data, uint32_t kind,
 namespace {
 thread_local edgcpp_il_callback current_callback = nullptr;
 thread_local void *current_user_data = nullptr;
+thread_local std::unordered_map<const void *, uint32_t> type_ids;
 }
 
 namespace edg {
@@ -73,6 +75,34 @@ static std::string declaration_name(const a_source_correspondence &sc,
 #endif
   return namespace_prefix(sc.parent_scope) +
          (source_name(sc) != nullptr ? source_name(sc) : "");
+}
+
+// Assign dense IDs during compilation; never export EDG type addresses.
+static uint32_t emit_type(a_type_ptr type, unsigned depth)
+{
+  if (type == nullptr || depth > 64 || current_callback == nullptr) return 0;
+  auto existing = type_ids.find(type);
+  if (existing != type_ids.end()) return existing->second;
+  uint32_t id = static_cast<uint32_t>(type_ids.size() + 1);
+  type_ids.emplace(type, id); // Register before recursion, including recursive types.
+  a_type_ptr related = nullptr;
+  unsigned relation = 0;
+  if (type->kind == tk_pointer) {
+    related = type->variant.pointer.type;
+    relation = 1;
+  } else if (type->kind == tk_array) {
+    related = type->variant.array.element_type;
+    relation = 2;
+  } else if (type->kind == tk_routine) {
+    related = type->variant.routine.return_type;
+    relation = 3;
+  }
+  uint32_t child = emit_type(related, depth + 1);
+  std::string record = std::to_string(id) + "\t" +
+      std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
+      std::to_string(relation) + "\t" + std::to_string(child);
+  current_callback(current_user_data, 7, record.c_str(), 0);
+  return id;
 }
 
 // A bounded structural snapshot of function statement trees. The path is
@@ -133,10 +163,11 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   }
   const std::string related_kind = related_type == nullptr ? "" :
       std::to_string(static_cast<unsigned>(related_type->kind));
+  const uint32_t type_id = emit_type(node->type, 0);
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
                        std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value + "\t" +
-                       std::to_string(relationship) + "\t" + related_kind;
+                       std::to_string(relationship) + "\t" + related_kind + "\t" + std::to_string(type_id);
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
@@ -234,6 +265,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   if (current_callback != nullptr) {
     return -1; // Recursive invocation not supported.
   }
+  type_ids.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -241,5 +273,6 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   int status = edg::edg_main(argc, argv);
   current_callback = nullptr;
   current_user_data = nullptr;
+  type_ids.clear();
   return status;
 }

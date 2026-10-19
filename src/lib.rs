@@ -43,6 +43,21 @@ pub struct Il {
     pub statements: Vec<Statement>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
+    /// Identity-preserving types captured during this compilation.
+    pub types: Vec<TypeDef>,
+}
+
+/// Stable type identifier within one compilation. Zero means no type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeId(pub u32);
+
+/// A type and its direct child relationship, using native EDG kind tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDef {
+    pub id: TypeId,
+    pub kind: u32,
+    pub related_role: Option<u32>,
+    pub related: Option<TypeId>,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -78,6 +93,7 @@ pub struct Expression {
     /// Relationship to a direct child type (1=pointee, 2=array element, 3=function return).
     pub related_type_role: Option<u32>,
     pub related_type_kind: Option<u32>,
+    pub type_id: Option<TypeId>,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -174,8 +190,8 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         3 => output.entities.push(Entity::Type { name }),
         4 => output.entities.push(Entity::Namespace { name }),
         6 => {
-            let fields: Vec<_> = name.splitn(13, '\t').collect();
-            if fields.len() == 13 {
+            let fields: Vec<_> = name.splitn(14, '\t').collect();
+            if fields.len() == 14 {
                 output.expressions.push(Expression {
                     function: fields[0].into(),
                     statement_path: fields[1].into(),
@@ -191,7 +207,21 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                     constant_integer: fields[10].parse().ok(),
                     related_type_role: fields[11].parse().ok().filter(|v| *v != 0),
                     related_type_kind: fields[12].parse().ok(),
+                    type_id: fields[13].parse::<u32>().ok().filter(|v| *v != 0).map(TypeId),
                 });
+            }
+        },
+        7 => {
+            let fields: Vec<_> = name.splitn(4, '\t').collect();
+            if fields.len() == 4 {
+                if let (Ok(id), Ok(kind), Ok(role), Ok(child)) =
+                    (fields[0].parse(), fields[1].parse(), fields[2].parse::<u32>(), fields[3].parse::<u32>()) {
+                    output.types.push(TypeDef {
+                        id: TypeId(id), kind,
+                        related_role: if role == 0 { None } else { Some(role) },
+                        related: if child == 0 { None } else { Some(TypeId(child)) },
+                    });
+                }
             }
         },
         5 => {
@@ -249,7 +279,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
@@ -266,12 +296,12 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None, kind: 1,
-            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None,
+            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None,
         });
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0.0".into(), parent: Some("0".into()), kind: 2,
-            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None,
+            operator: None, type_kind: Some(2), reference: Some("x".into()), type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None,
         });
         assert_eq!(il.expressions[1].parent.as_deref(), Some("0"));
         assert_eq!(il.expressions[1].path, "0.0");
