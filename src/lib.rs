@@ -75,6 +75,7 @@ pub struct Il {
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
+    pub initializer_expressions: Vec<InitializerExpression>,
 }
 
 /// Per-compilation identity for a declaration or referenced symbol.
@@ -112,6 +113,18 @@ pub struct DynamicInitializer {
     pub kind: u32,
     pub expression_kind: Option<u32>,
     pub operator: Option<u32>,
+}
+
+/// One expression node in a dynamic initializer's operand tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializerExpression {
+    pub owner: SymbolId,
+    pub path: String,
+    pub parent: Option<String>,
+    pub kind: u32,
+    pub operator: Option<u32>,
+    pub type_id: Option<TypeId>,
+    pub symbol_id: Option<SymbolId>,
 }
 
 /// Stable type identifier within one compilation. Zero means no type.
@@ -335,6 +348,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
         16 => Some(il.dynamic_initializers.len()),
+        17 => Some(il.initializer_expressions.len()),
         _ => None,
     }
 }
@@ -347,7 +361,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -416,6 +430,18 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        17 => {
+            let (Some(owner), Some(path), Some(kind)) = (n(0), t(1), n(3)) else { return; };
+            let parent = if fields[2].present() {
+                let Some(parent) = t(2) else { return; };
+                Some(parent)
+            } else { None };
+            output.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(owner), path, parent, kind,
+                operator: n(4), type_id: n(5).map(TypeId),
+                symbol_id: n(6).map(SymbolId),
+            });
         }
         16 => {
             let (Some(symbol), Some(kind)) = (n(0), n(1)) else { return; };
@@ -489,7 +515,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![], symbols: vec![], variable_initializers: vec![], initializer_integers: vec![], dynamic_initializers: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![], symbols: vec![], variable_initializers: vec![], initializer_integers: vec![], dynamic_initializers: vec![], initializer_expressions: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {

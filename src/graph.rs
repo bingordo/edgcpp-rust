@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -47,6 +47,8 @@ pub enum GraphError {
     DuplicateVariableInitializer(SymbolId),
     DuplicateInitializerInteger(SymbolId),
     DuplicateDynamicInitializer(SymbolId),
+    DuplicateInitializerExpression { owner: SymbolId, path: String },
+    InvalidInitializerParent { owner: SymbolId, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -64,6 +66,7 @@ pub struct Graph {
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
+    pub initializer_expressions: Vec<InitializerExpression>,
 }
 
 impl Graph {
@@ -182,6 +185,38 @@ impl Graph {
             }
             graph.dynamic_initializers.push(init.clone());
         }
+        let mut init_paths = std::collections::HashSet::new();
+        for node in &il.initializer_expressions {
+            if !symbol_ids.contains(&node.owner) {
+                return Err(GraphError::MissingSymbol(node.owner));
+            }
+            if let Some(id) = node.symbol_id {
+                if !symbol_ids.contains(&id) { return Err(GraphError::MissingSymbol(id)); }
+            }
+            if let Some(id) = node.type_id {
+                if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
+            }
+            if !init_paths.insert((node.owner, node.path.clone())) {
+                return Err(GraphError::DuplicateInitializerExpression {
+                    owner: node.owner, path: node.path.clone(),
+                });
+            }
+            graph.initializer_expressions.push(node.clone());
+        }
+        for node in &graph.initializer_expressions {
+            let valid = match &node.parent {
+                None => node.path == "0",
+                Some(parent) => node.path.strip_prefix(&(parent.clone() + "."))
+                    .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('.')
+                        && suffix.parse::<u32>().is_ok())
+                    && init_paths.contains(&(node.owner, parent.clone())),
+            };
+            if !valid {
+                return Err(GraphError::InvalidInitializerParent {
+                    owner: node.owner, path: node.path.clone(),
+                });
+            }
+        }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
                 if !symbol_ids.contains(&id) { return Err(GraphError::MissingSymbol(id)); }
@@ -296,6 +331,9 @@ impl Graph {
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
+    }
+    pub fn initializer_expressions(&self, id: SymbolId) -> impl Iterator<Item = &InitializerExpression> {
+        self.initializer_expressions.iter().filter(move |e| e.owner == id)
     }
     pub fn dynamic_initializer(&self, id: SymbolId) -> Option<&DynamicInitializer> {
         self.dynamic_initializers.iter().find(|v| v.symbol == id)

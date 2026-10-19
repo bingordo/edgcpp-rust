@@ -305,6 +305,41 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
   }
 }
 
+// Independently owned expression nodes for dynamic variable initializers.
+static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
+                                  const std::string &path,
+                                  const std::string &parent, unsigned depth)
+{
+  if (expr == nullptr || depth > 64) return;
+  uint32_t symbol = 0;
+  if (expr->kind == enk_variable && expr->variant.variable.ptr != nullptr) {
+    auto ptr = expr->variant.variable.ptr;
+    symbol = emit_symbol(ptr, 2, declaration_name(ptr->source_corresp, false));
+  } else if (expr->kind == enk_routine && expr->variant.routine.ptr != nullptr) {
+    auto ptr = expr->variant.routine.ptr;
+    symbol = emit_symbol(ptr, 1, declaration_name(ptr->source_corresp, true, true));
+  } else if (expr->kind == enk_field && expr->variant.field.ptr != nullptr) {
+    auto ptr = expr->variant.field.ptr;
+    const char *name = source_name(ptr->source_corresp);
+    symbol = emit_symbol(ptr, 3, name == nullptr ? "" : name);
+  }
+  uint32_t type_id = emit_type(expr->type, 0);
+  emit_record(17, {num(owner), txt(path), parent.empty() ? absent() : txt(parent),
+                   num(static_cast<uint32_t>(expr->kind)),
+                   expr->kind == enk_operation ?
+                       num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
+                   type_id ? num(type_id) : absent(),
+                   symbol ? num(symbol) : absent()});
+  if (expr->kind == enk_operation) {
+    unsigned index = 0;
+    for (an_expr_node_ptr operand = expr->variant.operation.operands;
+         operand != nullptr && index < 10000; operand = operand->next, ++index) {
+      emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
+                            path, depth + 1);
+    }
+  }
+}
+
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
@@ -375,6 +410,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                          expr != nullptr ? num(static_cast<unsigned>(expr->kind)) : absent(),
                          expr != nullptr && expr->kind == enk_operation ?
                              num(static_cast<unsigned>(expr->variant.operation.kind)) : absent()});
+        if (expr != nullptr) emit_initializer_expr(expr, symbol_id, "0", "", 0);
       }
       emit_record(2, {txt(name)}, 0);
     }
