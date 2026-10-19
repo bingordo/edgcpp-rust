@@ -80,4 +80,5 @@ jobs:
             grep -E 'record field flags offset=[0-9]+ bit=[0-9]+ width=3' il_result.txt
             grep -F 'reference=true rvalue=false' il_result.txt
             grep -F 'reference=true rvalue=true' il_result.txt
+            grep -E 'function signature id=[0-9]+ prototyped=true variadic=true' il_result.txt
           )

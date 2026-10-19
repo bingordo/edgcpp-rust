@@ -48,6 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("record field {} offset={} bit={} width={}",
             field.name, field.byte_offset, field.bit_offset, field.bit_width);
     }
+    for sig in &result.il.function_signatures {
+        println!("function signature id={} prototyped={} variadic={}", sig.owner.0, sig.prototyped, sig.variadic);
+    }
     for detail in &result.il.type_details {
         println!("type detail id={} reference={} rvalue={} qualifiers={:?}",
             detail.owner.0, detail.is_reference, detail.is_rvalue_reference, detail.qualifiers);
