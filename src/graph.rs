@@ -76,7 +76,7 @@ impl Graph {
             if let Some(path) = parent {
                 let function = graph.statements[idx].data.function.clone();
                 let id = *smap.get(&(function.clone(), path.clone()))
-                    .ok_or(GraphError::MissingStatement { function, path })?;
+                    .ok_or(GraphError::MissingStatement { function, path: path.clone() })?;
                 if id.0 == idx || !graph.statements[idx].data.path.starts_with(&(path.clone() + ".")) {
                     return Err(GraphError::InvalidStatementParent {
                         function: graph.statements[idx].data.function.clone(),
