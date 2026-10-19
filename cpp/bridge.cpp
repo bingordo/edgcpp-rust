@@ -117,9 +117,26 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       integer_value = std::to_string(static_cast<int64_t>(value));
     }
   }
+  a_type_ptr related_type = nullptr;
+  unsigned relationship = 0; // 1=pointee, 2=element, 3=return
+  if (node->type != nullptr) {
+    if (node->type->kind == tk_pointer) {
+      related_type = node->type->variant.pointer.type;
+      relationship = 1;
+    } else if (node->type->kind == tk_array) {
+      related_type = node->type->variant.array.element_type;
+      relationship = 2;
+    } else if (node->type->kind == tk_routine) {
+      related_type = node->type->variant.routine.return_type;
+      relationship = 3;
+    }
+  }
+  const std::string related_kind = related_type == nullptr ? "" :
+      std::to_string(static_cast<unsigned>(related_type->kind));
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
-                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value;
+                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value + "\t" +
+                       std::to_string(relationship) + "\t" + related_kind;
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
