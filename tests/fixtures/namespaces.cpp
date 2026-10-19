@@ -3,6 +3,8 @@ int count = 4;
 struct Widget { int member; unsigned flags : 3; };
 Widget widget{};
 int variadic(int first, ...) { return first; }
+int overloaded(int value) { return value; }
+long overloaded(long value) { return value; }
 unsigned long long big_unsigned() { return 18446744073709551615ULL; }
 using CountAlias = int;
 int references(CountAlias &a, CountAlias &&b) { return a + b; }

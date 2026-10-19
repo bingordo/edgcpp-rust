@@ -56,7 +56,7 @@ static std::string namespace_prefix(a_scope_ptr parent)
 }
 
 static std::string declaration_name(const a_source_correspondence &sc,
-                                    bool is_routine)
+                                    bool is_routine, bool keep_parameters = false)
 {
 #if NEED_NAME_MANGLING
   if (sc.name_has_been_mangled && sc.name != nullptr) {
@@ -65,7 +65,7 @@ static std::string declaration_name(const a_source_correspondence &sc,
     if (status == 0 && decoded != nullptr) {
       std::string qualified(decoded);
       std::free(decoded);
-      if (is_routine) {
+      if (is_routine && !keep_parameters) {
         const auto param = qualified.find('(');
         if (param != std::string::npos) qualified.resize(param);
       }
@@ -288,9 +288,19 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
   if (scope == nullptr || current_callback == nullptr || depth > 128) return;
+  // Overloaded functions cannot be keyed solely by qualified base name:
+  // preserve demangled parameter signatures only when the base is ambiguous.
+  std::unordered_map<std::string, unsigned> routine_counts;
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
     if (source_name(r->source_corresp) != nullptr) {
-      std::string name = declaration_name(r->source_corresp, true);
+      ++routine_counts[declaration_name(r->source_corresp, true)];
+    }
+  }
+  for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
+    if (source_name(r->source_corresp) != nullptr) {
+      std::string base = declaration_name(r->source_corresp, true);
+      std::string name = routine_counts[base] > 1 ?
+          declaration_name(r->source_corresp, true, true) : base;
       emit_type(r->type, 0);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);

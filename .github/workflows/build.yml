@@ -83,6 +83,10 @@ jobs:
             grep -F 'reference=true rvalue=true' il_result.txt
             grep -E 'function signature id=[0-9]+ prototyped=true variadic=true' il_result.txt
             grep -F 'routine outer::big_unsigned, defined=true' il_result.txt
+            grep -F 'routine outer::overloaded(int), defined=true' il_result.txt
+            grep -F 'routine outer::overloaded(long), defined=true' il_result.txt
+            grep -F 'statement outer::overloaded(int) path=' il_result.txt
+            grep -F 'statement outer::overloaded(long) path=' il_result.txt
             if grep -F 'integer constant outer::big_unsigned' il_result.txt; then
               echo 'Unsigned constant was incorrectly converted to signed i64' >&2
               exit 1
