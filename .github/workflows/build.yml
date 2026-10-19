@@ -78,4 +78,6 @@ jobs:
             grep -F 'type id=' il_result.txt
             grep -F 'record field member offset=0 bit=0 width=0' il_result.txt
             grep -E 'record field flags offset=[0-9]+ bit=[0-9]+ width=3' il_result.txt
+            grep -F 'reference=true rvalue=false' il_result.txt
+            grep -F 'reference=true rvalue=true' il_result.txt
           )
