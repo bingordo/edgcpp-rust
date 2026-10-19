@@ -41,6 +41,6 @@ for arg in args:
         continue
     new_args.append(arg)
 # Preserve EDG's -D and -I switches, plus every other required compiler flag.
-new_args += ["-o", str(output), str(bridge)]
+new_args += ["-I", str(source_dir / "src"), "-o", str(output), str(bridge)]
 print("Compiling bridge with EDG's recorded C++ compiler configuration", flush=True)
 subprocess.run(new_args, cwd=entry.get("directory", str(source_dir)), check=True)

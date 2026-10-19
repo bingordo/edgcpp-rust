@@ -52,12 +52,9 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   }
   current_callback = callback;
   current_user_data = user_data;
-  int status = -2;
-  try {
-    status = edg::edg_main(argc, argv);
-  } catch (...) {
-    status = -2; // Never allow a C++ exception to cross the C ABI.
-  }
+  // EDG is built with -fno-exceptions; its callable path returns a status.
+  // Do not introduce an exception handler compiled with incompatible flags.
+  int status = edg::edg_main(argc, argv);
   current_callback = nullptr;
   current_user_data = nullptr;
   return status;
