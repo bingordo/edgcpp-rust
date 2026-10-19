@@ -282,11 +282,11 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     match kind {
         1 => output.entities.push(Entity::Routine {
-            name, has_definition: defined != 0,
+            name: name.to_owned(), has_definition: defined != 0,
         }),
-        2 => output.entities.push(Entity::Variable { name }),
-        3 => output.entities.push(Entity::Type { name }),
-        4 => output.entities.push(Entity::Namespace { name }),
+        2 => output.entities.push(Entity::Variable { name: name.to_owned() }),
+        3 => output.entities.push(Entity::Type { name: name.to_owned() }),
+        4 => output.entities.push(Entity::Namespace { name: name.to_owned() }),
         6 => {
             let fields: Vec<_> = name.splitn(14, '\t').collect();
             if fields.len() == 14 {
