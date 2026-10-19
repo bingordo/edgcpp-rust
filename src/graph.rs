@@ -50,6 +50,7 @@ pub enum GraphError {
     DuplicateInitializerExpression { owner: SymbolId, path: String },
     InvalidInitializerParent { owner: SymbolId, path: String },
     MissingInitializerRoot(SymbolId),
+    InvalidInitializerOperandPath { owner: SymbolId, path: String },
     MissingCallExpression { function: String, statement: String, path: String },
     DuplicateCallExpression { function: String, statement: String, path: String },
     InvalidCallOperands { function: String, statement: String, path: String },
@@ -244,6 +245,20 @@ impl Graph {
         }
         for children in graph.initializer_children.values_mut() {
             children.sort_by_key(|&idx| graph_path_index(&graph.initializer_expressions[idx].path));
+        }
+        // Initializer operands use the same positional path convention as
+        // statement expressions. Missing indices must not be interpreted as
+        // a different operand position by downstream compiler passes.
+        for ((owner, parent), children) in &graph.initializer_children {
+            for (index, &child) in children.iter().enumerate() {
+                if graph.initializer_expressions[child].path
+                    != format!("{}.{}", parent, index)
+                {
+                    return Err(GraphError::InvalidInitializerOperandPath {
+                        owner: *owner, path: parent.clone(),
+                    });
+                }
+            }
         }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
@@ -603,6 +618,23 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
         assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
+    #[test]
+    fn rejects_initializer_operand_gaps() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 2, name: "x".into(), type_id: None,
+        });
+        for (path, parent) in [("0", None), ("0.1", Some("0"))] {
+            il.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(1), path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+                operator: None, type_id: None, symbol_id: None,
+            });
+        }
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidInitializerOperandPath { .. })));
     }
 
     #[test]
