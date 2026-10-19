@@ -53,6 +53,18 @@ for entity in result.il.entities {
 }
 ```
 
+You can also inspect an owned namespace hierarchy with:
+
+```rust
+let result = edgcpp::compile(&["edgcpfe", "--c++20", "example.cpp"])?;
+let namespaces = result.il.scope_tree();
+if let Some(scope) = namespaces.namespace(&["outer", "inner"]) {
+    for declaration in &scope.declarations {
+        println!("{declaration:?}");
+    }
+}
+```
+
 The bridge defines `edg::back_end()` in place of the archive's C-code-generating
 back end. EDG invokes it after front-end processing, while IL is still alive.
 It copies the relevant data through a C callback. Rust keeps only owned data.
