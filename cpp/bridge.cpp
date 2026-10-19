@@ -262,14 +262,23 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
+  an_expr_node_ptr operands = nullptr;
+  bool list = false;
   if (node->kind == enk_operation) {
-    unsigned index = 0;
-    for (an_expr_node_ptr operand = node->variant.operation.operands;
-         operand != nullptr && index < 10000;
-         operand = operand->next, ++index) {
-      emit_expr(operand, function, stmt_path,
-                path + "." + std::to_string(index), path, depth + 1);
-    }
+    operands = node->variant.operation.operands;
+    list = true;
+  } else if (node->kind == enk_object_lifetime) {
+    operands = node->variant.object_lifetime.expr;
+  } else if ((node->kind == enk_sizeof || node->kind == enk_alignof ||
+              node->kind == enk_datasizeof) && !node->variant.sizeof_info.is_type) {
+    operands = node->variant.sizeof_info.variant.expr;
+  }
+  unsigned index = 0;
+  for (an_expr_node_ptr operand = operands;
+       operand != nullptr && index < 10000;
+       operand = list ? operand->next : nullptr, ++index) {
+    emit_expr(operand, function, stmt_path,
+              path + "." + std::to_string(index), path, depth + 1);
   }
 }
 
@@ -330,13 +339,23 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                        num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
                    type_id ? num(type_id) : absent(),
                    symbol ? num(symbol) : absent()});
+  an_expr_node_ptr operands = nullptr;
+  bool list = false;
   if (expr->kind == enk_operation) {
-    unsigned index = 0;
-    for (an_expr_node_ptr operand = expr->variant.operation.operands;
-         operand != nullptr && index < 10000; operand = operand->next, ++index) {
-      emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
-                            path, depth + 1);
-    }
+    operands = expr->variant.operation.operands;
+    list = true;
+  } else if (expr->kind == enk_object_lifetime) {
+    operands = expr->variant.object_lifetime.expr;
+  } else if ((expr->kind == enk_sizeof || expr->kind == enk_alignof ||
+              expr->kind == enk_datasizeof) && !expr->variant.sizeof_info.is_type) {
+    operands = expr->variant.sizeof_info.variant.expr;
+  }
+  unsigned index = 0;
+  for (an_expr_node_ptr operand = operands;
+       operand != nullptr && index < 10000;
+       operand = list ? operand->next : nullptr, ++index) {
+    emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
+                          path, depth + 1);
   }
 }
 
