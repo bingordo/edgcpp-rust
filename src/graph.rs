@@ -52,6 +52,7 @@ pub enum GraphError {
     MissingInitializerRoot(SymbolId),
     MissingCallExpression { function: String, statement: String, path: String },
     DuplicateCallExpression { function: String, statement: String, path: String },
+    InvalidCallOperands { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -347,6 +348,22 @@ impl Graph {
                 }
             }
         }
+        // A call's first operand is its callee; member calls additionally
+        // carry an object operand. Missing required operands indicate a
+        // truncated native snapshot rather than a valid zero-argument call.
+        for call in &graph.calls {
+            let key = (call.function.clone(), call.statement_path.clone(), call.path.clone());
+            let id = emap[&key];
+            if !(call.first_argument == 1 || call.first_argument == 2)
+                || graph.expressions[id.0].operands.len() < call.first_argument as usize
+            {
+                return Err(GraphError::InvalidCallOperands {
+                    function: call.function.clone(),
+                    statement: call.statement_path.clone(),
+                    path: call.path.clone(),
+                });
+            }
+        }
         // Preserve operand order from sequence-indexed paths (not callback order).
         let expr_order: Vec<usize> = graph.expressions.iter()
             .map(|n| graph_path_index(&n.data.path)).collect();
@@ -551,6 +568,28 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
         assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
+    #[test]
+    fn rejects_truncated_call_operands() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None,
+            kind: 1, operator: None, type_kind: None, reference: None,
+            type_size: None, type_alignment: None, constant_kind: None,
+            constant_integer: None, related_type_role: None,
+            related_type_kind: None, type_id: None, symbol_id: None,
+        });
+        il.calls.push(CallSite {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), first_argument: 1,
+        });
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidCallOperands { .. })));
     }
 
     #[test]
