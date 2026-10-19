@@ -55,5 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("type detail id={} reference={} rvalue={} qualifiers={:?}",
             detail.owner.0, detail.is_reference, detail.is_rvalue_reference, detail.qualifiers);
     }
+    for expr in &graph.expressions {
+        if let Some(id) = expr.data.symbol_id {
+            let symbol = graph.symbol(id).ok_or("missing referenced symbol")?;
+            println!("symbol reference {} -> {} ({})", id.0, symbol.name, symbol.kind);
+        }
+    }
+    println!("indexed symbols={}", graph.symbols.len());
     Ok(())
 }

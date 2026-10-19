@@ -152,3 +152,13 @@ full qualifiers are not yet represented.
 
 Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.\n\nRecord fields include byte offsets, bit offsets within the byte, and bit-field widths from the target EDG layout. Zero bit width denotes an ordinary field in this snapshot.\n\nTyperef types now have an underlying type edge (relation role 4). The bridge also exports EDG pointer reference/rvalue-reference flags and the raw qualifier mask for typeref nodes as `TypeDetail`. The qualifier mask is the native EDG encoding, not a portable `const`/`volatile` abstraction.\n
 Function routine types additionally export prototype and ellipsis flags in `FunctionSignature`. The graph validates unique signature records and exposes `signature(TypeId)`. The C++ fixture includes a variadic declaration for integration coverage.
+
+## Symbol identities (prototype)
+
+The bridge now assigns compilation-local `SymbolId` numbers using EDG routine,
+variable and field node identity. `Il::symbols` owns the symbol names and kinds;
+`Expression::symbol_id` identifies the referenced native declaration without
+relying on display-name equality. `Graph::symbol(SymbolId)` resolves these
+references; graph construction rejects duplicate or dangling symbol IDs.
+These IDs are **not** stable across compilations. Type/namespace declarations
+and expression forms outside the current visitor still need symbol capture.
