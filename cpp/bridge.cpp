@@ -30,26 +30,45 @@ static const char *source_name(const a_source_correspondence &sc)
   return sc.name;
 }
 
+static std::string namespace_prefix(a_scope_ptr parent)
+{
+  // File-scope IL lists can include entities declared in nested namespaces.
+  // Use each declaration's parent scope, not the containing list, to qualify it.
+  std::string result;
+  unsigned depth = 0;
+  for (a_scope_ptr scope = parent; scope != nullptr && depth++ < 128;
+       scope = scope->parent) {
+    if (scope->kind != sck_namespace) continue;
+    a_namespace_ptr ns = scope->variant.assoc_namespace;
+    if (ns == nullptr) continue;
+    const char *name = source_name(ns->source_corresp);
+    if (name != nullptr) {
+      result = std::string(name) + "::" + result;
+    }
+  }
+  return result;
+}
+
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
   if (scope == nullptr || current_callback == nullptr || depth > 128) return;
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
     if (source_name(r->source_corresp) != nullptr) {
-      std::string name = prefix + source_name(r->source_corresp);
+      std::string name = namespace_prefix(r->source_corresp.parent_scope) + source_name(r->source_corresp);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);
     }
   }
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
     if (source_name(v->source_corresp) != nullptr) {
-      std::string name = prefix + source_name(v->source_corresp);
+      std::string name = namespace_prefix(v->source_corresp.parent_scope) + source_name(v->source_corresp);
       current_callback(current_user_data, 2, name.c_str(), 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
-      std::string name = prefix + source_name(t->source_corresp);
+      std::string name = namespace_prefix(t->source_corresp.parent_scope) + source_name(t->source_corresp);
       current_callback(current_user_data, 3, name.c_str(), 0);
     }
   }
