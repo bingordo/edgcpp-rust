@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -39,6 +39,7 @@ pub enum GraphError {
     DuplicateParameter { owner: TypeId, position: u32 },
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    DuplicateTypeDetail(TypeId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -50,6 +51,7 @@ pub struct Graph {
     pub type_parameters: Vec<TypeParameter>,
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
+    pub type_details: Vec<TypeDetail>,
 }
 
 impl Graph {
@@ -110,6 +112,16 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
+        let mut detailed = std::collections::HashSet::new();
+        for detail in &il.type_details {
+            if !type_map.contains_key(&detail.owner) {
+                return Err(GraphError::MissingType(detail.owner));
+            }
+            if !detailed.insert(detail.owner) {
+                return Err(GraphError::DuplicateTypeDetail(detail.owner));
+            }
+            graph.type_details.push(detail.clone());
+        }
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
                 if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
@@ -208,6 +220,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
+        self.type_details.iter().find(|d| d.owner == id)
+    }
     pub fn fields(&self, owner: TypeId) -> impl Iterator<Item = &RecordField> {
         self.record_fields.iter().filter(move |f| f.owner == owner)
     }
@@ -297,6 +312,16 @@ mod tests {
         il.record_fields.push(RecordField { owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.fields(TypeId(1)).map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn resolves_reference_details() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.type_details.push(TypeDetail { owner: TypeId(1), is_reference: true,
+            is_rvalue_reference: false, qualifiers: None });
+        let graph = Graph::from_il(&il).unwrap();
+        assert!(graph.type_detail(TypeId(1)).unwrap().is_reference);
     }
 
     #[test]
