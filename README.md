@@ -140,3 +140,5 @@ and return types respectively, allowing recursive type graphs to be represented.
 Each expression carries an optional `type_id` referring into the same table.
 Type parameters, typedef chains, cv qualifiers and record members are not yet
 modeled. IDs are valid only within the containing compilation.
+
+The indexed `Graph::from_il()` validates unique, nonzero type IDs, checks that direct type edges resolve, and rejects expressions referring to missing types. `Graph::type_def(TypeId)` resolves an owned type node. Cycles are permitted (recursive types).\n
