@@ -30,6 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("expression {} statement={} path={} parent={:?} kind={} op={:?} type={:?}",
             expression.function, expression.statement_path, expression.path,
             expression.parent, expression.kind, expression.operator, expression.type_kind);
+        if let Some(value) = expression.constant_integer {
+            println!("integer constant {} = {}", expression.function, value);
+        }
         if let Some(reference) = &expression.reference {
             println!("reference {} -> {}", expression.function, reference);
         }
