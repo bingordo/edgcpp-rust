@@ -19,26 +19,37 @@ thread_local void *current_user_data = nullptr;
 }
 
 namespace edg {
+static const char *source_name(const a_source_correspondence &sc)
+{
+#if NEED_NAME_MANGLING
+  if (sc.name_has_been_mangled &&
+      sc.unmangled_name_or_mangled_encoding != nullptr) {
+    return sc.unmangled_name_or_mangled_encoding;
+  }
+#endif
+  return sc.name;
+}
+
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
   if (scope == nullptr || current_callback == nullptr || depth > 128) return;
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
-    if (r->source_corresp.name != nullptr) {
-      std::string name = prefix + r->source_corresp.name;
+    if (source_name(r->source_corresp) != nullptr) {
+      std::string name = prefix + source_name(r->source_corresp);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);
     }
   }
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
-    if (v->source_corresp.name != nullptr) {
-      std::string name = prefix + v->source_corresp.name;
+    if (source_name(v->source_corresp) != nullptr) {
+      std::string name = prefix + source_name(v->source_corresp);
       current_callback(current_user_data, 2, name.c_str(), 0);
     }
   }
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
-    if (t->source_corresp.name != nullptr) {
-      std::string name = prefix + t->source_corresp.name;
+    if (source_name(t->source_corresp) != nullptr) {
+      std::string name = prefix + source_name(t->source_corresp);
       current_callback(current_user_data, 3, name.c_str(), 0);
     }
   }
