@@ -69,6 +69,8 @@ pub struct Il {
     /// Known fixed array bounds (in elements).
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
+    /// Direct class bases in declaration order.
+    pub base_classes: Vec<BaseClass>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -167,6 +169,15 @@ pub struct RecordField {
     pub bit_offset: u32,
     /// Zero for ordinary fields; nonzero for bit-fields.
     pub bit_width: u32,
+}
+
+/// A direct C++ base class, in declaration order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseClass {
+    pub derived: TypeId,
+    pub position: u32,
+    pub base: TypeId,
+    pub is_virtual: bool,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -361,6 +372,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         15 => Some(il.initializer_integers.len()),
         16 => Some(il.dynamic_initializers.len()),
         17 => Some(il.initializer_expressions.len()),
+        19 => Some(il.base_classes.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -374,7 +386,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -443,6 +455,15 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        19 => {
+            let (Some(derived), Some(position), Some(base), Some(virtual_flag)) =
+                (n(0), n(1), n(2), n(3)) else { return; };
+            if virtual_flag > 1 { return; }
+            output.base_classes.push(BaseClass {
+                derived: TypeId(derived), position, base: TypeId(base),
+                is_virtual: virtual_flag == 1,
+            });
         }
         18 => {
             let (Some(function), Some(statement_path), Some(path), Some(first_argument)) =
