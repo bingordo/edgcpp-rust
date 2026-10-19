@@ -339,7 +339,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         }
         6 => {
             let (Some(function), Some(statement_path), Some(path)) = (t(0), t(1), t(2)) else { return; };
-            let opt_text = |i| if fields[i].present() { t(i) } else { Some(String::new()) };
+            let opt_text = |i: usize| if fields[i].present() { t(i) } else { Some(String::new()) };
             let (Some(parent), Some(reference)) = (opt_text(3), opt_text(6)) else { return; };
             output.expressions.push(Expression {
                 function, statement_path, path,
