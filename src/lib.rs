@@ -52,6 +52,19 @@ pub struct Il {
     pub record_fields: Vec<RecordField>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
+    pub symbols: Vec<Symbol>,
+}
+
+/// Per-compilation identity for a declaration or referenced symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub id: SymbolId,
+    /// 1=routine, 2=variable, 3=field.
+    pub kind: u32,
+    pub name: String,
 }
 
 /// Stable type identifier within one compilation. Zero means no type.
@@ -145,6 +158,7 @@ pub struct Expression {
     pub related_type_role: Option<u32>,
     pub related_type_kind: Option<u32>,
     pub type_id: Option<TypeId>,
+    pub symbol_id: Option<SymbolId>,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -269,6 +283,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         10 => Some(il.record_fields.len()),
         11 => Some(il.type_details.len()),
         12 => Some(il.function_signatures.len()),
+        13 => Some(il.symbols.len()),
         _ => None,
     }
 }
@@ -288,8 +303,8 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         3 => output.entities.push(Entity::Type { name: name.to_owned() }),
         4 => output.entities.push(Entity::Namespace { name: name.to_owned() }),
         6 => {
-            let fields: Vec<_> = name.splitn(14, '\t').collect();
-            if fields.len() == 14 {
+            let fields: Vec<_> = name.splitn(15, '\t').collect();
+            if fields.len() == 15 {
                 output.expressions.push(Expression {
                     function: fields[0].into(),
                     statement_path: fields[1].into(),
@@ -306,7 +321,16 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                     related_type_role: fields[11].parse().ok().filter(|v| *v != 0),
                     related_type_kind: fields[12].parse().ok(),
                     type_id: fields[13].parse::<u32>().ok().filter(|v| *v != 0).map(TypeId),
+                    symbol_id: fields[14].parse::<u32>().ok().filter(|v| *v != 0).map(SymbolId),
                 });
+            }
+        },
+        13 => {
+            let f: Vec<_> = name.splitn(3, '\t').collect();
+            if f.len() == 3 {
+                if let (Ok(id), Ok(kind)) = (f[0].parse(), f[1].parse()) {
+                    output.symbols.push(Symbol { id: SymbolId(id), kind, name: f[2].into() });
+                }
             }
         },
         12 => {
@@ -438,7 +462,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![], symbols: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
@@ -469,7 +493,7 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None, kind: 1,
-            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None,
+            operator: Some(12), type_kind: Some(2), reference: None, type_size: Some(4), type_alignment: Some(4), constant_kind: None, constant_integer: None, related_type_role: None, related_type_kind: None, type_id: None, symbol_id: None,
         });
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),

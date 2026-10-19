@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -42,6 +42,8 @@ pub enum GraphError {
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
+    DuplicateSymbol(SymbolId),
+    MissingSymbol(SymbolId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -55,6 +57,7 @@ pub struct Graph {
     pub record_fields: Vec<RecordField>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
+    pub symbols: Vec<Symbol>,
 }
 
 impl Graph {
@@ -137,6 +140,18 @@ impl Graph {
                 return Err(GraphError::DuplicateFunctionSignature(sig.owner));
             }
             graph.function_signatures.push(sig.clone());
+        }
+        let mut symbol_ids = std::collections::HashSet::new();
+        for symbol in &il.symbols {
+            if symbol.id.0 == 0 || !symbol_ids.insert(symbol.id) {
+                return Err(GraphError::DuplicateSymbol(symbol.id));
+            }
+            graph.symbols.push(symbol.clone());
+        }
+        for expr in &il.expressions {
+            if let Some(id) = expr.symbol_id {
+                if !symbol_ids.contains(&id) { return Err(GraphError::MissingSymbol(id)); }
+            }
         }
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
@@ -248,6 +263,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
+        self.symbols.iter().find(|s| s.id == id)
+    }
     pub fn signature(&self, id: TypeId) -> Option<&FunctionSignature> {
         self.function_signatures.iter().find(|s| s.owner == id)
     }
@@ -289,7 +307,7 @@ mod tests {
             il.expressions.push(Expression {
                 function:"f".into(), statement_path:"0.block.0".into(),
                 path:path.into(), parent:parent.map(str::to_string),
-                kind:1, operator:Some(1), type_kind:Some(2), reference:None, type_size:Some(4), type_alignment:Some(4), constant_kind:None, constant_integer:None, related_type_role:None, related_type_kind:None, type_id:None,
+                kind:1, operator:Some(1), type_kind:Some(2), reference:None, type_size:Some(4), type_alignment:Some(4), constant_kind:None, constant_integer:None, related_type_role:None, related_type_kind:None, type_id:None, symbol_id:None,
             });
         }
         let graph = Graph::from_il(&il).unwrap();
@@ -379,6 +397,16 @@ mod tests {
             id: TypeId(1), kind: 7, related_role: Some(1), related: None,
         });
         assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::InvalidTypeRelation(TypeId(1)));
+    }
+
+    #[test]
+    fn symbol_identity_is_validated() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "f(int)".into() });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.symbol(SymbolId(1)).unwrap().name, "f(int)");
+        il.symbols.push(il.symbols[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::DuplicateSymbol(SymbolId(1)));
     }
 
     #[test]

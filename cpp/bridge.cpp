@@ -22,6 +22,7 @@ namespace {
 thread_local edgcpp_il_callback current_callback = nullptr;
 thread_local void *current_user_data = nullptr;
 thread_local std::unordered_map<const void *, uint32_t> type_ids;
+thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 }
 
 namespace edg {
@@ -76,6 +77,21 @@ static std::string declaration_name(const a_source_correspondence &sc,
 #endif
   return namespace_prefix(sc.parent_scope) +
          (source_name(sc) != nullptr ? source_name(sc) : "");
+}
+
+// Native addresses are used only as lookup keys while EDG owns the IL.
+static uint32_t emit_symbol(const void *ptr, unsigned kind,
+                            const std::string &name)
+{
+  if (ptr == nullptr || current_callback == nullptr) return 0;
+  auto found = symbol_ids.find(ptr);
+  if (found != symbol_ids.end()) return found->second;
+  uint32_t id = static_cast<uint32_t>(symbol_ids.size() + 1);
+  symbol_ids.emplace(ptr, id);
+  std::string record = std::to_string(id) + "\t" +
+                       std::to_string(kind) + "\t" + name;
+  current_callback(current_user_data, 13, record.c_str(), 0);
+  return id;
 }
 
 // Assign dense IDs during compilation; never export EDG type addresses.
@@ -180,13 +196,17 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   const unsigned ty = node->type == nullptr ? 0 :
       static_cast<unsigned>(node->type->kind);
   std::string referenced;
+  uint32_t symbol = 0;
   if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
     referenced = declaration_name(node->variant.variable.ptr->source_corresp, false);
+    symbol = emit_symbol(node->variant.variable.ptr, 2, referenced);
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
-    referenced = declaration_name(node->variant.routine.ptr->source_corresp, true);
+    referenced = declaration_name(node->variant.routine.ptr->source_corresp, true, true);
+    symbol = emit_symbol(node->variant.routine.ptr, 1, referenced);
   } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
     const char *field = source_name(node->variant.field.ptr->source_corresp);
     if (field != nullptr) referenced = field;
+    symbol = emit_symbol(node->variant.field.ptr, 3, referenced);
   }
   // Report target type layout only when EDG has a complete nonzero-sized type.
   const bool layout_known = node->type != nullptr &&
@@ -237,7 +257,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
                        std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value + "\t" +
-                       std::to_string(relationship) + "\t" + related_kind + "\t" + std::to_string(type_id);
+                       std::to_string(relationship) + "\t" + related_kind + "\t" + std::to_string(type_id) + "\t" + std::to_string(symbol);
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
@@ -302,6 +322,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = routine_counts[base] > 1 ?
           declaration_name(r->source_corresp, true, true) : base;
       emit_type(r->type, 0);
+      emit_symbol(r, 1, name);
       current_callback(current_user_data, 1, name.c_str(),
                        r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
@@ -316,6 +337,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
     if (source_name(v->source_corresp) != nullptr) {
       std::string name = declaration_name(v->source_corresp, false);
       emit_type(v->type, 0);
+      emit_symbol(v, 2, name);
       current_callback(current_user_data, 2, name.c_str(), 0);
     }
   }
@@ -349,6 +371,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
     return -1; // Recursive invocation not supported.
   }
   type_ids.clear();
+  symbol_ids.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -357,5 +380,6 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   current_callback = nullptr;
   current_user_data = nullptr;
   type_ids.clear();
+  symbol_ids.clear();
   return status;
 }
