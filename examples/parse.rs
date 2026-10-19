@@ -22,5 +22,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Entity::Namespace { name } => println!("namespace {name}"),
         }
     }
+    for statement in &result.il.statements {
+        println!("statement {} path={} parent={:?} kind={}",
+                 statement.function, statement.path, statement.parent, statement.kind);
+    }
     Ok(())
 }

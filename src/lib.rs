@@ -37,6 +37,18 @@ pub enum Entity {
 #[derive(Debug, Clone, Default)]
 pub struct Il {
     pub entities: Vec<Entity>,
+    /// Structural statement records captured while function IL is live.
+    pub statements: Vec<Statement>,
+}
+
+/// A statement node, identified by a stable path within one function.
+/// Kinds are EDG's a_statement_kind discriminants, not Rust syntax kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Statement {
+    pub function: String,
+    pub path: String,
+    pub parent: Option<String>,
+    pub kind: u32,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -132,6 +144,17 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         2 => output.entities.push(Entity::Variable { name }),
         3 => output.entities.push(Entity::Type { name }),
         4 => output.entities.push(Entity::Namespace { name }),
+        5 => {
+            let mut parts = name.splitn(3, '\t');
+            if let (Some(function), Some(path), Some(parent)) =
+                (parts.next(), parts.next(), parts.next()) {
+                output.statements.push(Statement {
+                    function: function.into(), path: path.into(),
+                    parent: if parent.is_empty() { None } else { Some(parent.into()) },
+                    kind: defined,
+                });
+            }
+        },
         _ => {}
     }
 }
@@ -176,7 +199,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ] };
+        ], statements: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
@@ -185,6 +208,16 @@ mod tests {
         let inner = root.namespace(&["outer", "inner"]).unwrap();
         assert_eq!(inner.declarations, vec![Entity::Variable { name: "value".into() }]);
         assert!(root.namespace(&["absent"]).is_none());
+    }
+
+    #[test]
+    fn statement_paths_preserve_parent_relation() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0.0".into(),
+            parent: Some("0".into()), kind: 0,
+        });
+        assert_eq!(il.statements[0].parent.as_deref(), Some("0"));
     }
 
     #[test]

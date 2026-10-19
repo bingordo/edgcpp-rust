@@ -72,4 +72,5 @@ jobs:
             grep -F 'variable outer::count' il_result.txt
             grep -F 'routine outer::calculate, defined=true' il_result.txt
             grep -F 'variable outer::inner::nested' il_result.txt
+            grep -F 'statement outer::calculate path=' il_result.txt
           )
