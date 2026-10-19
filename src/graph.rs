@@ -173,7 +173,15 @@ impl Graph {
                 let function = graph.statements[idx].data.function.clone();
                 let id = *smap.get(&(function.clone(), path.clone()))
                     .ok_or(GraphError::MissingStatement { function, path: path.clone() })?;
-                if id.0 == idx || !graph.statements[idx].data.path.starts_with(&(path.clone() + ".")) {
+                let rest = graph.statements[idx].data.path
+                    .strip_prefix(&(path.clone() + "."));
+                // Statement child paths: parent.edge.index.
+                let direct = rest.and_then(|r| r.split_once('.'))
+                    .is_some_and(|(edge, index)| {
+                        !edge.is_empty() && !index.is_empty() &&
+                        !index.contains('.') && index.parse::<usize>().is_ok()
+                    });
+                if id.0 == idx || !direct {
                     return Err(GraphError::InvalidStatementParent {
                         function: graph.statements[idx].data.function.clone(),
                         path: graph.statements[idx].data.path.clone(),
@@ -191,8 +199,12 @@ impl Graph {
                     .ok_or_else(|| GraphError::MissingExpression {
                         function: key.0, statement: key.1, path: key.2,
                     })?;
-                if parent.0 == idx ||
-                    !graph.expressions[idx].data.path.starts_with(&(path.clone() + ".")) {
+                let rest = graph.expressions[idx].data.path
+                    .strip_prefix(&(path.clone() + "."));
+                // Expression child paths: parent.index, with no skipped levels.
+                let direct = rest.is_some_and(|r| !r.is_empty() &&
+                    !r.contains('.') && r.parse::<usize>().is_ok());
+                if parent.0 == idx || !direct {
                     return Err(GraphError::InvalidExpressionParent {
                         function: graph.expressions[idx].data.function.clone(),
                         statement: graph.expressions[idx].data.statement_path.clone(),
@@ -375,6 +387,20 @@ mod tests {
         let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };
         il.types.extend([ty.clone(), ty]);
         assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::DuplicateType(TypeId(1)));
+    }
+
+    #[test]
+    fn rejects_skipped_statement_level() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 11,
+        });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0.block.0.block.0".into(),
+            parent: Some("0".into()), kind: 8,
+        });
+        assert!(matches!(Graph::from_il(&il),
+                         Err(GraphError::InvalidStatementParent { .. })));
     }
 
     #[test]
