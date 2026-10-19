@@ -65,6 +65,26 @@ if let Some(scope) = namespaces.namespace(&["outer", "inner"]) {
 }
 ```
 
+## C++ inheritance (prototype)
+
+The native bridge captures direct base-class edges for C++ class and struct
+types. `Compilation::il.base_classes` contains `BaseClass` records with
+`derived` and `base` compilation-local `TypeId` values, declaration-order
+`position`, and `is_virtual`. The graph validates the references and
+provides `Graph::bases(derived_type_id)` in declaration order.
+
+```rust
+let graph = edgcpp::graph::Graph::from_il(&result.il)?;
+for edge in graph.bases(derived_type_id) {
+    println!("base {:?}, virtual: {}", edge.base, edge.is_virtual);
+}
+```
+
+Only direct inheritance edges are exported. Access control, transitive
+inheritance, base-subobject layout and constructor initializer lists are not
+yet exposed. As with the rest of the native IL, IDs are not stable across
+compilations.
+
 ## Function statements (prototype)
 
 `Compilation::il.statements` now contains a bounded snapshot of function-body
