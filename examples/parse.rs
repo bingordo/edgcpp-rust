@@ -44,5 +44,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for ty in &result.il.types {
         println!("type id={} kind={} related={:?}", ty.id.0, ty.kind, ty.related);
     }
+    for field in &result.il.record_fields {
+        println!("record field {} offset={} bit={} width={}",
+            field.name, field.byte_offset, field.bit_offset, field.bit_width);
+    }
     Ok(())
 }
