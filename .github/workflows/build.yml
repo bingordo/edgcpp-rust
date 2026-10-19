@@ -66,7 +66,7 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            ../../edgcpp-rust/target/debug/examples/parse --c++20 il_fixture.cpp > il_result.txt
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 il_fixture.cpp > il_result.txt
             cat il_result.txt
             grep -F 'namespace outer' il_result.txt
             grep -F 'variable outer::count' il_result.txt
