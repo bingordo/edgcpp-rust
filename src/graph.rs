@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -39,6 +39,8 @@ pub enum GraphError {
     DuplicateParameter { owner: TypeId, position: u32 },
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    DuplicateBaseClass { derived: TypeId, position: u32 },
+    InvalidBaseClass { derived: TypeId, base: TypeId },
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
@@ -67,6 +69,7 @@ pub struct Graph {
     pub type_parameters: Vec<TypeParameter>,
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
+    pub base_classes: Vec<BaseClass>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -141,6 +144,27 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
+        let mut base_positions = std::collections::HashSet::new();
+        for edge in &il.base_classes {
+            if !type_map.contains_key(&edge.derived) {
+                return Err(GraphError::MissingType(edge.derived));
+            }
+            if !type_map.contains_key(&edge.base) {
+                return Err(GraphError::MissingType(edge.base));
+            }
+            if edge.derived == edge.base {
+                return Err(GraphError::InvalidBaseClass {
+                    derived: edge.derived, base: edge.base,
+                });
+            }
+            if !base_positions.insert((edge.derived, edge.position)) {
+                return Err(GraphError::DuplicateBaseClass {
+                    derived: edge.derived, position: edge.position,
+                });
+            }
+            graph.base_classes.push(edge.clone());
+        }
+        graph.base_classes.sort_by_key(|edge| (edge.derived.0, edge.position));
         let mut detailed = std::collections::HashSet::new();
         for detail in &il.type_details {
             if !type_map.contains_key(&detail.owner) {
@@ -516,6 +540,10 @@ impl Graph {
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
     }
+    /// Direct bases in source declaration order, including virtual bases.
+    pub fn bases(&self, derived: TypeId) -> impl Iterator<Item = &BaseClass> {
+        self.base_classes.iter().filter(move |edge| edge.derived == derived)
+    }
     pub fn fields(&self, owner: TypeId) -> impl Iterator<Item = &RecordField> {
         self.record_fields.iter().filter(move |f| f.owner == owner)
     }
@@ -542,6 +570,31 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn orders_direct_base_classes_and_rejects_duplicates() {
+        let mut il = Il::default();
+        for id in 1..=3 {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 1, related_role: None, related: None,
+            });
+        }
+        il.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 1, base: TypeId(3), is_virtual: true,
+        });
+        il.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 0, base: TypeId(2), is_virtual: false,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        let bases: Vec<_> = graph.bases(TypeId(1)).collect();
+        assert_eq!(bases.iter().map(|b| b.base).collect::<Vec<_>>(),
+                   vec![TypeId(2), TypeId(3)]);
+        assert!(!bases[0].is_virtual);
+        assert!(bases[1].is_virtual);
+        il.base_classes.push(il.base_classes[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateBaseClass { .. })));
+    }
+
     #[test]
     fn rejects_initializer_tree_without_root() {
         let mut il = Il::default();
