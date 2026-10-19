@@ -17,6 +17,8 @@
 
 extern "C" {
 struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
+static_assert(sizeof(edgcpp_field) == 32, "Unexpected native wire-field layout");
+static_assert(alignof(edgcpp_field) == 8, "Unexpected native wire-field alignment");
 typedef void (*edgcpp_il_callback)(void *, uint32_t, const edgcpp_field *, size_t, uint32_t);
 }
 
