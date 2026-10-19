@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -40,6 +40,7 @@ pub enum GraphError {
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateTypeDetail(TypeId),
+    DuplicateFunctionSignature(TypeId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -52,6 +53,7 @@ pub struct Graph {
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
     pub type_details: Vec<TypeDetail>,
+    pub function_signatures: Vec<FunctionSignature>,
 }
 
 impl Graph {
@@ -121,6 +123,16 @@ impl Graph {
                 return Err(GraphError::DuplicateTypeDetail(detail.owner));
             }
             graph.type_details.push(detail.clone());
+        }
+        let mut signatures = std::collections::HashSet::new();
+        for sig in &il.function_signatures {
+            if !type_map.contains_key(&sig.owner) {
+                return Err(GraphError::MissingType(sig.owner));
+            }
+            if !signatures.insert(sig.owner) {
+                return Err(GraphError::DuplicateFunctionSignature(sig.owner));
+            }
+            graph.function_signatures.push(sig.clone());
         }
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
@@ -219,6 +231,9 @@ impl Graph {
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
+    }
+    pub fn signature(&self, id: TypeId) -> Option<&FunctionSignature> {
+        self.function_signatures.iter().find(|s| s.owner == id)
     }
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
@@ -322,6 +337,15 @@ mod tests {
             is_rvalue_reference: false, qualifiers: None });
         let graph = Graph::from_il(&il).unwrap();
         assert!(graph.type_detail(TypeId(1)).unwrap().is_reference);
+    }
+
+    #[test]
+    fn routine_signature_metadata() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.function_signatures.push(FunctionSignature { owner: TypeId(1),
+            prototyped: true, variadic: true });
+        assert!(Graph::from_il(&il).unwrap().signature(TypeId(1)).unwrap().variadic);
     }
 
     #[test]

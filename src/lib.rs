@@ -51,6 +51,7 @@ pub struct Il {
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
     pub type_details: Vec<TypeDetail>,
+    pub function_signatures: Vec<FunctionSignature>,
 }
 
 /// Stable type identifier within one compilation. Zero means no type.
@@ -100,6 +101,14 @@ pub struct TypeDetail {
     pub is_reference: bool,
     pub is_rvalue_reference: bool,
     pub qualifiers: Option<u32>,
+}
+
+/// Prototype and variadic metadata for a routine type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub owner: TypeId,
+    pub prototyped: bool,
+    pub variadic: bool,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -253,6 +262,17 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                 });
             }
         },
+        12 => {
+            let f: Vec<_> = name.splitn(3, '\t').collect();
+            if f.len() == 3 {
+                if let (Ok(owner), Ok(prototyped), Ok(variadic)) =
+                    (f[0].parse(), f[1].parse::<u32>(), f[2].parse::<u32>()) {
+                    output.function_signatures.push(FunctionSignature {
+                        owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0,
+                    });
+                }
+            }
+        },
         11 => {
             let f: Vec<_> = name.splitn(3, '\t').collect();
             if f.len() == 3 {
@@ -368,7 +388,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![], record_fields: vec![], type_details: vec![], function_signatures: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
