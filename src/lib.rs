@@ -275,7 +275,11 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
                         name: *const c_char, defined: u32) {
-    let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+    // Invalid UTF-8 must not silently change a compiler symbol.
+    // A missing record is reported by the enclosing callback.
+    let Ok(name) = CStr::from_ptr(name).to_str() else {
+        return;
+    };
     match kind {
         1 => output.entities.push(Entity::Routine {
             name, has_definition: defined != 0,
@@ -507,6 +511,19 @@ mod tests {
         }
         assert!(state.malformed);
         assert!(state.il.types.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_callback_is_reported() {
+        let mut state = Collector {
+            il: Il::default(), panicked: false, malformed: false,
+        };
+        let bad = [0xff_u8, 0];
+        unsafe {
+            collect(&mut state as *mut Collector as *mut c_void,
+                    1, bad.as_ptr().cast(), 0);
+        }
+        assert!(state.malformed);
     }
 
     #[test]
