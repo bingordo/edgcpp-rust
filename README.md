@@ -162,3 +162,12 @@ relying on display-name equality. `Graph::symbol(SymbolId)` resolves these
 references; graph construction rejects duplicate or dangling symbol IDs.
 These IDs are **not** stable across compilations. Type/namespace declarations
 and expression forms outside the current visitor still need symbol capture.
+
+## Callback wire format (transitional)
+
+The native callback now receives `(user_data, event_kind, bytes, byte_length,
+auxiliary_kind)`. Rust validates the exact UTF-8 byte slice; it no longer reads
+past the payload looking for a terminator. **Field encoding is still tab-separated**
+inside the byte slice, so this does not yet support arbitrary tabs in names or
+structured binary values. Replacing field encoding with explicitly sized fields
+remains necessary before treating this as a general-purpose lossless IL protocol.
