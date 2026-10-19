@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression};
+use crate::{Il, Statement, Expression, TypeDef, TypeId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -33,6 +33,9 @@ pub enum GraphError {
     MultipleStatementExpressions { function: String, path: String },
     InvalidStatementParent { function: String, path: String },
     InvalidExpressionParent { function: String, statement: String, path: String },
+    DuplicateType(TypeId),
+    MissingType(TypeId),
+    InvalidTypeId(TypeId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -40,6 +43,7 @@ pub enum GraphError {
 pub struct Graph {
     pub statements: Vec<StatementNode>,
     pub expressions: Vec<ExpressionNode>,
+    pub types: Vec<TypeDef>,
 }
 
 impl Graph {
@@ -47,6 +51,24 @@ impl Graph {
         let mut graph = Self::default();
         let mut smap = HashMap::new();
         let mut emap = HashMap::new();
+        let mut type_map = HashMap::new();
+        for ty in &il.types {
+            if ty.id.0 == 0 { return Err(GraphError::InvalidTypeId(ty.id)); }
+            if type_map.insert(ty.id, graph.types.len()).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+            graph.types.push(ty.clone());
+        }
+        for ty in &graph.types {
+            if let Some(child) = ty.related {
+                if !type_map.contains_key(&child) { return Err(GraphError::MissingType(child)); }
+            }
+        }
+        for expr in &il.expressions {
+            if let Some(id) = expr.type_id {
+                if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
+            }
+        }
         for item in &il.statements {
             let key = (item.function.clone(), item.path.clone());
             if smap.insert(key.clone(), StatementId(graph.statements.len())).is_some() {
@@ -140,6 +162,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn type_def(&self, id: TypeId) -> Option<&TypeDef> {
+        self.types.iter().find(|t| t.id == id)
+    }
     pub fn statement(&self, id: StatementId) -> Option<&StatementNode> {
         self.statements.get(id.0)
     }
@@ -178,6 +203,29 @@ mod tests {
         il.statements.push(Statement { function:"f".into(), path:"0".into(), parent:Some("0".into()), kind:1 });
         assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidStatementParent { .. })));
     }
+    #[test]
+    fn rejects_missing_type_references() {
+        let mut il = Il::default();
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 5, related_role: Some(1),
+            related: Some(TypeId(2)),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingType(TypeId(2)));
+        il.types.push(TypeDef {
+            id: TypeId(2), kind: 2, related_role: None, related: None,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.type_def(TypeId(1)).unwrap().related, Some(TypeId(2)));
+    }
+
+    #[test]
+    fn rejects_duplicate_type_ids() {
+        let mut il = Il::default();
+        let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };
+        il.types.extend([ty.clone(), ty]);
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::DuplicateType(TypeId(1)));
+    }
+
     #[test]
     fn rejects_dangling_statement() {
         let mut il = Il::default();
