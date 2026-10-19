@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -50,6 +50,8 @@ pub enum GraphError {
     DuplicateInitializerExpression { owner: SymbolId, path: String },
     InvalidInitializerParent { owner: SymbolId, path: String },
     MissingInitializerRoot(SymbolId),
+    MissingCallExpression { function: String, statement: String, path: String },
+    DuplicateCallExpression { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -68,6 +70,7 @@ pub struct Graph {
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
+    pub calls: Vec<CallSite>,
     initializer_index: HashMap<(SymbolId, String), usize>,
     initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
 }
@@ -272,6 +275,21 @@ impl Graph {
             graph.expressions.push(ExpressionNode {
                 data: item.clone(), parent: None, operands: Vec::new(), statement,
             });
+        }
+        let mut call_paths = std::collections::HashSet::new();
+        for call in &il.calls {
+            let key = (call.function.clone(), call.statement_path.clone(), call.path.clone());
+            if !call_paths.insert(key.clone()) {
+                return Err(GraphError::DuplicateCallExpression {
+                    function: key.0, statement: key.1, path: key.2,
+                });
+            }
+            if !emap.contains_key(&key) {
+                return Err(GraphError::MissingCallExpression {
+                    function: key.0, statement: key.1, path: key.2,
+                });
+            }
+            graph.calls.push(call.clone());
         }
         for idx in 0..graph.statements.len() {
             let parent = graph.statements[idx].data.parent.clone();
