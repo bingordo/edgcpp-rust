@@ -183,3 +183,8 @@ format or public extension ABI.
 
 Variable declarations now preserve EDG's native `init_kind`, explicit-initializer flag and uninitialized flag, attached to the declaration's `SymbolId`. This is initial classification metadata, not yet a full initializer expression or aggregate value tree.
 \nDynamic variable initializers now also report their native EDG `dik_*` category, and where applicable the root expression kind and operator. This is not yet a copied full expression tree.\n
+Dynamic scalar expression initializers now also export operation operand trees
+through typed event 17, retaining path/parent, EDG expression kind, operator,
+type ID and referenced symbol ID. The graph checks ancestry and dangling
+references. Non-operation expression subtrees and constructor/aggregate
+initializers are still incomplete.

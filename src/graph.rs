@@ -552,6 +552,24 @@ mod tests {
     }
 
     #[test]
+    fn validates_initializer_expression_tree() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "x".into() });
+        il.initializer_expressions.push(InitializerExpression {
+            owner: SymbolId(1), path: "0".into(), parent: None,
+            kind: 1, operator: Some(4), type_id: None, symbol_id: None,
+        });
+        il.initializer_expressions.push(InitializerExpression {
+            owner: SymbolId(1), path: "0.0".into(), parent: Some("0".into()),
+            kind: 3, operator: None, type_id: None, symbol_id: Some(SymbolId(1)),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap().initializer_expressions(SymbolId(1)).count(), 2);
+        il.initializer_expressions[1].parent = Some("missing".into());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidInitializerParent { .. })));
+    }
+
+    #[test]
     fn rejects_duplicate_type_ids() {
         let mut il = Il::default();
         let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };

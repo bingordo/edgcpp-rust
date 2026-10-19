@@ -73,5 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("dynamic initializer symbol={} kind={} expression={:?} operator={:?}",
                  init.symbol.0, init.kind, init.expression_kind, init.operator);
     }
+    for expr in &graph.initializer_expressions {
+        println!("initializer expression owner={} path={} parent={:?} kind={} op={:?} type={:?} symbol={:?}",
+                 expr.owner.0, expr.path, expr.parent, expr.kind, expr.operator,
+                 expr.type_id, expr.symbol_id);
+    }
     Ok(())
 }
