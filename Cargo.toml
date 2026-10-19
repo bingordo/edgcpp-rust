@@ -1,0 +1,12 @@
+[package]
+name = "edgcpp"
+version = "0.1.0"
+edition = "2021"
+links = "edgcpfe"
+build = "build.rs"
+description = "Rust bindings to the EDG callable C/C++ front end"
+license = "Apache-2.0 WITH LLVM-exception"
+
+[lib]
+name = "edgcpp"
+path = "src/lib.rs"
