@@ -7,6 +7,7 @@
 #include "fe_common.h"
 #include "const_ints.h"
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
@@ -200,11 +201,20 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   std::string integer_value;
   if (node->kind == enk_constant && node->variant.constant.ptr != nullptr &&
       node->variant.constant.ptr->kind == ck_integer) {
+    a_constant_ptr constant = node->variant.constant.ptr;
     a_boolean overflow = FALSE;
-    a_host_large_integer value =
-        value_of_integer_constant(node->variant.constant.ptr, &overflow);
-    if (!overflow && sizeof(value) <= sizeof(int64_t)) {
-      integer_value = std::to_string(static_cast<int64_t>(value));
+    if (int_constant_is_signed(constant)) {
+      a_host_large_integer value = value_of_integer_constant(constant, &overflow);
+      if (!overflow && sizeof(value) <= sizeof(int64_t)) {
+        integer_value = std::to_string(static_cast<int64_t>(value));
+      }
+    } else {
+      a_host_large_unsigned value =
+          unsigned_value_of_integer_constant(constant, &overflow);
+      if (!overflow && value <=
+          static_cast<a_host_large_unsigned>(std::numeric_limits<int64_t>::max())) {
+        integer_value = std::to_string(static_cast<int64_t>(value));
+      }
     }
   }
   a_type_ptr related_type = nullptr;
