@@ -383,7 +383,7 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                    symbol ? num(symbol) : absent()});
   const auto children = children_of(expr);
   unsigned index = 0;
-  for (an_expr_node_ptr operand = operands;
+  for (an_expr_node_ptr operand = children.first;
        operand != nullptr && index < 10000;
        operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
