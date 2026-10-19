@@ -123,3 +123,10 @@ bridge and archive from the **same commit and configuration**.
 
 License: Apache-2.0 WITH LLVM-exception, as in upstream EDG.
 \n## Type layout and constants\n\nExpressions expose optional EDG target type size/alignment (bytes) and the\nconstant representation kind for constant expressions. Layout is absent\nfor incomplete or zero-sized types. Constant values and semantic type graph\nedges are not yet serialized; consumers must not confuse kind tags with values.\n\nSigned integer constants representable as i64 are copied as `Expression::constant_integer`; out-of-range integer values are left absent. This is not yet a general arbitrary-precision constant representation.\n
+## Direct type relationships (prototype)
+
+Expression records now include `related_type_role` and `related_type_kind`
+for pointer pointee (1), array element (2), or function return (3) types.
+These are **one-hop kind summaries**, not identity-preserving type graph edges;
+the actual referenced type nodes, parameters, qualifiers and typedef chains
+will require a separate owned type table.
