@@ -335,6 +335,25 @@ impl Graph {
     pub fn initializer_expressions(&self, id: SymbolId) -> impl Iterator<Item = &InitializerExpression> {
         self.initializer_expressions.iter().filter(move |e| e.owner == id)
     }
+    /// Root expression of a variable's dynamic initializer, if captured.
+    pub fn initializer_root(&self, owner: SymbolId) -> Option<&InitializerExpression> {
+        self.initializer_expressions.iter()
+            .find(|node| node.owner == owner && node.parent.is_none())
+    }
+
+    /// Direct operands of an initializer expression, ordered by their path index.
+    ///
+    /// This does not interpret EDG expression-kind or operator discriminants.
+    pub fn initializer_operands<'a>(&'a self, node: &InitializerExpression)
+        -> Vec<&'a InitializerExpression> {
+        let mut children: Vec<_> = self.initializer_expressions.iter()
+            .filter(|child| child.owner == node.owner
+                && child.parent.as_deref() == Some(node.path.as_str()))
+            .collect();
+        children.sort_by_key(|child| graph_path_index(&child.path));
+        children
+    }
+
     pub fn dynamic_initializer(&self, id: SymbolId) -> Option<&DynamicInitializer> {
         self.dynamic_initializers.iter().find(|v| v.symbol == id)
     }
