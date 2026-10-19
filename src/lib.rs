@@ -223,15 +223,30 @@ pub enum Error {
     NulArgument,
     TooManyArguments,
     NativeFailure,
+    CallbackPanicked,
+    EmptyArguments,
 }
 
+struct Collector {
+    il: Il,
+    panicked: bool,
+}
+
+/// Never allow a Rust panic to cross the C ABI into EDG.
+/// Native callbacks are synchronous and serialized by COMPILER_LOCK.
 unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                               name: *const c_char, defined: u32) {
-    // The callback is invoked synchronously from the bridge.
-    if context.is_null() || name.is_null() {
-        return;
-    }
-    let output = &mut *(context as *mut Il);
+    if context.is_null() || name.is_null() { return; }
+    let state = &mut *(context as *mut Collector);
+    if state.panicked { return; }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect_event(&mut state.il, kind, name, defined);
+    }));
+    if result.is_err() { state.panicked = true; }
+}
+
+unsafe fn collect_event(output: &mut Il, kind: u32,
+                        name: *const c_char, defined: u32) {
     let name = CStr::from_ptr(name).to_string_lossy().into_owned();
     match kind {
         1 => output.entities.push(Entity::Routine {
@@ -358,6 +373,7 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
 /// are appropriate for the selected EDG command-line options.
 pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     let _lock = COMPILER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if args.is_empty() { return Err(Error::EmptyArguments); }
     if args.len() > c_int::MAX as usize {
         return Err(Error::TooManyArguments);
     }
@@ -367,15 +383,16 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     let mut argv: Vec<*mut c_char> =
         cstrings.iter().map(|s| s.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
-    let mut il = Il::default();
+    let mut collector = Collector { il: Il::default(), panicked: false };
     let code = unsafe {
         edgcpp_compile(cstrings.len() as c_int, argv.as_mut_ptr(),
-                       Some(collect), &mut il as *mut Il as *mut c_void)
+                       Some(collect), &mut collector as *mut Collector as *mut c_void)
     };
+    if collector.panicked { return Err(Error::CallbackPanicked); }
     if code < 0 {
         return Err(Error::NativeFailure);
     }
-    Ok(Compilation { status: code, il })
+    Ok(Compilation { status: code, il: collector.il })
 }
 
 #[cfg(test)]
@@ -434,6 +451,11 @@ mod tests {
             parent: Some("0".into()), kind: 0,
         });
         assert_eq!(il.statements[0].parent.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn rejects_empty_argv() {
+        assert_eq!(compile(&[] as &[&str]).unwrap_err(), Error::EmptyArguments);
     }
 
     #[test]
