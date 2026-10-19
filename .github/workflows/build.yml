@@ -75,4 +75,5 @@ jobs:
             grep -F 'statement outer::calculate path=' il_result.txt
             grep -F 'expression outer::calculate statement=' il_result.txt
             grep -F 'integer constant outer::calculate = 0' il_result.txt
+            grep -F 'type id=' il_result.txt
           )

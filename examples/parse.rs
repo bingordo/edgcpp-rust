@@ -41,5 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid EDG IL graph: {e:?}"))?;
     println!("indexed IL statements={} expressions={}",
              graph.statements.len(), graph.expressions.len());
+    for ty in &result.il.types {
+        println!("type id={} kind={} related={:?}", ty.id.0, ty.kind, ty.related);
+    }
     Ok(())
 }

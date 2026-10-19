@@ -308,6 +308,16 @@ mod tests {
     }
 
     #[test]
+    fn type_id_links_are_owned() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 5,
+            related_role: Some(1), related: Some(TypeId(2)) });
+        il.types.push(TypeDef { id: TypeId(2), kind: 2,
+            related_role: None, related: None });
+        assert_eq!(il.types[0].related, Some(il.types[1].id));
+    }
+
+    #[test]
     fn statement_paths_preserve_parent_relation() {
         let mut il = Il::default();
         il.statements.push(Statement {

@@ -130,3 +130,13 @@ for pointer pointee (1), array element (2), or function return (3) types.
 These are **one-hop kind summaries**, not identity-preserving type graph edges;
 the actual referenced type nodes, parameters, qualifiers and typedef chains
 will require a separate owned type table.
+
+## Identity-preserving type snapshots
+
+`Il::types` now contains `TypeDef` records keyed by `TypeId`. EDG type
+addresses are mapped to per-compilation numeric IDs; the callback exports
+only those IDs. Pointer, array and routine types link to pointee, element,
+and return types respectively, allowing recursive type graphs to be represented.
+Each expression carries an optional `type_id` referring into the same table.
+Type parameters, typedef chains, cv qualifiers and record members are not yet
+modeled. IDs are valid only within the containing compilation.
