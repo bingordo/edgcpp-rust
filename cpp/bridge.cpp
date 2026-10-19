@@ -119,8 +119,8 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   // Preserve the calling interface shape, including variadic functions.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     const auto *info = type->variant.routine.extra_info;
-    std::string signature = std::to_string(id) + "\\t" +
-        std::to_string(info->prototyped ? 1 : 0) + "\\t" +
+    std::string signature = std::to_string(id) + "\t" +
+        std::to_string(info->prototyped ? 1 : 0) + "\t" +
         std::to_string(info->has_ellipsis ? 1 : 0);
     current_callback(current_user_data, 12, signature.c_str(), 0);
   }
