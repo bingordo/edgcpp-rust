@@ -163,7 +163,7 @@ mod tests {
             il.expressions.push(Expression {
                 function:"f".into(), statement_path:"0.block.0".into(),
                 path:path.into(), parent:parent.map(str::to_string),
-                kind:1, operator:Some(1), type_kind:Some(2), reference:None,
+                kind:1, operator:Some(1), type_kind:Some(2), reference:None, type_size:Some(4), type_alignment:Some(4), constant_kind:None,
             });
         }
         let graph = Graph::from_il(&il).unwrap();

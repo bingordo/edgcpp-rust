@@ -96,9 +96,19 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     const char *field = source_name(node->variant.field.ptr->source_corresp);
     if (field != nullptr) referenced = field;
   }
+  // Report target type layout only when EDG has a complete nonzero-sized type.
+  const bool layout_known = node->type != nullptr &&
+                             !node->type->incomplete && node->type->size != 0;
+  const std::string type_size = layout_known ?
+      std::to_string(node->type->size) : "";
+  const std::string type_align = layout_known ?
+      std::to_string(node->type->alignment) : "";
+  const std::string constant_kind = node->kind == enk_constant &&
+      node->variant.constant.ptr != nullptr ?
+      std::to_string(static_cast<unsigned>(node->variant.constant.ptr->kind)) : "";
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
-                       std::to_string(ty) + "\t" + referenced;
+                       std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind;
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {

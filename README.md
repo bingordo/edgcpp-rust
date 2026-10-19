@@ -122,3 +122,4 @@ bridge and archive from the **same commit and configuration**.
 - Exceptions do not cross the C ABI.
 
 License: Apache-2.0 WITH LLVM-exception, as in upstream EDG.
+\n## Type layout and constants\n\nExpressions expose optional EDG target type size/alignment (bytes) and the\nconstant representation kind for constant expressions. Layout is absent\nfor incomplete or zero-sized types. Constant values and semantic type graph\nedges are not yet serialized; consumers must not confuse kind tags with values.\n
