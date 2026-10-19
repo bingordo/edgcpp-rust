@@ -9,7 +9,7 @@
 pub mod graph;
 
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString},
+    ffi::{c_char, c_int, c_void, CString},
     sync::Mutex,
 };
 
