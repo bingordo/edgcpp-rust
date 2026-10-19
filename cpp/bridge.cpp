@@ -269,8 +269,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                        parent + "\t" + std::to_string(op) + "\t" +
                        std::to_string(ty) + "\t" + referenced + "\t" + type_size + "\t" + type_align + "\t" + constant_kind + "\t" + integer_value + "\t" +
                        std::to_string(relationship) + "\t" + related_kind + "\t" + std::to_string(type_id) + "\t" + std::to_string(symbol);
-  current_callback(current_user_data, 6, record.c_str(),
-                   static_cast<uint32_t>(node->kind));
+  emit_record(6, record, static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {
     unsigned index = 0;
     for (an_expr_node_ptr operand = node->variant.operation.operands;
@@ -292,8 +291,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     std::string path = parent.empty() ? std::to_string(index) :
                          parent + "." + edge + "." + std::to_string(index);
     std::string record = function + "\t" + path + "\t" + parent;
-    current_callback(current_user_data, 5, record.c_str(),
-                     static_cast<uint32_t>(stmt->kind));
+    emit_record(5, record, static_cast<uint32_t>(stmt->kind));
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
