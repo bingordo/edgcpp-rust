@@ -149,3 +149,5 @@ Function types now export their parameter types in declaration order as
 both referenced type IDs and rejects duplicate parameter positions. Query
 `Graph::parameters(TypeId)` for ordered parameter edges. Array dimensions and
 full qualifiers are not yet represented.
+
+Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.\n

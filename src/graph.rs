@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -37,6 +37,7 @@ pub enum GraphError {
     MissingType(TypeId),
     InvalidTypeId(TypeId),
     DuplicateParameter { owner: TypeId, position: u32 },
+    DuplicateArrayBound(TypeId),
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -46,6 +47,7 @@ pub struct Graph {
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
+    pub array_bounds: Vec<ArrayBound>,
 }
 
 impl Graph {
@@ -81,6 +83,16 @@ impl Graph {
             graph.type_parameters.push(param.clone());
         }
         graph.type_parameters.sort_by_key(|p| (p.owner.0, p.position));
+        let mut bounded = std::collections::HashSet::new();
+        for bound in &il.array_bounds {
+            if !type_map.contains_key(&bound.array) {
+                return Err(GraphError::MissingType(bound.array));
+            }
+            if !bounded.insert(bound.array) {
+                return Err(GraphError::DuplicateArrayBound(bound.array));
+            }
+            graph.array_bounds.push(bound.clone());
+        }
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
                 if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
@@ -179,6 +191,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn array_bound(&self, array: TypeId) -> Option<u64> {
+        self.array_bounds.iter().find(|b| b.array == array).map(|b| b.elements)
+    }
     pub fn parameters(&self, owner: TypeId) -> impl Iterator<Item = &TypeParameter> {
         self.type_parameters.iter().filter(move |p| p.owner == owner)
     }
@@ -251,6 +266,14 @@ mod tests {
             related_role: None, related: None });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.parameters(TypeId(1)).next().unwrap().ty, TypeId(2));
+    }
+
+    #[test]
+    fn fixed_array_bound_is_owned() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.array_bounds.push(ArrayBound { array: TypeId(1), elements: 12 });
+        assert_eq!(Graph::from_il(&il).unwrap().array_bound(TypeId(1)), Some(12));
     }
 
     #[test]

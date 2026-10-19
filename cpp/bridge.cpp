@@ -113,6 +113,14 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
       std::to_string(relation) + "\t" + std::to_string(child);
   current_callback(current_user_data, 7, record.c_str(), 0);
+  if (type->kind == tk_array &&
+      !type->variant.array.is_variable_size_array &&
+      !type->variant.array.is_template_dependent_size_array &&
+      !type->incomplete) {
+    std::string count = std::to_string(type->variant.array.variant.number_of_elements);
+    std::string bound = std::to_string(id) + "\t" + count;
+    current_callback(current_user_data, 9, bound.c_str(), 0);
+  }
   return id;
 }
 

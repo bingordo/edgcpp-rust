@@ -47,6 +47,8 @@ pub struct Il {
     pub types: Vec<TypeDef>,
     /// Ordered parameter edges belonging to routine types.
     pub type_parameters: Vec<TypeParameter>,
+    /// Known fixed array bounds (in elements).
+    pub array_bounds: Vec<ArrayBound>,
 }
 
 /// Stable type identifier within one compilation. Zero means no type.
@@ -68,6 +70,12 @@ pub struct TypeParameter {
     pub owner: TypeId,
     pub position: u32,
     pub ty: TypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayBound {
+    pub array: TypeId,
+    pub elements: u64,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -221,6 +229,14 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                 });
             }
         },
+        9 => {
+            let mut fields = name.splitn(2, '\t');
+            if let (Some(id), Some(count)) = (fields.next(), fields.next()) {
+                if let (Ok(id), Ok(elements)) = (id.parse(), count.parse()) {
+                    output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
+                }
+            }
+        },
         8 => {
             let f: Vec<_> = name.splitn(3, '\t').collect();
             if f.len() == 3 {
@@ -300,7 +316,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![] };
+        ], statements: vec![], expressions: vec![], types: vec![], type_parameters: vec![], array_bounds: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
