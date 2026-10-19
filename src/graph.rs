@@ -501,6 +501,19 @@ mod tests {
     }
 
     #[test]
+    fn validates_dynamic_initializers() {
+        let mut il = Il::default();
+        il.dynamic_initializers.push(DynamicInitializer {
+            symbol: SymbolId(4), kind: 3, expression_kind: Some(1), operator: Some(40),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingSymbol(SymbolId(4)));
+        il.symbols.push(Symbol { id: SymbolId(4), kind: 2, name: "x".into() });
+        assert_eq!(Graph::from_il(&il).unwrap().dynamic_initializer(SymbolId(4)).unwrap().kind, 3);
+        il.dynamic_initializers.push(il.dynamic_initializers[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::DuplicateDynamicInitializer(SymbolId(4)));
+    }
+
+    #[test]
     fn rejects_duplicate_type_ids() {
         let mut il = Il::default();
         let ty = TypeDef { id: TypeId(1), kind: 2, related_role: None, related: None };
