@@ -96,6 +96,9 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   } else if (type->kind == tk_routine) {
     related = type->variant.routine.return_type;
     relation = 3;
+  } else if (type->kind == tk_typeref) {
+    related = type->variant.typeref.type;
+    relation = 4; // Underlying typedef / qualified type.
   }
   uint32_t child = emit_type(related, depth + 1);
   if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
@@ -128,6 +131,20 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
       std::to_string(relation) + "\t" + std::to_string(child);
   current_callback(current_user_data, 7, record.c_str(), 0);
+  // Type qualifiers and reference distinctions are native EDG properties,
+  // rather than inferred from the printed type name.
+  if (type->kind == tk_pointer || type->kind == tk_typeref) {
+    unsigned flags = 0;
+    if (type->kind == tk_pointer) {
+      if (type->variant.pointer.is_reference) flags |= 1;
+      if (type->variant.pointer.is_rvalue_reference) flags |= 2;
+    }
+    std::string qualifiers = type->kind == tk_typeref ?
+        std::to_string(static_cast<unsigned>(type->variant.typeref.qualifiers)) : "";
+    std::string detail = std::to_string(id) + "\t" +
+        std::to_string(flags) + "\t" + qualifiers;
+    current_callback(current_user_data, 11, detail.c_str(), 0);
+  }
   if (type->kind == tk_array &&
       !type->variant.array.is_variable_size_array &&
       !type->variant.array.is_template_dependent_size_array &&
