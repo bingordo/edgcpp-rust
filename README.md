@@ -76,7 +76,7 @@ Unknown statement kinds are retained as opaque records.
 `Compilation::il.expressions` snapshots the primary expression on a statement,
 including ordered operands of EDG operation nodes. Records retain function,
 statement path, expression path, parent expression path, EDG expression kind,
-operator kind when applicable, and the basic result type kind. Other expression
+operator kind when applicable, the basic result type kind, and optional\nvariable/routine/field references. Other expression
 kinds remain opaque. Full type graphs, some non-operation expression children,
 and CFG edges are not yet represented. No EDG pointers escape the callback.
 

@@ -87,9 +87,18 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       static_cast<unsigned>(node->variant.operation.kind) : 0;
   const unsigned ty = node->type == nullptr ? 0 :
       static_cast<unsigned>(node->type->kind);
+  std::string referenced;
+  if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
+    referenced = declaration_name(node->variant.variable.ptr->source_corresp, false);
+  } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
+    referenced = declaration_name(node->variant.routine.ptr->source_corresp, true);
+  } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
+    const char *field = source_name(node->variant.field.ptr->source_corresp);
+    if (field != nullptr) referenced = field;
+  }
   std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
                        parent + "\t" + std::to_string(op) + "\t" +
-                       std::to_string(ty);
+                       std::to_string(ty) + "\t" + referenced;
   current_callback(current_user_data, 6, record.c_str(),
                    static_cast<uint32_t>(node->kind));
   if (node->kind == enk_operation) {

@@ -66,6 +66,8 @@ pub struct Expression {
     pub kind: u32,
     pub operator: Option<u32>,
     pub type_kind: Option<u32>,
+    /// Qualified source name for variable/routine references or field name.
+    pub reference: Option<String>,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -162,8 +164,8 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         3 => output.entities.push(Entity::Type { name }),
         4 => output.entities.push(Entity::Namespace { name }),
         6 => {
-            let fields: Vec<_> = name.split('\t').collect();
-            if fields.len() == 6 {
+            let fields: Vec<_> = name.splitn(7, '\t').collect();
+            if fields.len() == 7 {
                 output.expressions.push(Expression {
                     function: fields[0].into(),
                     statement_path: fields[1].into(),
@@ -172,6 +174,7 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                     kind: defined,
                     operator: fields[4].parse().ok().filter(|_| defined == 1),
                     type_kind: fields[5].parse().ok(),
+                    reference: if fields[6].is_empty() { None } else { Some(fields[6].into()) },
                 });
             }
         },
@@ -247,12 +250,12 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None, kind: 1,
-            operator: Some(12), type_kind: Some(2),
+            operator: Some(12), type_kind: Some(2), reference: None,
         });
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0.0".into(), parent: Some("0".into()), kind: 2,
-            operator: None, type_kind: Some(2),
+            operator: None, type_kind: Some(2), reference: Some("x".into()),
         });
         assert_eq!(il.expressions[1].parent.as_deref(), Some("0"));
         assert_eq!(il.expressions[1].path, "0.0");
