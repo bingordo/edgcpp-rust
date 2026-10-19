@@ -142,3 +142,10 @@ Type parameters, typedef chains, cv qualifiers and record members are not yet
 modeled. IDs are valid only within the containing compilation.
 
 The indexed `Graph::from_il()` validates unique, nonzero type IDs, checks that direct type edges resolve, and rejects expressions referring to missing types. `Graph::type_def(TypeId)` resolves an owned type node. Cycles are permitted (recursive types).\n
+## Function parameter edges
+
+Function types now export their parameter types in declaration order as
+`TypeParameter { owner, position, ty }` records. The indexed graph validates
+both referenced type IDs and rejects duplicate parameter positions. Query
+`Graph::parameters(TypeId)` for ordered parameter edges. Array dimensions and
+full qualifiers are not yet represented.

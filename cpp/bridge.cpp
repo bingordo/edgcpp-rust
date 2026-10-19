@@ -98,6 +98,17 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     relation = 3;
   }
   uint32_t child = emit_type(related, depth + 1);
+  // Send additional parameter type edges in declaration order.
+  if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
+    unsigned position = 0;
+    for (a_param_type_ptr p = type->variant.routine.extra_info->param_type_list;
+         p != nullptr && position < 10000; p = p->next, ++position) {
+      uint32_t parameter = emit_type(p->type, depth + 1);
+      std::string edge = std::to_string(id) + "\t" +
+          std::to_string(position) + "\t" + std::to_string(parameter);
+      current_callback(current_user_data, 8, edge.c_str(), 0);
+    }
+  }
   std::string record = std::to_string(id) + "\t" +
       std::to_string(static_cast<unsigned>(type->kind)) + "\t" +
       std::to_string(relation) + "\t" + std::to_string(child);

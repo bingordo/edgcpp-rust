@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -36,6 +36,7 @@ pub enum GraphError {
     DuplicateType(TypeId),
     MissingType(TypeId),
     InvalidTypeId(TypeId),
+    DuplicateParameter { owner: TypeId, position: u32 },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -44,6 +45,7 @@ pub struct Graph {
     pub statements: Vec<StatementNode>,
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
+    pub type_parameters: Vec<TypeParameter>,
 }
 
 impl Graph {
@@ -64,6 +66,21 @@ impl Graph {
                 if !type_map.contains_key(&child) { return Err(GraphError::MissingType(child)); }
             }
         }
+        let mut parameters = std::collections::HashSet::new();
+        for param in &il.type_parameters {
+            for id in [param.owner, param.ty] {
+                if !type_map.contains_key(&id) {
+                    return Err(GraphError::MissingType(id));
+                }
+            }
+            if !parameters.insert((param.owner, param.position)) {
+                return Err(GraphError::DuplicateParameter {
+                    owner: param.owner, position: param.position,
+                });
+            }
+            graph.type_parameters.push(param.clone());
+        }
+        graph.type_parameters.sort_by_key(|p| (p.owner.0, p.position));
         for expr in &il.expressions {
             if let Some(id) = expr.type_id {
                 if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
@@ -162,6 +179,9 @@ impl Graph {
         self.expression(id).into_iter()
             .flat_map(move |n| n.operands.iter().filter_map(move |child| self.expression(*child)))
     }
+    pub fn parameters(&self, owner: TypeId) -> impl Iterator<Item = &TypeParameter> {
+        self.type_parameters.iter().filter(move |p| p.owner == owner)
+    }
     pub fn type_def(&self, id: TypeId) -> Option<&TypeDef> {
         self.types.iter().find(|t| t.id == id)
     }
@@ -216,6 +236,21 @@ mod tests {
         });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.type_def(TypeId(1)).unwrap().related, Some(TypeId(2)));
+    }
+
+    #[test]
+    fn validates_parameter_edges() {
+        let mut il = Il::default();
+        il.types.push(TypeDef { id: TypeId(1), kind: 0,
+            related_role: None, related: None });
+        il.type_parameters.push(TypeParameter {
+            owner: TypeId(1), position: 0, ty: TypeId(2),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingType(TypeId(2)));
+        il.types.push(TypeDef { id: TypeId(2), kind: 0,
+            related_role: None, related: None });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.parameters(TypeId(1)).next().unwrap().ty, TypeId(2));
     }
 
     #[test]
