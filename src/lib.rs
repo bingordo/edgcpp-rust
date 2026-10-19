@@ -39,6 +39,8 @@ pub struct Il {
     pub entities: Vec<Entity>,
     /// Structural statement records captured while function IL is live.
     pub statements: Vec<Statement>,
+    /// Owned expression nodes, including operation operand relationships.
+    pub expressions: Vec<Expression>,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -49,6 +51,19 @@ pub struct Statement {
     pub path: String,
     pub parent: Option<String>,
     pub kind: u32,
+}
+
+/// A snapshot of an EDG expression and its ordered operand tree.
+/// Discriminants are native EDG enums; consumers must use the matching EDG build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expression {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub parent: Option<String>,
+    pub kind: u32,
+    pub operator: Option<u32>,
+    pub type_kind: Option<u32>,
 }
 
 /// Owned namespace tree. Declarations are grouped by the namespace in
@@ -144,6 +159,20 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         2 => output.entities.push(Entity::Variable { name }),
         3 => output.entities.push(Entity::Type { name }),
         4 => output.entities.push(Entity::Namespace { name }),
+        6 => {
+            let fields: Vec<_> = name.split('\t').collect();
+            if fields.len() == 6 {
+                output.expressions.push(Expression {
+                    function: fields[0].into(),
+                    statement_path: fields[1].into(),
+                    path: fields[2].into(),
+                    parent: if fields[3].is_empty() { None } else { Some(fields[3].into()) },
+                    kind: defined,
+                    operator: fields[4].parse().ok().filter(|_| defined == 1),
+                    type_kind: fields[5].parse().ok(),
+                });
+            }
+        },
         5 => {
             let mut parts = name.splitn(3, '\t');
             if let (Some(function), Some(path), Some(parent)) =
@@ -199,7 +228,7 @@ mod tests {
             Entity::Namespace { name: "outer::inner".into() },
             Entity::Variable { name: "outer::inner::value".into() },
             Entity::Routine { name: "outer::compute".into(), has_definition: true },
-        ], statements: vec![] };
+        ], statements: vec![], expressions: vec![] };
         let root = il.scope_tree();
         let outer = root.namespace(&["outer"]).unwrap();
         assert!(outer.declarations.contains(&Entity::Routine {
@@ -208,6 +237,23 @@ mod tests {
         let inner = root.namespace(&["outer", "inner"]).unwrap();
         assert_eq!(inner.declarations, vec![Entity::Variable { name: "value".into() }]);
         assert!(root.namespace(&["absent"]).is_none());
+    }
+
+    #[test]
+    fn expression_operands_are_ordered_and_owned() {
+        let mut il = Il::default();
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None, kind: 1,
+            operator: Some(12), type_kind: Some(2),
+        });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0.0".into(), parent: Some("0".into()), kind: 2,
+            operator: None, type_kind: Some(2),
+        });
+        assert_eq!(il.expressions[1].parent.as_deref(), Some("0"));
+        assert_eq!(il.expressions[1].path, "0.0");
     }
 
     #[test]

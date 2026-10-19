@@ -73,4 +73,5 @@ jobs:
             grep -F 'routine outer::calculate, defined=true' il_result.txt
             grep -F 'variable outer::inner::nested' il_result.txt
             grep -F 'statement outer::calculate path=' il_result.txt
+            grep -F 'expression outer::calculate statement=' il_result.txt
           )

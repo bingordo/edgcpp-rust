@@ -26,5 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("statement {} path={} parent={:?} kind={}",
                  statement.function, statement.path, statement.parent, statement.kind);
     }
+    for expression in &result.il.expressions {
+        println!("expression {} statement={} path={} parent={:?} kind={} op={:?} type={:?}",
+            expression.function, expression.statement_path, expression.path,
+            expression.parent, expression.kind, expression.operator, expression.type_kind);
+    }
     Ok(())
 }

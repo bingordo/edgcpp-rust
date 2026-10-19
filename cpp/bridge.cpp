@@ -76,6 +76,33 @@ static std::string declaration_name(const a_source_correspondence &sc,
 
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
+// Each expression receives a local path and parent path. Operation operands
+// are traversed in EDG list order. Non-operation kinds remain opaque.
+static void emit_expr(an_expr_node_ptr node, const std::string &function,
+                      const std::string &stmt_path, const std::string &path,
+                      const std::string &parent, unsigned depth)
+{
+  if (node == nullptr || depth > 64 || current_callback == nullptr) return;
+  const unsigned op = node->kind == enk_operation ?
+      static_cast<unsigned>(node->variant.operation.kind) : 0;
+  const unsigned ty = node->type == nullptr ? 0 :
+      static_cast<unsigned>(node->type->kind);
+  std::string record = function + "\t" + stmt_path + "\t" + path + "\t" +
+                       parent + "\t" + std::to_string(op) + "\t" +
+                       std::to_string(ty);
+  current_callback(current_user_data, 6, record.c_str(),
+                   static_cast<uint32_t>(node->kind));
+  if (node->kind == enk_operation) {
+    unsigned index = 0;
+    for (an_expr_node_ptr operand = node->variant.operation.operands;
+         operand != nullptr && index < 10000;
+         operand = operand->next, ++index) {
+      emit_expr(operand, function, stmt_path,
+                path + "." + std::to_string(index), path, depth + 1);
+    }
+  }
+}
+
 static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge, unsigned depth)
 {
@@ -88,6 +115,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     std::string record = function + "\t" + path + "\t" + parent;
     current_callback(current_user_data, 5, record.c_str(),
                      static_cast<uint32_t>(stmt->kind));
+    if (stmt->expr != nullptr) {
+      emit_expr(stmt->expr, function, path, "0", "", 0);
+    }
     if (stmt->kind == stmk_block) {
       emit_statements(stmt->variant.block.statements, function, path, "block", depth + 1);
     } else if (stmt->kind == stmk_if) {
@@ -101,7 +131,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                       function, path, "body", depth + 1);
     } else if (stmt->kind == stmk_for) {
       emit_statements(stmt->variant.for_loop.statement,
-                      function, path + ".body", depth + 1);
+                      function, path, "body", depth + 1);
     }
   }
 }
