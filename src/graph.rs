@@ -77,6 +77,7 @@ pub struct Graph {
     pub calls: Vec<CallSite>,
     initializer_index: HashMap<(SymbolId, String), usize>,
     initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
+    call_expression_ids: Vec<ExpressionId>,
 }
 
 impl Graph {
@@ -307,6 +308,7 @@ impl Graph {
                     function: key.0, statement: key.1, path: key.2,
                 });
             }
+            graph.call_expression_ids.push(emap[&key]);
             graph.calls.push(call.clone());
         }
         for idx in 0..graph.statements.len() {
@@ -463,12 +465,18 @@ impl Graph {
             .unwrap_or_default()
     }
 
+    /// Resolve a call record by its compilation-local expression identity.
+    pub fn call_at(&self, id: ExpressionId) -> Option<&CallSite> {
+        self.call_expression_ids.iter().position(|&candidate| candidate == id)
+            .map(|index| &self.calls[index])
+    }
+
     /// Resolve the expression associated with a call-site record.
+    ///
+    /// Call-site references should come from this graph's `calls` slice.
     pub fn call_expression(&self, call: &CallSite) -> Option<ExpressionId> {
-        self.expressions.iter().position(|node|
-            node.data.function == call.function &&
-            node.data.statement_path == call.statement_path &&
-            node.data.path == call.path).map(ExpressionId)
+        self.calls.iter().position(|candidate| candidate == call)
+            .map(|index| self.call_expression_ids[index])
     }
 
     /// Callee expression (operand zero) of an EDG call.
@@ -618,6 +626,36 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
         assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
+    #[test]
+    fn resolves_regular_call_with_no_object() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent) in [("0.1", Some("0")), ("0", None), ("0.0", Some("0"))] {
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: "0".into(),
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_kind: None, reference: None,
+                type_size: None, type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None, symbol_id: None,
+            });
+        }
+        il.calls.push(CallSite {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), first_argument: 1,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        let call = &graph.calls[0];
+        let root = graph.call_expression(call).unwrap();
+        assert_eq!(root, ExpressionId(1));
+        assert_eq!(graph.call_at(root), Some(call));
+        assert_eq!(graph.call_callee(call), Some(ExpressionId(2)));
+        assert_eq!(graph.call_object(call), None);
+        assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(0)][..]));
     }
 
     #[test]
