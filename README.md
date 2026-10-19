@@ -188,3 +188,10 @@ through typed event 17, retaining path/parent, EDG expression kind, operator,
 type ID and referenced symbol ID. The graph checks ancestry and dangling
 references. Non-operation expression subtrees and constructor/aggregate
 initializers are still incomplete.
+
+Expression traversal now follows `enk_object_lifetime` wrapper nodes and
+expression-form `enk_sizeof`, `enk_alignof` and `enk_datasizeof` child
+expressions, in addition to ordinary operation operand lists. Type-form
+size/alignment operations have no expression child. Both function-body and
+dynamic-initializer visitors use this rule. The overall snapshot remains
+partial for other EDG expression variants.

@@ -3,6 +3,7 @@ int count = 4;
 extern const int constant_answer = 42;
 int uninitialized_global;
 int initialized_from_count = count + 5;
+int initialized_with_sizeof = count + sizeof(count);
 struct Widget { int member; unsigned flags : 3; };
 Widget widget{};
 int variadic(int first, ...) { return first; }
