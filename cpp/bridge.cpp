@@ -429,6 +429,15 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
              (stmt->is_lowering_boilerplate ? 64u : 0u);
 #endif
     emit_record(26, {txt(function), txt(path), num(flags)});
+    if ((stmt->kind == stmk_goto || stmt->kind == stmk_label) &&
+        stmt->variant.label.ptr != nullptr) {
+      a_label_ptr label = stmt->variant.label.ptr;
+      const char *label_name = source_name(label->source_corresp);
+      const uint32_t label_id = emit_symbol(label, 4,
+                                             label_name == nullptr ? "" : label_name);
+      emit_record(28, {txt(function), txt(path), num(label_id),
+                       num(stmt->kind == stmk_label ? 1 : 0)});
+    }
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
