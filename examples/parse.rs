@@ -82,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("base class derived={} position={} base={} virtual={}",
                  base.derived.0, base.position, base.base.0, base.is_virtual);
     }
+    for access in &graph.base_class_access {
+        println!("base access derived={} position={} access={:?} pack={}",
+                 access.derived.0, access.position, access.access, access.pack_expansion);
+    }
     for member in &graph.member_functions {
         let symbol = graph.symbol(member.routine).ok_or("missing member symbol")?;
         println!("member function owner={} name={}", member.owner.0, symbol.name);
