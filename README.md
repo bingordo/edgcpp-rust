@@ -675,3 +675,18 @@ Each returned batch is a strongly connected component, **not** necessarily
 a parallel execution wave. The schedule only accounts for captured type
 relationships; callers remain responsible for non-type dependencies and
 for rebuilding the index after mutating the graph.
+
+
+## Parallel invalidation waves
+
+`index.invalidation_waves(&changed)` returns a sequence of dependency-level
+waves. Each wave contains one or more strongly connected type components.
+Components in the same wave have no captured type dependencies on one another,
+so downstream analyses may process them concurrently if their own state and
+non-type dependencies permit. A component's types are kept together.
+
+`index.invalidation_symbol_waves(&changed)` projects those waves onto
+captured symbols with affected declared types, preserving symbol order within
+each wave. `graph.type_invalidation_waves(&changed)` builds a temporary
+index for convenience. Reuse a previously constructed index when issuing
+many queries, and rebuild it after mutating Graph collections.
