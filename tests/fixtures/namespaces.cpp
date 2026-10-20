@@ -23,10 +23,13 @@ struct Base { int value; Base() : value(1) {} virtual ~Base() {} };
 struct Secondary { int other; };
 struct Derived : public Base, virtual public Secondary {
     int field;
-    Derived() : Base(), Secondary(), field(7) {}
-    int method() const { return field + value; }
-    static int static_method() { return 3; }
+    Derived();
+    int method() const;
+    static int static_method();
 };
+Derived::Derived() : Base(), Secondary(), field(7) {}
+int Derived::method() const { return field + value; }
+int Derived::static_method() { return 3; }
 int exercise() {
     Derived d;
     return d.method() + Derived::static_method();
