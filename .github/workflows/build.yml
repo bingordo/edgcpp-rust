@@ -88,6 +88,11 @@ jobs:
             grep -F 'routine outer::overloaded(int), defined=true' il_result.txt
             grep -F 'routine outer::overloaded(long), defined=true' il_result.txt
             grep -F 'indexed symbols=' il_result.txt
+            grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
+            grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
+            grep -E 'member function owner=[0-9]+ name=.*Derived::method' il_result.txt
+            grep -E 'member function owner=[0-9]+ name=.*Derived::static_method' il_result.txt
+            grep -E 'constructor initializer routine=.*Derived::Derived.*position=[0-9]+ kind=[0-3]' il_result.txt
             grep -F 'variable outer::constant_answer' il_result.txt
             grep -E 'initializer integer symbol=[0-9]+ value=42' il_result.txt
             grep -F 'variable outer::initialized_from_count' il_result.txt
