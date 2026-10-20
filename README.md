@@ -572,7 +572,7 @@ are valid only while the owning `Graph` is alive.
 ## Declaration and record-layout API
 
 `Graph::routine_view(symbol_id)` and `Graph::variable_view(symbol_id)`
-provide borrowed declaration summaries. Both require a captured symbol;
+provide borrowed declaration summaries. The former requires EDG symbol kind 1\n(routine), and the latter kind 2 (variable); wrong-kind or absent symbols\nreturn `None`. Both require a captured symbol;
 uncaptured type metadata is represented by `None`, rather than inventing a
 type or failing the entire query. Routine views expose the canonical captured
 function name and optional implicit C++ `this` parameter. Variable views
@@ -655,8 +655,7 @@ edges, plus captured symbol ownership, so repeated calls to
 `index.affected_types(&changed)`, and
 `index.affected_symbols(&changed)` do not rescan the Graph's type records.
 
-The index is an owned **snapshot**, not a live view: if public Graph
-collections are mutated, rebuild the index. Reverse closure uses breadth-first
+The index is an owned **snapshot**, not a live view: if public Graph\ncollections are mutated, rebuild the index or apply matching incremental edits. Reverse closure uses breadth-first
 search and handles cycles. Indexed `affected_symbols` preserves overall captured symbol order,
 matching `Graph::affected_symbols`.
 
@@ -706,3 +705,26 @@ Updates change the index snapshot only; they do not mutate the underlying
 `Graph`. Callers are responsible for keeping both consistent when editing
 the Graph. Reverse dependent ordering follows retained type insertion order.
 The index does not automatically observe mutations to public Graph fields.
+
+
+## Batched edits and differential invalidation
+
+`TypeDependencyIndex::apply_changes(&changes)` accepts an ordered batch of
+`TypeIndexChange::{ReplaceType, RemoveType, SetSymbolType}` operations.
+Later edits to the same source or symbol win. Reverse adjacency is refreshed
+only for destinations touched by the batch, and symbol/type buckets only
+for affected associations. Repeated forward edges are retained while
+reverse sources are deduplicated in captured type order.
+
+`apply_changes_with_diff(&changes, &seed_type_ids)` applies the same batch
+and returns a `TypeInvalidationDiff`, including pre/post closure snapshots,
+newly affected types, no-longer-affected types, and analogous symbol ID
+changes. The caller **must specify changed type seeds**; the method does not
+infer them from edit operations. A type that remains in the closure but
+changes its shortest distance is not reported as a newly affected type;
+compare the included `before_types` and `after_types` for depth changes.
+
+The index is a snapshot independent of `Graph`, not a transactional editor
+of EDG IL. Operations only update the index and do not modify source types,
+field declarations, or semantic dependencies not present in the snapshot.
+`symbols_with_type(type_id)` queries captured symbol/type ownership directly.
