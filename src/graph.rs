@@ -1816,7 +1816,7 @@ impl Graph {
         function: &str,
         routine: SymbolId,
     ) -> Vec<SymbolUseCount> {
-        let mut positions = HashMap::new();
+        let mut positions: HashMap<SymbolId, usize> = HashMap::new();
         let mut counts: Vec<SymbolUseCount> = Vec::new();
         self.walk_routine_expressions(function, routine, |expression| {
             if let Some(symbol) = expression.symbol_id() {
@@ -1834,7 +1834,7 @@ impl Graph {
 
     /// Count references to each symbol in a variable initializer.
     pub fn variable_symbol_use_counts(&self, owner: SymbolId) -> Vec<SymbolUseCount> {
-        let mut positions = HashMap::new();
+        let mut positions: HashMap<SymbolId, usize> = HashMap::new();
         let mut counts: Vec<SymbolUseCount> = Vec::new();
         self.walk_variable_expressions(owner, |expression| {
             if let Some(symbol) = expression.symbol_id() {
