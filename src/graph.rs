@@ -2168,6 +2168,23 @@ impl Graph {
         }
     }
 
+    /// Collect record field IDs' declared types, in captured field order.
+    /// This is a direct dependency query, not a transitive type walk.
+    pub fn record_field_types(&self, record: TypeId) -> Vec<TypeId> {
+        self.fields(record).map(|field| field.ty).collect()
+    }
+
+    /// Collect direct base types in captured base declaration order.
+    pub fn direct_base_types(&self, record: TypeId) -> Vec<TypeId> {
+        self.bases(record).map(|base| base.base).collect()
+    }
+
+    /// Collect explicit routine parameter types in captured order.
+    /// The implicit C++ this parameter is excluded.
+    pub fn routine_parameter_types(&self, routine: SymbolId) -> Vec<TypeId> {
+        self.function_parameters(routine).map(|parameter| parameter.ty).collect()
+    }
+
     /// Visit the fields and direct bases of a record as one declaration stream.
     /// Bases are emitted before fields; order within each category is IL order.
     pub fn walk_record_layout(
