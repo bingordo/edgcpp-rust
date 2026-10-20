@@ -1634,6 +1634,42 @@ impl Graph {
         });
     }
 
+    /// Collect unique symbol references across function-body and constructor
+    /// initializer expressions, preserving first-encounter order.
+    pub fn routine_referenced_symbols(&self, function: &str, routine: SymbolId) -> Vec<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        self.walk_routine_expressions(function, routine, |expression| {
+            let symbol = match expression {
+                AnyExpressionRef::Primary(node) => node.data.symbol_id,
+                AnyExpressionRef::Control(node) => node.symbol_id,
+                AnyExpressionRef::VariableInitializer(node) => node.symbol_id,
+                AnyExpressionRef::ConstructorInitializer(node) => node.symbol_id,
+            };
+            if let Some(symbol) = symbol {
+                if seen.insert(symbol) { result.push(symbol); }
+            }
+            true
+        });
+        result
+    }
+
+    /// Collect unique variable-initializer symbol references in numeric
+    /// expression-path order.
+    pub fn variable_referenced_symbols(&self, owner: SymbolId) -> Vec<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        self.walk_variable_expressions(owner, |expression| {
+            if let AnyExpressionRef::VariableInitializer(node) = expression {
+                if let Some(symbol) = node.symbol_id {
+                    if seen.insert(symbol) { result.push(symbol); }
+                }
+            }
+            true
+        });
+        result
+    }
+
     /// Symbol references from a variable's initializer expression tree.
     /// Returns unique symbols in numeric tree-path order.
     pub fn initializer_referenced_symbols(&self, owner: SymbolId) -> Vec<SymbolId> {
