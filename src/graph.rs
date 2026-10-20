@@ -2791,6 +2791,38 @@ mod tests {
     }
 
     #[test]
+    fn reverse_type_dependencies_and_sccs_handle_cycles() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: Some(TypeId(99)) },
+        ]);
+        assert_eq!(graph.direct_type_dependents(TypeId(2)), [TypeId(1), TypeId(3)]);
+        assert_eq!(graph.type_dependents(TypeId(2)), vec![
+            ReachableType { ty: TypeId(2), depth: 0 },
+            ReachableType { ty: TypeId(1), depth: 1 },
+            ReachableType { ty: TypeId(3), depth: 1 },
+        ]);
+        let mut components: Vec<Vec<TypeId>> = graph.type_strongly_connected_components();
+        for component in &mut components {
+            component.sort_by_key(|id| id.0);
+        }
+        components.sort_by_key(|component| component[0].0);
+        assert_eq!(components, vec![
+            vec![TypeId(1), TypeId(2)], vec![TypeId(3)], vec![TypeId(4)],
+        ]);
+        let mut stopped = Vec::new();
+        graph.walk_type_dependents(TypeId(2), |node| {
+            stopped.push(node.ty);
+            false
+        });
+        assert_eq!(stopped, [TypeId(2)]);
+        assert_eq!(graph.direct_type_dependents(TypeId(99)), [TypeId(4)]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
