@@ -112,6 +112,7 @@ jobs:
             grep -E 'function parameter routine=.*Receiver::read.*this=true' il_result.txt
             grep -E 'local scope routine=scope_verification::shadow id=0 parent=None' il_result.txt
             grep -E 'local variable routine=scope_verification::shadow scope=[0-9]+ name=.*value.*type=[0-9]+' il_result.txt
+            grep -E 'static local owner routine=scope_verification::shadow name=.*calls symbol=[0-9]+' il_result.txt
             grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
             grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
             grep -E 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
