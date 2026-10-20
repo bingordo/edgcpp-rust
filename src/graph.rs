@@ -2534,8 +2534,10 @@ impl Graph {
     /// Borrow a routine's symbol, declared type, signature and parameters.
     /// Missing optional metadata is represented by None or empty iterators.
     pub fn routine_view(&self, routine: SymbolId) -> Option<RoutineView<'_>> {
+        let symbol = self.symbol(routine)?;
+        if symbol.kind != 1 { return None; }
         Some(RoutineView {
-            symbol: self.symbol(routine)?,
+            symbol,
             function: self.routine_function(routine),
             ty: self.symbol_type_view(routine),
             implicit_this: self.implicit_this(routine),
@@ -2544,8 +2546,10 @@ impl Graph {
 
     /// Borrow a variable's symbol, declared type and initializer metadata.
     pub fn variable_view(&self, variable: SymbolId) -> Option<VariableView<'_>> {
+        let symbol = self.symbol(variable)?;
+        if symbol.kind != 2 { return None; }
         Some(VariableView {
-            symbol: self.symbol(variable)?,
+            symbol,
             ty: self.symbol_type_view(variable),
             initializer: self.variable_initializer(variable),
         })
