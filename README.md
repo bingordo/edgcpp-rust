@@ -644,3 +644,19 @@ reprocessed together. Uncaptured IDs remain singleton groups. The groups
 are not a topological build schedule; callers must order them according to
 their pass dependencies. This analysis reflects captured structural type
 edges only, and does not substitute for complete C++ semantic invalidation.
+
+
+## Reusable type dependency index
+
+For repeated invalidation queries, build a `TypeDependencyIndex` once with
+`graph.type_dependency_index()`. The index stores direct forward and reverse
+edges, plus captured symbol ownership, so repeated calls to
+`index.dependencies(type_id)`, `index.dependents(type_id)`,
+`index.affected_types(&changed)`, and
+`index.affected_symbols(&changed)` do not rescan the Graph's type records.
+
+The index is an owned **snapshot**, not a live view: if public Graph
+collections are mutated, rebuild the index. Reverse closure uses breadth-first
+search and handles cycles. Indexed `affected_symbols` is ordered by affected
+type discovery, then captured symbol order *within each type*, whereas
+`Graph::affected_symbols` returns overall captured symbol order.
