@@ -234,6 +234,32 @@ impl AnyExpressionRef<'_> {
     }
 }
 
+/// Counts of captured expression kinds in a routine or initializer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpressionStats {
+    pub primary: usize,
+    pub control: usize,
+    pub variable_initializers: usize,
+    pub constructor_initializers: usize,
+    /// Number of expression nodes with a symbol reference (including repeats).
+    pub symbol_uses: usize,
+    /// Number of distinct referenced symbols.
+    pub distinct_symbols: usize,
+}
+
+impl ExpressionStats {
+    pub fn total(&self) -> usize {
+        self.primary + self.control + self.variable_initializers + self.constructor_initializers
+    }
+}
+
+/// A symbol and its number of occurrences, ordered by first use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolUseCount {
+    pub symbol: SymbolId,
+    pub count: usize,
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -1781,6 +1807,82 @@ impl Graph {
         self.walk_variable_expressions(owner, |expression| {
             expression.symbol_id() != Some(symbol) || visit(expression)
         });
+    }
+
+    /// Count references to each symbol in a routine, in first-use order.
+    /// Repeated references in the same expression tree are counted separately.
+    pub fn routine_symbol_use_counts(
+        &self,
+        function: &str,
+        routine: SymbolId,
+    ) -> Vec<SymbolUseCount> {
+        let mut positions = HashMap::new();
+        let mut counts: Vec<SymbolUseCount> = Vec::new();
+        self.walk_routine_expressions(function, routine, |expression| {
+            if let Some(symbol) = expression.symbol_id() {
+                if let Some(&index) = positions.get(&symbol) {
+                    counts[index].count += 1;
+                } else {
+                    positions.insert(symbol, counts.len());
+                    counts.push(SymbolUseCount { symbol, count: 1 });
+                }
+            }
+            true
+        });
+        counts
+    }
+
+    /// Count references to each symbol in a variable initializer.
+    pub fn variable_symbol_use_counts(&self, owner: SymbolId) -> Vec<SymbolUseCount> {
+        let mut positions = HashMap::new();
+        let mut counts: Vec<SymbolUseCount> = Vec::new();
+        self.walk_variable_expressions(owner, |expression| {
+            if let Some(symbol) = expression.symbol_id() {
+                if let Some(&index) = positions.get(&symbol) {
+                    counts[index].count += 1;
+                } else {
+                    positions.insert(symbol, counts.len());
+                    counts.push(SymbolUseCount { symbol, count: 1 });
+                }
+            }
+            true
+        });
+        counts
+    }
+
+    /// Summarize all captured expression categories in a routine.
+    pub fn routine_expression_stats(&self, function: &str, routine: SymbolId) -> ExpressionStats {
+        let mut stats = ExpressionStats::default();
+        let mut seen = std::collections::HashSet::new();
+        self.walk_routine_expressions(function, routine, |expression| {
+            match expression {
+                AnyExpressionRef::Primary(_) => stats.primary += 1,
+                AnyExpressionRef::Control(_) => stats.control += 1,
+                AnyExpressionRef::VariableInitializer(_) => stats.variable_initializers += 1,
+                AnyExpressionRef::ConstructorInitializer(_) => stats.constructor_initializers += 1,
+            }
+            if let Some(symbol) = expression.symbol_id() {
+                stats.symbol_uses += 1;
+                if seen.insert(symbol) { stats.distinct_symbols += 1; }
+            }
+            true
+        });
+        stats
+    }
+
+    /// Summarize the captured initializer tree for a variable.
+    pub fn variable_expression_stats(&self, owner: SymbolId) -> ExpressionStats {
+        let mut stats = ExpressionStats::default();
+        let mut seen = std::collections::HashSet::new();
+        self.walk_variable_expressions(owner, |expression| {
+            stats.variable_initializers += 1;
+            if let Some(symbol) = expression.symbol_id() {
+                stats.symbol_uses += 1;
+                if seen.insert(symbol) { stats.distinct_symbols += 1; }
+            }
+            true
+        });
+        stats
     }
 
     /// Collect unique symbol references across function-body and constructor
