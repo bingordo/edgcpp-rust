@@ -1918,6 +1918,54 @@ mod tests {
 
 
     #[test]
+    fn unified_expression_walk_orders_kinds_and_honors_early_exit() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "a".into() });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None, kind: 1,
+            operator: None, type_kind: None, reference: None,
+            type_size: None, type_alignment: None, constant_kind: None,
+            constant_integer: None, related_type_role: None,
+            related_type_kind: None, type_id: None,
+            symbol_id: Some(SymbolId(1)),
+        });
+        il.control_expressions.push(ControlExpression {
+            function: "f".into(), statement_path: "0".into(), role: 1,
+            path: "0".into(), parent: None, kind: 1,
+            operator: None, type_id: None, symbol_id: Some(SymbolId(1)),
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        let mut kinds = Vec::new();
+        graph.walk_function_all_expressions("f", |_, expr| {
+            kinds.push(match expr {
+                FunctionExpressionRef::Primary(_) => "primary",
+                FunctionExpressionRef::Control(_) => "control",
+            });
+            true
+        });
+        assert_eq!(kinds, ["primary", "control"]);
+        kinds.clear();
+        graph.walk_function_all_expressions("f", |_, expr| {
+            kinds.push(match expr {
+                FunctionExpressionRef::Primary(_) => "primary",
+                FunctionExpressionRef::Control(_) => "control",
+            });
+            false
+        });
+        assert_eq!(kinds, ["primary"]);
+        let mut absent = 0;
+        graph.walk_function_all_expressions("missing", |_, _| {
+            absent += 1;
+            true
+        });
+        assert_eq!(absent, 0);
+    }
+
+    #[test]
     fn walks_control_expressions_in_index_order_and_stops_early() {
         let mut il = Il::default();
         il.symbols.extend([
