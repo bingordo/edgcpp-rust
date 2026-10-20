@@ -34,6 +34,11 @@ thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, std::string> scope_statement_paths;
 thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
+struct PendingStaticLocal {
+  a_variable_ptr variable;
+  a_routine_ptr routine;
+};
+thread_local std::vector<PendingStaticLocal> pending_static_locals;
 thread_local std::unordered_map<const void *, std::string> routine_names;
 thread_local std::unordered_set<std::string> used_routine_names;
 struct PendingMember {
@@ -468,6 +473,11 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       emit_record(31, {num(routine), num(id), num(symbol), num(ty),
                        num(static_cast<unsigned>(var->storage_class)),
                        num(flags)});
+      if (group == 1 && var->source_corresp.is_local_to_function &&
+          var->source_corresp.enclosing_routine != nullptr) {
+        pending_static_locals.push_back(
+            {var, var->source_corresp.enclosing_routine});
+      }
     }
   }
   unsigned child_count = 0;
@@ -818,6 +828,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(v->source_corresp, false);
       uint32_t symbol_id = emit_symbol(v, 2, name);
       emit_variable_type(v);
+      if (v->source_corresp.is_local_to_function &&
+          v->source_corresp.enclosing_routine != nullptr) {
+        pending_static_locals.push_back(
+            {v, v->source_corresp.enclosing_routine});
+      }
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
@@ -892,6 +907,22 @@ void back_end(void)
 {
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
+  // After every routine has been registered, recover static locals that
+  // EDG moved into the file-scope memory region. Their source correspondence
+  // still points to the enclosing routine, but deliberately not to a
+  // function/block scope across memory regions. Do not invent a scope ID.
+  std::unordered_set<a_variable_ptr> seen_static;
+  for (const PendingStaticLocal &entry : pending_static_locals) {
+    if (!seen_static.insert(entry.variable).second ||
+        emitted_routines.find(entry.routine) == emitted_routines.end()) {
+      continue;
+    }
+    const auto routine = symbol_ids.find(entry.routine);
+    const auto variable = symbol_ids.find(entry.variable);
+    if (routine != symbol_ids.end() && variable != symbol_ids.end()) {
+      emit_record(32, {num(routine->second), num(variable->second)});
+    }
+  }
   for (const PendingMember &candidate : unresolved_members) {
     if (emitted_member_edges.find(candidate.routine) != emitted_member_edges.end()) {
       continue;
@@ -933,6 +964,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   used_routine_names.clear();
   unresolved_members.clear();
   named_class_types.clear();
+  pending_static_locals.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -951,5 +983,6 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   used_routine_names.clear();
   unresolved_members.clear();
   named_class_types.clear();
+  pending_static_locals.clear();
   return status;
 }
