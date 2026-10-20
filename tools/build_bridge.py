@@ -34,8 +34,12 @@ for arg in args:
     if skip:
         skip = False
         continue
-    if arg == "-o":
+    if arg in ("-o", "-MF", "-MT", "-MQ"):
         skip = True
+        continue
+    if arg in ("-MD", "-MMD", "-MP"):
+        continue
+    if arg.startswith(("-MF", "-MT", "-MQ")) and len(arg) > 3:
         continue
     if arg == str(original) or pathlib.Path(arg).resolve() == original:
         continue
