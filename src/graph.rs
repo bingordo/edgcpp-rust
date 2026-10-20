@@ -430,13 +430,22 @@ impl TypeDependencyIndex {
         if !changed_sources.is_empty() {
             let ranks: HashMap<TypeId, usize> = self.type_order.iter()
                 .copied().enumerate().map(|(rank, ty)| (ty, rank)).collect();
+            // Index the new outgoing edges once rather than checking every
+            // changed source against every touched reverse destination.
+            let mut new_reverse: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+            for &source in &changed_sources {
+                let mut emitted = std::collections::HashSet::new();
+                for edge in self.dependencies(source) {
+                    if emitted.insert(edge.target) {
+                        new_reverse.entry(edge.target).or_default().push(source);
+                    }
+                }
+            }
             for target in touched_targets {
                 let mut sources = self.reverse.remove(&target).unwrap_or_default();
                 sources.retain(|source| !changed_sources.contains(source));
-                for &source in &changed_sources {
-                    if self.dependencies(source).iter().any(|edge| edge.target == target) {
-                        sources.push(source);
-                    }
+                if let Some(additions) = new_reverse.get(&target) {
+                    sources.extend(additions.iter().copied());
                 }
                 sources.sort_by_key(|source| ranks.get(source).copied().unwrap_or(usize::MAX));
                 sources.dedup();
