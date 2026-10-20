@@ -657,6 +657,5 @@ edges, plus captured symbol ownership, so repeated calls to
 
 The index is an owned **snapshot**, not a live view: if public Graph
 collections are mutated, rebuild the index. Reverse closure uses breadth-first
-search and handles cycles. Indexed `affected_symbols` is ordered by affected
-type discovery, then captured symbol order *within each type*, whereas
-`Graph::affected_symbols` returns overall captured symbol order.
+search and handles cycles. Indexed `affected_symbols` preserves overall captured symbol order,
+matching `Graph::affected_symbols`.
