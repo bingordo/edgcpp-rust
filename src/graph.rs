@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -35,6 +35,10 @@ pub enum GraphError {
     DuplicateStatementDeclaration { function: String, path: String, position: u32 },
     InvalidStatementDeclarationPosition { function: String, path: String },
     InvalidStatementInitialization { function: String, path: String },
+    InvalidSourceLocation { function: String, path: String },
+    DuplicateSourceLocation { function: String, path: String },
+    InvalidSymbolSource(SymbolId),
+    DuplicateSymbolSource(SymbolId),
     DuplicateStatementInitialization { function: String, path: String },
     InvalidStatementAttributes { function: String, path: String },
     DuplicateControlExpression { function: String, statement: String, role: u32, path: String },
@@ -107,6 +111,9 @@ pub struct Graph {
     pub statement_labels: Vec<StatementLabel>,
     pub statement_declarations: Vec<StatementDeclaration>,
     pub statement_initializations: Vec<StatementInitialization>,
+    pub statement_sources: Vec<StatementSource>,
+    pub symbol_sources: Vec<SymbolSource>,
+    pub expression_sources: Vec<ExpressionSource>,
     pub function_parameters: Vec<FunctionParameter>,
     pub local_scopes: Vec<LocalScope>,
     pub local_variables: Vec<LocalVariable>,
@@ -133,6 +140,9 @@ pub struct Graph {
     pub calls: Vec<CallSite>,
     label_definitions: HashMap<SymbolId, StatementId>,
     statement_label_index: HashMap<StatementId, usize>,
+    statement_source_index: HashMap<(String, String), usize>,
+    symbol_source_index: HashMap<SymbolId, usize>,
+    expression_source_index: HashMap<(String, String, u32, String), usize>,
     control_expr_index: HashMap<(String, String, u32, String), usize>,
     control_expr_children: HashMap<(String, String, u32, String), Vec<usize>>,
     constructor_expr_index: HashMap<(SymbolId, u32, String), usize>,
@@ -985,6 +995,52 @@ impl Graph {
                 }
             }
         }
+        let valid_position = |loc: &SourceLocation|
+            loc.sequence != 0 && loc.line != 0 && !loc.file.is_empty();
+        for record in &il.statement_sources {
+            let key = (record.function.clone(), record.path.clone());
+            if !valid_position(&record.location) || !smap.contains_key(&key) {
+                return Err(GraphError::InvalidSourceLocation {
+                    function: key.0, path: key.1,
+                });
+            }
+            if graph.statement_source_index.insert(key.clone(), graph.statement_sources.len()).is_some() {
+                return Err(GraphError::DuplicateSourceLocation {
+                    function: key.0, path: key.1,
+                });
+            }
+            graph.statement_sources.push(record.clone());
+        }
+        for record in &il.symbol_sources {
+            if !valid_position(&record.location) || !symbol_ids.contains(&record.symbol) {
+                return Err(GraphError::InvalidSymbolSource(record.symbol));
+            }
+            if graph.symbol_source_index.insert(record.symbol, graph.symbol_sources.len()).is_some() {
+                return Err(GraphError::DuplicateSymbolSource(record.symbol));
+            }
+            graph.symbol_sources.push(record.clone());
+        }
+        for record in &il.expression_sources {
+            let key = (record.function.clone(), record.statement_path.clone(),
+                       record.role, record.path.clone());
+            let valid_expr = if record.role == 0 {
+                emap.contains_key(&(record.function.clone(), record.statement_path.clone(),
+                                    record.path.clone()))
+            } else {
+                graph.control_expr_index.contains_key(&key)
+            };
+            if !valid_position(&record.location) || !valid_expr {
+                return Err(GraphError::InvalidSourceLocation {
+                    function: record.function.clone(), path: record.path.clone(),
+                });
+            }
+            if graph.expression_source_index.insert(key, graph.expression_sources.len()).is_some() {
+                return Err(GraphError::DuplicateSourceLocation {
+                    function: record.function.clone(), path: record.path.clone(),
+                });
+            }
+            graph.expression_sources.push(record.clone());
+        }
         Ok(graph)
     }
     /// Branch/label record belonging to a statement, if present.
@@ -1049,6 +1105,28 @@ impl Graph {
     pub fn local_variable_scope(&self, symbol: SymbolId) -> Option<&LocalScope> {
         let local = self.local_variables.iter().find(|var| var.symbol == symbol)?;
         self.local_scope(local.routine, local.scope)
+    }
+
+    /// Source file, line and column of a captured statement.
+    pub fn statement_source(&self, function: &str, path: &str)
+        -> Option<&SourceLocation> {
+        self.statement_source_index.get(&(function.to_owned(), path.to_owned()))
+            .map(|&idx| &self.statement_sources[idx].location)
+    }
+
+    /// Source location of a variable, routine, or field declaration.
+    pub fn symbol_source(&self, symbol: SymbolId) -> Option<&SourceLocation> {
+        self.symbol_source_index.get(&symbol)
+            .map(|&idx| &self.symbol_sources[idx].location)
+    }
+
+    /// Source location of a primary or supplemental expression node.
+    /// Role 0 is the primary expression; roles 1..=4 are supplemental trees.
+    pub fn expression_source(&self, function: &str, statement: &str,
+                             role: u32, path: &str) -> Option<&SourceLocation> {
+        self.expression_source_index.get(&(function.to_owned(), statement.to_owned(),
+                                            role, path.to_owned()))
+            .map(|&idx| &self.expression_sources[idx].location)
     }
 
     /// Variable declarations belonging to a statement, in EDG list order.
