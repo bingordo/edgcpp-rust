@@ -690,3 +690,19 @@ captured symbols with affected declared types, preserving symbol order within
 each wave. `graph.type_invalidation_waves(&changed)` builds a temporary
 index for convenience. Reuse a previously constructed index when issuing
 many queries, and rebuild it after mutating Graph collections.
+
+
+## Updating the dependency index incrementally
+
+A retained `TypeDependencyIndex` can now be updated without reconstructing
+all forward type relationships. `replace_type_dependencies(type_id, edges)`
+replaces one source type's outgoing edges and refreshes only reverse adjacency
+lists touched by its old or new targets. `remove_type(type_id)` removes a
+source's outgoing edges while preserving incoming references to that ID.
+`set_symbol_type(symbol_id, Some(type_id))` updates the index's captured
+symbol-to-type mapping; passing `None` removes that association.
+
+Updates change the index snapshot only; they do not mutate the underlying
+`Graph`. Callers are responsible for keeping both consistent when editing
+the Graph. Reverse dependent ordering follows retained type insertion order.
+The index does not automatically observe mutations to public Graph fields.
