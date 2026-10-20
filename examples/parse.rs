@@ -47,6 +47,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  label.function, label.statement_path, label.label.0,
                  label.definition, target);
     }
+    for decl in &graph.statement_declarations {
+        let variable = graph.symbol(decl.symbol).ok_or("missing declared symbol")?;
+        println!("statement declaration {} path={} position={} name={} symbol={} type={} vla={}",
+                 decl.function, decl.statement_path, decl.position,
+                 variable.name, decl.symbol.0, decl.ty.0, decl.is_vla);
+    }
+    for init in &graph.statement_initializations {
+        let variable = init.symbol.and_then(|id| graph.symbol(id));
+        println!("statement initialization {} path={} symbol={:?} name={:?} kind={} role={} follows_execution={} braced={}",
+                 init.function, init.statement_path, init.symbol,
+                 variable.map(|s| s.name.as_str()), init.kind, init.role,
+                 init.follows_execution, init.braced);
+    }
     for attrs in &graph.statement_attributes {
         println!("statement attributes {} path={} generated={} lowering={} likely={} unlikely={} fallthrough={}",
                  attrs.function, attrs.statement_path, attrs.compiler_generated,
