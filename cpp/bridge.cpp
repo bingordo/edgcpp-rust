@@ -30,6 +30,8 @@ thread_local void *current_user_data = nullptr;
 thread_local std::unordered_map<const void *, uint32_t> type_ids;
 thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 thread_local std::unordered_set<const void *> visited_scopes;
+thread_local std::unordered_set<const void *> emitted_symbol_types;
+thread_local std::unordered_map<const void *, std::string> scope_statement_paths;
 thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
 thread_local std::unordered_map<const void *, std::string> routine_names;
@@ -407,6 +409,112 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
 
 // A dependent statement is a *single* IL node, whereas block.statements is
 // a linked sequence. Never follow dependent->next into the enclosing list.
+// Emit each symbol's declared type once, even if it is visible from
+// multiple EDG scope lists or was referenced earlier by an expression.
+static uint32_t emit_variable_type(a_variable_ptr var)
+{
+  if (var == nullptr) return 0;
+  const uint32_t type_id = emit_type(var->type, 0);
+  if (type_id != 0 && emitted_symbol_types.insert(var).second) {
+    // The caller has already registered this variable symbol.
+    const auto found = symbol_ids.find(var);
+    if (found != symbol_ids.end()) {
+      emit_record(25, {num(found->second), num(type_id)});
+    }
+  }
+  return type_id;
+}
+
+// The IL owns a function-scope tree independently of the statement tree.
+// Walk only a routine's own scope region and retain parent relationships.
+// The lifetime of all pointers is limited to the synchronous EDG callback.
+static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
+                             const std::string &function, uint32_t parent,
+                             unsigned &next_id,
+                             std::unordered_set<a_scope_ptr> &seen_scopes,
+                             std::unordered_set<a_variable_ptr> &seen_locals,
+                             unsigned depth)
+{
+  if (scope == nullptr || depth > 64 || next_id >= 10000 ||
+      !seen_scopes.insert(scope).second) return;
+  const uint32_t id = next_id++;
+  const auto known_path = scope_statement_paths.find(scope);
+  emit_record(30, {num(routine), num(id),
+                   parent == std::numeric_limits<uint32_t>::max() ?
+                       absent() : num(parent),
+                   num(static_cast<unsigned>(scope->kind)),
+                   known_path == scope_statement_paths.end() ?
+                       absent() : txt(known_path->second)});
+
+  for (unsigned group = 0; group < 2; ++group) {
+    a_variable_ptr first = group == 0 ?
+        scope->nonstatic_variables : scope->variables;
+    unsigned count = 0;
+    for (a_variable_ptr var = first; var != nullptr && count++ < 10000;
+         var = var->next) {
+      if (var->is_parameter || var->is_this_parameter ||
+          !seen_locals.insert(var).second) continue;
+      const char *raw_name = source_name(var->source_corresp);
+      const std::string name = function + "::" +
+          (raw_name == nullptr ? "<local>" : raw_name);
+      const uint32_t symbol = emit_symbol(var, 2, name);
+      const uint32_t ty = emit_variable_type(var);
+      if (symbol == 0 || ty == 0) continue;
+      const uint32_t flags =
+          (var->compiler_generated ? 1u : 0u) |
+          (group == 1 ? 2u : 0u) |
+          (var->is_struct_binding ? 4u : 0u) |
+          (var->is_handler_param ? 8u : 0u);
+      emit_record(31, {num(routine), num(id), num(symbol), num(ty),
+                       num(static_cast<unsigned>(var->storage_class)),
+                       num(flags)});
+    }
+  }
+  unsigned child_count = 0;
+  for (a_scope_ptr child = scope->scopes;
+       child != nullptr && child_count++ < 10000; child = child->next) {
+    emit_local_scope(child, routine, function, id, next_id,
+                     seen_scopes, seen_locals, depth + 1);
+  }
+}
+
+static void emit_function_locals(a_scope_ptr body, uint32_t routine,
+                                 const std::string &function)
+{
+  if (body == nullptr || body->kind != sck_function) return;
+  unsigned position = 0;
+  unsigned count = 0;
+  std::unordered_set<a_variable_ptr> seen_parameters;
+  for (a_variable_ptr var = body->variant.routine.parameters;
+       var != nullptr && count++ < 10000; var = var->next) {
+    if (!seen_parameters.insert(var).second || var->is_this_parameter) continue;
+    const char *raw_name = source_name(var->source_corresp);
+    const std::string name = function + "::" +
+        (raw_name == nullptr ? "<parameter>" : raw_name);
+    const uint32_t symbol = emit_symbol(var, 2, name);
+    const uint32_t ty = emit_variable_type(var);
+    if (symbol == 0 || ty == 0) continue;
+    emit_record(29, {num(routine), num(position++), num(symbol), num(ty),
+                     num(var->compiler_generated ? 2u : 0u)});
+  }
+  // The implicit C++ object parameter is separate from the explicit list.
+  a_variable_ptr this_var = body->variant.routine.this_param_variable;
+  if (this_var != nullptr && seen_parameters.insert(this_var).second) {
+    const uint32_t symbol = emit_symbol(this_var, 2, function + "::<this>");
+    const uint32_t ty = emit_variable_type(this_var);
+    if (symbol != 0 && ty != 0) {
+      emit_record(29, {num(routine), absent(), num(symbol), num(ty),
+                       num(1u | (this_var->compiler_generated ? 2u : 0u))});
+    }
+  }
+  unsigned next_id = 0;
+  std::unordered_set<a_scope_ptr> seen_scopes;
+  std::unordered_set<a_variable_ptr> seen_locals;
+  emit_local_scope(body, routine, function,
+                   std::numeric_limits<uint32_t>::max(), next_id,
+                   seen_scopes, seen_locals, 0);
+}
+
 static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
                             unsigned depth, bool single = false)
@@ -442,6 +550,11 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
     if (stmt->kind == stmk_block) {
+      if (stmt->variant.block.extra_info != nullptr &&
+          stmt->variant.block.extra_info->assoc_scope != nullptr) {
+        scope_statement_paths.emplace(
+            stmt->variant.block.extra_info->assoc_scope, path);
+      }
       emit_statements(stmt->variant.block.statements, function, path, "block", depth + 1);
     } else if (stmt->kind == stmk_if ||
                stmt->kind == stmk_if_consteval ||
@@ -463,6 +576,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     } else if (stmt->kind == stmk_for) {
       a_for_loop_ptr info = stmt->variant.for_loop.extra_info;
       if (info != nullptr) {
+        if (info->for_init_scope != nullptr) {
+          scope_statement_paths.emplace(info->for_init_scope, path);
+        }
         emit_statements(info->initialization, function, path, "init", depth + 1, true);
         emit_control_expr(info->increment, function, path, 1, "0", "", 0);
       }
@@ -471,6 +587,12 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     } else if (stmt->kind == stmk_range_based_for) {
       a_range_based_for_loop_ptr info = stmt->variant.range_based_for_loop.extra_info;
       if (info != nullptr) {
+        if (info->range_based_for_scope != nullptr) {
+          scope_statement_paths.emplace(info->range_based_for_scope, path);
+        }
+        if (info->iterator_scope != nullptr) {
+          scope_statement_paths.emplace(info->iterator_scope, path);
+        }
         emit_statements(info->initialization, function, path, "init", depth + 1, true);
         emit_control_expr(info->ne_call_expr, function, path, 2, "0", "", 0);
         emit_control_expr(info->incr_call_expr, function, path, 3, "0", "", 0);
@@ -682,7 +804,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             }
 
           }
+          if (body->assoc_block != nullptr) {
+            scope_statement_paths.emplace(body, "0");
+          }
           emit_statements(body->assoc_block, name, "", "", 0);
+          emit_function_locals(body, routine_symbol, name);
         }
       }
     }
@@ -690,11 +816,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
     if (source_name(v->source_corresp) != nullptr) {
       std::string name = declaration_name(v->source_corresp, false);
-      const uint32_t variable_type_id = emit_type(v->type, 0);
       uint32_t symbol_id = emit_symbol(v, 2, name);
-      if (variable_type_id != 0) {
-        emit_record(25, {num(symbol_id), num(variable_type_id)});
-      }
+      emit_variable_type(v);
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
@@ -802,6 +925,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   visited_scopes.clear();
+  emitted_symbol_types.clear();
+  scope_statement_paths.clear();
   emitted_routines.clear();
   emitted_member_edges.clear();
   routine_names.clear();
@@ -818,6 +943,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   visited_scopes.clear();
+  emitted_symbol_types.clear();
+  scope_statement_paths.clear();
   emitted_routines.clear();
   emitted_member_edges.clear();
   routine_names.clear();
