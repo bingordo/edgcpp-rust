@@ -44,8 +44,6 @@ def bridge_arguments(args, original):
             continue
         if arg.startswith(("-MF", "-MT", "-MQ")) and len(arg) > 3:
             continue
-        if arg == "-c":
-            continue
         candidate = pathlib.Path(arg)
         if candidate == original or (
             not arg.startswith("-")
@@ -57,6 +55,10 @@ def bridge_arguments(args, original):
 
 
 new_args = bridge_arguments(args, original)
+# The original EDG command is a compile-only invocation. Keep -c so the
+# compiler produces an object rather than attempting to link an executable.
+if "-c" not in new_args:
+    new_args.append("-c")
 # Preserve EDG's -D and -I switches, plus every other required compiler flag.
 new_args += ["-I", str(source_dir / "src"), "-o", str(output), str(bridge)]
 print("Compiling bridge with EDG's recorded C++ compiler configuration", flush=True)
