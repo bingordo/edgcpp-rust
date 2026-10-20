@@ -1465,6 +1465,39 @@ impl Graph {
         symbols
     }
 
+    /// All symbol references captured for a function, including supplemental
+    /// control-expression trees. Deduplicated in first-encounter order.
+    /// Variable and constructor initializer trees belong to symbols/routines
+    /// and are deliberately not attributed to a function here.
+    pub fn referenced_symbols_including_controls(&self, function: &str) -> Vec<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut record = |id: SymbolId| {
+            if seen.insert(id) { result.push(id); }
+        };
+        self.walk_statements(function, |statement_id, statement| {
+            if let Some(root) = statement.expression {
+                self.walk_expression(root, |_, expr| {
+                    if let Some(id) = expr.data.symbol_id { record(id); }
+                    true
+                });
+            }
+            let _ = statement_id;
+            // Supplemental expressions are ordered by role and tree path.
+            let mut controls: Vec<_> = self.control_expressions.iter()
+                .filter(|expr| expr.function == function
+                    && expr.statement_path == statement.data.path)
+                .collect();
+            controls.sort_by(|a, b| a.role.cmp(&b.role)
+                .then_with(|| compare_tree_paths(&a.path, &b.path)));
+            for expr in controls {
+                if let Some(id) = expr.symbol_id { record(id); }
+            }
+            true
+        });
+        result
+    }
+
     /// Expression operands in the original IL order.
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
@@ -1637,6 +1670,25 @@ impl Graph {
         self.expressions.get(id.0)
     }
 }
+fn compare_tree_paths(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let order = match (x.parse::<u32>(), y.parse::<u32>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    _ => x.cmp(y),
+                };
+                if order != std::cmp::Ordering::Equal { return order; }
+            }
+        }
+    }
+}
+
 fn graph_path_index(path: &str) -> usize {
     path.rsplit('.').next().and_then(|n| n.parse().ok()).unwrap_or(usize::MAX)
 }
@@ -1644,6 +1696,14 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_tree_paths_sort_by_operand_index() {
+        let mut paths = vec!["0.10", "0.2", "0.1", "0.2.0", "0"];
+        paths.sort_by(|a, b| compare_tree_paths(a, b));
+        assert_eq!(paths, ["0", "0.1", "0.2", "0.2.0", "0.10"]);
+    }
+
+
     #[test]
     fn function_expression_walk_and_symbol_collection() {
         let mut il = Il::default();
