@@ -151,59 +151,6 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
-        let mut member_owners = std::collections::HashSet::new();
-        for member in &il.member_functions {
-            if !type_map.contains_key(&member.owner) ||
-                !graph.symbols.iter().any(|s| s.id == member.routine && s.kind == 1) {
-                return Err(GraphError::InvalidMemberFunction {
-                    owner: member.owner, routine: member.routine,
-                });
-            }
-            if !member_owners.insert(member.routine) {
-                return Err(GraphError::DuplicateMemberFunction(member.routine));
-            }
-            graph.member_functions.push(member.clone());
-        }
-        // Constructor initializers refer to routine symbols, field symbols,
-        // or record types. Check the complete snapshot before indexing them.
-        let mut ctor_positions = std::collections::HashSet::new();
-        for init in &il.constructor_initializers {
-            let valid_routine = graph.symbols.iter()
-                .any(|s| s.id == init.routine && s.kind == 1);
-            let valid_target = match init.kind {
-                0 | 1 => init.target_type.is_some_and(|ty| type_map.contains_key(&ty))
-                    && init.target_field.is_none(),
-                2 => init.target_field.is_some_and(|field| graph.symbols.iter()
-                    .any(|s| s.id == field && s.kind == 3))
-                    && init.target_type.is_none(),
-                3 => init.target_type.is_none() && init.target_field.is_none(),
-                _ => false,
-            };
-            if !valid_routine || !valid_target ||
-               !ctor_positions.insert((init.routine, init.position)) {
-                return Err(GraphError::InvalidConstructorInitializer {
-                    routine: init.routine, position: init.position,
-                });
-            }
-            graph.constructor_initializers.push(init.clone());
-        }
-        graph.constructor_initializers.sort_by_key(|v| (v.routine.0, v.position));
-        for window in graph.constructor_initializers.windows(2) {
-            if window[0].routine == window[1].routine
-                && window[1].position != window[0].position + 1 {
-                return Err(GraphError::InvalidConstructorInitializer {
-                    routine: window[1].routine, position: window[1].position,
-                });
-            }
-        }
-        for init in &graph.constructor_initializers {
-            if init.position == 0 { continue; }
-            if !ctor_positions.contains(&(init.routine, 0)) {
-                return Err(GraphError::InvalidConstructorInitializer {
-                    routine: init.routine, position: init.position,
-                });
-            }
-        }
         let mut base_positions = std::collections::HashSet::new();
         for edge in &il.base_classes {
             if !type_map.contains_key(&edge.derived) {
@@ -289,6 +236,59 @@ impl Graph {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
+        }
+        let mut member_owners = std::collections::HashSet::new();
+        for member in &il.member_functions {
+            if !type_map.contains_key(&member.owner) ||
+                !graph.symbols.iter().any(|s| s.id == member.routine && s.kind == 1) {
+                return Err(GraphError::InvalidMemberFunction {
+                    owner: member.owner, routine: member.routine,
+                });
+            }
+            if !member_owners.insert(member.routine) {
+                return Err(GraphError::DuplicateMemberFunction(member.routine));
+            }
+            graph.member_functions.push(member.clone());
+        }
+        // Constructor initializers refer to routine symbols, field symbols,
+        // or record types. Check the complete snapshot before indexing them.
+        let mut ctor_positions = std::collections::HashSet::new();
+        for init in &il.constructor_initializers {
+            let valid_routine = graph.symbols.iter()
+                .any(|s| s.id == init.routine && s.kind == 1);
+            let valid_target = match init.kind {
+                0 | 1 => init.target_type.is_some_and(|ty| type_map.contains_key(&ty))
+                    && init.target_field.is_none(),
+                2 => init.target_field.is_some_and(|field| graph.symbols.iter()
+                    .any(|s| s.id == field && s.kind == 3))
+                    && init.target_type.is_none(),
+                3 => init.target_type.is_none() && init.target_field.is_none(),
+                _ => false,
+            };
+            if !valid_routine || !valid_target ||
+               !ctor_positions.insert((init.routine, init.position)) {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: init.routine, position: init.position,
+                });
+            }
+            graph.constructor_initializers.push(init.clone());
+        }
+        graph.constructor_initializers.sort_by_key(|v| (v.routine.0, v.position));
+        for window in graph.constructor_initializers.windows(2) {
+            if window[0].routine == window[1].routine
+                && window[1].position != window[0].position + 1 {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: window[1].routine, position: window[1].position,
+                });
+            }
+        }
+        for init in &graph.constructor_initializers {
+            if init.position == 0 { continue; }
+            if !ctor_positions.contains(&(init.routine, 0)) {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: init.routine, position: init.position,
+                });
+            }
         }
         let mut initialized = std::collections::HashSet::new();
         for init in &il.variable_initializers {
