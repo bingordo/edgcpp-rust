@@ -77,6 +77,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("symbol reference {} -> {} ({})", id.0, symbol.name, symbol.kind);
         }
     }
+    for param in &graph.function_parameters {
+        let routine = graph.symbol(param.routine).ok_or("missing parameter routine")?;
+        let symbol = graph.symbol(param.symbol).ok_or("missing parameter symbol")?;
+        println!("function parameter routine={} position={:?} name={} symbol={} type={} this={} generated={}",
+                 routine.name, param.position, symbol.name, param.symbol.0,
+                 param.ty.0, param.implicit_this, param.compiler_generated);
+    }
+    for scope in &graph.local_scopes {
+        let routine = graph.symbol(scope.routine).ok_or("missing scope routine")?;
+        println!("local scope routine={} id={} parent={:?} kind={} statement={:?}",
+                 routine.name, scope.id, scope.parent, scope.kind, scope.statement_path);
+    }
+    for local in &graph.local_variables {
+        let routine = graph.symbol(local.routine).ok_or("missing local routine")?;
+        let symbol = graph.symbol(local.symbol).ok_or("missing local symbol")?;
+        println!("local variable routine={} scope={} name={} symbol={} type={} static={} generated={}",
+                 routine.name, local.scope, symbol.name, local.symbol.0, local.ty.0,
+                 local.static_storage, local.compiler_generated);
+    }
     for edge in &graph.symbol_types {
         let symbol = graph.symbol(edge.symbol).ok_or("missing typed symbol")?;
         println!("symbol type name={} id={} type={}", symbol.name, edge.symbol.0, edge.ty.0);
