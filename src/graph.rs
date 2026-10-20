@@ -183,6 +183,15 @@ pub enum FunctionExpressionRef<'a> {
     Control(&'a ControlExpression),
 }
 
+/// Borrowed expression across function bodies and initializer trees.
+#[derive(Debug, Clone, Copy)]
+pub enum AnyExpressionRef<'a> {
+    Primary(&'a ExpressionNode),
+    Control(&'a ControlExpression),
+    VariableInitializer(&'a InitializerExpression),
+    ConstructorInitializer(&'a ConstructorInitializerExpression),
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -1588,6 +1597,41 @@ impl Graph {
         for node in nodes {
             if !visit(node) { break; }
         }
+    }
+
+    /// Visit every expression associated with a function, including constructor
+    /// initializer expressions when the routine symbol is supplied.
+    /// Function-body expressions precede constructor initializers.
+    pub fn walk_routine_expressions(
+        &self,
+        function: &str,
+        routine: SymbolId,
+        mut visit: impl FnMut(AnyExpressionRef<'_>) -> bool,
+    ) {
+        let mut continuing = true;
+        self.walk_function_all_expressions(function, |_, expression| {
+            continuing = visit(match expression {
+                FunctionExpressionRef::Primary(node) => AnyExpressionRef::Primary(node),
+                FunctionExpressionRef::Control(node) => AnyExpressionRef::Control(node),
+            });
+            continuing
+        });
+        if !continuing { return; }
+        self.walk_constructor_expressions(routine, |node| {
+            visit(AnyExpressionRef::ConstructorInitializer(node))
+        });
+    }
+
+    /// Visit expressions in a variable initializer through the same borrowed
+    /// expression representation used by routine traversal.
+    pub fn walk_variable_expressions(
+        &self,
+        owner: SymbolId,
+        mut visit: impl FnMut(AnyExpressionRef<'_>) -> bool,
+    ) {
+        self.walk_initializer_expressions(owner, |node| {
+            visit(AnyExpressionRef::VariableInitializer(node))
+        });
     }
 
     /// Symbol references from a variable's initializer expression tree.
