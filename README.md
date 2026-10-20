@@ -659,3 +659,19 @@ The index is an owned **snapshot**, not a live view: if public Graph
 collections are mutated, rebuild the index. Reverse closure uses breadth-first
 search and handles cycles. Indexed `affected_symbols` preserves overall captured symbol order,
 matching `Graph::affected_symbols`.
+
+
+## Dependency-first incremental scheduling
+
+`index.invalidation_schedule(&changed_type_ids)` computes a conservative
+invalidation closure, collapses strongly connected type components, and
+returns dependency-first batches of type IDs. Cyclic types are emitted in
+one batch; acyclic dependencies precede their dependents. Independent
+components use stable first-discovery tie-breaking. Uncaptured changed
+IDs are singleton batches. `graph.type_invalidation_schedule(&changed)`
+is a convenience wrapper that constructs an index for a single query.
+
+Each returned batch is a strongly connected component, **not** necessarily
+a parallel execution wave. The schedule only accounts for captured type
+relationships; callers remain responsible for non-type dependencies and
+for rebuilding the index after mutating the graph.
