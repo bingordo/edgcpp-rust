@@ -155,6 +155,50 @@ no source spelling is reconstructed. Records are available only for function
 scopes traversed by the native bridge. As with the rest of the native IL,
 IDs are not stable across compilations.
 
+## Function parameters and lexical scope trees
+
+For function definitions, the native bridge snapshots the EDG function
+scope, its explicit parameter-variable list and its implicit C++ `this`
+variable. `Compilation::il.function_parameters` links each variable
+`SymbolId` to its owning routine and `TypeId`. Explicit parameters have
+zero-based positions; an implicit `this` has `position = None`.
+This is separate from the existing routine **type signature**:
+`Graph::parameters(type_id)` describes declared parameter types, whereas
+`Graph::function_parameters(routine_symbol_id)` describes actual parameter
+variables in the function body. `Graph::implicit_this(routine_symbol_id)`
+returns the implicit object parameter when present.
+
+Function and nested block scopes are captured as `LocalScope` records,
+using dense scope IDs starting at zero per routine; each has a parent
+scope ID, EDG scope kind and optional associated statement path. Declarations
+on the scope's nonstatic and static variable lists become `LocalVariable`
+records, with the variable symbol and its type, storage class, and flags
+for compiler generation, static storage, structured bindings and catch
+handler parameters. Scope IDs are compilation-local and do not escape
+as EDG pointers. Repeated names (including shadowed locals) have distinct
+`SymbolId` values.
+
+```rust
+let graph = edgcpp::graph::Graph::from_il(&result.il)?;
+for parameter in graph.function_parameters(routine_id) {
+    println!("parameter {:?}: {:?}", parameter.symbol, parameter.ty);
+}
+if let Some(object) = graph.implicit_this(routine_id) {
+    println!("implicit this: {:?}", object.symbol);
+}
+for scope in graph.local_scopes(routine_id) {
+    for local in graph.locals_in_scope(routine_id, scope.id) {
+        println!("local {:?}: {:?}", local.symbol, local.ty);
+    }
+}
+```
+
+`Graph::local_scope(routine, id)` and `Graph::local_variable_scope(symbol)`
+provide parent/declaration lookups. As with other snapshots, EDG may have
+lowered away some source declarations and generated temporary variables.
+Scopes without an associated statement are retained, and this API does
+not yet reconstruct lifetime intervals or source locations.
+
 ## Structured control flow and loop expressions
 
 The native bridge now follows more of EDG's structured statement tree:
