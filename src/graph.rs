@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -39,6 +39,15 @@ pub enum GraphError {
     DuplicateSourceLocation { function: String, path: String },
     InvalidSymbolSource(SymbolId),
     DuplicateSymbolSource(SymbolId),
+    InvalidLifetime { routine: SymbolId, id: u32 },
+    DuplicateLifetime { routine: SymbolId, id: u32 },
+    InvalidScopeLifetime { routine: SymbolId, scope: u32 },
+    DuplicateScopeLifetime { routine: SymbolId, scope: u32 },
+    InvalidInitializationLifetime { function: String, path: String },
+    DuplicateInitializationLifetime { function: String, path: String },
+    InvalidLifetimeDestruction { routine: SymbolId, lifetime: u32 },
+    DuplicateLifetimeDestruction { routine: SymbolId, lifetime: u32, position: u32 },
+    InvalidLifetimeDestructionPosition { routine: SymbolId, lifetime: u32 },
     DuplicateStatementInitialization { function: String, path: String },
     InvalidStatementAttributes { function: String, path: String },
     DuplicateControlExpression { function: String, statement: String, role: u32, path: String },
@@ -114,6 +123,10 @@ pub struct Graph {
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
+    pub object_lifetimes: Vec<ObjectLifetime>,
+    pub scope_lifetimes: Vec<ScopeLifetime>,
+    pub initialization_lifetimes: Vec<InitializationLifetime>,
+    pub lifetime_destructions: Vec<LifetimeDestruction>,
     pub function_parameters: Vec<FunctionParameter>,
     pub local_scopes: Vec<LocalScope>,
     pub local_variables: Vec<LocalVariable>,
@@ -140,6 +153,10 @@ pub struct Graph {
     pub calls: Vec<CallSite>,
     label_definitions: HashMap<SymbolId, StatementId>,
     statement_label_index: HashMap<StatementId, usize>,
+    lifetime_index: HashMap<(SymbolId, u32), usize>,
+    scope_lifetime_index: HashMap<(SymbolId, u32), usize>,
+    initialization_lifetime_index: HashMap<(String, String), usize>,
+    lifetime_destruction_index: HashMap<(SymbolId, u32), Vec<usize>>,
     statement_source_index: HashMap<(String, String), usize>,
     symbol_source_index: HashMap<SymbolId, usize>,
     expression_source_index: HashMap<(String, String, u32, String), usize>,
@@ -995,6 +1012,122 @@ impl Graph {
                 }
             }
         }
+        // The native snapshot assigns lifetime IDs in preorder *within*
+        // each function. Parent regions always appear before their children.
+        let mut lifetime_positions: HashMap<SymbolId, Vec<u32>> = HashMap::new();
+        for region in &il.object_lifetimes {
+            if !graph.symbols.iter().any(|symbol|
+                    symbol.id == region.routine && symbol.kind == 1) ||
+                region.parent.is_some_and(|parent| parent >= region.id)
+            {
+                return Err(GraphError::InvalidLifetime {
+                    routine: region.routine, id: region.id,
+                });
+            }
+            if graph.lifetime_index.insert((region.routine, region.id),
+                                            graph.object_lifetimes.len()).is_some() {
+                return Err(GraphError::DuplicateLifetime {
+                    routine: region.routine, id: region.id,
+                });
+            }
+            lifetime_positions.entry(region.routine).or_default().push(region.id);
+            graph.object_lifetimes.push(region.clone());
+        }
+        for region in &graph.object_lifetimes {
+            if region.parent.is_some_and(|parent|
+                !graph.lifetime_index.contains_key(&(region.routine, parent)))
+            {
+                return Err(GraphError::InvalidLifetime {
+                    routine: region.routine, id: region.id,
+                });
+            }
+        }
+        for (routine, mut ids) in lifetime_positions {
+            ids.sort_unstable();
+            if ids.iter().enumerate().any(|(index, &id)| id != index as u32) {
+                return Err(GraphError::InvalidLifetime { routine, id: ids[0] });
+            }
+        }
+        for item in &il.scope_lifetimes {
+            if !graph.local_scopes.iter().any(|scope|
+                 scope.routine == item.routine && scope.id == item.scope)
+                || !graph.lifetime_index.contains_key(&(item.routine, item.lifetime))
+            {
+                return Err(GraphError::InvalidScopeLifetime {
+                    routine: item.routine, scope: item.scope,
+                });
+            }
+            if graph.scope_lifetime_index.insert(
+                (item.routine, item.scope), graph.scope_lifetimes.len()).is_some()
+            {
+                return Err(GraphError::DuplicateScopeLifetime {
+                    routine: item.routine, scope: item.scope,
+                });
+            }
+            graph.scope_lifetimes.push(item.clone());
+        }
+        let routine_names: HashMap<String, SymbolId> = graph.symbols.iter()
+            .filter(|s| s.kind == 1)
+            .map(|s| (s.name.clone(), s.id))
+            .collect();
+        for item in &il.initialization_lifetimes {
+            let key = (item.function.clone(), item.statement_path.clone());
+            let owner = routine_names.get(&item.function);
+            if !graph.statement_initializations.iter().any(|init|
+                    init.function == item.function &&
+                    init.statement_path == item.statement_path)
+                || item.lifetime.is_some_and(|id|
+                    owner.is_none_or(|routine| !graph.lifetime_index.contains_key(&(*routine, id))))
+                || item.destructor.is_some_and(|symbol|
+                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 1))
+            {
+                return Err(GraphError::InvalidInitializationLifetime {
+                    function: key.0, path: key.1,
+                });
+            }
+            if graph.initialization_lifetime_index.insert(
+                key.clone(), graph.initialization_lifetimes.len()).is_some()
+            {
+                return Err(GraphError::DuplicateInitializationLifetime {
+                    function: key.0, path: key.1,
+                });
+            }
+            graph.initialization_lifetimes.push(item.clone());
+        }
+        let mut destruction_positions: HashMap<(SymbolId, u32), Vec<u32>> = HashMap::new();
+        for item in &il.lifetime_destructions {
+            let key = (item.routine, item.lifetime);
+            if !graph.lifetime_index.contains_key(&key)
+                || item.variable.is_some_and(|symbol|
+                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 2))
+                || item.destructor.is_some_and(|symbol|
+                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 1))
+            {
+                return Err(GraphError::InvalidLifetimeDestruction {
+                    routine: item.routine, lifetime: item.lifetime,
+                });
+            }
+            let positions = destruction_positions.entry(key).or_default();
+            if positions.contains(&item.position) {
+                return Err(GraphError::DuplicateLifetimeDestruction {
+                    routine: item.routine, lifetime: item.lifetime,
+                    position: item.position,
+                });
+            }
+            positions.push(item.position);
+            graph.lifetime_destruction_index.entry(key).or_default()
+                .push(graph.lifetime_destructions.len());
+            graph.lifetime_destructions.push(item.clone());
+        }
+        for ((routine, lifetime), mut positions) in destruction_positions {
+            positions.sort_unstable();
+            if positions.iter().enumerate().any(|(i, &pos)| pos != i as u32) {
+                return Err(GraphError::InvalidLifetimeDestructionPosition { routine, lifetime });
+            }
+        }
+        for indices in graph.lifetime_destruction_index.values_mut() {
+            indices.sort_by_key(|&i| graph.lifetime_destructions[i].position);
+        }
         let valid_position = |loc: &SourceLocation|
             loc.sequence != 0 && loc.line != 0 && !loc.file.is_empty();
         for record in &il.statement_sources {
@@ -1105,6 +1238,35 @@ impl Graph {
     pub fn local_variable_scope(&self, symbol: SymbolId) -> Option<&LocalScope> {
         let local = self.local_variables.iter().find(|var| var.symbol == symbol)?;
         self.local_scope(local.routine, local.scope)
+    }
+
+    /// EDG object-lifetime region identified within a routine.
+    pub fn object_lifetime(&self, routine: SymbolId, id: u32)
+        -> Option<&ObjectLifetime> {
+        self.lifetime_index.get(&(routine, id)).map(|&i| &self.object_lifetimes[i])
+    }
+
+    /// Associated runtime lifetime region, if EDG created one for the scope.
+    pub fn scope_lifetime(&self, routine: SymbolId, scope: u32)
+        -> Option<&ObjectLifetime> {
+        let link = self.scope_lifetime_index.get(&(routine, scope))?;
+        let item = &self.scope_lifetimes[*link];
+        self.object_lifetime(routine, item.lifetime)
+    }
+
+    /// Lifetime/destructor of an executed initializer, if retained.
+    pub fn initialization_lifetime(&self, function: &str, path: &str)
+        -> Option<&InitializationLifetime> {
+        self.initialization_lifetime_index.get(&(function.to_owned(), path.to_owned()))
+            .map(|&i| &self.initialization_lifetimes[i])
+    }
+
+    /// Destruction entries in EDG cleanup order for a lifetime region.
+    pub fn lifetime_destructions(&self, routine: SymbolId, lifetime: u32)
+        -> Vec<&LifetimeDestruction> {
+        self.lifetime_destruction_index.get(&(routine, lifetime))
+            .map(|indices| indices.iter().map(|&i| &self.lifetime_destructions[i]).collect())
+            .unwrap_or_default()
     }
 
     /// Source file, line and column of a captured statement.
