@@ -3290,6 +3290,39 @@ mod tests {
     }
 
     #[test]
+    fn mutable_type_index_updates_reverse_edges_without_losing_order() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(3)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(3)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: None },
+        ]);
+        let mut index = graph.type_dependency_index();
+        assert_eq!(index.dependents(TypeId(3)), [TypeId(1), TypeId(2)]);
+        index.replace_type_dependencies(TypeId(1), vec![
+            TypeDependency { target: TypeId(4), kind: TypeDependencyKind::Related },
+            TypeDependency { target: TypeId(4), kind: TypeDependencyKind::Field },
+        ]);
+        assert_eq!(index.dependents(TypeId(3)), [TypeId(2)]);
+        assert_eq!(index.dependents(TypeId(4)), [TypeId(1)]);
+        index.replace_type_dependencies(TypeId(1), vec![
+            TypeDependency { target: TypeId(3), kind: TypeDependencyKind::Related },
+        ]);
+        assert_eq!(index.dependents(TypeId(3)), [TypeId(1), TypeId(2)]);
+        assert!(index.remove_type(TypeId(1)));
+        assert!(!index.remove_type(TypeId(1)));
+        assert_eq!(index.dependents(TypeId(3)), [TypeId(2)]);
+        index.replace_type_dependencies(TypeId(5), vec![
+            TypeDependency { target: TypeId(3), kind: TypeDependencyKind::Related },
+        ]);
+        assert_eq!(index.dependents(TypeId(3)), [TypeId(2), TypeId(5)]);
+        index.set_symbol_type(SymbolId(9), Some(TypeId(5)));
+        assert_eq!(index.affected_symbols(&[TypeId(3)]), [SymbolId(9)]);
+        index.set_symbol_type(SymbolId(9), None);
+        assert!(index.affected_symbols(&[TypeId(3)]).is_empty());
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
