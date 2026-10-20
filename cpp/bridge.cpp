@@ -29,6 +29,10 @@ thread_local void *current_user_data = nullptr;
 thread_local std::unordered_map<const void *, uint32_t> type_ids;
 thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 thread_local std::unordered_set<const void *> visited_scopes;
+thread_local std::unordered_set<const void *> emitted_routines;
+thread_local std::unordered_set<const void *> emitted_member_edges;
+thread_local std::unordered_map<const void *, std::string> routine_names;
+thread_local std::unordered_set<std::string> used_routine_names;
 }
 
 namespace edg {
@@ -425,17 +429,35 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   }
   for (a_routine_ptr r = scope->routines; r != nullptr; r = r->next) {
     if (source_name(r->source_corresp) != nullptr) {
-      std::string base = declaration_name(r->source_corresp, true);
-      std::string name = routine_counts[base] > 1 ?
-          declaration_name(r->source_corresp, true, true) : base;
+      std::string name;
+      auto previously_named = routine_names.find(r);
+      if (previously_named != routine_names.end()) {
+        name = previously_named->second;
+      } else {
+        std::string base = declaration_name(r->source_corresp, true);
+        std::string preferred = routine_counts[base] > 1 ?
+            declaration_name(r->source_corresp, true, true) : base;
+        name = preferred;
+        // Several distinct EDG entries can share a demangled signature,
+        // notably ABI-specific destructor variants. Statement identities
+        // must remain distinct even when the source spelling is identical.
+        unsigned suffix = 2;
+        while (!used_routine_names.insert(name).second) {
+          name = preferred + " [EDG " + std::to_string(suffix++) + "]";
+        }
+        routine_names.emplace(r, name);
+      }
       emit_type(r->type, 0);
-      emit_symbol(r, 1, name);
+      uint32_t routine_symbol = emit_symbol(r, 1, name);
       if (scope->kind == sck_class_struct_union &&
-          scope->variant.assoc_type != nullptr) {
+          scope->variant.assoc_type != nullptr &&
+          emitted_member_edges.insert(r).second) {
         uint32_t owner_type = emit_type(scope->variant.assoc_type, 0);
-        uint32_t routine_symbol = emit_symbol(r, 1, name);
         emit_record(21, {num(owner_type), num(routine_symbol)});
       }
+      // Out-of-line definitions may be visible through multiple IL scope
+      // lists. Export their body and entity only once per routine pointer.
+      if (!emitted_routines.insert(r).second) continue;
       emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
@@ -560,6 +582,10 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   visited_scopes.clear();
+  emitted_routines.clear();
+  emitted_member_edges.clear();
+  routine_names.clear();
+  used_routine_names.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -570,5 +596,9 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   visited_scopes.clear();
+  emitted_routines.clear();
+  emitted_member_edges.clear();
+  routine_names.clear();
+  used_routine_names.clear();
   return status;
 }
