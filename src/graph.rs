@@ -362,6 +362,97 @@ impl TypeDependencyIndex {
         result
     }
 
+    /// Compute dependency-first invalidation batches using SCC condensation.
+    /// Each batch contains a strongly connected component; components are
+    /// emitted in topological order, with dependencies before dependents.
+    /// Uncaptured changed IDs are treated as singleton components.
+    pub fn invalidation_schedule(&self, changed: &[TypeId]) -> Vec<Vec<TypeId>> {
+        let affected = self.affected_types(changed);
+        if affected.is_empty() { return Vec::new(); }
+        let nodes: Vec<TypeId> = affected.iter().map(|entry| entry.ty).collect();
+        let included: std::collections::HashSet<TypeId> = nodes.iter().copied().collect();
+
+        // Iterative Kosaraju pass one: genuine DFS postorder.
+        let mut seen = std::collections::HashSet::new();
+        let mut finish = Vec::new();
+        for &root in &nodes {
+            if !seen.insert(root) { continue; }
+            let mut stack = vec![(root, 0usize)];
+            while let Some((node, next)) = stack.last_mut() {
+                let edges = self.dependencies(*node);
+                if *next < edges.len() {
+                    let target = edges[*next].target;
+                    *next += 1;
+                    if included.contains(&target) && seen.insert(target) {
+                        stack.push((target, 0));
+                    }
+                } else {
+                    finish.push(*node);
+                    stack.pop();
+                }
+            }
+        }
+
+        let mut component_of = HashMap::new();
+        let mut components: Vec<Vec<TypeId>> = Vec::new();
+        seen.clear();
+        for &root in finish.iter().rev() {
+            if !seen.insert(root) { continue; }
+            let component_id = components.len();
+            let mut members = Vec::new();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                component_of.insert(node, component_id);
+                members.push(node);
+                for &parent in self.dependents(node) {
+                    if included.contains(&parent) && seen.insert(parent) {
+                        stack.push(parent);
+                    }
+                }
+            }
+            components.push(members);
+        }
+
+        // Build condensed dependency -> dependent DAG.
+        let mut successors = vec![std::collections::HashSet::new(); components.len()];
+        let mut indegree = vec![0usize; components.len()];
+        for &node in &nodes {
+            let dependent = component_of[&node];
+            for edge in self.dependencies(node) {
+                if let Some(&dependency) = component_of.get(&edge.target) {
+                    if dependency != dependent && successors[dependency].insert(dependent) {
+                        indegree[dependent] += 1;
+                    }
+                }
+            }
+        }
+
+        // Stable tie-breaking by initial affected-type discovery order.
+        let mut rank = vec![usize::MAX; components.len()];
+        for (position, &node) in nodes.iter().enumerate() {
+            rank[component_of[&node]] = rank[component_of[&node]].min(position);
+        }
+        let mut ready: std::collections::BTreeSet<(usize, usize)> = indegree.iter()
+            .enumerate()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(id, _)| (rank[id], id))
+            .collect();
+        let mut schedule = Vec::new();
+        while let Some(&(priority, id)) = ready.iter().next() {
+            ready.remove(&(priority, id));
+            let mut members = components[id].clone();
+            members.sort_by_key(|ty| nodes.iter().position(|node| node == ty).unwrap_or(usize::MAX));
+            schedule.push(members);
+            for &next in &successors[id] {
+                indegree[next] -= 1;
+                if indegree[next] == 0 {
+                    ready.insert((rank[next], next));
+                }
+            }
+        }
+        schedule
+    }
+
     /// Affected captured symbols in overall captured symbol order.
     pub fn affected_symbols(&self, changed: &[TypeId]) -> Vec<SymbolId> {
         let affected: std::collections::HashSet<TypeId> =
@@ -2472,6 +2563,13 @@ impl Graph {
             }
         }
         index
+    }
+
+    /// Produce dependency-first batches of affected types. Types in a cycle
+    /// form one batch; independent batches at the same level can be analyzed
+    /// together. Uncaptured seed IDs are retained as singleton batches.
+    pub fn type_invalidation_schedule(&self, changed: &[TypeId]) -> Vec<Vec<TypeId>> {
+        self.type_dependency_index().invalidation_schedule(changed)
     }
 
     /// Find the conservative set of captured types affected by changes to
