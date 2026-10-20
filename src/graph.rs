@@ -1481,6 +1481,46 @@ mod tests {
     }
 
     #[test]
+    fn source_locations_link_only_to_existing_il_nodes() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(2), kind: 2, name: "variable".into() });
+        il.statements.push(Statement { function: "f".into(), path: "0".into(),
+                                       parent: None, kind: 0 });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None, kind: 1,
+            operator: None, type_kind: None, reference: None,
+            type_size: None, type_alignment: None, constant_integer: None,
+            type_id: None, symbol_id: None,
+        });
+        let location = SourceLocation {
+            sequence: 12, column: 7, file: "example.cpp".into(), line: 4,
+        };
+        il.statement_sources.push(StatementSource {
+            function: "f".into(), path: "0".into(), location: location.clone(),
+        });
+        il.symbol_sources.push(SymbolSource {
+            symbol: SymbolId(2), location: location.clone(),
+        });
+        il.expression_sources.push(ExpressionSource {
+            function: "f".into(), statement_path: "0".into(), role: 0,
+            path: "0".into(), location: location.clone(),
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.statement_source("f", "0"), Some(&location));
+        assert_eq!(graph.symbol_source(SymbolId(2)), Some(&location));
+        assert_eq!(graph.expression_source("f", "0", 0, "0"), Some(&location));
+        il.expression_sources[0].path = "0.1".into();
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidSourceLocation { .. })));
+        il.expression_sources[0].path = "0".into();
+        il.statement_sources.push(il.statement_sources[0].clone());
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::DuplicateSourceLocation { .. })));
+        il.statement_sources.pop();
+        il.symbol_sources[0].symbol = SymbolId(99);
+        assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::InvalidSymbolSource(SymbolId(99)));
+    }
+
+    #[test]
     fn declaration_sites_and_initializer_execution_are_distinct() {
         let mut il = Il::default();
         for path in ["0", "1"] {
