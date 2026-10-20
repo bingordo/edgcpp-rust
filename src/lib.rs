@@ -70,6 +70,9 @@ pub struct Il {
     pub statement_declarations: Vec<StatementDeclaration>,
     /// Dynamic initialization execution sites with optional expression trees.
     pub statement_initializations: Vec<StatementInitialization>,
+    pub statement_sources: Vec<StatementSource>,
+    pub symbol_sources: Vec<SymbolSource>,
+    pub expression_sources: Vec<ExpressionSource>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -369,6 +372,38 @@ pub struct StatementInitialization {
     pub role: u32,
 }
 
+/// Physical/diagnostic source location resolved from EDG's sequence table.
+/// Sequence and column are compilation-local; file and line reflect
+/// EDG's #line/include mapping. Generated locations are omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub sequence: u32,
+    pub column: u32,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementSource {
+    pub function: String,
+    pub path: String,
+    pub location: SourceLocation,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSource {
+    pub symbol: SymbolId,
+    pub location: SourceLocation,
+}
+/// Primary expression role 0, supplemental control/init roles 1..=4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpressionSource {
+    pub function: String,
+    pub statement_path: String,
+    pub role: u32,
+    pub path: String,
+    pub location: SourceLocation,
+}
+
 /// A branch or definition referring to one compilation-local EDG label.
 /// The label Symbol has kind 4. References may be compiler generated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -610,6 +645,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         32 => Some(il.static_local_owners.len()),
         33 => Some(il.statement_declarations.len()),
         34 => Some(il.statement_initializations.len()),
+        35 => Some(il.statement_sources.len()),
+        36 => Some(il.symbol_sources.len()),
+        37 => Some(il.expression_sources.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -623,7 +661,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -692,6 +730,36 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        37 => {
+            let (Some(function), Some(statement_path), Some(role),
+                 Some(path), Some(sequence), Some(column), Some(file), Some(line)) =
+                (t(0), t(1), n(2), t(3), n(4), n(5), t(6), n(7))
+                else { return; };
+            if role > 4 || sequence == 0 || line == 0 || file.is_empty() { return; }
+            output.expression_sources.push(ExpressionSource {
+                function, statement_path, role, path,
+                location: SourceLocation { sequence, column, file, line },
+            });
+        }
+        36 => {
+            let (Some(symbol), Some(sequence), Some(column), Some(file), Some(line)) =
+                (n(0), n(1), n(2), t(3), n(4)) else { return; };
+            if symbol == 0 || sequence == 0 || line == 0 || file.is_empty() { return; }
+            output.symbol_sources.push(SymbolSource {
+                symbol: SymbolId(symbol),
+                location: SourceLocation { sequence, column, file, line },
+            });
+        }
+        35 => {
+            let (Some(function), Some(path), Some(sequence), Some(column),
+                 Some(file), Some(line)) = (t(0), t(1), n(2), n(3), t(4), n(5))
+                 else { return; };
+            if sequence == 0 || line == 0 || file.is_empty() { return; }
+            output.statement_sources.push(StatementSource {
+                function, path,
+                location: SourceLocation { sequence, column, file, line },
+            });
         }
         34 => {
             let (Some(function), Some(statement_path), Some(kind),
