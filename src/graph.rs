@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -58,6 +58,8 @@ pub enum GraphError {
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
     DuplicateSymbol(SymbolId),
+    DuplicateSymbolType(SymbolId),
+    InvalidSymbolType(SymbolId),
     MissingSymbol(SymbolId),
     DuplicateVariableInitializer(SymbolId),
     DuplicateInitializerInteger(SymbolId),
@@ -91,6 +93,7 @@ pub struct Graph {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    pub symbol_types: Vec<SymbolType>,
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
@@ -265,6 +268,16 @@ impl Graph {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
+        }
+        let mut typed_symbols = std::collections::HashSet::new();
+        for edge in &il.symbol_types {
+            if !symbol_ids.contains(&edge.symbol) || !type_map.contains_key(&edge.ty) {
+                return Err(GraphError::InvalidSymbolType(edge.symbol));
+            }
+            if !typed_symbols.insert(edge.symbol) {
+                return Err(GraphError::DuplicateSymbolType(edge.symbol));
+            }
+            graph.symbol_types.push(edge.clone());
         }
         let mut annotated_routines = std::collections::HashSet::new();
         for attributes in &il.routine_attributes {
@@ -811,6 +824,11 @@ impl Graph {
     pub fn parameters(&self, owner: TypeId) -> impl Iterator<Item = &TypeParameter> {
         self.type_parameters.iter().filter(move |p| p.owner == owner)
     }
+    /// Declared EDG type of a routine or variable symbol, if captured.
+    pub fn symbol_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        self.symbol_types.iter().find(|edge| edge.symbol == symbol).map(|edge| edge.ty)
+    }
+
     pub fn type_def(&self, id: TypeId) -> Option<&TypeDef> {
         self.types.iter().find(|t| t.id == id)
     }
@@ -962,6 +980,28 @@ mod tests {
         il.constructor_initializers[0].position = 3;
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidConstructorInitializer { .. })));
+    }
+
+    #[test]
+    fn indexes_symbol_types_and_rejects_duplicates() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1, name: "f".into(),
+        });
+        il.types.push(TypeDef {
+            id: TypeId(2), kind: 8, related_role: None, related: None,
+        });
+        il.symbol_types.push(SymbolType { symbol: SymbolId(1), ty: TypeId(2) });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.symbol_type(SymbolId(1)), Some(TypeId(2)));
+        assert_eq!(graph.symbol_type(SymbolId(99)), None);
+        il.symbol_types.push(il.symbol_types[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::DuplicateSymbolType(SymbolId(1)));
+        il.symbol_types.pop();
+        il.symbol_types[0].ty = TypeId(100);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::InvalidSymbolType(SymbolId(1)));
     }
 
     #[test]
