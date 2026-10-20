@@ -175,6 +175,12 @@ compiler-generated statements, initialization guards, fallthrough,
 `Graph::statement_attributes(function, statement_path)` finds the
 metadata for a particular statement.
 
+`goto` and label statements receive `StatementLabel` records whose
+`SymbolId` refers to a native label symbol (kind 4). The graph exposes
+`statement_label(statement_id)`, `label_target(label_symbol_id)`, and
+`goto_target(goto_statement_id)`. A target may be absent when the matching
+label definition was not captured; no raw EDG pointer escapes the bridge.
+
 The primary expression in `a_statement::expr` remains in
 `Compilation::il.expressions`. Additional control-flow expressions
 are independently owned in `Compilation::il.control_expressions`,
