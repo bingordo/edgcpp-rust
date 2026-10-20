@@ -591,3 +591,24 @@ order. All visitors stop when the callback returns `false`.
 These APIs retain the compilation-local ID and borrowing constraints of
 `Graph`. They do not promise cross-compilation identity or complete
 C++ semantic reconstruction.
+
+
+## Type dependency graph
+
+The graph API exposes direct captured type relationships through
+`type_dependencies(type_id)` and `walk_type_dependencies(type_id, visitor)`.
+Each edge identifies its target and kind: `Related`, `Base`, `Field`,
+or `Parameter`. Direct edges are emitted in that category order, retaining
+duplicate edges where the IL has multiple relationships.
+
+`reachable_types(type_id)` and `walk_reachable_types(type_id, visitor)`
+perform iterative breadth-first traversal with cycle detection. Results
+include the root at depth zero and report each type ID once with its
+shortest discovered edge distance. `symbol_reachable_types(symbol_id)`
+starts from the declared type of a symbol, returning `None` if no
+symbol-to-type edge was captured.
+
+References to type IDs without a captured definition are included as
+leaves, not silently discarded. These are structural references in the
+captured snapshot, not proof of complete semantic dependency or ABI layout.
+Traversal callbacks may return `false` to stop early.
