@@ -478,7 +478,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         }
         routine_names.emplace(r, name);
       }
-      emit_type(r->type, 0);
+      const uint32_t routine_type_id = emit_type(r->type, 0);
       uint32_t routine_symbol = emit_symbol(r, 1, name);
       // EDG's lowered IL may put out-of-line member definitions in a
       // file/namespace routine list. Their declaration scope, rather than
@@ -514,6 +514,9 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         unresolved_members.push_back({r, routine_symbol, name});
       }
       if (!emitted_routines.insert(r).second) continue;
+      if (routine_type_id != 0) {
+        emit_record(25, {num(routine_symbol), num(routine_type_id)});
+      }
       // Routine classification and dispatch properties are EDG-native.
       // Bit 9 reflects the implicit this parameter, not a source keyword.
       const bool has_this = r->type != nullptr &&
@@ -589,8 +592,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   for (a_variable_ptr v = scope->variables; v != nullptr; v = v->next) {
     if (source_name(v->source_corresp) != nullptr) {
       std::string name = declaration_name(v->source_corresp, false);
-      emit_type(v->type, 0);
+      const uint32_t variable_type_id = emit_type(v->type, 0);
       uint32_t symbol_id = emit_symbol(v, 2, name);
+      if (variable_type_id != 0) {
+        emit_record(25, {num(symbol_id), num(variable_type_id)});
+      }
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
