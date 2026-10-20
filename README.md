@@ -81,8 +81,29 @@ for edge in graph.bases(derived_type_id) {
 ```
 
 Only direct inheritance edges are exported. Access control, transitive
-inheritance, base-subobject layout and constructor initializer lists are not
-yet exposed. As with the rest of the native IL, IDs are not stable across
+inheritance and base-subobject layout are not yet exposed.
+
+## Constructor and destructor subobject initialization
+
+For defined C++ constructors and destructors, the native bridge reads EDG's
+function-scope `constructor_inits` list. Each record is owned by the
+compilation-local routine `SymbolId` and contains a dense execution-order
+position, EDG initializer kind, target base `TypeId` or field `SymbolId`,
+and flags for compiler-generated, braced, default member and pack-expansion
+initialization.
+
+```rust
+let graph = edgcpp::graph::Graph::from_il(&result.il)?;
+for init in graph.constructor_initializers(constructor_symbol_id) {
+    println!("kind={}, base={:?}, field={:?}",
+             init.kind, init.target_type, init.target_field);
+}
+```
+
+The initializer *expression* attached to each constructor subobject is not
+yet captured. Constructor/destructor classification is retained as native
+EDG kinds, and no source spelling is reconstructed. The records are
+available only for function scopes traversed by the native bridge. As with the rest of the native IL, IDs are not stable across
 compilations.
 
 ## Function statements (prototype)
