@@ -107,6 +107,10 @@ jobs:
             grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::first"\).*role=0 ' il_result.txt
             grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::second"\).*role=0 ' il_result.txt
             grep -E 'control expression declaration_site_verification::mixed statement=.* role=4 path=0 parent=None ' il_result.txt
+            grep -E 'routine identity id=[0-9]+ function=declaration_site_verification::mixed' il_result.txt
+            grep -E 'object lifetime routine=declaration_site_verification::mixed id=0 parent=None kind=[0-9]+' il_result.txt
+            grep -E 'scope lifetime routine=declaration_site_verification::mixed scope=0 lifetime=0' il_result.txt
+            grep -E 'lifetime destruction routine=declaration_site_verification::mixed lifetime=[0-9]+ position=0 variable=Some\(SymbolId\([0-9]+\)\) destructor=Some\(SymbolId\([0-9]+\)\)' il_result.txt
             grep -E 'statement source declaration_site_verification::mixed path=.*file=.*il_fixture.cpp line=[0-9]+ column=[0-9]+' il_result.txt
             grep -E 'symbol source id=[0-9]+ name=declaration_site_verification::(first|second).*file=.*il_fixture.cpp line=[0-9]+' il_result.txt
             grep -F 'routine outer::big_unsigned, defined=true' il_result.txt
