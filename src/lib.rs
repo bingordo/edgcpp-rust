@@ -66,6 +66,10 @@ pub struct Il {
     pub control_expressions: Vec<ControlExpression>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
+    /// Variable declaration positions within structured statements.
+    pub statement_declarations: Vec<StatementDeclaration>,
+    /// Dynamic initialization execution sites with optional expression trees.
+    pub statement_initializations: Vec<StatementInitialization>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -321,7 +325,8 @@ pub struct StatementAttributes {
 }
 
 /// Expressions stored outside a statement's primary `expr` field.
-/// Roles: 1=for increment, 2=range-for comparison, 3=range-for increment.
+/// Roles: 1=for increment, 2=range-for comparison, 3=range-for increment,
+/// 4=dynamic initializer expression executed at a statement.
 /// Their paths are local to (function, statement_path, role).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlExpression {
@@ -334,6 +339,34 @@ pub struct ControlExpression {
     pub operator: Option<u32>,
     pub type_id: Option<TypeId>,
     pub symbol_id: Option<SymbolId>,
+}
+
+/// A variable declared by a particular statement. More than one variable
+/// can share the same statement, in source-list order. The `is_vla` flag
+/// identifies a stmk_vla_decl allocation/declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementDeclaration {
+    pub function: String,
+    pub statement_path: String,
+    pub position: u32,
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub is_vla: bool,
+}
+
+/// A dynamic initializer executed at a statement (rather than merely
+/// attached to a declaration). Native EDG kind is retained.
+/// Role 0=stmk_init, 1=return, 2=statement-expression result.
+/// A representable expression is available as control role 4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementInitialization {
+    pub function: String,
+    pub statement_path: String,
+    pub symbol: Option<SymbolId>,
+    pub kind: u32,
+    pub follows_execution: bool,
+    pub braced: bool,
+    pub role: u32,
 }
 
 /// A branch or definition referring to one compilation-local EDG label.
@@ -575,6 +608,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         30 => Some(il.local_scopes.len()),
         31 => Some(il.local_variables.len()),
         32 => Some(il.static_local_owners.len()),
+        33 => Some(il.statement_declarations.len()),
+        34 => Some(il.statement_initializations.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -588,7 +623,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -657,6 +692,28 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        34 => {
+            let (Some(function), Some(statement_path), Some(kind),
+                 Some(flags), Some(role)) = (t(0), t(1), n(3), n(4), n(5))
+                 else { return; };
+            if flags & !3 != 0 || role > 2 { return; }
+            output.statement_initializations.push(StatementInitialization {
+                function, statement_path, symbol: n(2).map(SymbolId), kind,
+                follows_execution: flags & 1 != 0,
+                braced: flags & 2 != 0, role,
+            });
+        }
+        33 => {
+            let (Some(function), Some(statement_path), Some(position),
+                 Some(symbol), Some(ty), Some(is_vla)) =
+                (t(0), t(1), n(2), n(3), n(4), n(5)) else { return; };
+            if symbol == 0 || ty == 0 || is_vla > 1 { return; }
+            output.statement_declarations.push(StatementDeclaration {
+                function, statement_path, position,
+                symbol: SymbolId(symbol), ty: TypeId(ty),
+                is_vla: is_vla != 0,
+            });
         }
         32 => {
             let (Some(routine), Some(symbol)) = (n(0), n(1)) else { return; };
