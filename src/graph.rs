@@ -318,6 +318,32 @@ pub struct ReachableType {
     pub depth: usize,
 }
 
+/// One ordered mutation of a reusable type dependency index.
+/// Within a batch, later changes to the same source or symbol win.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeIndexChange {
+    /// Set the complete outgoing dependency list of a type.
+    ReplaceType { ty: TypeId, dependencies: Vec<TypeDependency> },
+    /// Delete the type definition's outgoing edges; incoming edges remain.
+    RemoveType { ty: TypeId },
+    /// Change or remove the declared type of a symbol.
+    SetSymbolType { symbol: SymbolId, ty: Option<TypeId> },
+}
+
+/// Changes in membership of the conservative invalidation closure.
+/// Depths in before/after and newly/no-longer affected types are the
+/// shortest reverse-edge distances in the corresponding index state.
+/// Types present on both sides remain affected even if their depth changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypeInvalidationDiff {
+    pub before_types: Vec<ReachableType>,
+    pub after_types: Vec<ReachableType>,
+    pub newly_affected_types: Vec<ReachableType>,
+    pub no_longer_affected_types: Vec<ReachableType>,
+    pub newly_affected_symbols: Vec<SymbolId>,
+    pub no_longer_affected_symbols: Vec<SymbolId>,
+}
+
 /// Reusable snapshot of forward/reverse type edges and symbol ownership.
 /// Construct after the Graph is populated; rebuild after mutating its public
 /// collections. Queries never rescan Graph's type relationships.
@@ -331,60 +357,130 @@ pub struct TypeDependencyIndex {
 }
 
 impl TypeDependencyIndex {
-    /// Replace the outgoing relationships for one captured type without
-    /// rebuilding unrelated forward edges. The supplied relationships
-    /// become the authoritative outgoing edges for this snapshot.
-    /// Duplicate edges are retained in the forward index.
+    /// Replace the outgoing relationships for one type.
+    /// Duplicate forward edges are retained, but reverse edges are unique.
     pub fn replace_type_dependencies(&mut self, ty: TypeId, edges: Vec<TypeDependency>) {
-        if !self.type_order.contains(&ty) {
-            self.type_order.push(ty);
-        }
-        let old = self.forward.insert(ty, edges);
-        self.update_reverse_for_type(ty, old.as_deref().unwrap_or(&[]));
+        self.apply_changes(&[TypeIndexChange::ReplaceType { ty, dependencies: edges }]);
     }
 
-    /// Remove a type's outgoing relationships and its captured definition.
-    /// Incoming references from other types are intentionally preserved.
+    /// Remove a captured type's outgoing edges. Incoming references remain.
+    /// Returns false if this source type is not present.
     pub fn remove_type(&mut self, ty: TypeId) -> bool {
-        let Some(old) = self.forward.remove(&ty) else { return false; };
-        self.type_order.retain(|&id| id != ty);
-        self.update_reverse_for_type(ty, &old);
+        if !self.forward.contains_key(&ty) { return false; }
+        self.apply_changes(&[TypeIndexChange::RemoveType { ty }]);
         true
     }
 
-    /// Update the declared type of a captured symbol, or remove its
-    /// type association with None. New symbols are appended to symbol order.
+    /// Update a symbol's declared type. Existing symbols retain their
+    /// captured order; newly associated symbols are appended.
     pub fn set_symbol_type(&mut self, symbol: SymbolId, ty: Option<TypeId>) {
-        self.symbol_order.retain(|(id, _)| *id != symbol);
-        if let Some(ty) = ty {
-            self.symbol_order.push((symbol, ty));
+        self.apply_changes(&[TypeIndexChange::SetSymbolType { symbol, ty }]);
+    }
+
+    /// Apply an ordered batch of mutations with a single reverse-edge
+    /// refresh. Only reverse adjacency lists touched by a changed type are
+    /// rebuilt; other reverse lists and outgoing edge lists are unchanged.
+    /// The index is updated, not the Graph that originally supplied it.
+    pub fn apply_changes(&mut self, changes: &[TypeIndexChange]) {
+        let mut changed_sources = std::collections::HashSet::new();
+        let mut touched_targets = std::collections::HashSet::new();
+        let mut symbols_changed = false;
+        for change in changes {
+            match change {
+                TypeIndexChange::ReplaceType { ty, dependencies } => {
+                    if !self.forward.contains_key(ty) {
+                        self.type_order.push(*ty);
+                    }
+                    if let Some(previous) = self.forward.insert(*ty, dependencies.clone()) {
+                        touched_targets.extend(previous.into_iter().map(|edge| edge.target));
+                    }
+                    touched_targets.extend(dependencies.iter().map(|edge| edge.target));
+                    changed_sources.insert(*ty);
+                }
+                TypeIndexChange::RemoveType { ty } => {
+                    if let Some(previous) = self.forward.remove(ty) {
+                        self.type_order.retain(|source| source != ty);
+                        touched_targets.extend(previous.into_iter().map(|edge| edge.target));
+                        changed_sources.insert(*ty);
+                    }
+                }
+                TypeIndexChange::SetSymbolType { symbol, ty } => {
+                    if let Some(position) = self.symbol_order.iter()
+                        .position(|(id, _)| id == symbol)
+                    {
+                        if let Some(new_type) = ty {
+                            self.symbol_order[position].1 = *new_type;
+                        } else {
+                            self.symbol_order.remove(position);
+                        }
+                    } else if let Some(new_type) = ty {
+                        self.symbol_order.push((*symbol, *new_type));
+                    }
+                    symbols_changed = true;
+                }
+            }
         }
-        self.symbols_by_type.clear();
-        for &(id, ty) in &self.symbol_order {
-            self.symbols_by_type.entry(ty).or_default().push(id);
+        if !changed_sources.is_empty() {
+            let ranks: HashMap<TypeId, usize> = self.type_order.iter()
+                .copied().enumerate().map(|(rank, ty)| (ty, rank)).collect();
+            for target in touched_targets {
+                let mut sources = self.reverse.remove(&target).unwrap_or_default();
+                sources.retain(|source| !changed_sources.contains(source));
+                for &source in &changed_sources {
+                    if self.dependencies(source).iter().any(|edge| edge.target == target) {
+                        sources.push(source);
+                    }
+                }
+                sources.sort_by_key(|source| ranks.get(source).copied().unwrap_or(usize::MAX));
+                sources.dedup();
+                if !sources.is_empty() {
+                    self.reverse.insert(target, sources);
+                }
+            }
+        }
+        if symbols_changed {
+            self.symbols_by_type.clear();
+            for &(symbol, ty) in &self.symbol_order {
+                self.symbols_by_type.entry(ty).or_default().push(symbol);
+            }
         }
     }
 
-    /// Refresh only reverse adjacency lists touched by a changed source.
-    /// Existing source ordering is preserved using captured type order.
-    fn update_reverse_for_type(&mut self, ty: TypeId, old: &[TypeDependency]) {
-        let mut touched = std::collections::HashSet::new();
-        for edge in old { touched.insert(edge.target); }
-        for edge in self.dependencies(ty) { touched.insert(edge.target); }
-        for target in touched {
-            let mut dependents = self.reverse.remove(&target).unwrap_or_default();
-            dependents.retain(|&source| source != ty);
-            if self.dependencies(ty).iter().any(|edge| edge.target == target) {
-                let rank = self.type_order.iter().position(|&id| id == ty).unwrap_or(usize::MAX);
-                let insert_at = dependents.iter().position(|source| {
-                    self.type_order.iter().position(|id| id == source)
-                        .unwrap_or(usize::MAX) > rank
-                }).unwrap_or(dependents.len());
-                dependents.insert(insert_at, ty);
-            }
-            if !dependents.is_empty() {
-                self.reverse.insert(target, dependents);
-            }
+    /// Apply a batch and report changes to invalidation membership from
+    /// the same seed IDs, comparing the index before and after the batch.
+    /// Seeds are explicit: edits alone do not infer which types changed.
+    /// Retained members with changed distances are not "newly affected".
+    pub fn apply_changes_with_diff(
+        &mut self, changes: &[TypeIndexChange], changed: &[TypeId],
+    ) -> TypeInvalidationDiff {
+        let before_types = self.affected_types(changed);
+        let before_symbols = self.affected_symbols(changed);
+        self.apply_changes(changes);
+        let after_types = self.affected_types(changed);
+        let after_symbols = self.affected_symbols(changed);
+
+        let old_set: std::collections::HashSet<TypeId> =
+            before_types.iter().map(|entry| entry.ty).collect();
+        let new_set: std::collections::HashSet<TypeId> =
+            after_types.iter().map(|entry| entry.ty).collect();
+        let old_symbols: std::collections::HashSet<SymbolId> =
+            before_symbols.iter().copied().collect();
+        let new_symbols: std::collections::HashSet<SymbolId> =
+            after_symbols.iter().copied().collect();
+
+        let newly_affected_types = after_types.iter().copied()
+            .filter(|entry| !old_set.contains(&entry.ty)).collect();
+        let no_longer_affected_types = before_types.iter().copied()
+            .filter(|entry| !new_set.contains(&entry.ty)).collect();
+        let newly_affected_symbols = after_symbols.into_iter()
+            .filter(|symbol| !old_symbols.contains(symbol)).collect();
+        let no_longer_affected_symbols = before_symbols.into_iter()
+            .filter(|symbol| !new_symbols.contains(symbol)).collect();
+
+        TypeInvalidationDiff {
+            before_types, after_types, newly_affected_types,
+            no_longer_affected_types, newly_affected_symbols,
+            no_longer_affected_symbols,
         }
     }
 
