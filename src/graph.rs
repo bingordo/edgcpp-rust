@@ -1398,6 +1398,38 @@ impl Graph {
             .filter(move |(_, n)| n.parent.is_none() && n.data.function == function)
             .map(|(i, n)| (StatementId(i), n))
     }
+    /// Visit structured statements in depth-first pre-order, retaining the
+    /// original child order. The callback can stop traversal early by returning
+    /// false; this avoids allocating a flattened statement list.
+    pub fn walk_statements(
+        &self,
+        function: &str,
+        mut visit: impl FnMut(StatementId, &StatementNode) -> bool,
+    ) {
+        let mut stack: Vec<_> = self.roots(function).map(|(id, _)| id).collect();
+        stack.reverse();
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.statement(id) else { continue };
+            if !visit(id, node) { break; }
+            stack.extend(node.children.iter().rev().copied());
+        }
+    }
+
+    /// Visit an expression tree in pre-order, following operand order.
+    /// Invalid IDs are ignored; graphs created by from_il have valid edges.
+    pub fn walk_expression(
+        &self,
+        root: ExpressionId,
+        mut visit: impl FnMut(ExpressionId, &ExpressionNode) -> bool,
+    ) {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.expression(id) else { continue };
+            if !visit(id, node) { break; }
+            stack.extend(node.operands.iter().rev().copied());
+        }
+    }
+
     /// Expression operands in the original IL order.
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
@@ -1577,6 +1609,37 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn depth_first_walk_preserves_order_and_supports_early_exit() {
+        let mut il = Il::default();
+        for (path, parent) in [
+            ("0", None), ("0.0", Some("0")), ("0.0.0", Some("0.0")),
+            ("0.1", Some("0")), ("1", None),
+        ] {
+            il.statements.push(Statement {
+                function: "f".into(), path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let mut paths = Vec::new();
+        graph.walk_statements("f", |_, node| {
+            paths.push(node.data.path.clone());
+            true
+        });
+        assert_eq!(paths, ["0", "0.0", "0.0.0", "0.1", "1"]);
+        let mut stopped = Vec::new();
+        graph.walk_statements("f", |_, node| {
+            stopped.push(node.data.path.clone());
+            stopped.len() < 3
+        });
+        assert_eq!(stopped, ["0", "0.0", "0.0.0"]);
+        let mut missing = 0;
+        graph.walk_statements("other", |_, _| { missing += 1; true });
+        assert_eq!(missing, 0);
+    }
+
+
     #[test]
     fn preserves_hoisted_static_local_ownership_without_inventing_scopes() {
         let mut il = Il::default();
