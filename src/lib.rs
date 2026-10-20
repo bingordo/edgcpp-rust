@@ -84,6 +84,8 @@ pub struct Il {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    /// Type edges for named declarations.
+    pub symbol_types: Vec<SymbolType>,
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
@@ -102,6 +104,14 @@ pub struct Symbol {
     /// 1=routine, 2=variable, 3=field.
     pub kind: u32,
     pub name: String,
+}
+
+/// Declared type of a routine, variable, or other symbol.
+/// Both IDs are valid only within the current compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolType {
+    pub symbol: SymbolId,
+    pub ty: TypeId,
 }
 
 /// Native EDG initialization classification for a variable declaration.
@@ -453,6 +463,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         22 => Some(il.routine_attributes.len()),
         23 => Some(il.constructor_initializer_expressions.len()),
         24 => Some(il.base_class_access.len()),
+        25 => Some(il.symbol_types.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -466,7 +477,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -535,6 +546,11 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        25 => {
+            let (Some(symbol), Some(ty)) = (n(0), n(1)) else { return; };
+            if symbol == 0 || ty == 0 { return; }
+            output.symbol_types.push(SymbolType { symbol: SymbolId(symbol), ty: TypeId(ty) });
         }
         24 => {
             let (Some(derived), Some(position), Some(expansion)) =
