@@ -12,6 +12,27 @@ fn main() {
         .expect("Set EDGCPP_LIB_DIR to the directory containing libedgcpfe.a");
     let source = env::var("EDGCPP_SOURCE_DIR")
         .expect("Set EDGCPP_SOURCE_DIR to the matching EDG checkout");
+    // The native EDG IL layout changes when upstream sources or macro
+    // configuration change. CI passes an immutable EDG source revision and
+    // keys the target cache by that revision, avoiding needless rebuilds
+    // caused by fresh checkout timestamps. Local builds without that
+    // revision explicitly track native inputs for correctness.
+    println!("cargo:rerun-if-env-changed=EDGCPP_EDG_REVISION");
+    if env::var_os("EDGCPP_EDG_REVISION").is_none() {
+        println!("cargo:rerun-if-changed={commands}");
+        println!(
+            "cargo:rerun-if-changed={}",
+            PathBuf::from(&libdir).join("libedgcpfe.a").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            PathBuf::from(&source).join("src").display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            PathBuf::from(&source).join("build/gcc-release/src/includes").display()
+        );
+    }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let status = Command::new("python3")
         .arg("tools/build_bridge.py")
