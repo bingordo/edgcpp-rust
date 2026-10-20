@@ -64,6 +64,8 @@ pub struct Il {
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
     pub control_expressions: Vec<ControlExpression>,
+    /// References and definitions of native goto labels.
+    pub statement_labels: Vec<StatementLabel>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
     /// Identity-preserving types captured during this compilation.
@@ -105,7 +107,7 @@ pub struct SymbolId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
     pub id: SymbolId,
-    /// 1=routine, 2=variable, 3=field.
+    /// 1=routine, 2=variable, 3=field, 4=goto label.
     pub kind: u32,
     pub name: String,
 }
@@ -326,6 +328,16 @@ pub struct ControlExpression {
     pub symbol_id: Option<SymbolId>,
 }
 
+/// A branch or definition referring to one compilation-local EDG label.
+/// The label Symbol has kind 4. References may be compiler generated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementLabel {
+    pub function: String,
+    pub statement_path: String,
+    pub label: SymbolId,
+    pub definition: bool,
+}
+
 /// A snapshot of an EDG expression and its ordered operand tree.
 /// Discriminants are native EDG enums; consumers must use the matching EDG build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,6 +512,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         25 => Some(il.symbol_types.len()),
         26 => Some(il.statement_attributes.len()),
         27 => Some(il.control_expressions.len()),
+        28 => Some(il.statement_labels.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -513,7 +526,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -582,6 +595,15 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        28 => {
+            let (Some(function), Some(statement_path), Some(label), Some(definition)) =
+                (t(0), t(1), n(2), n(3)) else { return; };
+            if label == 0 || definition > 1 { return; }
+            output.statement_labels.push(StatementLabel {
+                function, statement_path,
+                label: SymbolId(label), definition: definition == 1,
+            });
         }
         27 => {
             let (Some(function), Some(statement_path), Some(role),
