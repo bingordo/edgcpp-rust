@@ -61,6 +61,11 @@ jobs:
           path: edgcpp
           persist-credentials: false
 
+      - name: Verify checkout matches the pinned EDG binary
+        working-directory: edgcpp
+        run: |
+          test "$(git rev-parse HEAD)" = "$EDG_SOURCE_SHA"
+
       # GitHub's cache entries are immutable, so restore the newest matching
       # prior cache; only new main-branch builds save a replacement snapshot.
       - name: Restore Rust/Cargo incremental compilation cache
