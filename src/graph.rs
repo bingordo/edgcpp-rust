@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, MemberFunction, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -46,6 +46,8 @@ pub enum GraphError {
     InvalidConstructorInitializer { routine: SymbolId, position: u32 },
     InvalidMemberFunction { owner: TypeId, routine: SymbolId },
     DuplicateMemberFunction(SymbolId),
+    InvalidRoutineAttributes(SymbolId),
+    DuplicateRoutineAttributes(SymbolId),
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
@@ -77,6 +79,7 @@ pub struct Graph {
     pub base_classes: Vec<BaseClass>,
     pub constructor_initializers: Vec<ConstructorInitializer>,
     pub member_functions: Vec<MemberFunction>,
+    pub routine_attributes: Vec<RoutineAttributes>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -236,6 +239,22 @@ impl Graph {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
+        }
+        let mut annotated_routines = std::collections::HashSet::new();
+        for attributes in &il.routine_attributes {
+            if !graph.symbols.iter().any(|symbol|
+                symbol.id == attributes.routine && symbol.kind == 1)
+                || (attributes.pure_virtual && !attributes.is_virtual)
+                || (attributes.is_override && !attributes.is_virtual)
+                || (attributes.is_final && !attributes.is_virtual)
+                || (attributes.overrides_base_member && !attributes.is_virtual)
+            {
+                return Err(GraphError::InvalidRoutineAttributes(attributes.routine));
+            }
+            if !annotated_routines.insert(attributes.routine) {
+                return Err(GraphError::DuplicateRoutineAttributes(attributes.routine));
+            }
+            graph.routine_attributes.push(attributes.clone());
         }
         let mut member_owners = std::collections::HashSet::new();
         for member in &il.member_functions {
@@ -638,6 +657,11 @@ impl Graph {
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
     }
+    /// EDG special-function and dispatch metadata for this routine.
+    pub fn routine_attributes(&self, routine: SymbolId) -> Option<&RoutineAttributes> {
+        self.routine_attributes.iter().find(|attributes| attributes.routine == routine)
+    }
+
     /// Declared member routines belonging to this class.
     pub fn member_functions(&self, owner: TypeId)
         -> impl Iterator<Item = &MemberFunction> {
@@ -706,6 +730,33 @@ mod tests {
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.member_function_owner(SymbolId(10)), Some(TypeId(20)));
         assert_eq!(graph.constructor_initializers(SymbolId(10)).count(), 1);
+    }
+
+    #[test]
+    fn validates_routine_attributes_and_duplicate_records() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1, name: "Widget::method".into(),
+        });
+        let attributes = RoutineAttributes {
+            routine: SymbolId(1), special_kind: 0,
+            is_virtual: true, pure_virtual: false,
+            is_override: true, is_final: true,
+            overrides_base_member: true,
+            is_inline: false, is_constexpr: false,
+            defined: true, explicit_constructor: false,
+            has_this_parameter: true,
+        };
+        il.routine_attributes.push(attributes.clone());
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.routine_attributes(SymbolId(1)), Some(&attributes));
+        il.routine_attributes.push(attributes);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::DuplicateRoutineAttributes(SymbolId(1)));
+        il.routine_attributes.pop();
+        il.routine_attributes[0].is_virtual = false;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::InvalidRoutineAttributes(SymbolId(1)));
     }
 
     #[test]
