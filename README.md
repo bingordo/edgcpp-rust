@@ -242,6 +242,17 @@ or represent scalar initialization directly as operations in the function
 body. An absent record therefore does **not** imply that a C++ source
 variable is uninitialized.
 
+## Routine identity and statement-body ownership
+
+The bridge emits an authoritative `RoutineIdentity { routine, function }`
+link for each exported routine. `function` is the key used by statement
+and expression paths, and can differ from the symbol's display name when
+EDG first encounters a reference using a full overloaded signature or a
+destructor variant. Use `Graph::routine_function(SymbolId)` and
+`Graph::routine_for_function(&str)` rather than comparing
+`Symbol.name` to `Statement.function`. Graph validation also uses this
+mapping for local scope and runtime lifetime associations.
+
 ## Function parameters and lexical scope trees
 
 For function definitions, the native bridge snapshots the EDG function
