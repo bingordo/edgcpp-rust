@@ -64,6 +64,55 @@ static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> field
 {
   current_callback(current_user_data, kind, fields.begin(), fields.size(), aux);
 }
+// EDG sequence numbers are compilation-global and may incorporate includes
+// and #line remapping. Resolve while the source-file lookup table is live.
+// Omit synthetic/unknown locations rather than inventing a source line.
+struct ResolvedSource {
+  uint32_t seq;
+  uint32_t column;
+  std::string file;
+  uint32_t line;
+};
+static bool resolve_source(const a_source_position &position,
+                           ResolvedSource &resolved)
+{
+  if (position.seq == 0) return false;
+  a_const_char *file = nullptr;
+  a_const_char *full = nullptr;
+  a_line_number line = 0;
+  a_boolean at_end = FALSE;
+  a_source_file_ptr source = conv_seq_to_file_and_line(
+      position.seq, &file, &full, &line, &at_end);
+  if (source == nullptr || line == 0 || at_end) return false;
+  const char *name = file != nullptr ? file : full;
+  if (name == nullptr) return false;
+  resolved = {position.seq, position.column, name, line};
+  return true;
+}
+static void emit_statement_source(const std::string &function,
+                                  const std::string &path,
+                                  const a_source_position &pos)
+{
+  ResolvedSource location{};
+  if (resolve_source(pos, location)) {
+    emit_record(35, {txt(function), txt(path), num(location.seq),
+                     num(location.column), txt(location.file), num(location.line)});
+  }
+}
+static void emit_expression_source(const std::string &function,
+                                   const std::string &statement,
+                                   uint32_t role,
+                                   const std::string &path,
+                                   const a_source_position &pos)
+{
+  ResolvedSource location{};
+  if (resolve_source(pos, location)) {
+    emit_record(37, {txt(function), txt(statement), num(role), txt(path),
+                     num(location.seq), num(location.column),
+                     txt(location.file), num(location.line)});
+  }
+}
+
 static const char *source_name(const a_source_correspondence &sc)
 {
 #if NEED_NAME_MANGLING
@@ -127,6 +176,16 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   uint32_t id = static_cast<uint32_t>(symbol_ids.size() + 1);
   symbol_ids.emplace(ptr, id);
   emit_record(13, {num(id), num(kind), txt(name)});
+  if (kind >= 1 && kind <= 3) {
+    // EDG routines, variables and fields all place source_corresp first.
+    const auto *correspondence =
+        reinterpret_cast<const a_source_correspondence *>(ptr);
+    ResolvedSource position{};
+    if (resolve_source(correspondence->decl_position, position)) {
+      emit_record(36, {num(id), num(position.seq), num(position.column),
+                       txt(position.file), num(position.line)});
+    }
+  }
   return id;
 }
 
@@ -289,6 +348,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       const std::string &parent, unsigned depth)
 {
   if (node == nullptr || depth > 64 || current_callback == nullptr) return;
+  emit_expression_source(function, stmt_path, 0, path, node->position);
   const unsigned op = node->kind == enk_operation ?
       static_cast<unsigned>(node->variant.operation.kind) : 0;
   const unsigned ty = node->type == nullptr ? 0 :
@@ -400,6 +460,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
     symbol = emit_symbol(field, 3, name == nullptr ? "" : name);
   }
   const uint32_t type_id = emit_type(node->type, 0);
+  emit_expression_source(function, statement, role, path, node->position);
   emit_record(27, {txt(function), txt(statement), num(role), txt(path),
                    parent.empty() ? absent() : txt(parent),
                    num(static_cast<unsigned>(node->kind)),
@@ -544,6 +605,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                          parent + "." + edge + "." + std::to_string(index);
     emit_record(5, {txt(function), txt(path), parent.empty() ? absent() : txt(parent)},
                 static_cast<uint32_t>(stmt->kind));
+    emit_statement_source(function, path, stmt->position);
     uint32_t flags = (stmt->compiler_generated ? 1u : 0u) |
                      (stmt->is_initialization_guard ? 2u : 0u) |
                      (stmt->is_fallthrough_statement ? 4u : 0u) |
