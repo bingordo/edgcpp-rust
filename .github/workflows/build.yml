@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 45
     container:
       # Identical native toolchain to the published EDG x86-64 archive.
-      image: ghcr.io/edgcpp/ci-runner@sha256:14b3948c2ce12cfa5472e5a6c468393d15426f3
+      image: ghcr.io/edgcpp/ci-runner@sha256:14b3948c2ce12cfa5472e5a6c468393d15426f3a67685cc35d830ea5db2acdf8
     defaults:
       run:
         shell: edg-container-exec "bash -eo pipefail {0}"
