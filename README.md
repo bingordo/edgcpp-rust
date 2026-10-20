@@ -612,3 +612,19 @@ References to type IDs without a captured definition are included as
 leaves, not silently discarded. These are structural references in the
 captured snapshot, not proof of complete semantic dependency or ABI layout.
 Traversal callbacks may return `false` to stop early.
+
+
+## Reverse type dependencies and cycles
+
+`direct_type_dependents(type_id)` reports captured types with an outgoing
+dependency to the requested type. `type_dependents(type_id)` and
+`walk_type_dependents(type_id, visitor)` traverse the reverse graph using
+cycle-safe breadth-first search, including the root at depth zero. They can
+support conservative invalidation when a type changes.
+
+`type_strongly_connected_components()` partitions captured type definitions
+into maximal mutually reachable groups using an iterative two-pass DFS.
+Edges to uncaptured type IDs do not create component members. Component
+ordering is an implementation detail; callers should not use it as a stable
+serialization order. These relationships reflect only the captured EDG
+snapshot, not every possible C++ semantic dependency.
