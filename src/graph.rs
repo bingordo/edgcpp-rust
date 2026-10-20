@@ -686,6 +686,29 @@ fn graph_path_index(path: &str) -> usize {
 mod tests {
     use super::*;
     #[test]
+    fn constructor_records_are_independent_of_symbol_callback_order() {
+        let mut il = Il::default();
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine: SymbolId(10), position: 0, kind: 3,
+            target_type: None, target_field: None,
+            compiler_generated: false, braced: false,
+            use_field_initializer: false, pack_expansion: false,
+        });
+        il.member_functions.push(MemberFunction {
+            owner: TypeId(20), routine: SymbolId(10),
+        });
+        il.symbols.push(Symbol {
+            id: SymbolId(10), kind: 1, name: "Widget::Widget".into(),
+        });
+        il.types.push(TypeDef {
+            id: TypeId(20), kind: 1, related_role: None, related: None,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.member_function_owner(SymbolId(10)), Some(TypeId(20)));
+        assert_eq!(graph.constructor_initializers(SymbolId(10)).count(), 1);
+    }
+
+    #[test]
     fn validates_member_function_ownership() {
         let mut il = Il::default();
         il.types.push(TypeDef {
