@@ -430,6 +430,34 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
+          // The function scope owns constructor/destructor subobject
+          // initialization entries, ordered by actual execution order.
+          unsigned init_position = 0;
+          for (a_constructor_init_ptr init = body->variant.routine.constructor_inits;
+               init != nullptr && init_position < 10000;
+               init = init->next, ++init_position) {
+            uint32_t target_type = 0;
+            uint32_t target_symbol = 0;
+            if ((init->kind == cik_virtual_base_class ||
+                 init->kind == cik_direct_base_class) &&
+                init->variant.base_class != nullptr) {
+              target_type = emit_type(init->variant.base_class->type, 0);
+            } else if (init->kind == cik_field && init->variant.field != nullptr) {
+              a_field_ptr field = init->variant.field;
+              const char *field_name = source_name(field->source_corresp);
+              target_symbol = emit_symbol(field, 3,
+                                          field_name == nullptr ? "" : field_name);
+            }
+            unsigned flags = (init->compiler_generated ? 1u : 0u) |
+                             (init->is_braced ? 2u : 0u) |
+                             (init->use_field_initializer ? 4u : 0u) |
+                             (init->is_pack_expansion ? 8u : 0u);
+            emit_record(20, {num(emit_symbol(r, 1, name)), num(init_position),
+                             num(static_cast<unsigned>(init->kind)),
+                             target_type ? num(target_type) : absent(),
+                             target_symbol ? num(target_symbol) : absent(),
+                             num(flags)});
+          }
           emit_statements(body->assoc_block, name, "", "", 0);
         }
       }
