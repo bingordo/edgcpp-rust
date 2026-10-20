@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, FunctionParameter, LocalScope, LocalVariable, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -75,6 +75,8 @@ pub enum GraphError {
     InvalidLocalScope { routine: SymbolId, scope: u32 },
     DuplicateLocalVariable(SymbolId),
     InvalidLocalVariable(SymbolId),
+    InvalidStaticLocalOwner(SymbolId),
+    DuplicateStaticLocalOwner(SymbolId),
     InvalidSymbolType(SymbolId),
     MissingSymbol(SymbolId),
     DuplicateVariableInitializer(SymbolId),
@@ -101,6 +103,7 @@ pub struct Graph {
     pub function_parameters: Vec<FunctionParameter>,
     pub local_scopes: Vec<LocalScope>,
     pub local_variables: Vec<LocalVariable>,
+    pub static_local_owners: Vec<StaticLocalOwner>,
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
@@ -648,6 +651,23 @@ impl Graph {
         }
         graph.local_scopes.sort_by_key(|scope| (scope.routine.0, scope.id));
         graph.local_variables.sort_by_key(|var| (var.routine.0, var.scope, var.symbol.0));
+        let mut static_owner_symbols = std::collections::HashSet::new();
+        for entry in &il.static_local_owners {
+            if !is_routine(entry.routine) || !is_variable(entry.symbol) ||
+                graph.local_variables.iter().any(|local| {
+                    local.symbol == entry.symbol &&
+                    (local.routine != entry.routine || !local.static_storage)
+                })
+            {
+                return Err(GraphError::InvalidStaticLocalOwner(entry.symbol));
+            }
+            if !static_owner_symbols.insert(entry.symbol) {
+                return Err(GraphError::DuplicateStaticLocalOwner(entry.symbol));
+            }
+            graph.static_local_owners.push(entry.clone());
+        }
+        graph.static_local_owners.sort_by_key(|entry| (entry.routine.0, entry.symbol.0));
+
 
         for label in &il.statement_labels {
             let key = (label.function.clone(), label.statement_path.clone());
@@ -956,6 +976,18 @@ impl Graph {
             var.routine == routine && var.scope == scope)
     }
 
+    /// Static locals belonging to a routine, including variables that EDG
+    /// hoisted into file-scope memory. Their exact lexical scope may be unknown.
+    pub fn static_locals(&self, routine: SymbolId)
+        -> impl Iterator<Item = &StaticLocalOwner> {
+        self.static_local_owners.iter().filter(move |entry| entry.routine == routine)
+    }
+
+    pub fn static_local_owner(&self, symbol: SymbolId) -> Option<SymbolId> {
+        self.static_local_owners.iter().find(|entry| entry.symbol == symbol)
+            .map(|entry| entry.routine)
+    }
+
     /// The exact declaring lexical scope of a local variable.
     pub fn local_variable_scope(&self, symbol: SymbolId) -> Option<&LocalScope> {
         let local = self.local_variables.iter().find(|var| var.symbol == symbol)?;
@@ -1169,6 +1201,27 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserves_hoisted_static_local_ownership_without_inventing_scopes() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "f".into() });
+        il.symbols.push(Symbol { id: SymbolId(2), kind: 2, name: "f()::counter".into() });
+        il.static_local_owners.push(StaticLocalOwner {
+            routine: SymbolId(1), symbol: SymbolId(2),
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.static_local_owner(SymbolId(2)), Some(SymbolId(1)));
+        assert_eq!(graph.static_locals(SymbolId(1)).count(), 1);
+        assert_eq!(graph.local_variable_scope(SymbolId(2)), None);
+        il.static_local_owners.push(il.static_local_owners[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateStaticLocalOwner(SymbolId(2)))));
+        il.static_local_owners.pop();
+        il.static_local_owners[0].routine = SymbolId(9);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidStaticLocalOwner(SymbolId(2)))));
+    }
+
     #[test]
     fn indexed_function_locals_preserve_scope_and_shadowing() {
         let mut il = Il::default();
