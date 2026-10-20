@@ -75,6 +75,8 @@ pub struct Il {
     pub constructor_initializers: Vec<ConstructorInitializer>,
     /// Class ownership edges for declared member functions.
     pub member_functions: Vec<MemberFunction>,
+    /// Special-function and virtual dispatch attributes of routines.
+    pub routine_attributes: Vec<RoutineAttributes>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -205,6 +207,24 @@ pub struct ConstructorInitializer {
 pub struct MemberFunction {
     pub owner: TypeId,
     pub routine: SymbolId,
+}
+
+/// EDG special-function classification and dispatch metadata for a routine.
+/// Special-kind discriminants are native EDG values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineAttributes {
+    pub routine: SymbolId,
+    pub special_kind: u32,
+    pub is_virtual: bool,
+    pub pure_virtual: bool,
+    pub is_override: bool,
+    pub is_final: bool,
+    pub overrides_base_member: bool,
+    pub is_inline: bool,
+    pub is_constexpr: bool,
+    pub defined: bool,
+    pub explicit_constructor: bool,
+    pub has_this_parameter: bool,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -402,6 +422,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         19 => Some(il.base_classes.len()),
         20 => Some(il.constructor_initializers.len()),
         21 => Some(il.member_functions.len()),
+        22 => Some(il.routine_attributes.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -415,7 +436,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -484,6 +505,21 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        22 => {
+            let (Some(routine), Some(special_kind), Some(flags)) =
+                (n(0), n(1), n(2)) else { return; };
+            if flags & !1023 != 0 { return; }
+            output.routine_attributes.push(RoutineAttributes {
+                routine: SymbolId(routine), special_kind,
+                is_virtual: flags & 1 != 0, pure_virtual: flags & 2 != 0,
+                is_override: flags & 4 != 0, is_final: flags & 8 != 0,
+                overrides_base_member: flags & 16 != 0,
+                is_inline: flags & 32 != 0, is_constexpr: flags & 64 != 0,
+                defined: flags & 128 != 0,
+                explicit_constructor: flags & 256 != 0,
+                has_this_parameter: flags & 512 != 0,
+            });
         }
         21 => {
             let (Some(owner), Some(routine)) = (n(0), n(1)) else { return; };
