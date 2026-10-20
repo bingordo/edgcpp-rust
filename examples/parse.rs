@@ -61,6 +61,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("symbol reference {} -> {} ({})", id.0, symbol.name, symbol.kind);
         }
     }
+    for edge in &graph.symbol_types {
+        let symbol = graph.symbol(edge.symbol).ok_or("missing typed symbol")?;
+        println!("symbol type name={} id={} type={}", symbol.name, edge.symbol.0, edge.ty.0);
+    }
     println!("indexed symbols={}", graph.symbols.len());
     for init in &graph.variable_initializers {
         println!("variable initializer id={} kind={} explicit={} uninitialized={}",
