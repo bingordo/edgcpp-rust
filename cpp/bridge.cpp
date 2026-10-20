@@ -449,11 +449,31 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       }
       emit_type(r->type, 0);
       uint32_t routine_symbol = emit_symbol(r, 1, name);
-      if (scope->kind == sck_class_struct_union &&
-          scope->variant.assoc_type != nullptr &&
+      // EDG's lowered IL may put out-of-line member definitions in a
+      // file/namespace routine list. Their declaration scope, rather than
+      // this traversal scope, identifies the owning class. A nonstatic
+      // method's this_class is an additional fallback after lowering.
+      a_type_ptr owning_class = nullptr;
+      a_scope_ptr declared_in = r->source_corresp.parent_scope;
+      if (r->source_corresp.is_class_member && declared_in != nullptr &&
+          (declared_in->kind == sck_class_struct_union ||
+           declared_in->kind == sck_class_reactivation)) {
+        owning_class = declared_in->variant.assoc_type;
+      }
+      if (owning_class == nullptr && scope->kind == sck_class_struct_union) {
+        owning_class = scope->variant.assoc_type;
+      }
+      if (owning_class == nullptr && r->type != nullptr &&
+          r->type->kind == tk_routine &&
+          r->type->variant.routine.extra_info != nullptr) {
+        owning_class = r->type->variant.routine.extra_info->this_class;
+      }
+      if (owning_class != nullptr &&
           emitted_member_edges.insert(r).second) {
-        uint32_t owner_type = emit_type(scope->variant.assoc_type, 0);
-        emit_record(21, {num(owner_type), num(routine_symbol)});
+        const uint32_t owner_type = emit_type(owning_class, 0);
+        if (owner_type != 0) {
+          emit_record(21, {num(owner_type), num(routine_symbol)});
+        }
       }
       // Out-of-line definitions may be visible through multiple IL scope
       // lists. Export their body and entity only once per routine pointer.
