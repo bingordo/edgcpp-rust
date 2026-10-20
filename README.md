@@ -155,6 +155,54 @@ no source spelling is reconstructed. Records are available only for function
 scopes traversed by the native bridge. As with the rest of the native IL,
 IDs are not stable across compilations.
 
+## Source locations and runtime object lifetimes
+
+When EDG retains a source position, the bridge resolves its compilation
+sequence number through EDG's own source-file mapping, preserving the
+diagnostic filename, logical line (including `#line`), column and original
+sequence number. No source-code tokenization or line-number guessing is
+involved. Synthetic entities and operations without mapped positions simply
+have no source-location record.
+
+- `Graph::symbol_source(symbol_id)` identifies the declaration location for
+  a routine, variable or field.
+- `Graph::statement_source(function, statement_path)` identifies the
+  source position attached to a statement.
+- `Graph::expression_source(function, statement_path, role, expression_path)`
+  identifies an expression position (role 0 is the primary tree; roles 1–4
+  are the supplemental control/initializer trees).
+
+Source positions may identify macro invocation locations rather than macro
+body spelling; the bridge does not yet export macro expansion stacks or
+complete end-of-range source spans. EDG's generated statements often have
+unknown positions.
+
+**Runtime object lifetimes are distinct from lexical scopes.** The bridge
+preserves EDG's lifetime-region hierarchy as `ObjectLifetime` records with
+dense IDs per routine, native kind, and parent ID. `ScopeLifetime` records
+link an EDG lexical scope to its runtime region if both exist. Dynamic
+initialization statements may additionally carry `InitializationLifetime`
+records with an associated lifetime and/or destructor routine.
+`LifetimeDestruction` records preserve the order of cleanup entries in
+the EDG destruction list (the first entry is destroyed first).
+
+```rust
+if let Some(region) = graph.scope_lifetime(routine_id, scope_id) {
+    for cleanup in graph.lifetime_destructions(routine_id, region.id) {
+        println!("destruction position {}", cleanup.position);
+    }
+}
+```
+
+The queries `object_lifetime(routine, id)`,
+`initialization_lifetime(function, statement_path)` and
+`lifetime_destructions(routine, id)` allow passes to reason about object
+cleanup regions without exposing EDG's native pointers. The lifetime
+hierarchy is **not** a computed exact instruction-level live interval:
+constructs eliminated by lowering, objects with no required destruction,
+explicit `new`/`delete`, and independent memory regions may not appear.
+Missing metadata must not be interpreted as proof that no destruction occurs.
+
 ## Declaration sites and initializer execution
 
 EDG's lexical scopes identify which function or block *owns* a variable;
