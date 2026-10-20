@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -27,6 +27,9 @@ pub struct ExpressionNode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateStatement { function: String, path: String },
+    InvalidStatementLabel { function: String, path: String },
+    DuplicateStatementLabel { function: String, path: String },
+    DuplicateLabelDefinition(SymbolId),
     DuplicateStatementAttributes { function: String, path: String },
     InvalidStatementAttributes { function: String, path: String },
     DuplicateControlExpression { function: String, statement: String, role: u32, path: String },
@@ -87,6 +90,7 @@ pub struct Graph {
     pub statements: Vec<StatementNode>,
     pub statement_attributes: Vec<StatementAttributes>,
     pub control_expressions: Vec<ControlExpression>,
+    pub statement_labels: Vec<StatementLabel>,
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
@@ -107,6 +111,8 @@ pub struct Graph {
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    label_definitions: HashMap<SymbolId, StatementId>,
+    statement_label_index: HashMap<StatementId, usize>,
     control_expr_index: HashMap<(String, String, u32, String), usize>,
     control_expr_children: HashMap<(String, String, u32, String), Vec<usize>>,
     constructor_expr_index: HashMap<(SymbolId, u32, String), usize>,
@@ -532,6 +538,33 @@ impl Graph {
                 data: item.clone(), parent: None, children: Vec::new(), expression: None,
             });
         }
+        for label in &il.statement_labels {
+            let key = (label.function.clone(), label.statement_path.clone());
+            let Some(&statement) = smap.get(&key) else {
+                return Err(GraphError::InvalidStatementLabel {
+                    function: label.function.clone(), path: label.statement_path.clone(),
+                });
+            };
+            if !graph.symbols.iter().any(|symbol|
+                symbol.id == label.label && symbol.kind == 4)
+            {
+                return Err(GraphError::InvalidStatementLabel {
+                    function: label.function.clone(), path: label.statement_path.clone(),
+                });
+            }
+            if graph.statement_label_index.insert(statement, graph.statement_labels.len()).is_some() {
+                return Err(GraphError::DuplicateStatementLabel {
+                    function: label.function.clone(), path: label.statement_path.clone(),
+                });
+            }
+            if label.definition &&
+                graph.label_definitions.insert(label.label, statement).is_some()
+            {
+                return Err(GraphError::DuplicateLabelDefinition(label.label));
+            }
+            graph.statement_labels.push(label.clone());
+        }
+
         let mut statement_metadata = std::collections::HashSet::new();
         for attributes in &il.statement_attributes {
             let key = (attributes.function.clone(), attributes.statement_path.clone());
@@ -766,6 +799,22 @@ impl Graph {
         }
         Ok(graph)
     }
+    /// Branch/label record belonging to a statement, if present.
+    pub fn statement_label(&self, statement: StatementId) -> Option<&StatementLabel> {
+        self.statement_label_index.get(&statement).map(|&idx| &self.statement_labels[idx])
+    }
+
+    /// Resolve a label definition included in the current snapshot.
+    pub fn label_target(&self, label: SymbolId) -> Option<StatementId> {
+        self.label_definitions.get(&label).copied()
+    }
+
+    /// Resolve a captured goto statement to its target statement, if captured.
+    pub fn goto_target(&self, statement: StatementId) -> Option<StatementId> {
+        let info = self.statement_label(statement)?;
+        (!info.definition).then(|| self.label_target(info.label)).flatten()
+    }
+
     /// Flags supplied by EDG for a statement in a function.
     pub fn statement_attributes(&self, function: &str, path: &str)
         -> Option<&StatementAttributes> {
@@ -973,6 +1022,37 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resolves_goto_labels_and_rejects_duplicate_definitions() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(4), kind: 4, name: "done".into() });
+        for index in 0..=1 {
+            il.statements.push(Statement {
+                function: "jump".into(), path: index.to_string(),
+                parent: None, kind: if index == 0 { 6 } else { 7 },
+            });
+            il.statement_labels.push(StatementLabel {
+                function: "jump".into(), statement_path: index.to_string(),
+                label: SymbolId(4), definition: index == 1,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.goto_target(StatementId(0)), Some(StatementId(1)));
+        assert_eq!(graph.label_target(SymbolId(4)), Some(StatementId(1)));
+        assert_eq!(graph.goto_target(StatementId(1)), None);
+        il.statement_labels.push(il.statement_labels[1].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateStatementLabel { .. })));
+        il.statement_labels.pop();
+        il.statement_labels[1].statement_path = "0".into();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateStatementLabel { .. })));
+        il.statement_labels[1].statement_path = "1".into();
+        il.symbols[0].kind = 1;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidStatementLabel { .. })));
+    }
+
     #[test]
     fn validates_statement_flags_and_auxiliary_control_expressions() {
         let mut il = Il::default();
