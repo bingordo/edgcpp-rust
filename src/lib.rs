@@ -1302,6 +1302,24 @@ mod tests {
     }
 
     #[test]
+    fn decodes_authoritative_routine_identity_records() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let fields = [number(5), string(b"ns::overloaded")];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 42, fields.as_ptr(), fields.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.routine_identities,
+            vec![RoutineIdentity { routine: SymbolId(5), function: "ns::overloaded".into() }]);
+    }
+
+    #[test]
     fn decodes_source_positions_and_lifetime_records() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
