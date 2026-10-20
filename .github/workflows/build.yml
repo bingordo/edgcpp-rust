@@ -99,6 +99,8 @@ jobs:
             grep -F 'routine outer::overloaded(int), defined=true' il_result.txt
             grep -F 'routine outer::overloaded(long), defined=true' il_result.txt
             grep -F 'indexed symbols=' il_result.txt
+            grep -E 'symbol type name=outer::count id=[0-9]+ type=[0-9]+' il_result.txt
+            grep -E 'symbol type name=.*Derived::method id=[0-9]+ type=[0-9]+' il_result.txt
             grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
             grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
             grep -E 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
