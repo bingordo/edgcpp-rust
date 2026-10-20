@@ -114,11 +114,12 @@ int shadow(int input, int offset) {
 }
 struct Receiver {
     int member;
-    int read(int multiplier) const {
-        int local = member * multiplier;
-        return local;
-    }
+    int read(int multiplier) const;
 };
+int Receiver::read(int multiplier) const {
+    int local = member * multiplier;
+    return local;
+}
 int use_receiver() {
     Receiver receiver{4};
     return receiver.read(3);
