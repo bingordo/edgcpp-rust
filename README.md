@@ -294,8 +294,10 @@ for scope in graph.local_scopes(routine_id) {
 `Graph::local_scope(routine, id)` and `Graph::local_variable_scope(symbol)`
 provide parent/declaration lookups. As with other snapshots, EDG may have
 lowered away some source declarations and generated temporary variables.
-Scopes without an associated statement are retained, and this API does
-not yet reconstruct lifetime intervals or source locations.
+Scopes without an associated statement are retained. Lexical scopes alone
+do not define exact instruction-level live intervals. Source locations and
+runtime object-lifetime regions are available through the separate source
+and lifetime graph APIs described above.
 
 **Hoisted static locals:** EDG can allocate function-local static and
 thread-storage variables in the file-scope memory region. Their
@@ -353,15 +355,17 @@ control expressions elsewhere.
 `Compilation::il.statements` now contains a bounded snapshot of function-body
 statements. Each record has a qualified function name, an EDG statement-kind
 discriminant, a stable statement path, and an optional parent path. The bridge
-recurses into blocks, if/else branches, while loops, and for-loop bodies.
+recurses into blocks, if/else branches, while, for and range-for loops,
+switch bodies, constexpr-if and try/catch handlers.
 Unknown statement kinds are retained as opaque records.
 
 `Compilation::il.expressions` snapshots the primary expression on a statement,
 including ordered operands of EDG operation nodes. Records retain function,
 statement path, expression path, parent expression path, EDG expression kind,
-operator kind when applicable, the basic result type kind, and optional\nvariable/routine/field references. Other expression
-kinds remain opaque. Full type graphs, some non-operation expression children,
-and CFG edges are not yet represented. No EDG pointers escape the callback.
+operator kind when applicable, the basic result type kind, and optional
+variable/routine/field references. Other expression
+kinds remain opaque. Some semantic type relationships and non-operation expression children remain
+partial, and CFG edges are not yet represented. No EDG pointers escape the callback.
 
 ## Indexed IL graph
 
@@ -398,21 +402,30 @@ bridge and archive from the **same commit and configuration**.
 - The callable EDG library is not thread-safe; `compile()` serializes calls
   within this process.
 - EDG manages its own diagnostics and source-file options.
-- The declaration snapshot recurses into named namespaces, but not class members;
-  function bodies have a partial statement/expression snapshot.
+- The declaration snapshot includes namespaces and supported class member
+  routines, including out-of-line definitions; access control, overload
+  grouping, and portions of function-body IL remain incomplete.
 - The custom back-end symbol relies on static archive resolution; link tests
   against the exact archive version are necessary.
 - Exceptions do not cross the C ABI.
 
 License: Apache-2.0 WITH LLVM-exception, as in upstream EDG.
-\n## Type layout and constants\n\nExpressions expose optional EDG target type size/alignment (bytes) and the\nconstant representation kind for constant expressions. Layout is absent\nfor incomplete or zero-sized types. Constant values and semantic type graph\nedges are not yet serialized; consumers must not confuse kind tags with values.\n\nSigned integer constants representable as i64 are copied as `Expression::constant_integer`; out-of-range integer values are left absent. This is not yet a general arbitrary-precision constant representation.\n
-## Direct type relationships (prototype)
 
-Expression records now include `related_type_role` and `related_type_kind`
-for pointer pointee (1), array element (2), or function return (3) types.
-These are **one-hop kind summaries**, not identity-preserving type graph edges;
-the actual referenced type nodes, parameters, qualifiers and typedef chains
-will require a separate owned type table.
+## Type layout and constants
+
+Expressions expose optional EDG target type size/alignment (bytes) and the
+constant representation kind for constant expressions. Layout is absent
+for incomplete or zero-sized types. Constant values and semantic type graph
+edges are not yet serialized; consumers must not confuse kind tags with values.
+
+Signed integer constants representable as i64 are copied as `Expression::constant_integer`; out-of-range integer values are left absent. This is not yet a general arbitrary-precision constant representation.
+
+## Direct type relationships
+
+Expression records include optional one-hop kind summaries for pointees,
+array elements and function return types. These summaries are accompanied
+by identity-preserving `TypeId` references in the owned `Il::types` table.
+Use the type table for traversal instead of treating kind values as identities.
 
 ## Identity-preserving type snapshots
 
@@ -421,19 +434,28 @@ addresses are mapped to per-compilation numeric IDs; the callback exports
 only those IDs. Pointer, array and routine types link to pointee, element,
 and return types respectively, allowing recursive type graphs to be represented.
 Each expression carries an optional `type_id` referring into the same table.
-Type parameters, typedef chains, cv qualifiers and record members are not yet
-modeled. IDs are valid only within the containing compilation.
+Routine parameter types, typeref/typedef chains, record members and native
+qualifier masks are exported where EDG exposes them. Full semantic C++
+qualification and template parameter instantiation are still incomplete.
+IDs are valid only within the containing compilation.
 
-The indexed `Graph::from_il()` validates unique, nonzero type IDs, checks that direct type edges resolve, and rejects expressions referring to missing types. `Graph::type_def(TypeId)` resolves an owned type node. Cycles are permitted (recursive types).\n
+The indexed `Graph::from_il()` validates unique, nonzero type IDs, checks that direct type edges resolve, and rejects expressions referring to missing types. `Graph::type_def(TypeId)` resolves an owned type node. Cycles are permitted (recursive types).
+
 ## Function parameter edges
 
 Function types now export their parameter types in declaration order as
 `TypeParameter { owner, position, ty }` records. The indexed graph validates
 both referenced type IDs and rejects duplicate parameter positions. Query
-`Graph::parameters(TypeId)` for ordered parameter edges. Array dimensions and
-full qualifiers are not yet represented.
+`Graph::parameters(TypeId)` for ordered parameter edges. Fixed array bounds
+and native qualifier masks are exported, but dependent/VLA dimensions and
+fully interpreted C++ qualifiers are not yet represented.
 
-Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.\n\nRecord fields include byte offsets, bit offsets within the byte, and bit-field widths from the target EDG layout. Zero bit width denotes an ordinary field in this snapshot.\n\nTyperef types now have an underlying type edge (relation role 4). The bridge also exports EDG pointer reference/rvalue-reference flags and the raw qualifier mask for typeref nodes as `TypeDetail`. The qualifier mask is the native EDG encoding, not a portable `const`/`volatile` abstraction.\n
+Fixed-size array types now export element counts as `ArrayBound` records. Bounds for variable-length, template-dependent, and incomplete arrays remain absent. `Graph::array_bound(TypeId)` resolves a known fixed bound.
+
+Record fields include byte offsets, bit offsets within the byte, and bit-field widths from the target EDG layout. Zero bit width denotes an ordinary field in this snapshot.
+
+Typeref types now have an underlying type edge (relation role 4). The bridge also exports EDG pointer reference/rvalue-reference flags and the raw qualifier mask for typeref nodes as `TypeDetail`. The qualifier mask is the native EDG encoding, not a portable `const`/`volatile` abstraction.
+
 Function routine types additionally export prototype and ellipsis flags in `FunctionSignature`. The graph validates unique signature records and exposes `signature(TypeId)`. The C++ fixture includes a variadic declaration for integration coverage.
 
 ## Symbol identities (prototype)
@@ -459,13 +481,20 @@ The C and Rust structures have matching field order and native C layout.
 The pointer and length are valid **only during the synchronous callback**.
 No EDG pointers are stored in the returned `Il` or `Graph`.
 
-The wire contract currently includes 13 event kinds and supports arbitrary
+The wire contract includes typed events for symbols, types, statements,
+source locations, lifetimes and cleanup records. It supports arbitrary
 UTF-8 in string fields, including tabs and embedded NUL bytes. This
 protocol is private to the in-process bridge and is not a stable file
 format or public extension ABI.
 
-Variable declarations now preserve EDG's native `init_kind`, explicit-initializer flag and uninitialized flag, attached to the declaration's `SymbolId`. This is initial classification metadata, not yet a full initializer expression or aggregate value tree.
-\nDynamic variable initializers now also report their native EDG `dik_*` category, and where applicable the root expression kind and operator. This is not yet a copied full expression tree.\n
+Variable declarations preserve EDG's native `init_kind`, explicit-initializer
+and uninitialized flags, attached to their `SymbolId`. These flags classify
+the declaration and should not be mistaken for a complete initializer tree.
+
+Dynamic variable initializers report their native EDG `dik_*` category and,
+when supported, a copied scalar expression tree. Constructor and aggregate
+initializer variants may still be represented only partially.
+
 Dynamic scalar expression initializers now also export operation operand trees
 through typed event 17, retaining path/parent, EDG expression kind, operator,
 type ID and referenced symbol ID. The graph checks ancestry and dangling
