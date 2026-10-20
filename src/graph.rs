@@ -1455,7 +1455,7 @@ impl Graph {
         mut visit: impl FnMut(StatementId, ExpressionId, &ExpressionNode) -> bool,
     ) {
         let mut continuing = true;
-        self.walk_statements(function, |statement_id, statement| {
+        self.walk_statements(function, |_, statement| {
             if let Some(root) = statement.expression {
                 self.walk_expression(root, |expression_id, node| {
                     continuing = visit(statement_id, expression_id, node);
@@ -1498,7 +1498,6 @@ impl Graph {
                     true
                 });
             }
-            let _ = statement_id;
             let controls = self.control_expr_by_statement
                 .get(&(function.to_owned(), statement.data.path.clone()));
             for &index in controls.into_iter().flatten() {
@@ -1730,6 +1729,35 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn constructor_symbol_references_are_ordered_and_unique() {
+        let mut il = Il::default();
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "ctor".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "a".into() },
+            Symbol { id: SymbolId(3), kind: 2, name: "b".into() },
+        ]);
+        // Expression order in the raw IL need not match initializer order.
+        for (position, path, parent, symbol) in [
+            (1, "0", None, Some(SymbolId(2))),
+            (0, "0", None, Some(SymbolId(3))),
+            (0, "0.0", Some("0"), Some(SymbolId(2))),
+        ] {
+            il.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+                routine: SymbolId(1), position, path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+                operator: None, type_id: None, symbol_id: symbol,
+            });
+        }
+        // Constructor expression validation also requires initializer records;
+        // this test exercises the query on an owned graph without inventing
+        // unrelated EDG initializer metadata.
+        let mut graph = Graph::default();
+        graph.constructor_initializer_expressions = il.constructor_initializer_expressions;
+        assert_eq!(graph.constructor_referenced_symbols(SymbolId(1)),
+            vec![SymbolId(3), SymbolId(2)]);
+    }
+
     #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
