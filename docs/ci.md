@@ -23,7 +23,9 @@ https://github.com/bingundu/edgcpp/blob/ci/x86_64-callable-release/.github/workf
 CI checks out the **exact source commit** matching that archive because
 `cpp/bridge.cpp` includes internal EDG IL headers. It performs a **CMake
 configure only**, which generates `compile_commands.json` and the runtime
-environment, and uses the upstream library binary for all links. The archive
+environment, and generates EDG's error-message headers with the small `error-info` target
+(`mk_errinfo`), **without building the EDG front end**. All links use the
+upstream library binary. The archive
 metadata is checked against the pinned EDG source SHA before testing.
 
 ### Updating EDG
