@@ -43,3 +43,51 @@ int exercise() {
     return d.virtual_method() + d.method() + Derived::static_method() + probe.field;
 }
 }
+
+// Broad structured control-flow coverage for the owned EDG statement graph.
+// The matching EDG build may lower individual constructs; native tests require
+// the traversal to remain valid and preserve representable control expressions.
+namespace control_flow_verification {
+int branching(int count) {
+    int sum = 0;
+    for (int i = 0; i < count; ++i) {
+        if (i == 3) continue;
+        switch (i % 3) {
+            case 0: sum += i; break;
+            case 1: sum -= i; [[fallthrough]];
+            default: sum += 2;
+        }
+    }
+    do {
+        --sum;
+    } while (sum > 100);
+    if constexpr (sizeof(int) >= 2) {
+        sum += 1;
+    } else {
+        sum = 0;
+    }
+    goto finish;
+finish:
+    return sum;
+}
+
+int ranged() {
+    int values[] = { 1, 2, 3 };
+    int result = 0;
+    for (int item : values) {
+        result += item;
+    }
+    return result;
+}
+
+int exception_handling(int x) {
+    try {
+        if (x < 0) throw x;
+        return x * 2;
+    } catch (int error) {
+        return -error;
+    } catch (...) {
+        return 0;
+    }
+}
+}
