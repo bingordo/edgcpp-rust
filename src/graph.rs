@@ -3695,7 +3695,7 @@ mod tests {
         }
         assert_eq!(index.dependents(TypeId(99)),
             graph.direct_type_dependents(TypeId(99)));
-        assert_eq!(index.dependencies(TypeId(99)), []);
+        assert!(index.dependencies(TypeId(99)).is_empty());
         assert_eq!(index.affected_types(&[TypeId(7)]),
             graph.affected_types(&[TypeId(7)]));
         assert_eq!(index.affected_symbols(&[TypeId(7)]),
