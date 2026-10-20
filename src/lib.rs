@@ -971,6 +971,50 @@ mod tests {
     }
 
     #[test]
+    fn decodes_statement_flags_loop_operands_and_label_edges() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let absent = WireField {
+            data: std::ptr::null(), length: 0, value: 0, tag: 0,
+        };
+        let mut state = Collector {
+            il: Il::default(), panicked: false, malformed: false,
+        };
+        let attrs = [string(b"f"), string(b"0"), number(1 | 8 | 32)];
+        let control = [
+            string(b"f"), string(b"0"), number(1), string(b"0"), absent,
+            number(1), number(5), number(4), absent,
+        ];
+        let label = [string(b"f"), string(b"1"), number(17), number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 26, attrs.as_ptr(), attrs.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 27, control.as_ptr(), control.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 28, label.as_ptr(), label.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statement_attributes.len(), 1);
+        assert!(state.il.statement_attributes[0].likely);
+        assert!(state.il.statement_attributes[0].lowering_generated);
+        assert_eq!(state.il.control_expressions[0].role, 1);
+        assert_eq!(state.il.control_expressions[0].type_id, Some(TypeId(4)));
+        assert_eq!(state.il.statement_labels[0].label, SymbolId(17));
+        assert!(state.il.statement_labels[0].definition);
+        let invalid_control = [
+            string(b"f"), string(b"0"), number(9), string(b"0"), absent,
+            number(1), absent, absent, absent,
+        ];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 27,
+                    invalid_control.as_ptr(), invalid_control.len(), 0);
+        }
+        assert!(state.malformed);
+    }
+
+    #[test]
     fn invalid_utf8_callback_is_reported() {
         let bad = [0xff_u8];
         let fields = [WireField { data: bad.as_ptr(), length: 1, value: 0, tag: 1 }];
