@@ -1054,6 +1054,9 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             }
 
           }
+          // Function memory regions may be recycled by EDG. Do not carry
+          // raw scope-pointer-to-statement links across function bodies.
+          scope_statement_paths.clear();
           if (body->assoc_block != nullptr) {
             scope_statement_paths.emplace(body, "0");
           }
