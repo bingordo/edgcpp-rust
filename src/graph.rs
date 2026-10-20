@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, MemberFunction, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -44,6 +44,8 @@ pub enum GraphError {
     InvalidBaseClassPosition(TypeId),
     CyclicInheritance(TypeId),
     InvalidConstructorInitializer { routine: SymbolId, position: u32 },
+    InvalidMemberFunction { owner: TypeId, routine: SymbolId },
+    DuplicateMemberFunction(SymbolId),
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
@@ -74,6 +76,7 @@ pub struct Graph {
     pub record_fields: Vec<RecordField>,
     pub base_classes: Vec<BaseClass>,
     pub constructor_initializers: Vec<ConstructorInitializer>,
+    pub member_functions: Vec<MemberFunction>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -148,6 +151,19 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
+        let mut member_owners = std::collections::HashSet::new();
+        for member in &il.member_functions {
+            if !type_map.contains_key(&member.owner) ||
+                !graph.symbols.iter().any(|s| s.id == member.routine && s.kind == 1) {
+                return Err(GraphError::InvalidMemberFunction {
+                    owner: member.owner, routine: member.routine,
+                });
+            }
+            if !member_owners.insert(member.routine) {
+                return Err(GraphError::DuplicateMemberFunction(member.routine));
+            }
+            graph.member_functions.push(member.clone());
+        }
         // Constructor initializers refer to routine symbols, field symbols,
         // or record types. Check the complete snapshot before indexing them.
         let mut ctor_positions = std::collections::HashSet::new();
@@ -622,6 +638,17 @@ impl Graph {
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
     }
+    /// Declared member routines belonging to this class.
+    pub fn member_functions(&self, owner: TypeId)
+        -> impl Iterator<Item = &MemberFunction> {
+        self.member_functions.iter().filter(move |m| m.owner == owner)
+    }
+
+    /// Owning class of a member routine, if any.
+    pub fn member_function_owner(&self, routine: SymbolId) -> Option<TypeId> {
+        self.member_functions.iter().find(|m| m.routine == routine).map(|m| m.owner)
+    }
+
     /// Subobject initialization/destruction entries in EDG execution order.
     pub fn constructor_initializers(&self, routine: SymbolId)
         -> impl Iterator<Item = &ConstructorInitializer> {
@@ -658,6 +685,26 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validates_member_function_ownership() {
+        let mut il = Il::default();
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1, name: "C::f".into(),
+        });
+        il.member_functions.push(MemberFunction {
+            owner: TypeId(1), routine: SymbolId(1),
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.member_function_owner(SymbolId(1)), Some(TypeId(1)));
+        assert_eq!(graph.member_functions(TypeId(1)).count(), 1);
+        il.member_functions.push(il.member_functions[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::DuplicateMemberFunction(SymbolId(1)));
+    }
+
     #[test]
     fn validates_constructor_initializer_targets_and_order() {
         let mut il = Il::default();
