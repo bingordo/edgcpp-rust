@@ -1848,6 +1848,53 @@ mod tests {
     }
 
     #[test]
+    fn initializer_visitor_orders_numeric_paths_and_stops() {
+        let mut graph = Graph::default();
+        for path in ["0.10", "0", "0.2", "0.1"] {
+            graph.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(1), path: path.into(), parent: None,
+                kind: 1, operator: None, type_id: None, symbol_id: None,
+            });
+        }
+        let mut paths = Vec::new();
+        graph.walk_initializer_expressions(SymbolId(1), |expr| {
+            paths.push(expr.path.clone());
+            paths.len() < 3
+        });
+        assert_eq!(paths, ["0", "0.1", "0.2"]);
+        let mut missing = 0;
+        graph.walk_initializer_expressions(SymbolId(2), |_| {
+            missing += 1;
+            true
+        });
+        assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn constructor_visitor_orders_positions_and_stops() {
+        let mut graph = Graph::default();
+        for (position, path) in [(1, "0"), (0, "0.10"), (0, "0"), (0, "0.2")] {
+            graph.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+                routine: SymbolId(1), position, path: path.into(),
+                parent: None, kind: 1, operator: None, type_id: None,
+                symbol_id: None,
+            });
+        }
+        let mut paths = Vec::new();
+        graph.walk_constructor_expressions(SymbolId(1), |expr| {
+            paths.push((expr.position, expr.path.clone()));
+            paths.len() < 3
+        });
+        assert_eq!(paths, [(0, "0".into()), (0, "0.2".into()), (0, "0.10".into())]);
+        let mut missing = 0;
+        graph.walk_constructor_expressions(SymbolId(2), |_| {
+            missing += 1;
+            true
+        });
+        assert_eq!(missing, 0);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
