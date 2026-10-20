@@ -83,6 +83,25 @@ for edge in graph.bases(derived_type_id) {
 Only direct inheritance edges are exported. Access control, transitive
 inheritance and base-subobject layout are not yet exposed.
 
+## Class member functions
+
+The bridge traverses EDG class/struct/union scopes, including nested
+classes, rather than only file and namespace scopes. Member routines are
+included in the routine snapshot and connected to their declaring class
+through `Compilation::il.member_functions`. In the graph:
+
+```rust
+for member in graph.member_functions(class_type_id) {
+    let routine = graph.symbol(member.routine);
+    println!("{routine:?}");
+}
+let owner = graph.member_function_owner(routine_symbol_id);
+```
+
+Member-function ownership includes static and nonstatic member routines.
+Access control, virtual dispatch properties, special-member classification,
+and overload grouping are not yet exported.
+
 ## Constructor and destructor subobject initialization
 
 For defined C++ constructors and destructors, the native bridge reads EDG's
