@@ -40,6 +40,8 @@ jobs:
       # The versioned GitHub Release is built from exactly this EDG source.
       EDG_SOURCE_SHA: 799603e0b5ab272d9418e2d44a53a95bc73dfdc4
       EDG_RELEASE_TAG: edgcpfe-ci-799603e0b5ab
+      # SHA-256 of the GitHub Release asset, independent of BUILD-INFO.txt.
+      EDG_RELEASE_SHA256: fa769825e70766fbefe017806816b2338acd03daa93bb5562369c293972ce64c
       # CI needs failures and diagnostics but not bulky debug symbols.
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -104,6 +106,7 @@ jobs:
           curl --fail --location --silent --show-error \
             --retry 4 --retry-delay 2 \
             "$url" --output build/prebuilt-edg/archive.tar.gz
+          printf '%s  %s\n' "$EDG_RELEASE_SHA256" build/prebuilt-edg/archive.tar.gz | sha256sum --check --status
           tar -xzf build/prebuilt-edg/archive.tar.gz -C build/prebuilt-edg
           grep -Fx "commit=$EDG_SOURCE_SHA" build/prebuilt-edg/BUILD-INFO.txt
           grep -Fx 'platform=linux-x86_64' build/prebuilt-edg/BUILD-INFO.txt
@@ -134,72 +137,73 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
+            # The full IL dump is needed only for a failing assertion.
+            trap 'rc=$?; echo "IL fixture validation failed (status=$rc)"; if test -f il_result.txt; then tail -n 100 il_result.txt; fi; exit "$rc"' ERR
             ../../../edgcpp-rust/target/debug/examples/parse --c++20 il_fixture.cpp > il_result.txt
-            cat il_result.txt
-            grep -F 'namespace outer' il_result.txt
-            grep -F 'variable outer::count' il_result.txt
-            grep -F 'routine outer::calculate, defined=true' il_result.txt
-            grep -F 'routine control_flow_verification::branching, defined=true' il_result.txt
-            grep -F 'routine control_flow_verification::ranged, defined=true' il_result.txt
-            grep -F 'routine control_flow_verification::exception_handling, defined=true' il_result.txt
-            grep -F 'statement control_flow_verification::branching path=' il_result.txt
-            grep -F 'statement attributes control_flow_verification::branching path=' il_result.txt
-            grep -E 'control expression control_flow_verification::branching statement=.*role=1 path=0 ' il_result.txt
-            grep -F 'variable outer::inner::nested' il_result.txt
-            grep -F 'statement outer::calculate path=' il_result.txt
-            grep -F 'expression outer::calculate statement=' il_result.txt
-            grep -F 'integer constant outer::calculate = 0' il_result.txt
-            grep -F 'type id=' il_result.txt
-            grep -F 'record field member offset=0 bit=0 width=0' il_result.txt
-            grep -E 'record field flags offset=[0-9]+ bit=[0-9]+ width=3' il_result.txt
-            grep -F 'reference=true rvalue=false' il_result.txt
-            grep -F 'reference=true rvalue=true' il_result.txt
-            grep -E 'function signature id=[0-9]+ prototyped=true variadic=true' il_result.txt
+              grep -qF 'namespace outer' il_result.txt
+            grep -qF 'variable outer::count' il_result.txt
+            grep -qF 'routine outer::calculate, defined=true' il_result.txt
+            grep -qF 'routine control_flow_verification::branching, defined=true' il_result.txt
+            grep -qF 'routine control_flow_verification::ranged, defined=true' il_result.txt
+            grep -qF 'routine control_flow_verification::exception_handling, defined=true' il_result.txt
+            grep -qF 'statement control_flow_verification::branching path=' il_result.txt
+            grep -qF 'statement attributes control_flow_verification::branching path=' il_result.txt
+            grep -qE 'control expression control_flow_verification::branching statement=.*role=1 path=0 ' il_result.txt
+            grep -qF 'variable outer::inner::nested' il_result.txt
+            grep -qF 'statement outer::calculate path=' il_result.txt
+            grep -qF 'expression outer::calculate statement=' il_result.txt
+            grep -qF 'integer constant outer::calculate = 0' il_result.txt
+            grep -qF 'type id=' il_result.txt
+            grep -qF 'record field member offset=0 bit=0 width=0' il_result.txt
+            grep -qE 'record field flags offset=[0-9]+ bit=[0-9]+ width=3' il_result.txt
+            grep -qF 'reference=true rvalue=false' il_result.txt
+            grep -qF 'reference=true rvalue=true' il_result.txt
+            grep -qE 'function signature id=[0-9]+ prototyped=true variadic=true' il_result.txt
             # Declaration and initializer positions are distinct in lowered EDG.
-            grep -E 'statement declaration declaration_site_verification::mixed path=.* position=0 name=declaration_site_verification::first symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
-            grep -E 'statement declaration declaration_site_verification::mixed path=.* position=1 name=declaration_site_verification::second symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
-            grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::first"\).*role=0 ' il_result.txt
-            grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::second"\).*role=0 ' il_result.txt
-            grep -E 'control expression declaration_site_verification::mixed statement=.* role=4 path=0 parent=None ' il_result.txt
-            grep -E 'routine identity id=[0-9]+ function=declaration_site_verification::mixed' il_result.txt
-            grep -E 'object lifetime routine=declaration_site_verification::mixed id=0 parent=None kind=[0-9]+' il_result.txt
-            grep -E 'scope lifetime routine=declaration_site_verification::mixed scope=0 lifetime=0' il_result.txt
-            grep -E 'lifetime destruction routine=declaration_site_verification::mixed lifetime=[0-9]+ position=0 variable=Some\(SymbolId\([0-9]+\)\) destructor=Some\(SymbolId\([0-9]+\)\)' il_result.txt
-            grep -E 'statement source declaration_site_verification::mixed path=.*file=.*il_fixture.cpp line=[0-9]+ column=[0-9]+' il_result.txt
-            grep -E 'symbol source id=[0-9]+ name=declaration_site_verification::(first|second).*file=.*il_fixture.cpp line=[0-9]+' il_result.txt
-            grep -F 'routine outer::big_unsigned, defined=true' il_result.txt
-            grep -F 'routine outer::overloaded(int), defined=true' il_result.txt
-            grep -F 'routine outer::overloaded(long), defined=true' il_result.txt
-            grep -F 'indexed symbols=' il_result.txt
-            grep -E 'symbol type name=outer::count id=[0-9]+ type=[0-9]+' il_result.txt
-            grep -E 'symbol type name=.*Derived::method id=[0-9]+ type=[0-9]+' il_result.txt
-            grep -E 'function parameter routine=scope_verification::shadow.*position=Some\(0\).*type=[0-9]+ this=false' il_result.txt
-            grep -E 'function parameter routine=scope_verification::shadow.*position=Some\(1\).*type=[0-9]+ this=false' il_result.txt
-            grep -E 'function parameter routine=.*Receiver::read.*this=true' il_result.txt
-            grep -E 'local scope routine=scope_verification::shadow id=0 parent=None' il_result.txt
-            grep -E 'local variable routine=scope_verification::shadow scope=[0-9]+ name=.*value.*type=[0-9]+' il_result.txt
-            grep -E 'static local owner routine=scope_verification::shadow name=.*calls symbol=[0-9]+' il_result.txt
-            grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
-            grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
-            grep -E 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
-            grep -E 'base access derived=[0-9]+ position=1 access=Some\([0-9]+\) pack=false' il_result.txt
-            grep -E 'member function owner=[0-9]+ name=.*Derived::method' il_result.txt
-            grep -E 'member function owner=[0-9]+ name=.*Derived::static_method' il_result.txt
-            grep -E 'routine attributes name=.*Derived::virtual_method.*virtual=true override=true' il_result.txt
+            grep -qE 'statement declaration declaration_site_verification::mixed path=.* position=0 name=declaration_site_verification::first symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
+            grep -qE 'statement declaration declaration_site_verification::mixed path=.* position=1 name=declaration_site_verification::second symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
+            grep -qE 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::first"\).*role=0 ' il_result.txt
+            grep -qE 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::second"\).*role=0 ' il_result.txt
+            grep -qE 'control expression declaration_site_verification::mixed statement=.* role=4 path=0 parent=None ' il_result.txt
+            grep -qE 'routine identity id=[0-9]+ function=declaration_site_verification::mixed' il_result.txt
+            grep -qE 'object lifetime routine=declaration_site_verification::mixed id=0 parent=None kind=[0-9]+' il_result.txt
+            grep -qE 'scope lifetime routine=declaration_site_verification::mixed scope=0 lifetime=0' il_result.txt
+            grep -qE 'lifetime destruction routine=declaration_site_verification::mixed lifetime=[0-9]+ position=0 variable=Some\(SymbolId\([0-9]+\)\) destructor=Some\(SymbolId\([0-9]+\)\)' il_result.txt
+            grep -qE 'statement source declaration_site_verification::mixed path=.*file=.*il_fixture.cpp line=[0-9]+ column=[0-9]+' il_result.txt
+            grep -qE 'symbol source id=[0-9]+ name=declaration_site_verification::(first|second).*file=.*il_fixture.cpp line=[0-9]+' il_result.txt
+            grep -qF 'routine outer::big_unsigned, defined=true' il_result.txt
+            grep -qF 'routine outer::overloaded(int), defined=true' il_result.txt
+            grep -qF 'routine outer::overloaded(long), defined=true' il_result.txt
+            grep -qF 'indexed symbols=' il_result.txt
+            grep -qE 'symbol type name=outer::count id=[0-9]+ type=[0-9]+' il_result.txt
+            grep -qE 'symbol type name=.*Derived::method id=[0-9]+ type=[0-9]+' il_result.txt
+            grep -qE 'function parameter routine=scope_verification::shadow.*position=Some\(0\).*type=[0-9]+ this=false' il_result.txt
+            grep -qE 'function parameter routine=scope_verification::shadow.*position=Some\(1\).*type=[0-9]+ this=false' il_result.txt
+            grep -qE 'function parameter routine=.*Receiver::read.*this=true' il_result.txt
+            grep -qE 'local scope routine=scope_verification::shadow id=0 parent=None' il_result.txt
+            grep -qE 'local variable routine=scope_verification::shadow scope=[0-9]+ name=.*value.*type=[0-9]+' il_result.txt
+            grep -qE 'static local owner routine=scope_verification::shadow name=.*calls symbol=[0-9]+' il_result.txt
+            grep -qE 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
+            grep -qE 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
+            grep -qE 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
+            grep -qE 'base access derived=[0-9]+ position=1 access=Some\([0-9]+\) pack=false' il_result.txt
+            grep -qE 'member function owner=[0-9]+ name=.*Derived::method' il_result.txt
+            grep -qE 'member function owner=[0-9]+ name=.*Derived::static_method' il_result.txt
+            grep -qE 'routine attributes name=.*Derived::virtual_method.*virtual=true override=true' il_result.txt
             # This EDG lowering configuration emits scalar member initializers
             # in the constructor body, not in constructor_inits. Validate the
             # resulting expression rather than requiring an optional event 23.
-            grep -F 'expression cpp_bridge_verification::InitializerExpressionProbe::InitializerExpressionProbe(int) statement=' il_result.txt
-            grep -E 'constructor initializer routine=.*Derived::Derived.*position=[0-9]+ kind=[0-3]' il_result.txt
-            grep -F 'variable outer::constant_answer' il_result.txt
-            grep -E 'initializer integer symbol=[0-9]+ value=42' il_result.txt
-            grep -F 'variable outer::initialized_from_count' il_result.txt
-            grep -E 'routine __sti_.*defined=true' il_result.txt
-            grep -E 'reference __sti_.* -> outer::initialized_from_count' il_result.txt
-            grep -F 'symbol reference ' il_result.txt
-            grep -F 'statement outer::overloaded(int) path=' il_result.txt
-            grep -F 'statement outer::overloaded(long) path=' il_result.txt
-            if grep -F 'integer constant outer::big_unsigned' il_result.txt; then
+            grep -qF 'expression cpp_bridge_verification::InitializerExpressionProbe::InitializerExpressionProbe(int) statement=' il_result.txt
+            grep -qE 'constructor initializer routine=.*Derived::Derived.*position=[0-9]+ kind=[0-3]' il_result.txt
+            grep -qF 'variable outer::constant_answer' il_result.txt
+            grep -qE 'initializer integer symbol=[0-9]+ value=42' il_result.txt
+            grep -qF 'variable outer::initialized_from_count' il_result.txt
+            grep -qE 'routine __sti_.*defined=true' il_result.txt
+            grep -qE 'reference __sti_.* -> outer::initialized_from_count' il_result.txt
+            grep -qF 'symbol reference ' il_result.txt
+            grep -qF 'statement outer::overloaded(int) path=' il_result.txt
+            grep -qF 'statement outer::overloaded(long) path=' il_result.txt
+            if grep -qF 'integer constant outer::big_unsigned' il_result.txt; then
               echo 'Unsigned constant was incorrectly converted to signed i64' >&2
               exit 1
             fi
