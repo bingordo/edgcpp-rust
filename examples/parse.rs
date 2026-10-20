@@ -151,6 +151,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  routine.name, local.scope, symbol.name, local.symbol.0, local.ty.0,
                  local.static_storage, local.compiler_generated);
     }
+    for identity in &graph.routine_identities {
+        println!("routine identity id={} function={}", identity.routine.0, identity.function);
+    }
     for edge in &graph.symbol_types {
         let symbol = graph.symbol(edge.symbol).ok_or("missing typed symbol")?;
         println!("symbol type name={} id={} type={}", symbol.name, edge.symbol.0, edge.ty.0);
