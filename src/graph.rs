@@ -1403,6 +1403,64 @@ mod tests {
     }
 
     #[test]
+    fn declaration_sites_and_initializer_execution_are_distinct() {
+        let mut il = Il::default();
+        for path in ["0", "1"] {
+            il.statements.push(Statement {
+                function: "f".into(), path: path.into(), parent: None, kind: 1,
+            });
+        }
+        for id in 1..=2 {
+            il.symbols.push(Symbol {
+                id: SymbolId(id), kind: 2, name: format!("var{id}"),
+            });
+        }
+        il.types.push(TypeDef {
+            id: TypeId(7), kind: 2, related_role: None, related: None,
+        });
+        for (position, symbol) in [(1, SymbolId(2)), (0, SymbolId(1))] {
+            il.statement_declarations.push(StatementDeclaration {
+                function: "f".into(), statement_path: "0".into(),
+                position, symbol, ty: TypeId(7), is_vla: false,
+            });
+        }
+        il.statement_initializations.push(StatementInitialization {
+            function: "f".into(), statement_path: "1".into(),
+            symbol: Some(SymbolId(1)), kind: 1,
+            follows_execution: true, braced: false, role: 0,
+        });
+        il.control_expressions.push(ControlExpression {
+            function: "f".into(), statement_path: "1".into(), role: 4,
+            path: "0".into(), parent: None, kind: 1, operator: None,
+            type_id: Some(TypeId(7)), symbol_id: None,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.declarations_at("f", "0").map(|d| d.symbol)
+            .collect::<Vec<_>>(), vec![SymbolId(1), SymbolId(2)]);
+        assert_eq!(graph.declaration_sites(SymbolId(1)).count(), 1);
+        assert_eq!(graph.variable_initialization_sites(SymbolId(1)).count(), 1);
+        assert!(graph.statement_initialization("f", "1").unwrap().follows_execution);
+        assert_eq!(graph.statement_initializer_expression("f", "1").unwrap().path, "0");
+        assert!(graph.statement_initializer_expression("f", "0").is_none());
+
+        il.statement_declarations[0].position = 2;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidStatementDeclarationPosition { .. })));
+        il.statement_declarations[0].position = 1;
+        il.statement_declarations.push(il.statement_declarations[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateStatementDeclaration { .. })));
+        il.statement_declarations.pop();
+        il.statement_initializations.clear();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidControlExpression { .. })));
+        il.control_expressions.clear();
+        il.statement_declarations[0].symbol = SymbolId(999);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidStatementDeclaration { .. })));
+    }
+
+    #[test]
     fn validates_statement_flags_and_auxiliary_control_expressions() {
         let mut il = Il::default();
         il.statements.push(Statement {
