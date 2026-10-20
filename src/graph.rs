@@ -293,6 +293,31 @@ pub struct VariableView<'a> {
     pub initializer: Option<&'a VariableInitializer>,
 }
 
+/// Direct captured type relationship. These are structural references,
+/// not a statement about ABI layout or ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeDependencyKind {
+    Related,
+    Base,
+    Field,
+    Parameter,
+}
+
+/// One direct edge in the captured type graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypeDependency {
+    pub target: TypeId,
+    pub kind: TypeDependencyKind,
+}
+
+/// A type reachable through captured type relationships, with its shortest
+/// discovered edge distance from the starting type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReachableType {
+    pub ty: TypeId,
+    pub depth: usize,
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -2183,6 +2208,85 @@ impl Graph {
     /// The implicit C++ this parameter is excluded.
     pub fn routine_parameter_types(&self, routine: SymbolId) -> Vec<TypeId> {
         self.function_parameters(routine).map(|parameter| parameter.ty).collect()
+    }
+
+    /// Visit direct type relationships in a stable category order:
+    /// related type, direct bases, fields, then function-type parameters.
+    /// Missing referenced types are still reported as IDs.
+    pub fn walk_type_dependencies(
+        &self, ty: TypeId, mut visit: impl FnMut(TypeDependency) -> bool,
+    ) {
+        if let Some(related) = self.type_def(ty).and_then(|def| def.related) {
+            if !visit(TypeDependency { target: related, kind: TypeDependencyKind::Related }) {
+                return;
+            }
+        }
+        for base in self.bases(ty) {
+            if !visit(TypeDependency { target: base.base, kind: TypeDependencyKind::Base }) {
+                return;
+            }
+        }
+        for field in self.fields(ty) {
+            if !visit(TypeDependency { target: field.ty, kind: TypeDependencyKind::Field }) {
+                return;
+            }
+        }
+        for parameter in self.parameters(ty) {
+            if !visit(TypeDependency {
+                target: parameter.ty, kind: TypeDependencyKind::Parameter,
+            }) {
+                return;
+            }
+        }
+    }
+
+    /// Collect all direct type relationships, retaining repeated edges.
+    pub fn type_dependencies(&self, ty: TypeId) -> Vec<TypeDependency> {
+        let mut result = Vec::new();
+        self.walk_type_dependencies(ty, |dependency| {
+            result.push(dependency);
+            true
+        });
+        result
+    }
+
+    /// Breadth-first, cycle-safe traversal of the captured type graph.
+    /// Includes the starting type at depth zero. References to uncaptured
+    /// type IDs remain visible as leaves. Returning false stops traversal.
+    pub fn walk_reachable_types(
+        &self, root: TypeId, mut visit: impl FnMut(ReachableType) -> bool,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        seen.insert(root);
+        queue.push_back(ReachableType { ty: root, depth: 0 });
+        while let Some(node) = queue.pop_front() {
+            if !visit(node) { break; }
+            self.walk_type_dependencies(node.ty, |dependency| {
+                if seen.insert(dependency.target) {
+                    queue.push_back(ReachableType {
+                        ty: dependency.target, depth: node.depth + 1,
+                    });
+                }
+                true
+            });
+        }
+    }
+
+    /// Collect all reachable type IDs once, in breadth-first order.
+    pub fn reachable_types(&self, root: TypeId) -> Vec<ReachableType> {
+        let mut result = Vec::new();
+        self.walk_reachable_types(root, |node| {
+            result.push(node);
+            true
+        });
+        result
+    }
+
+    /// Traverse the type graph starting from a symbol's declared type.
+    /// Returns None if the symbol has no captured type edge.
+    pub fn symbol_reachable_types(&self, symbol: SymbolId) -> Option<Vec<ReachableType>> {
+        Some(self.reachable_types(self.symbol_type(symbol)?))
     }
 
     /// Visit the fields and direct bases of a record as one declaration stream.
