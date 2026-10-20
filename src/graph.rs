@@ -1643,6 +1643,57 @@ mod tests {
     }
 
     #[test]
+    fn lifetime_tree_preserves_scope_links_and_cleanup_order() {
+        let mut il = Il::default();
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "f".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "object".into() },
+            Symbol { id: SymbolId(3), kind: 1, name: "Object::~Object".into() },
+        ]);
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None,
+            kind: 17, statement_path: None,
+        });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 18,
+        });
+        il.statement_initializations.push(StatementInitialization {
+            function: "f".into(), statement_path: "0".into(),
+            symbol: Some(SymbolId(2)), kind: 3,
+            follows_execution: false, braced: false, role: 0,
+        });
+        il.object_lifetimes.extend([
+            ObjectLifetime { routine: SymbolId(1), id: 0, parent: None, kind: 1 },
+            ObjectLifetime { routine: SymbolId(1), id: 1, parent: Some(0), kind: 2 },
+        ]);
+        il.scope_lifetimes.push(ScopeLifetime {
+            routine: SymbolId(1), scope: 0, lifetime: 0,
+        });
+        il.initialization_lifetimes.push(InitializationLifetime {
+            function: "f".into(), statement_path: "0".into(),
+            lifetime: Some(1), destructor: Some(SymbolId(3)),
+        });
+        il.lifetime_destructions.push(LifetimeDestruction {
+            routine: SymbolId(1), lifetime: 1, position: 0,
+            variable: Some(SymbolId(2)), destructor: Some(SymbolId(3)),
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.object_lifetime(SymbolId(1), 1).unwrap().parent, Some(0));
+        assert_eq!(graph.scope_lifetime(SymbolId(1), 0).unwrap().id, 0);
+        assert_eq!(graph.initialization_lifetime("f", "0").unwrap().lifetime, Some(1));
+        assert_eq!(graph.lifetime_destructions(SymbolId(1), 1).len(), 1);
+        il.object_lifetimes[1].parent = Some(1);
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidLifetime { .. })));
+        il.object_lifetimes[1].parent = Some(0);
+        il.lifetime_destructions[0].position = 2;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidLifetimeDestructionPosition { .. })));
+        il.lifetime_destructions[0].position = 0;
+        il.scope_lifetimes[0].lifetime = 99;
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidScopeLifetime { .. })));
+    }
+
+    #[test]
     fn source_locations_link_only_to_existing_il_nodes() {
         let mut il = Il::default();
         il.symbols.push(Symbol { id: SymbolId(2), kind: 2, name: "variable".into() });
