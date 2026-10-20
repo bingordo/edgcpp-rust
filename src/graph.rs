@@ -453,6 +453,55 @@ impl TypeDependencyIndex {
         schedule
     }
 
+    /// Compute parallel-ready waves of SCC batches. All batches in one wave
+    /// have no dependencies on each other within the affected subgraph.
+    /// A later wave depends only on preceding waves. The inner Vec contains
+    /// mutually dependent types, which must be handled together.
+    pub fn invalidation_waves(&self, changed: &[TypeId]) -> Vec<Vec<Vec<TypeId>>> {
+        let schedule = self.invalidation_schedule(changed);
+        if schedule.is_empty() { return Vec::new(); }
+        let mut component_of = HashMap::new();
+        for (id, component) in schedule.iter().enumerate() {
+            for &ty in component {
+                component_of.insert(ty, id);
+            }
+        }
+        let mut levels = vec![0usize; schedule.len()];
+        for (id, component) in schedule.iter().enumerate() {
+            for &ty in component {
+                for edge in self.dependencies(ty) {
+                    if let Some(&dependency) = component_of.get(&edge.target) {
+                        if dependency != id {
+                            levels[id] = levels[id].max(levels[dependency] + 1);
+                        }
+                    }
+                }
+            }
+        }
+        let mut waves: Vec<Vec<Vec<TypeId>>> = Vec::new();
+        for (id, component) in schedule.into_iter().enumerate() {
+            let level = levels[id];
+            if waves.len() <= level {
+                waves.resize_with(level + 1, Vec::new);
+            }
+            waves[level].push(component);
+        }
+        waves
+    }
+
+    /// All affected symbols grouped by the wave of their declared type.
+    /// Symbol ordering within a wave follows captured symbol order.
+    pub fn invalidation_symbol_waves(&self, changed: &[TypeId]) -> Vec<Vec<SymbolId>> {
+        self.invalidation_waves(changed).into_iter().map(|wave| {
+            let types: std::collections::HashSet<TypeId> =
+                wave.into_iter().flatten().collect();
+            self.symbol_order.iter()
+                .filter(|(_, ty)| types.contains(ty))
+                .map(|(symbol, _)| *symbol)
+                .collect()
+        }).collect()
+    }
+
     /// Affected captured symbols in overall captured symbol order.
     pub fn affected_symbols(&self, changed: &[TypeId]) -> Vec<SymbolId> {
         let affected: std::collections::HashSet<TypeId> =
@@ -2570,6 +2619,11 @@ impl Graph {
     /// together. Uncaptured seed IDs are retained as singleton batches.
     pub fn type_invalidation_schedule(&self, changed: &[TypeId]) -> Vec<Vec<TypeId>> {
         self.type_dependency_index().invalidation_schedule(changed)
+    }
+
+    /// Build dependency-level waves for parallel incremental analysis.
+    pub fn type_invalidation_waves(&self, changed: &[TypeId]) -> Vec<Vec<Vec<TypeId>>> {
+        self.type_dependency_index().invalidation_waves(changed)
     }
 
     /// Find the conservative set of captured types affected by changes to
