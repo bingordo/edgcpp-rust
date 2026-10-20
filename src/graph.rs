@@ -1104,7 +1104,9 @@ impl Graph {
         for item in &il.initialization_lifetimes {
             let key = (item.function.clone(), item.statement_path.clone());
             let owner = routine_names.get(&item.function);
-            if !graph.statement_initializations.iter().any(|init|
+            if owner.is_none()
+                || (item.lifetime.is_none() && item.destructor.is_none())
+                || !graph.statement_initializations.iter().any(|init|
                     init.function == item.function &&
                     init.statement_path == item.statement_path)
                 || item.lifetime.is_some_and(|id|
@@ -1773,6 +1775,12 @@ mod tests {
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidLifetimeDestructionPosition { .. })));
         il.lifetime_destructions[0].position = 0;
+        il.initialization_lifetimes[0].lifetime = None;
+        il.initialization_lifetimes[0].destructor = None;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidInitializationLifetime { .. })));
+        il.initialization_lifetimes[0].lifetime = Some(1);
+        il.initialization_lifetimes[0].destructor = Some(SymbolId(3));
         il.scope_lifetimes[0].lifetime = 99;
         assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidScopeLifetime { .. })));
     }
