@@ -17,3 +17,18 @@ namespace inner {
 int nested = 7;
 }
 }
+
+namespace cpp_bridge_verification {
+struct Base { int value; Base() : value(1) {} virtual ~Base() {} };
+struct Secondary { int other; };
+struct Derived : public Base, virtual public Secondary {
+    int field;
+    Derived() : Base(), Secondary(), field(7) {}
+    int method() const { return field + value; }
+    static int static_method() { return 3; }
+};
+int exercise() {
+    Derived d;
+    return d.method() + Derived::static_method();
+}
+}
