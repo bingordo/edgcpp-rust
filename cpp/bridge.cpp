@@ -35,8 +35,8 @@ thread_local std::unordered_map<const void *, std::string> scope_statement_paths
 thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
 struct PendingStaticLocal {
-  a_variable_ptr variable;
-  a_routine_ptr routine;
+  const void *variable;
+  const void *routine;
 };
 thread_local std::vector<PendingStaticLocal> pending_static_locals;
 thread_local std::unordered_map<const void *, std::string> routine_names;
@@ -911,7 +911,7 @@ void back_end(void)
   // EDG moved into the file-scope memory region. Their source correspondence
   // still points to the enclosing routine, but deliberately not to a
   // function/block scope across memory regions. Do not invent a scope ID.
-  std::unordered_set<a_variable_ptr> seen_static;
+  std::unordered_set<const void *> seen_static;
   for (const PendingStaticLocal &entry : pending_static_locals) {
     if (!seen_static.insert(entry.variable).second ||
         emitted_routines.find(entry.routine) == emitted_routines.end()) {
