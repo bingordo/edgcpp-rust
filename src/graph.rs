@@ -260,6 +260,15 @@ pub struct SymbolUseCount {
     pub count: usize,
 }
 
+/// Borrowed summary of a type's captured EDG metadata.
+#[derive(Clone, Copy, Debug)]
+pub struct TypeView<'a> {
+    pub definition: &'a TypeDef,
+    pub detail: Option<&'a TypeDetail>,
+    pub signature: Option<&'a FunctionSignature>,
+    pub array_elements: Option<u64>,
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -2103,6 +2112,58 @@ impl Graph {
     /// Declared EDG type of a routine or variable symbol, if captured.
     pub fn symbol_type(&self, symbol: SymbolId) -> Option<TypeId> {
         self.symbol_types.iter().find(|edge| edge.symbol == symbol).map(|edge| edge.ty)
+    }
+
+    /// Borrow a complete type view without copying the underlying IL records.
+    /// Missing type IDs return None; absent optional metadata remains None.
+    pub fn type_view(&self, id: TypeId) -> Option<TypeView<'_>> {
+        Some(TypeView {
+            definition: self.type_def(id)?,
+            detail: self.type_detail(id),
+            signature: self.signature(id),
+            array_elements: self.array_bound(id),
+        })
+    }
+
+    /// Borrow the type view of a symbol's declared type, if present.
+    pub fn symbol_type_view(&self, symbol: SymbolId) -> Option<TypeView<'_>> {
+        self.type_view(self.symbol_type(symbol)?)
+    }
+
+    /// Visit the fields of a record in captured IL order, with early exit.
+    pub fn walk_record_fields(
+        &self, owner: TypeId, mut visit: impl FnMut(&RecordField) -> bool,
+    ) {
+        for field in self.fields(owner) {
+            if !visit(field) { break; }
+        }
+    }
+
+    /// Visit direct base-class edges in captured IL order, with early exit.
+    pub fn walk_base_classes(
+        &self, derived: TypeId, mut visit: impl FnMut(&BaseClass) -> bool,
+    ) {
+        for base in self.bases(derived) {
+            if !visit(base) { break; }
+        }
+    }
+
+    /// Visit function-type parameters in captured IL order, with early exit.
+    pub fn walk_type_parameters(
+        &self, owner: TypeId, mut visit: impl FnMut(&TypeParameter) -> bool,
+    ) {
+        for parameter in self.parameters(owner) {
+            if !visit(parameter) { break; }
+        }
+    }
+
+    /// Visit member functions of a record in captured IL order, with early exit.
+    pub fn walk_member_functions(
+        &self, owner: TypeId, mut visit: impl FnMut(&MemberFunction) -> bool,
+    ) {
+        for member in self.member_functions(owner) {
+            if !visit(member) { break; }
+        }
     }
 
     pub fn type_def(&self, id: TypeId) -> Option<&TypeDef> {
