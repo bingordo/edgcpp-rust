@@ -2396,6 +2396,68 @@ impl Graph {
         components
     }
 
+    /// Find the conservative set of captured types affected by changes to
+    /// one or more type IDs. Seeds are retained, including uncaptured IDs.
+    /// Each type is returned once, with the shortest reverse dependency
+    /// distance from any seed. Seed order breaks equal-distance ties.
+    pub fn affected_types(&self, changed: &[TypeId]) -> Vec<ReachableType> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut result = Vec::new();
+        for &ty in changed {
+            if seen.insert(ty) {
+                queue.push_back(ReachableType { ty, depth: 0 });
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            for ty in self.direct_type_dependents(node.ty) {
+                if seen.insert(ty) {
+                    queue.push_back(ReachableType { ty, depth: node.depth + 1 });
+                }
+            }
+            result.push(node);
+        }
+        result
+    }
+
+    /// Find captured symbols whose declared types may be affected by
+    /// changed type definitions. Symbols appear once, in captured symbol
+    /// order. This is conservative and includes indirect dependencies.
+    pub fn affected_symbols(&self, changed: &[TypeId]) -> Vec<SymbolId> {
+        let affected: std::collections::HashSet<TypeId> =
+            self.affected_types(changed).into_iter().map(|node| node.ty).collect();
+        self.symbols.iter()
+            .filter(|symbol| self.symbol_type(symbol.id).is_some_and(|ty| affected.contains(&ty)))
+            .map(|symbol| symbol.id)
+            .collect()
+    }
+
+    /// Group the affected captured types by their strongly connected
+    /// components. The groups are ordered by first affected-type encounter.
+    /// Uncaptured type IDs are returned as singleton groups.
+    pub fn affected_type_groups(&self, changed: &[TypeId]) -> Vec<Vec<TypeId>> {
+        let affected = self.affected_types(changed);
+        let components = self.type_strongly_connected_components();
+        let mut membership = HashMap::new();
+        for (index, component) in components.iter().enumerate() {
+            for &ty in component {
+                membership.insert(ty, index);
+            }
+        }
+        let mut emitted = std::collections::HashSet::new();
+        let mut groups = Vec::new();
+        for node in affected {
+            if let Some(&index) = membership.get(&node.ty) {
+                if emitted.insert(index) {
+                    groups.push(components[index].clone());
+                }
+            } else {
+                groups.push(vec![node.ty]);
+            }
+        }
+        groups
+    }
+
     /// Traverse the type graph starting from a symbol's declared type.
     /// Returns None if the symbol has no captured type edge.
     pub fn symbol_reachable_types(&self, symbol: SymbolId) -> Option<Vec<ReachableType>> {
