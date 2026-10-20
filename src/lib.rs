@@ -1060,6 +1060,52 @@ mod tests {
     }
 
     #[test]
+    fn decodes_function_parameters_lexical_scopes_and_locals() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let absent = WireField {
+            data: std::ptr::null(), length: 0, value: 0, tag: 0,
+        };
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let parameter = [number(1), number(0), number(2), number(3), number(0)];
+        let implicit = [number(1), absent, number(4), number(5), number(3)];
+        let root = [number(1), number(0), absent, number(17), string(b"0")];
+        let nested = [number(1), number(1), number(0), number(2), absent];
+        let local = [number(1), number(1), number(6), number(3), number(0), number(6)];
+        unsafe {
+            for values in [parameter, implicit] {
+                collect((&mut state as *mut Collector).cast(), 29,
+                        values.as_ptr(), values.len(), 0);
+            }
+            for values in [root, nested] {
+                collect((&mut state as *mut Collector).cast(), 30,
+                        values.as_ptr(), values.len(), 0);
+            }
+            collect((&mut state as *mut Collector).cast(), 31,
+                    local.as_ptr(), local.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.function_parameters.len(), 2);
+        assert_eq!(state.il.function_parameters[0].position, Some(0));
+        assert!(state.il.function_parameters[1].implicit_this);
+        assert_eq!(state.il.function_parameters[1].position, None);
+        assert_eq!(state.il.local_scopes[0].statement_path.as_deref(), Some("0"));
+        assert_eq!(state.il.local_scopes[1].parent, Some(0));
+        assert!(state.il.local_variables[0].static_storage);
+        assert!(state.il.local_variables[0].structured_binding);
+        let malformed = [number(1), number(0), number(2), number(3), number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 29,
+                    malformed.as_ptr(), malformed.len(), 0);
+        }
+        assert!(state.malformed);
+    }
+
+    #[test]
     fn decodes_statement_flags_loop_operands_and_label_edges() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
