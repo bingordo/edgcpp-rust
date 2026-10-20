@@ -1915,6 +1915,42 @@ mod tests {
 
 
     #[test]
+    fn unified_symbol_collection_preserves_primary_then_control_order() {
+        let mut il = Il::default();
+        for id in 1..=3 {
+            il.symbols.push(Symbol {
+                id: SymbolId(id), kind: 2, name: format!("s{id}"),
+            });
+        }
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        il.expressions.push(Expression {
+            function: "f".into(), statement_path: "0".into(),
+            path: "0".into(), parent: None, kind: 1,
+            operator: None, type_kind: None, reference: None,
+            type_size: None, type_alignment: None, constant_kind: None,
+            constant_integer: None, related_type_role: None,
+            related_type_kind: None, type_id: None, symbol_id: Some(SymbolId(2)),
+        });
+        for (path, parent, symbol) in [
+            ("0", None, SymbolId(1)),
+            ("0.0", Some("0"), SymbolId(2)),
+            ("0.1", Some("0"), SymbolId(3)),
+        ] {
+            il.control_expressions.push(ControlExpression {
+                function: "f".into(), statement_path: "0".into(), role: 1,
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_id: None, symbol_id: Some(symbol),
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.referenced_symbols("f"), vec![SymbolId(2)]);
+        assert_eq!(graph.referenced_symbols_including_controls("f"),
+            vec![SymbolId(2), SymbolId(1), SymbolId(3)]);
+    }
+
+    #[test]
     fn control_symbol_references_are_indexed_and_deduplicated() {
         let mut il = Il::default();
         il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "a".into() });
