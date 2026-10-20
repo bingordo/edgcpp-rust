@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include <initializer_list>
 
 extern "C" {
@@ -33,6 +34,13 @@ thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
 thread_local std::unordered_map<const void *, std::string> routine_names;
 thread_local std::unordered_set<std::string> used_routine_names;
+struct PendingMember {
+  const void *routine;
+  uint32_t symbol;
+  std::string name;
+};
+thread_local std::vector<PendingMember> unresolved_members;
+thread_local std::unordered_map<std::string, uint32_t> named_class_types;
 }
 
 namespace edg {
@@ -477,6 +485,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       }
       // Out-of-line definitions may be visible through multiple IL scope
       // lists. Export their body and entity only once per routine pointer.
+      if (owning_class == nullptr) {
+        // Static member functions have no this_class. Resolve these from
+        // the class declaration names after collecting all nested scopes.
+        unresolved_members.push_back({r, routine_symbol, name});
+      }
       if (!emitted_routines.insert(r).second) continue;
       // Routine classification and dispatch properties are EDG-native.
       // Bit 9 reflects the implicit this parameter, not a source keyword.
@@ -585,7 +598,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
-      emit_type(t, 0);
+      const uint32_t named_type_id = emit_type(t, 0);
+      if ((t->kind == tk_class || t->kind == tk_struct ||
+           t->kind == tk_union) && named_type_id != 0) {
+        named_class_types.emplace(name, named_type_id);
+      }
       emit_record(3, {txt(name)}, 0);
       if ((t->kind == tk_class || t->kind == tk_struct ||
            t->kind == tk_union) &&
@@ -610,6 +627,27 @@ void back_end(void)
 {
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
+  for (const PendingMember &candidate : unresolved_members) {
+    if (emitted_member_edges.find(candidate.routine) != emitted_member_edges.end()) {
+      continue;
+    }
+    // Require an exact class-name prefix plus "::", not an arbitrary
+    // namespace prefix. The longest match handles nested classes.
+    uint32_t owner = 0;
+    size_t best_length = 0;
+    for (const auto &named_type : named_class_types) {
+      const std::string prefix = named_type.first + "::";
+      if (prefix.size() > best_length &&
+          candidate.name.compare(0, prefix.size(), prefix) == 0) {
+        best_length = prefix.size();
+        owner = named_type.second;
+      }
+    }
+    if (owner != 0) {
+      emitted_member_edges.insert(candidate.routine);
+      emit_record(21, {num(owner), num(candidate.symbol)});
+    }
+  }
 }
 } // namespace edg
 
@@ -626,6 +664,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   emitted_member_edges.clear();
   routine_names.clear();
   used_routine_names.clear();
+  unresolved_members.clear();
+  named_class_types.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -640,5 +680,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   emitted_member_edges.clear();
   routine_names.clear();
   used_routine_names.clear();
+  unresolved_members.clear();
+  named_class_types.clear();
   return status;
 }
