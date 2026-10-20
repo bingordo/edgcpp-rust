@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -31,6 +31,11 @@ pub enum GraphError {
     DuplicateStatementLabel { function: String, path: String },
     DuplicateLabelDefinition(SymbolId),
     DuplicateStatementAttributes { function: String, path: String },
+    InvalidStatementDeclaration { function: String, path: String },
+    DuplicateStatementDeclaration { function: String, path: String, position: u32 },
+    InvalidStatementDeclarationPosition { function: String, path: String },
+    InvalidStatementInitialization { function: String, path: String },
+    DuplicateStatementInitialization { function: String, path: String },
     InvalidStatementAttributes { function: String, path: String },
     DuplicateControlExpression { function: String, statement: String, role: u32, path: String },
     InvalidControlExpression { function: String, statement: String, role: u32, path: String },
@@ -100,6 +105,8 @@ pub struct Graph {
     pub statement_attributes: Vec<StatementAttributes>,
     pub control_expressions: Vec<ControlExpression>,
     pub statement_labels: Vec<StatementLabel>,
+    pub statement_declarations: Vec<StatementDeclaration>,
+    pub statement_initializations: Vec<StatementInitialization>,
     pub function_parameters: Vec<FunctionParameter>,
     pub local_scopes: Vec<LocalScope>,
     pub local_variables: Vec<LocalVariable>,
@@ -696,6 +703,54 @@ impl Graph {
             graph.statement_labels.push(label.clone());
         }
 
+        let mut decl_keys = std::collections::HashSet::new();
+        let mut decl_positions: HashMap<(String, String), Vec<u32>> = HashMap::new();
+        for decl in &il.statement_declarations {
+            let key = (decl.function.clone(), decl.statement_path.clone());
+            if !smap.contains_key(&key)
+                || !graph.symbols.iter().any(|sym| sym.id == decl.symbol && sym.kind == 2)
+                || !type_map.contains_key(&decl.ty)
+            {
+                return Err(GraphError::InvalidStatementDeclaration {
+                    function: decl.function.clone(), path: decl.statement_path.clone(),
+                });
+            }
+            if !decl_keys.insert((key.clone(), decl.position)) {
+                return Err(GraphError::DuplicateStatementDeclaration {
+                    function: decl.function.clone(), path: decl.statement_path.clone(),
+                    position: decl.position,
+                });
+            }
+            decl_positions.entry(key).or_default().push(decl.position);
+            graph.statement_declarations.push(decl.clone());
+        }
+        for ((function, path), mut positions) in decl_positions {
+            positions.sort_unstable();
+            if positions.iter().enumerate().any(|(i, &position)| i as u32 != position) {
+                return Err(GraphError::InvalidStatementDeclarationPosition { function, path });
+            }
+        }
+        graph.statement_declarations.sort_by_key(|d|
+            (d.function.clone(), d.statement_path.clone(), d.position));
+
+        let mut init_keys = std::collections::HashSet::new();
+        for init in &il.statement_initializations {
+            let key = (init.function.clone(), init.statement_path.clone());
+            if !smap.contains_key(&key) || init.role > 2 ||
+               init.symbol.is_some_and(|symbol| !graph.symbols.iter()
+                   .any(|sym| sym.id == symbol && sym.kind == 2)) {
+                return Err(GraphError::InvalidStatementInitialization {
+                    function: key.0, path: key.1,
+                });
+            }
+            if !init_keys.insert(key.clone()) {
+                return Err(GraphError::DuplicateStatementInitialization {
+                    function: key.0, path: key.1,
+                });
+            }
+            graph.statement_initializations.push(init.clone());
+        }
+
         let mut statement_metadata = std::collections::HashSet::new();
         for attributes in &il.statement_attributes {
             let key = (attributes.function.clone(), attributes.statement_path.clone());
@@ -718,7 +773,9 @@ impl Graph {
         for expr in &il.control_expressions {
             let key = (expr.function.clone(), expr.statement_path.clone(),
                        expr.role, expr.path.clone());
-            if !(1..=3).contains(&expr.role)
+            if !(1..=4).contains(&expr.role)
+                || (expr.role == 4 && !init_keys.contains(&(
+                    expr.function.clone(), expr.statement_path.clone())))
                 || !smap.contains_key(&(expr.function.clone(), expr.statement_path.clone()))
                 || expr.type_id.is_some_and(|id| !type_map.contains_key(&id))
                 || expr.symbol_id.is_some_and(|id| !symbol_ids.contains(&id))
@@ -992,6 +1049,41 @@ impl Graph {
     pub fn local_variable_scope(&self, symbol: SymbolId) -> Option<&LocalScope> {
         let local = self.local_variables.iter().find(|var| var.symbol == symbol)?;
         self.local_scope(local.routine, local.scope)
+    }
+
+    /// Variable declarations belonging to a statement, in EDG list order.
+    pub fn declarations_at<'a>(&'a self, function: &'a str, path: &'a str)
+        -> impl Iterator<Item = &'a StatementDeclaration> + 'a {
+        self.statement_declarations.iter().filter(move |decl|
+            decl.function == function && decl.statement_path == path)
+    }
+
+    /// Captured declaration sites of one variable. The same symbol can
+    /// appear at more than one source/IL statement site.
+    pub fn declaration_sites(&self, symbol: SymbolId)
+        -> impl Iterator<Item = &StatementDeclaration> {
+        self.statement_declarations.iter().filter(move |decl| decl.symbol == symbol)
+    }
+
+    /// The dynamic initializer executed by a given statement, if present.
+    pub fn statement_initialization(
+        &self, function: &str, path: &str,
+    ) -> Option<&StatementInitialization> {
+        self.statement_initializations.iter().find(|init|
+            init.function == function && init.statement_path == path)
+    }
+
+    /// All initializer execution sites associated with a variable.
+    pub fn variable_initialization_sites(&self, symbol: SymbolId)
+        -> impl Iterator<Item = &StatementInitialization> {
+        self.statement_initializations.iter().filter(move |init| init.symbol == Some(symbol))
+    }
+
+    /// Root expression of a statement initializer, when EDG exposes one.
+    pub fn statement_initializer_expression(
+        &self, function: &str, path: &str,
+    ) -> Option<&ControlExpression> {
+        self.control_expression_root(function, path, 4)
     }
 
     /// Flags supplied by EDG for a statement in a function.
