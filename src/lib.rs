@@ -1136,6 +1136,57 @@ mod tests {
     }
 
     #[test]
+    fn decodes_declaration_and_initializer_site_events() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let absent = WireField {
+            data: std::ptr::null(), length: 0, value: 0, tag: 0,
+        };
+        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let decl = [string(b"f"), string(b"0"), number(0),
+                    number(11), number(12), number(1)];
+        let init = [string(b"f"), string(b"1"), number(11),
+                    number(2), number(3), number(0)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 33,
+                    decl.as_ptr(), decl.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 34,
+                    init.as_ptr(), init.len(), 0);
+        }
+        assert!(!state.malformed);
+        let decl = &state.il.statement_declarations[0];
+        assert_eq!((decl.symbol, decl.ty, decl.position),
+                   (SymbolId(11), TypeId(12), 0));
+        assert!(decl.is_vla);
+        let init = &state.il.statement_initializations[0];
+        assert_eq!(init.symbol, Some(SymbolId(11)));
+        assert!(init.follows_execution && init.braced);
+        assert_eq!(init.role, 0);
+
+        let ret = [string(b"f"), string(b"2"), absent,
+                   number(3), number(0), number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 34,
+                    ret.as_ptr(), ret.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statement_initializations[1].symbol, None);
+        assert_eq!(state.il.statement_initializations[1].role, 1);
+
+        let invalid = [string(b"f"), string(b"0"), number(0),
+                       number(11), number(12), number(2)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 33,
+                    invalid.as_ptr(), invalid.len(), 0);
+        }
+        assert!(state.malformed);
+    }
+
+    #[test]
     fn decodes_function_parameters_lexical_scopes_and_locals() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
