@@ -41,6 +41,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid EDG IL graph: {e:?}"))?;
     println!("indexed IL statements={} expressions={}",
              graph.statements.len(), graph.expressions.len());
+    for source in &graph.statement_sources {
+        println!("statement source {} path={} file={} line={} column={} seq={}",
+                 source.function, source.path, source.location.file,
+                 source.location.line, source.location.column, source.location.sequence);
+    }
+    for source in &graph.symbol_sources {
+        let symbol = graph.symbol(source.symbol).ok_or("missing source symbol")?;
+        println!("symbol source id={} name={} file={} line={} column={}",
+                 source.symbol.0, symbol.name, source.location.file,
+                 source.location.line, source.location.column);
+    }
+    for source in &graph.expression_sources {
+        println!("expression source {} statement={} role={} path={} file={} line={} column={}",
+                 source.function, source.statement_path, source.role, source.path,
+                 source.location.file, source.location.line, source.location.column);
+    }
+    for lifetime in &graph.object_lifetimes {
+        let routine = graph.symbol(lifetime.routine).ok_or("missing lifetime routine")?;
+        println!("object lifetime routine={} id={} parent={:?} kind={}",
+                 routine.name, lifetime.id, lifetime.parent, lifetime.kind);
+    }
+    for link in &graph.scope_lifetimes {
+        let routine = graph.symbol(link.routine).ok_or("missing scope lifetime routine")?;
+        println!("scope lifetime routine={} scope={} lifetime={}",
+                 routine.name, link.scope, link.lifetime);
+    }
+    for link in &graph.initialization_lifetimes {
+        println!("init lifetime function={} statement={} lifetime={:?} destructor={:?}",
+                 link.function, link.statement_path, link.lifetime, link.destructor);
+    }
+    for cleanup in &graph.lifetime_destructions {
+        let routine = graph.symbol(cleanup.routine).ok_or("missing cleanup routine")?;
+        println!("lifetime destruction routine={} lifetime={} position={} variable={:?} destructor={:?}",
+                 routine.name, cleanup.lifetime, cleanup.position,
+                 cleanup.variable, cleanup.destructor);
+    }
     for label in &graph.statement_labels {
         let target = graph.label_target(label.label);
         println!("statement label {} path={} symbol={} definition={} target={:?}",
