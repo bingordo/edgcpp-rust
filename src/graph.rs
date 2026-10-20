@@ -3165,6 +3165,10 @@ mod tests {
         graph.symbol_types.push(SymbolType { symbol: SymbolId(2), ty: TypeId(99) });
         assert!(graph.routine_view(SymbolId(99)).is_none());
         assert!(graph.variable_view(SymbolId(99)).is_none());
+        // A captured symbol with the wrong declaration kind is not a
+        // routine/variable view even if it happens to have type metadata.
+        assert!(graph.routine_view(SymbolId(2)).is_none());
+        assert!(graph.variable_view(SymbolId(1)).is_none());
         let routine = graph.routine_view(SymbolId(1)).unwrap();
         assert_eq!(routine.symbol.name, "run");
         assert_eq!(routine.ty.unwrap().definition.id, TypeId(3));
