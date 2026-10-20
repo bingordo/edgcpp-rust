@@ -3196,6 +3196,41 @@ mod tests {
     }
 
     #[test]
+    fn invalidation_waves_separate_dependencies_and_parallel_branches() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(5), kind: 1, related_role: None, related: Some(TypeId(3)) },
+        ]);
+        graph.symbols.extend([
+            Symbol { id: SymbolId(9), kind: 1, name: "later".into() },
+            Symbol { id: SymbolId(8), kind: 1, name: "earlier".into() },
+        ]);
+        graph.symbol_types.extend([
+            SymbolType { symbol: SymbolId(9), ty: TypeId(5) },
+            SymbolType { symbol: SymbolId(8), ty: TypeId(4) },
+        ]);
+        let index = graph.type_dependency_index();
+        let waves = index.invalidation_waves(&[TypeId(2)]);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].len(), 1);
+        let mut cycle = waves[0][0].clone();
+        cycle.sort_by_key(|ty| ty.0);
+        assert_eq!(cycle, [TypeId(1), TypeId(2)]);
+        let mut parallel: Vec<TypeId> = waves[1].iter().flatten().copied().collect();
+        parallel.sort_by_key(|ty| ty.0);
+        assert_eq!(parallel, [TypeId(3), TypeId(4)]);
+        assert_eq!(waves[2], vec![vec![TypeId(5)]]);
+        assert_eq!(index.invalidation_symbol_waves(&[TypeId(2)]),
+            vec![vec![], vec![SymbolId(8)], vec![SymbolId(9)]]);
+        assert_eq!(graph.type_invalidation_waves(&[TypeId(2)]), waves);
+        assert!(index.invalidation_waves(&[]).is_empty());
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
