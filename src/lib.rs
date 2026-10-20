@@ -72,6 +72,8 @@ pub struct Il {
     pub local_scopes: Vec<LocalScope>,
     /// Typed variables declared in lexical scopes.
     pub local_variables: Vec<LocalVariable>,
+    /// Function ownership recovered for hoisted static local variables.
+    pub static_local_owners: Vec<StaticLocalOwner>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
     /// Identity-preserving types captured during this compilation.
@@ -412,6 +414,15 @@ pub struct LocalVariable {
     pub handler_parameter: bool,
 }
 
+/// Static or thread-storage variable retained in a file-scope memory
+/// region even though its declaring context is a function. EDG cannot
+/// safely retain its precise block scope across the memory-region boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticLocalOwner {
+    pub routine: SymbolId,
+    pub symbol: SymbolId,
+}
+
 /// An EDG operation call. Operand zero is the callee; member calls use
 /// operand one for the object, so explicit arguments start at index two.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,6 +574,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         29 => Some(il.function_parameters.len()),
         30 => Some(il.local_scopes.len()),
         31 => Some(il.local_variables.len()),
+        32 => Some(il.static_local_owners.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -576,7 +588,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -645,6 +657,13 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        32 => {
+            let (Some(routine), Some(symbol)) = (n(0), n(1)) else { return; };
+            if routine == 0 || symbol == 0 { return; }
+            output.static_local_owners.push(StaticLocalOwner {
+                routine: SymbolId(routine), symbol: SymbolId(symbol),
+            });
         }
         31 => {
             let (Some(routine), Some(scope), Some(symbol), Some(ty),
