@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -44,6 +44,10 @@ pub enum GraphError {
     InvalidBaseClassPosition(TypeId),
     CyclicInheritance(TypeId),
     InvalidConstructorInitializer { routine: SymbolId, position: u32 },
+    DuplicateConstructorExpression { routine: SymbolId, position: u32, path: String },
+    InvalidConstructorExpression { routine: SymbolId, position: u32, path: String },
+    MissingConstructorExpressionRoot { routine: SymbolId, position: u32 },
+    InvalidConstructorExpressionOperandPath { routine: SymbolId, position: u32, path: String },
     InvalidMemberFunction { owner: TypeId, routine: SymbolId },
     DuplicateMemberFunction(SymbolId),
     InvalidRoutineAttributes(SymbolId),
@@ -78,6 +82,7 @@ pub struct Graph {
     pub record_fields: Vec<RecordField>,
     pub base_classes: Vec<BaseClass>,
     pub constructor_initializers: Vec<ConstructorInitializer>,
+    pub constructor_initializer_expressions: Vec<ConstructorInitializerExpression>,
     pub member_functions: Vec<MemberFunction>,
     pub routine_attributes: Vec<RoutineAttributes>,
     pub type_details: Vec<TypeDetail>,
@@ -88,6 +93,8 @@ pub struct Graph {
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    constructor_expr_index: HashMap<(SymbolId, u32, String), usize>,
+    constructor_expr_children: HashMap<(SymbolId, u32, String), Vec<usize>>,
     initializer_index: HashMap<(SymbolId, String), usize>,
     initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
     call_expression_ids: Vec<ExpressionId>,
@@ -307,6 +314,68 @@ impl Graph {
                 return Err(GraphError::InvalidConstructorInitializer {
                     routine: init.routine, position: init.position,
                 });
+            }
+        }
+        // Each constructor initializer can carry a separately owned
+        // expression tree. Paths are local to (routine, position).
+        let mut ctor_expr_paths = std::collections::HashSet::new();
+        for expr in &il.constructor_initializer_expressions {
+            let key = (expr.routine, expr.position, expr.path.clone());
+            if !ctor_positions.contains(&(expr.routine, expr.position))
+                || expr.symbol_id.is_some_and(|id| !symbol_ids.contains(&id))
+                || expr.type_id.is_some_and(|id| !type_map.contains_key(&id))
+            {
+                return Err(GraphError::InvalidConstructorExpression {
+                    routine: expr.routine, position: expr.position,
+                    path: expr.path.clone(),
+                });
+            }
+            if !ctor_expr_paths.insert(key.clone()) {
+                return Err(GraphError::DuplicateConstructorExpression {
+                    routine: expr.routine, position: expr.position,
+                    path: expr.path.clone(),
+                });
+            }
+            graph.constructor_expr_index.insert(key, graph.constructor_initializer_expressions.len());
+            graph.constructor_initializer_expressions.push(expr.clone());
+        }
+        for &(routine, position, _) in &ctor_expr_paths {
+            if !ctor_expr_paths.contains(&(routine, position, String::from("0"))) {
+                return Err(GraphError::MissingConstructorExpressionRoot { routine, position });
+            }
+        }
+        for (idx, node) in graph.constructor_initializer_expressions.iter().enumerate() {
+            let valid = match &node.parent {
+                None => node.path == "0",
+                Some(parent) => node.path.strip_prefix(&(parent.clone() + "."))
+                    .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('.')
+                        && suffix.parse::<u32>().is_ok())
+                    && ctor_expr_paths.contains(&(node.routine, node.position, parent.clone())),
+            };
+            if !valid {
+                return Err(GraphError::InvalidConstructorExpression {
+                    routine: node.routine, position: node.position,
+                    path: node.path.clone(),
+                });
+            }
+            if let Some(parent) = &node.parent {
+                graph.constructor_expr_children.entry((node.routine, node.position, parent.clone()))
+                    .or_default().push(idx);
+            }
+        }
+        for children in graph.constructor_expr_children.values_mut() {
+            children.sort_by_key(|&idx|
+                graph_path_index(&graph.constructor_initializer_expressions[idx].path));
+        }
+        for ((routine, position, parent), children) in &graph.constructor_expr_children {
+            for (index, &child) in children.iter().enumerate() {
+                if graph.constructor_initializer_expressions[child].path
+                    != format!("{}.{}", parent, index)
+                {
+                    return Err(GraphError::InvalidConstructorExpressionOperandPath {
+                        routine: *routine, position: *position, path: parent.clone(),
+                    });
+                }
             }
         }
         let mut initialized = std::collections::HashSet::new();
@@ -673,6 +742,31 @@ impl Graph {
         self.member_functions.iter().find(|m| m.routine == routine).map(|m| m.owner)
     }
 
+    /// Expression tree root for a constructor/destructor subobject initializer,
+    /// if EDG captured a representable expression.
+    pub fn constructor_initializer_root(
+        &self, routine: SymbolId, position: u32,
+    ) -> Option<&ConstructorInitializerExpression> {
+        self.constructor_initializer_expression(routine, position, "0")
+    }
+
+    pub fn constructor_initializer_expression(
+        &self, routine: SymbolId, position: u32, path: &str,
+    ) -> Option<&ConstructorInitializerExpression> {
+        self.constructor_expr_index.get(&(routine, position, path.to_owned()))
+            .map(|&idx| &self.constructor_initializer_expressions[idx])
+    }
+
+    /// Direct initializer-expression operands in original EDG order.
+    pub fn constructor_initializer_operands<'a>(
+        &'a self, node: &ConstructorInitializerExpression,
+    ) -> Vec<&'a ConstructorInitializerExpression> {
+        self.constructor_expr_children.get(&(node.routine, node.position, node.path.clone()))
+            .map(|children| children.iter()
+                .map(|&idx| &self.constructor_initializer_expressions[idx]).collect())
+            .unwrap_or_default()
+    }
+
     /// Subobject initialization/destruction entries in EDG execution order.
     pub fn constructor_initializers(&self, routine: SymbolId)
         -> impl Iterator<Item = &ConstructorInitializer> {
@@ -730,6 +824,43 @@ mod tests {
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.member_function_owner(SymbolId(10)), Some(TypeId(20)));
         assert_eq!(graph.constructor_initializers(SymbolId(10)).count(), 1);
+    }
+
+    #[test]
+    fn indexes_constructor_expression_operands_in_path_order() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "Widget::Widget".into() });
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine: SymbolId(1), position: 0, kind: 3,
+            target_type: None, target_field: None,
+            compiler_generated: false, braced: false,
+            use_field_initializer: false, pack_expansion: false,
+        });
+        for (path, parent) in [
+            ("0.1", Some("0")), ("0", None), ("0.0", Some("0")),
+        ] {
+            il.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+                routine: SymbolId(1), position: 0,
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_id: None, symbol_id: None,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let root = graph.constructor_initializer_root(SymbolId(1), 0).unwrap();
+        assert_eq!(root.path, "0");
+        let operands = graph.constructor_initializer_operands(root);
+        assert_eq!(operands.iter().map(|node| node.path.as_str()).collect::<Vec<_>>(),
+                   vec!["0.0", "0.1"]);
+        il.constructor_initializer_expressions.push(il.constructor_initializer_expressions[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateConstructorExpression { .. })));
+        il.constructor_initializer_expressions.pop();
+        il.constructor_initializer_expressions[2].path = "0.2".into();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidConstructorExpressionOperandPath { .. })));
+        il.constructor_initializer_expressions.remove(1);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::MissingConstructorExpressionRoot { .. })));
     }
 
     #[test]
