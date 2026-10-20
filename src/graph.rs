@@ -2707,61 +2707,14 @@ impl Graph {
 
     /// Partition captured types into strongly connected components.
     /// Each type appears exactly once. Edges to uncaptured types are ignored
-    /// for component membership. Uses an iterative two-pass DFS.
+    /// for component membership. Components are emitted dependency-first.
     pub fn type_strongly_connected_components(&self) -> Vec<Vec<TypeId>> {
-        let nodes: Vec<TypeId> = self.types.iter().map(|ty| ty.id).collect();
-        let present: std::collections::HashSet<TypeId> = nodes.iter().copied().collect();
-        let mut forward: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
-        let mut reverse: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
-        for &node in &nodes {
-            let mut edges = Vec::new();
-            self.walk_type_dependencies(node, |edge| {
-                if present.contains(&edge.target) {
-                    edges.push(edge.target);
-                    reverse.entry(edge.target).or_default().push(node);
-                }
-                true
-            });
-            forward.insert(node, edges);
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut finish = Vec::new();
-        for &root in &nodes {
-            if !seen.insert(root) { continue; }
-            let mut stack = vec![(root, 0usize)];
-            while let Some((node, next_index)) = stack.last_mut() {
-                let edges = forward.get(node).map(Vec::as_slice).unwrap_or(&[]);
-                if *next_index < edges.len() {
-                    let next = edges[*next_index];
-                    *next_index += 1;
-                    if seen.insert(next) {
-                        stack.push((next, 0));
-                    }
-                } else {
-                    finish.push(*node);
-                    stack.pop();
-                }
-            }
-        }
-        seen.clear();
-        let mut components = Vec::new();
-        for &root in finish.iter().rev() {
-            if !seen.insert(root) { continue; }
-            let mut component = Vec::new();
-            let mut stack = vec![root];
-            while let Some(node) = stack.pop() {
-                component.push(node);
-                if let Some(edges) = reverse.get(&node) {
-                    for &next in edges {
-                        if seen.insert(next) {
-                            stack.push(next);
-                        }
-                    }
-                }
-            }
-            components.push(component);
-        }
-        components
+        // Scheduling all captured definitions visits exactly the captured
+        // type graph. The schedule already condenses cycles, so reuse the
+        // indexed SCC implementation rather than running a separate,
+        // repeatedly scanning graph algorithm.
+        let all: Vec<TypeId> = self.types.iter().map(|ty| ty.id).collect();
+        self.type_dependency_index().invalidation_schedule(&all)
     }
 
     /// Build a reusable dependency index for repeated invalidation queries.
