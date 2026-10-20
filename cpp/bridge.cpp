@@ -984,6 +984,9 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         unresolved_members.push_back({r, routine_symbol, name});
       }
       if (!emitted_routines.insert(r).second) continue;
+      // Do not reconstruct the body owner from an arbitrary first-encounter
+      // symbol display name: overload and destructor names can differ.
+      emit_record(42, {num(routine_symbol), txt(name)});
       if (routine_type_id != 0) {
         emit_record(25, {num(routine_symbol), num(routine_type_id)});
       }
