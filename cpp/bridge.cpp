@@ -389,7 +389,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
 // Independently owned expression nodes for dynamic variable initializers.
 static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                                   const std::string &path,
-                                  const std::string &parent, unsigned depth)
+                                  const std::string &parent, unsigned depth,
+                                  bool constructor = false, uint32_t position = 0)
 {
   if (expr == nullptr || depth > 64) return;
   uint32_t symbol = 0;
@@ -405,19 +406,29 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
     symbol = emit_symbol(ptr, 3, name == nullptr ? "" : name);
   }
   uint32_t type_id = emit_type(expr->type, 0);
-  emit_record(17, {num(owner), txt(path), parent.empty() ? absent() : txt(parent),
-                   num(static_cast<uint32_t>(expr->kind)),
-                   expr->kind == enk_operation ?
-                       num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
-                   type_id ? num(type_id) : absent(),
-                   symbol ? num(symbol) : absent()});
+  if (constructor) {
+    emit_record(23, {num(owner), num(position), txt(path),
+                     parent.empty() ? absent() : txt(parent),
+                     num(static_cast<uint32_t>(expr->kind)),
+                     expr->kind == enk_operation ?
+                         num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
+                     type_id ? num(type_id) : absent(),
+                     symbol ? num(symbol) : absent()});
+  } else {
+    emit_record(17, {num(owner), txt(path), parent.empty() ? absent() : txt(parent),
+                     num(static_cast<uint32_t>(expr->kind)),
+                     expr->kind == enk_operation ?
+                         num(static_cast<uint32_t>(expr->variant.operation.kind)) : absent(),
+                     type_id ? num(type_id) : absent(),
+                     symbol ? num(symbol) : absent()});
+  }
   const auto children = children_of(expr);
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
        operand != nullptr && index < 10000;
        operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
-                          path, depth + 1);
+                          path, depth + 1, constructor, position);
   }
 }
 
@@ -542,6 +553,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                              target_type ? num(target_type) : absent(),
                              target_symbol ? num(target_symbol) : absent(),
                              num(flags)});
+            // Capture initializer expression trees separately from function
+            // body statements. Only dynamic-init variants documented to own
+            // an expression are safe to dereference here.
+            an_expr_node_ptr init_expr = nullptr;
+            if (init->initializer != nullptr &&
+                (init->initializer->kind == dik_expression ||
+                 init->initializer->kind == dik_class_result_via_ctor)) {
+              init_expr = init->initializer->variant.expression;
+            }
+            if (init_expr == nullptr) init_expr = init->source_expr;
+            if (init_expr != nullptr) {
+              emit_initializer_expr(init_expr, routine_symbol, "0", "",
+                                    0, true, init_position);
+            }
+
           }
           emit_statements(body->assoc_block, name, "", "", 0);
         }
