@@ -155,6 +155,42 @@ no source spelling is reconstructed. Records are available only for function
 scopes traversed by the native bridge. As with the rest of the native IL,
 IDs are not stable across compilations.
 
+## Structured control flow and loop expressions
+
+The native bridge now follows more of EDG's structured statement tree:
+`if`/`else`, `if constexpr`, C++23 consteval-if, while, do/while,
+`for` initializer and body, range-based `for` initializer and body,
+`switch` bodies, and C++ `try` plus individual catch-clause bodies.
+These remain **EDG IL** statements: constructs erased by lowering or
+rewritten into other kinds are represented in their lowered form.
+
+Child statement paths retain the parent path and a named edge, such as
+`0.block.1.body.0`, `0.block.2.init.0`, or
+`0.block.3.catch1.0`. A dependent statement is traversed as a single
+node rather than accidentally following its enclosing sibling list.
+
+`Compilation::il.statement_attributes` retains flags for
+compiler-generated statements, initialization guards, fallthrough,
+`[[likely]]`/`[[unlikely]]`, and lowering-generated/boilerplate statements.
+`Graph::statement_attributes(function, statement_path)` finds the
+metadata for a particular statement.
+
+The primary expression in `a_statement::expr` remains in
+`Compilation::il.expressions`. Additional control-flow expressions
+are independently owned in `Compilation::il.control_expressions`,
+keyed by function, statement path and EDG role:
+
+- role 1: `for` loop increment;
+- role 2: range-`for` iterator comparison;
+- role 3: range-`for` iterator increment.
+
+Use `Graph::control_expression_root(function, statement, role)`,
+`Graph::control_expression(function, statement, role, path)`, and
+`Graph::control_operands(node)`. The graph validates parent links,
+dense operand positions and type/symbol identities. These expressions
+are optional because EDG may lower a source construct or represent its
+control expressions elsewhere.
+
 ## Function statements (prototype)
 
 `Compilation::il.statements` now contains a bounded snapshot of function-body
