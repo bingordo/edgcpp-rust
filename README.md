@@ -88,6 +88,16 @@ specifier. Only **direct** inheritance edges are exported. Transitive
 inheritance, base-subobject layout and complete C++ access checking are not
 yet modeled.
 
+## Declared symbol types
+
+The native bridge exports compilation-local `SymbolType` edges linking
+routine and scope variable `SymbolId` values to EDG `TypeId` values.
+`Graph::symbol_type(symbol_id)` resolves each edge; `Graph::signature(type_id)`
+and `Graph::parameters(type_id)` then expose the function prototype when
+the type is a routine. Type metadata is not guaranteed for symbols that
+were captured only as references from an expression; a missing edge is
+represented by `None`.
+
 ## Class member functions
 
 The bridge traverses EDG class/struct/union scopes, including nested
