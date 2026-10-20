@@ -60,6 +60,10 @@ pub struct Il {
     pub entities: Vec<Entity>,
     /// Structural statement records captured while function IL is live.
     pub statements: Vec<Statement>,
+    /// Native flags retained for each emitted statement.
+    pub statement_attributes: Vec<StatementAttributes>,
+    /// Additional expressions on structured controls (e.g. for increments).
+    pub control_expressions: Vec<ControlExpression>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
     /// Identity-preserving types captured during this compilation.
@@ -292,6 +296,36 @@ pub struct Statement {
     pub kind: u32,
 }
 
+/// Properties of a structured statement retained after EDG lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementAttributes {
+    pub function: String,
+    pub statement_path: String,
+    pub compiler_generated: bool,
+    pub initialization_guard: bool,
+    pub fallthrough: bool,
+    pub likely: bool,
+    pub unlikely: bool,
+    pub lowering_generated: bool,
+    pub lowering_boilerplate: bool,
+}
+
+/// Expressions stored outside a statement's primary `expr` field.
+/// Roles: 1=for increment, 2=range-for comparison, 3=range-for increment.
+/// Their paths are local to (function, statement_path, role).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlExpression {
+    pub function: String,
+    pub statement_path: String,
+    pub role: u32,
+    pub path: String,
+    pub parent: Option<String>,
+    pub kind: u32,
+    pub operator: Option<u32>,
+    pub type_id: Option<TypeId>,
+    pub symbol_id: Option<SymbolId>,
+}
+
 /// A snapshot of an EDG expression and its ordered operand tree.
 /// Discriminants are native EDG enums; consumers must use the matching EDG build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +498,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         23 => Some(il.constructor_initializer_expressions.len()),
         24 => Some(il.base_class_access.len()),
         25 => Some(il.symbol_types.len()),
+        26 => Some(il.statement_attributes.len()),
+        27 => Some(il.control_expressions.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -477,7 +513,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -546,6 +582,35 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        27 => {
+            let (Some(function), Some(statement_path), Some(role),
+                 Some(path), Some(kind)) = (t(0), t(1), n(2), t(3), n(5)) else { return; };
+            if !(1..=3).contains(&role) { return; }
+            let parent = if fields[4].present() {
+                let Some(parent) = t(4) else { return; };
+                Some(parent)
+            } else { None };
+            output.control_expressions.push(ControlExpression {
+                function, statement_path, role, path, parent, kind,
+                operator: n(6), type_id: n(7).map(TypeId),
+                symbol_id: n(8).map(SymbolId),
+            });
+        }
+        26 => {
+            let (Some(function), Some(statement_path), Some(flags)) =
+                (t(0), t(1), n(2)) else { return; };
+            if flags & !127 != 0 { return; }
+            output.statement_attributes.push(StatementAttributes {
+                function, statement_path,
+                compiler_generated: flags & 1 != 0,
+                initialization_guard: flags & 2 != 0,
+                fallthrough: flags & 4 != 0,
+                likely: flags & 8 != 0,
+                unlikely: flags & 16 != 0,
+                lowering_generated: flags & 32 != 0,
+                lowering_boilerplate: flags & 64 != 0,
+            });
         }
         25 => {
             let (Some(symbol), Some(ty)) = (n(0), n(1)) else { return; };
