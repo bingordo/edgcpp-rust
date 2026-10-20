@@ -41,6 +41,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid EDG IL graph: {e:?}"))?;
     println!("indexed IL statements={} expressions={}",
              graph.statements.len(), graph.expressions.len());
+    for attrs in &graph.statement_attributes {
+        println!("statement attributes {} path={} generated={} lowering={} likely={} unlikely={} fallthrough={}",
+                 attrs.function, attrs.statement_path, attrs.compiler_generated,
+                 attrs.lowering_generated, attrs.likely, attrs.unlikely, attrs.fallthrough);
+    }
+    for expr in &graph.control_expressions {
+        println!("control expression {} statement={} role={} path={} parent={:?} kind={} op={:?}",
+                 expr.function, expr.statement_path, expr.role, expr.path,
+                 expr.parent, expr.kind, expr.operator);
+    }
     for ty in &result.il.types {
         println!("type id={} kind={} related={:?}", ty.id.0, ty.kind, ty.related);
     }
