@@ -1510,6 +1510,28 @@ impl Graph {
         result
     }
 
+    /// Symbol references from a variable's initializer expression tree.
+    /// Returns unique symbols in numeric tree-path order.
+    pub fn initializer_referenced_symbols(&self, owner: SymbolId) -> Vec<SymbolId> {
+        let mut nodes: Vec<_> = self.initializer_expressions(owner).collect();
+        nodes.sort_by(|a, b| compare_tree_paths(&a.path, &b.path));
+        let mut seen = std::collections::HashSet::new();
+        nodes.into_iter().filter_map(|node| node.symbol_id)
+            .filter(|id| seen.insert(*id)).collect()
+    }
+
+    /// Symbol references from constructor initializer expressions, ordered by
+    /// initializer position and then numeric tree path.
+    pub fn constructor_referenced_symbols(&self, routine: SymbolId) -> Vec<SymbolId> {
+        let mut nodes: Vec<_> = self.constructor_initializer_expressions.iter()
+            .filter(|node| node.routine == routine).collect();
+        nodes.sort_by(|a, b| a.position.cmp(&b.position)
+            .then_with(|| compare_tree_paths(&a.path, &b.path)));
+        let mut seen = std::collections::HashSet::new();
+        nodes.into_iter().filter_map(|node| node.symbol_id)
+            .filter(|id| seen.insert(*id)).collect()
+    }
+
     /// Expression operands in the original IL order.
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
@@ -1708,6 +1730,32 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn initializer_symbol_references_follow_numeric_tree_order() {
+        let mut il = Il::default();
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 2, name: "target".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "a".into() },
+            Symbol { id: SymbolId(3), kind: 2, name: "b".into() },
+        ]);
+        for (path, parent, symbol) in [
+            ("0", None, None),
+            ("0.1", Some("0"), Some(SymbolId(2))),
+            ("0.0", Some("0"), Some(SymbolId(3))),
+        ] {
+            il.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(1), path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+                operator: None, type_id: None, symbol_id: symbol,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.initializer_referenced_symbols(SymbolId(1)),
+            vec![SymbolId(3), SymbolId(2)]);
+        assert!(graph.constructor_referenced_symbols(SymbolId(1)).is_empty());
+    }
+
+
     #[test]
     fn control_symbol_references_are_indexed_and_deduplicated() {
         let mut il = Il::default();
