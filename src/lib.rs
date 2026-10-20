@@ -66,6 +66,12 @@ pub struct Il {
     pub control_expressions: Vec<ControlExpression>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
+    /// Defined routine parameters, including an optional implicit this.
+    pub function_parameters: Vec<FunctionParameter>,
+    /// Lexical scope tree for routine bodies.
+    pub local_scopes: Vec<LocalScope>,
+    /// Typed variables declared in lexical scopes.
+    pub local_variables: Vec<LocalVariable>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
     /// Identity-preserving types captured during this compilation.
@@ -365,6 +371,47 @@ pub struct Expression {
     pub symbol_id: Option<SymbolId>,
 }
 
+/// A parameter variable owned by one function definition.
+/// Explicit parameters have dense zero-based positions; the implicit C++
+/// object parameter has `position: None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParameter {
+    pub routine: SymbolId,
+    pub position: Option<u32>,
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub implicit_this: bool,
+    pub compiler_generated: bool,
+}
+
+/// A scope in the owned lexical tree of one function definition.
+/// Scope zero is the function scope, with no parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalScope {
+    pub routine: SymbolId,
+    pub id: u32,
+    pub parent: Option<u32>,
+    pub kind: u32,
+    /// Associated structured statement if EDG retained that link.
+    pub statement_path: Option<String>,
+}
+
+/// A local declaration belonging to a lexical scope.
+/// `static_storage` distinguishes scope->variables from
+/// scope->nonstatic_variables in EDG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVariable {
+    pub routine: SymbolId,
+    pub scope: u32,
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub storage_class: u32,
+    pub compiler_generated: bool,
+    pub static_storage: bool,
+    pub structured_binding: bool,
+    pub handler_parameter: bool,
+}
+
 /// An EDG operation call. Operand zero is the callee; member calls use
 /// operand one for the object, so explicit arguments start at index two.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +560,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         26 => Some(il.statement_attributes.len()),
         27 => Some(il.control_expressions.len()),
         28 => Some(il.statement_labels.len()),
+        29 => Some(il.function_parameters.len()),
+        30 => Some(il.local_scopes.len()),
+        31 => Some(il.local_variables.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -526,7 +576,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -595,6 +645,45 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        31 => {
+            let (Some(routine), Some(scope), Some(symbol), Some(ty),
+                 Some(storage_class), Some(flags)) =
+                (n(0), n(1), n(2), n(3), n(4), n(5)) else { return; };
+            if routine == 0 || symbol == 0 || ty == 0 || flags & !15 != 0 { return; }
+            output.local_variables.push(LocalVariable {
+                routine: SymbolId(routine), scope, symbol: SymbolId(symbol),
+                ty: TypeId(ty), storage_class,
+                compiler_generated: flags & 1 != 0,
+                static_storage: flags & 2 != 0,
+                structured_binding: flags & 4 != 0,
+                handler_parameter: flags & 8 != 0,
+            });
+        }
+        30 => {
+            let (Some(routine), Some(id), Some(kind)) = (n(0), n(1), n(3))
+                else { return; };
+            if routine == 0 { return; }
+            let statement_path = if fields[4].present() {
+                let Some(path) = t(4) else { return; };
+                Some(path)
+            } else { None };
+            output.local_scopes.push(LocalScope {
+                routine: SymbolId(routine), id, parent: n(2),
+                kind, statement_path,
+            });
+        }
+        29 => {
+            let (Some(routine), Some(symbol), Some(ty), Some(flags)) =
+                (n(0), n(2), n(3), n(4)) else { return; };
+            if routine == 0 || symbol == 0 || ty == 0 || flags & !3 != 0
+                || ((flags & 1 != 0) != !fields[1].present()) { return; }
+            output.function_parameters.push(FunctionParameter {
+                routine: SymbolId(routine), position: n(1),
+                symbol: SymbolId(symbol), ty: TypeId(ty),
+                implicit_this: flags & 1 != 0,
+                compiler_generated: flags & 2 != 0,
+            });
         }
         28 => {
             let (Some(function), Some(statement_path), Some(label), Some(definition)) =
