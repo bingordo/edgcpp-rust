@@ -125,3 +125,28 @@ int use_receiver() {
     return receiver.read(3);
 }
 }
+
+// The declaration point is not necessarily the initializer execution point:
+// EDG can lower initialization to a separate stmk_init, and may eliminate
+// source-level stmk_decl records for simple scalar variables.
+namespace declaration_site_verification {
+struct Resource {
+    int value;
+    explicit Resource(int input) : value(input) {}
+    ~Resource() {}
+};
+int mixed(int seed) {
+    int first = seed, second = seed + 1;
+    Resource resource(second);
+    int total = resource.value;
+    {
+        int first = total * 2;
+        total += first;
+    }
+    for (int index = 0; index < 2; ++index) {
+        Resource nested(index);
+        total += nested.value;
+    }
+    return total + first;
+}
+}
