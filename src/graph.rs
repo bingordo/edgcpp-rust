@@ -269,6 +269,30 @@ pub struct TypeView<'a> {
     pub array_elements: Option<u64>,
 }
 
+/// A record's captured direct base or nonstatic field.
+#[derive(Clone, Copy, Debug)]
+pub enum RecordLayoutItem<'a> {
+    Base(&'a BaseClass),
+    Field(&'a RecordField),
+}
+
+/// Borrowed view of an EDG routine declaration.
+#[derive(Clone, Copy, Debug)]
+pub struct RoutineView<'a> {
+    pub symbol: &'a Symbol,
+    pub function: Option<&'a str>,
+    pub ty: Option<TypeView<'a>>,
+    pub implicit_this: Option<&'a FunctionParameter>,
+}
+
+/// Borrowed view of an EDG variable declaration.
+#[derive(Clone, Copy, Debug)]
+pub struct VariableView<'a> {
+    pub symbol: &'a Symbol,
+    pub ty: Option<TypeView<'a>>,
+    pub initializer: Option<&'a VariableInitializer>,
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -2112,6 +2136,49 @@ impl Graph {
     /// Declared EDG type of a routine or variable symbol, if captured.
     pub fn symbol_type(&self, symbol: SymbolId) -> Option<TypeId> {
         self.symbol_types.iter().find(|edge| edge.symbol == symbol).map(|edge| edge.ty)
+    }
+
+    /// Borrow a routine's symbol, declared type, signature and parameters.
+    /// Missing optional metadata is represented by None or empty iterators.
+    pub fn routine_view(&self, routine: SymbolId) -> Option<RoutineView<'_>> {
+        Some(RoutineView {
+            symbol: self.symbol(routine)?,
+            function: self.routine_function(routine),
+            ty: self.symbol_type_view(routine),
+            implicit_this: self.implicit_this(routine),
+        })
+    }
+
+    /// Borrow a variable's symbol, declared type and initializer metadata.
+    pub fn variable_view(&self, variable: SymbolId) -> Option<VariableView<'_>> {
+        Some(VariableView {
+            symbol: self.symbol(variable)?,
+            ty: self.symbol_type_view(variable),
+            initializer: self.variable_initializer(variable),
+        })
+    }
+
+    /// Visit explicitly declared parameters, excluding implicit C++ this.
+    /// The order is the captured EDG parameter order.
+    pub fn walk_routine_parameters(
+        &self, routine: SymbolId, mut visit: impl FnMut(&FunctionParameter) -> bool,
+    ) {
+        for parameter in self.function_parameters(routine) {
+            if !visit(parameter) { break; }
+        }
+    }
+
+    /// Visit the fields and direct bases of a record as one declaration stream.
+    /// Bases are emitted before fields; order within each category is IL order.
+    pub fn walk_record_layout(
+        &self, record: TypeId, mut visit: impl FnMut(RecordLayoutItem<'_>) -> bool,
+    ) {
+        for base in self.bases(record) {
+            if !visit(RecordLayoutItem::Base(base)) { return; }
+        }
+        for field in self.fields(record) {
+            if !visit(RecordLayoutItem::Field(field)) { return; }
+        }
     }
 
     /// Borrow a complete type view without copying the underlying IL records.
