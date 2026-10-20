@@ -86,6 +86,15 @@ jobs:
             -DEDG_BUILD_CALLABLE_LIBRARY=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
+      # EDG generates two error-message headers through a tiny host tool.
+      # Building this named target does NOT build the EDG front-end library.
+      - name: Generate EDG error headers (small host-tool target only)
+        working-directory: edgcpp
+        run: |
+          cmake --build build/gcc-release --target error-info --parallel 2
+          test -s build/gcc-release/src/includes/err_codes.h
+          test -s build/gcc-release/src/includes/err_data.h
+
       - name: Download pinned, prebuilt EDG archive
         working-directory: edgcpp
         run: |
