@@ -199,6 +199,15 @@ lowered away some source declarations and generated temporary variables.
 Scopes without an associated statement are retained, and this API does
 not yet reconstruct lifetime intervals or source locations.
 
+**Hoisted static locals:** EDG can allocate function-local static and
+thread-storage variables in the file-scope memory region. Their
+`source_corresp.enclosing_routine` still identifies the owning function, but
+their exact lexical block is not retained as a safe scope pointer. These
+are therefore exported separately in `Compilation::il.static_local_owners`
+and `Graph::static_locals(routine)` / `Graph::static_local_owner(symbol)`.
+No scope ID is invented for such declarations. They may also appear in
+`local_variables` when EDG does retain their scope-list entry.
+
 ## Structured control flow and loop expressions
 
 The native bridge now follows more of EDG's structured statement tree:
