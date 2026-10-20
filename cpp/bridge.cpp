@@ -13,6 +13,7 @@
 #include <cxxabi.h>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 #include <initializer_list>
 
 extern "C" {
@@ -27,6 +28,7 @@ thread_local edgcpp_il_callback current_callback = nullptr;
 thread_local void *current_user_data = nullptr;
 thread_local std::unordered_map<const void *, uint32_t> type_ids;
 thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
+thread_local std::unordered_set<const void *> visited_scopes;
 }
 
 namespace edg {
@@ -411,6 +413,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
   if (scope == nullptr || current_callback == nullptr || depth > 128) return;
+  // Class scopes can be reached through more than one enclosing declaration.
+  if (!visited_scopes.insert(scope).second) return;
   // Overloaded functions cannot be keyed solely by qualified base name:
   // preserve demangled parameter signatures only when the base is ambiguous.
   std::unordered_map<std::string, unsigned> routine_counts;
@@ -555,6 +559,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   }
   type_ids.clear();
   symbol_ids.clear();
+  visited_scopes.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -564,5 +569,6 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   current_user_data = nullptr;
   type_ids.clear();
   symbol_ids.clear();
+  visited_scopes.clear();
   return status;
 }
