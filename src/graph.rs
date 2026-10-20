@@ -176,6 +176,13 @@ pub struct Graph {
     call_expression_ids: Vec<ExpressionId>,
 }
 
+/// Borrowed expression captured within a function body.
+#[derive(Debug, Clone, Copy)]
+pub enum FunctionExpressionRef<'a> {
+    Primary(&'a ExpressionNode),
+    Control(&'a ControlExpression),
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -1463,6 +1470,38 @@ impl Graph {
                 });
             }
             continuing
+        });
+    }
+
+    /// Walk primary and supplemental control expressions together in statement
+    /// order. Primary expression nodes precede supplemental controls for each
+    /// statement. Returning false stops all subsequent traversal.
+    pub fn walk_function_all_expressions(
+        &self,
+        function: &str,
+        mut visit: impl FnMut(StatementId, FunctionExpressionRef<'_>) -> bool,
+    ) {
+        let mut continuing = true;
+        self.walk_statements(function, |statement_id, statement| {
+            if let Some(root) = statement.expression {
+                self.walk_expression(root, |_, node| {
+                    continuing = visit(statement_id, FunctionExpressionRef::Primary(node));
+                    continuing
+                });
+            }
+            if !continuing { return false; }
+            if let Some(indices) = self.control_expr_by_statement
+                .get(&(function.to_owned(), statement.data.path.clone()))
+            {
+                for &index in indices {
+                    if !visit(statement_id,
+                        FunctionExpressionRef::Control(&self.control_expressions[index]))
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
         });
     }
 
