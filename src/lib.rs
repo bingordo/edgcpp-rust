@@ -73,6 +73,10 @@ pub struct Il {
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
+    pub object_lifetimes: Vec<ObjectLifetime>,
+    pub scope_lifetimes: Vec<ScopeLifetime>,
+    pub initialization_lifetimes: Vec<InitializationLifetime>,
+    pub lifetime_destructions: Vec<LifetimeDestruction>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -404,6 +408,44 @@ pub struct ExpressionSource {
     pub location: SourceLocation,
 }
 
+/// Runtime lifetime region from EDG. IDs are dense within a routine.
+/// Multiple root regions may exist (e.g. local static storage).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectLifetime {
+    pub routine: SymbolId,
+    pub id: u32,
+    pub parent: Option<u32>,
+    pub kind: u32,
+}
+
+/// Link between a lexical scope and the lifetime region EDG assigned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeLifetime {
+    pub routine: SymbolId,
+    pub scope: u32,
+    pub lifetime: u32,
+}
+
+/// Optional lifetime/destructor of an executed dynamic initialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializationLifetime {
+    pub function: String,
+    pub statement_path: String,
+    pub lifetime: Option<u32>,
+    pub destructor: Option<SymbolId>,
+}
+
+/// Destruction list position in the order EDG requires cleanup to run.
+/// A destructor may be absent for generated guards and related cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifetimeDestruction {
+    pub routine: SymbolId,
+    pub lifetime: u32,
+    pub position: u32,
+    pub variable: Option<SymbolId>,
+    pub destructor: Option<SymbolId>,
+}
+
 /// A branch or definition referring to one compilation-local EDG label.
 /// The label Symbol has kind 4. References may be compiler generated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,6 +690,10 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         35 => Some(il.statement_sources.len()),
         36 => Some(il.symbol_sources.len()),
         37 => Some(il.expression_sources.len()),
+        38 => Some(il.object_lifetimes.len()),
+        39 => Some(il.scope_lifetimes.len()),
+        40 => Some(il.initialization_lifetimes.len()),
+        41 => Some(il.lifetime_destructions.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -661,7 +707,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -730,6 +776,40 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        41 => {
+            let (Some(routine), Some(lifetime), Some(position)) =
+                (n(0), n(1), n(2)) else { return; };
+            if routine == 0 { return; }
+            output.lifetime_destructions.push(LifetimeDestruction {
+                routine: SymbolId(routine), lifetime, position,
+                variable: n(3).map(SymbolId), destructor: n(4).map(SymbolId),
+            });
+        }
+        40 => {
+            let (Some(function), Some(statement_path)) =
+                (t(0), t(1)) else { return; };
+            if !fields[2].present() && !fields[3].present() { return; }
+            output.initialization_lifetimes.push(InitializationLifetime {
+                function, statement_path,
+                lifetime: n(2), destructor: n(3).map(SymbolId),
+            });
+        }
+        39 => {
+            let (Some(routine), Some(scope), Some(lifetime)) =
+                (n(0), n(1), n(2)) else { return; };
+            if routine == 0 { return; }
+            output.scope_lifetimes.push(ScopeLifetime {
+                routine: SymbolId(routine), scope, lifetime,
+            });
+        }
+        38 => {
+            let (Some(routine), Some(id), Some(kind)) =
+                (n(0), n(1), n(3)) else { return; };
+            if routine == 0 { return; }
+            output.object_lifetimes.push(ObjectLifetime {
+                routine: SymbolId(routine), id, parent: n(2), kind,
+            });
         }
         37 => {
             let (Some(function), Some(statement_path), Some(role),
