@@ -1284,6 +1284,64 @@ mod tests {
     }
 
     #[test]
+    fn decodes_source_positions_and_lifetime_records() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let absent = WireField {
+            data: std::ptr::null(), length: 0, value: 0, tag: 0,
+        };
+        let mut state = Collector {
+            il: Il::default(), panicked: false, malformed: false,
+        };
+        let statement = [string(b"f"), string(b"0"), number(10),
+                         number(3), string(b"test.cpp"), number(4)];
+        let symbol = [number(2), number(9), number(1),
+                      string(b"test.cpp"), number(3)];
+        let expression = [string(b"f"), string(b"0"), number(0),
+                          string(b"0"), number(10), number(7),
+                          string(b"test.cpp"), number(4)];
+        let lifetime = [number(1), number(0), absent, number(1)];
+        let scope = [number(1), number(0), number(0)];
+        let initialization = [string(b"f"), string(b"0"), number(0), number(3)];
+        let destruction = [number(1), number(0), number(0), number(2), number(3)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 35,
+                    statement.as_ptr(), statement.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 36,
+                    symbol.as_ptr(), symbol.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 37,
+                    expression.as_ptr(), expression.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 38,
+                    lifetime.as_ptr(), lifetime.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 39,
+                    scope.as_ptr(), scope.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 40,
+                    initialization.as_ptr(), initialization.len(), 0);
+            collect((&mut state as *mut Collector).cast(), 41,
+                    destruction.as_ptr(), destruction.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statement_sources[0].location.line, 4);
+        assert_eq!(state.il.symbol_sources[0].location.column, 1);
+        assert_eq!(state.il.expression_sources[0].role, 0);
+        assert_eq!(state.il.object_lifetimes[0].parent, None);
+        assert_eq!(state.il.scope_lifetimes[0].lifetime, 0);
+        assert_eq!(state.il.initialization_lifetimes[0].destructor, Some(SymbolId(3)));
+        assert_eq!(state.il.lifetime_destructions[0].variable, Some(SymbolId(2)));
+        let bad_location = [string(b"f"), string(b"0"), number(0),
+                            number(3), string(b"test.cpp"), number(4)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 35,
+                    bad_location.as_ptr(), bad_location.len(), 0);
+        }
+        assert!(state.malformed);
+    }
+
+    #[test]
     fn decodes_declaration_and_initializer_site_events() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
