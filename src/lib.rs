@@ -71,6 +71,8 @@ pub struct Il {
     pub record_fields: Vec<RecordField>,
     /// Direct class bases in declaration order.
     pub base_classes: Vec<BaseClass>,
+    /// Constructor and destructor subobject initialization records.
+    pub constructor_initializers: Vec<ConstructorInitializer>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -178,6 +180,22 @@ pub struct BaseClass {
     pub position: u32,
     pub base: TypeId,
     pub is_virtual: bool,
+}
+
+/// One constructor/destructor subobject initializer in execution order.
+///
+/// Native EDG kind: 0=virtual base, 1=direct base, 2=field, 3=delegation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructorInitializer {
+    pub routine: SymbolId,
+    pub position: u32,
+    pub kind: u32,
+    pub target_type: Option<TypeId>,
+    pub target_field: Option<SymbolId>,
+    pub compiler_generated: bool,
+    pub braced: bool,
+    pub use_field_initializer: bool,
+    pub pack_expansion: bool,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -373,6 +391,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         16 => Some(il.dynamic_initializers.len()),
         17 => Some(il.initializer_expressions.len()),
         19 => Some(il.base_classes.len()),
+        20 => Some(il.constructor_initializers.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -386,7 +405,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -455,6 +474,25 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        20 => {
+            let (Some(routine), Some(position), Some(kind), Some(flags)) =
+                (n(0), n(1), n(2), n(5)) else { return; };
+            if kind > 3 || flags & !15 != 0 { return; }
+            let target_type = n(3).map(TypeId);
+            let target_field = n(4).map(SymbolId);
+            if (kind <= 1 && (target_type.is_none() || target_field.is_some()))
+                || (kind == 2 && (target_type.is_some() || target_field.is_none()))
+                || (kind == 3 && (target_type.is_some() || target_field.is_some()))
+            { return; }
+            output.constructor_initializers.push(ConstructorInitializer {
+                routine: SymbolId(routine), position, kind,
+                target_type, target_field,
+                compiler_generated: flags & 1 != 0,
+                braced: flags & 2 != 0,
+                use_field_initializer: flags & 4 != 0,
+                pack_expansion: flags & 8 != 0,
+            });
         }
         19 => {
             let (Some(derived), Some(position), Some(base), Some(virtual_flag)) =
