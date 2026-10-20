@@ -2631,6 +2631,53 @@ mod tests {
     }
 
     #[test]
+    fn type_dependency_graph_is_cycle_safe_and_breadth_first() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: Some(1), related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: Some(1), related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: None },
+        ]);
+        graph.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 0, base: TypeId(3), is_virtual: false,
+        });
+        graph.record_fields.push(RecordField {
+            owner: TypeId(1), position: 0, ty: TypeId(4),
+            name: "missing".into(), byte_offset: 0, bit_offset: 0, bit_width: 0,
+        });
+        graph.type_parameters.push(TypeParameter {
+            owner: TypeId(2), position: 0, ty: TypeId(3),
+        });
+        graph.symbol_types.push(SymbolType { symbol: SymbolId(8), ty: TypeId(1) });
+        assert_eq!(graph.type_dependencies(TypeId(1)), vec![
+            TypeDependency { target: TypeId(2), kind: TypeDependencyKind::Related },
+            TypeDependency { target: TypeId(3), kind: TypeDependencyKind::Base },
+            TypeDependency { target: TypeId(4), kind: TypeDependencyKind::Field },
+        ]);
+        let expected = vec![
+            ReachableType { ty: TypeId(1), depth: 0 },
+            ReachableType { ty: TypeId(2), depth: 1 },
+            ReachableType { ty: TypeId(3), depth: 1 },
+            ReachableType { ty: TypeId(4), depth: 1 },
+        ];
+        assert_eq!(graph.reachable_types(TypeId(1)), expected);
+        assert_eq!(graph.symbol_reachable_types(SymbolId(8)), Some(expected));
+        assert!(graph.symbol_reachable_types(SymbolId(99)).is_none());
+        let mut stopped = Vec::new();
+        graph.walk_reachable_types(TypeId(1), |node| {
+            stopped.push(node.ty);
+            stopped.len() < 2
+        });
+        assert_eq!(stopped, [TypeId(1), TypeId(2)]);
+        let mut direct = Vec::new();
+        graph.walk_type_dependencies(TypeId(1), |edge| {
+            direct.push(edge.target);
+            false
+        });
+        assert_eq!(direct, [TypeId(2)]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
