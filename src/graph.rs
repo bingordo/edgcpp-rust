@@ -1841,8 +1841,10 @@ mod tests {
         // Constructor expression validation also requires initializer records;
         // this test exercises the query on an owned graph without inventing
         // unrelated EDG initializer metadata.
-        let mut graph = Graph::default();
-        graph.constructor_initializer_expressions = il.constructor_initializer_expressions;
+        let graph = Graph {
+            constructor_initializer_expressions: il.constructor_initializer_expressions,
+            ..Graph::default()
+        };
         assert_eq!(graph.constructor_referenced_symbols(SymbolId(1)),
             vec![SymbolId(3), SymbolId(2)]);
     }
