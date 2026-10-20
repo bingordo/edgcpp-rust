@@ -2360,19 +2360,18 @@ impl Graph {
         let mut finish = Vec::new();
         for &root in &nodes {
             if !seen.insert(root) { continue; }
-            let mut stack = vec![(root, false)];
-            while let Some((node, exiting)) = stack.pop() {
-                if exiting {
-                    finish.push(node);
-                    continue;
-                }
-                stack.push((node, true));
-                if let Some(edges) = forward.get(&node) {
-                    for &next in edges.iter().rev() {
-                        if seen.insert(next) {
-                            stack.push((next, false));
-                        }
+            let mut stack = vec![(root, 0usize)];
+            while let Some((node, next_index)) = stack.last_mut() {
+                let edges = forward.get(node).map(Vec::as_slice).unwrap_or(&[]);
+                if *next_index < edges.len() {
+                    let next = edges[*next_index];
+                    *next_index += 1;
+                    if seen.insert(next) {
+                        stack.push((next, 0));
                     }
+                } else {
+                    finish.push(*node);
+                    stack.pop();
                 }
             }
         }
