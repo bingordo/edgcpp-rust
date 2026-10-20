@@ -168,6 +168,18 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       if (base_id != 0) {
         emit_record(19, {num(id), num(position), num(base_id),
                          num(base->is_virtual ? 1 : 0)});
+        // For virtual bases there may be several derivation paths.
+        // Choose the direct derivation when reporting the access written
+        // on this base specifier, not an indirect access path.
+        a_base_class_derivation_ptr direct_path = base->derivation;
+        while (direct_path != nullptr && !direct_path->direct) {
+          direct_path = direct_path->next;
+        }
+        emit_record(24, {num(id), num(position),
+                         direct_path != nullptr ?
+                             num(static_cast<unsigned>(direct_path->access)) : absent(),
+                         num(base->is_pack_expansion ? 1 : 0)});
+
       }
     }
   }
