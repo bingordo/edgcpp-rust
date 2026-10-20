@@ -39,6 +39,11 @@ struct PendingStaticLocal {
   const void *routine;
 };
 thread_local std::vector<PendingStaticLocal> pending_static_locals;
+struct PendingNamedStatic {
+  const void *variable;
+  std::string qualified_name;
+};
+thread_local std::vector<PendingNamedStatic> pending_named_statics;
 thread_local std::unordered_map<const void *, std::string> routine_names;
 thread_local std::unordered_set<std::string> used_routine_names;
 struct PendingMember {
@@ -473,7 +478,9 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       emit_record(31, {num(routine), num(id), num(symbol), num(ty),
                        num(static_cast<unsigned>(var->storage_class)),
                        num(flags)});
-      if (group == 1 && var->source_corresp.is_local_to_function &&
+      if (group == 1 &&
+          (var->storage_class == sc_static || var->is_thread_local) &&
+          raw_name != nullptr && var->source_corresp.is_local_to_function &&
           var->source_corresp.enclosing_routine != nullptr) {
         pending_static_locals.push_back(
             {var, var->source_corresp.enclosing_routine});
@@ -828,10 +835,20 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(v->source_corresp, false);
       uint32_t symbol_id = emit_symbol(v, 2, name);
       emit_variable_type(v);
-      if (v->source_corresp.is_local_to_function &&
-          v->source_corresp.enclosing_routine != nullptr) {
-        pending_static_locals.push_back(
-            {v, v->source_corresp.enclosing_routine});
+      if ((v->storage_class == sc_static || v->is_thread_local) &&
+          v->source_corresp.is_local_to_function) {
+        if (v->source_corresp.enclosing_routine != nullptr &&
+            source_name(v->source_corresp) != nullptr) {
+          pending_static_locals.push_back(
+              {v, v->source_corresp.enclosing_routine});
+        } else if (name.find(")::") != std::string::npos) {
+          pending_named_statics.push_back({v, name});
+        }
+      } else if ((v->storage_class == sc_static || v->is_thread_local) &&
+                 name.find(")::") != std::string::npos) {
+        // Some EDG lowering modes clear is_local_to_function and the
+        // cross-region enclosing_routine pointer on hoisted statics.
+        pending_named_statics.push_back({v, name});
       }
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
@@ -923,6 +940,36 @@ void back_end(void)
       emit_record(32, {num(routine->second), num(variable->second)});
     }
   }
+  // Hoisted static locals can lose even their enclosing_routine pointer.
+  // A demangled full function signature followed by "::local" is specific
+  // enough to restore ownership, but only for a unique routine match.
+  for (const PendingNamedStatic &entry : pending_named_statics) {
+    if (seen_static.find(entry.variable) != seen_static.end()) continue;
+    const void *owner = nullptr;
+    bool ambiguous = false;
+    for (const auto &candidate : routine_names) {
+      if (emitted_routines.find(candidate.first) == emitted_routines.end())
+        continue;
+      a_routine_ptr routine = static_cast<a_routine_ptr>(
+          const_cast<void *>(candidate.first));
+      const std::string signature =
+          declaration_name(routine->source_corresp, true, true) + "::";
+      if (entry.qualified_name.compare(0, signature.size(), signature) == 0) {
+        if (owner != nullptr && owner != candidate.first) {
+          ambiguous = true;
+          break;
+        }
+        owner = candidate.first;
+      }
+    }
+    if (owner == nullptr || ambiguous) continue;
+    const auto routine = symbol_ids.find(owner);
+    const auto variable = symbol_ids.find(entry.variable);
+    if (routine != symbol_ids.end() && variable != symbol_ids.end()) {
+      seen_static.insert(entry.variable);
+      emit_record(32, {num(routine->second), num(variable->second)});
+    }
+  }
   for (const PendingMember &candidate : unresolved_members) {
     if (emitted_member_edges.find(candidate.routine) != emitted_member_edges.end()) {
       continue;
@@ -965,6 +1012,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   unresolved_members.clear();
   named_class_types.clear();
   pending_static_locals.clear();
+  pending_named_statics.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -984,5 +1032,6 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   unresolved_members.clear();
   named_class_types.clear();
   pending_static_locals.clear();
+  pending_named_statics.clear();
   return status;
 }
