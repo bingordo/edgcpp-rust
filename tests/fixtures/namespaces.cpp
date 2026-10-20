@@ -91,3 +91,36 @@ int exception_handling(int x) {
     }
 }
 }
+
+// Function-scoped IL ownership: explicit parameters, implicit this,
+// shadowed locals, static locals, and for-initializer declarations.
+namespace scope_verification {
+int shadow(int input, int offset) {
+    int value = input;
+    {
+        int value = offset + 2;
+        if (value > 0) {
+            int nested = value;
+            offset += nested;
+        }
+    }
+    for (int index = 0; index < input; ++index) {
+        int iteration = index;
+        value += iteration;
+    }
+    static int calls = 0;
+    ++calls;
+    return value + offset + calls;
+}
+struct Receiver {
+    int member;
+    int read(int multiplier) const {
+        int local = member * multiplier;
+        return local;
+    }
+};
+int use_receiver() {
+    Receiver receiver{4};
+    return receiver.read(3);
+}
+}
