@@ -99,8 +99,13 @@ let owner = graph.member_function_owner(routine_symbol_id);
 ```
 
 Member-function ownership includes static and nonstatic member routines.
-Access control, virtual dispatch properties, special-member classification,
-and overload grouping are not yet exported.
+EDG routine classification and dispatch flags are also available through
+`Graph::routine_attributes(routine_symbol_id)`: native `special_kind`,
+virtual/pure-virtual/override/final flags, override relationships, inline and
+constexpr flags, explicit-constructor and definition flags, and whether an
+implicit `this` parameter is present. These describe EDG's processed IL and
+do not reconstruct the original source spelling. Access control and overload
+grouping are not yet exported.
 
 ## Constructor and destructor subobject initialization
 
@@ -119,11 +124,21 @@ for init in graph.constructor_initializers(constructor_symbol_id) {
 }
 ```
 
-The initializer *expression* attached to each constructor subobject is not
-yet captured. Constructor/destructor classification is retained as native
-EDG kinds, and no source spelling is reconstructed. The records are
-available only for function scopes traversed by the native bridge. As with the rest of the native IL, IDs are not stable across
-compilations.
+When EDG represents an initializer as a dynamic expression (or supplies
+a source-expression fallback), the bridge now captures a separate owned
+`ConstructorInitializerExpression` tree. Paths are local to the
+`(routine SymbolId, initializer position)` pair. Use
+`Graph::constructor_initializer_root(routine, position)`,
+`Graph::constructor_initializer_expression(routine, position, path)`, and
+`Graph::constructor_initializer_operands(node)` for navigation. Expression
+trees are optional: not every EDG initializer form exposes an expression.
+The graph checks parent references, type/symbol references, root presence
+and dense operand positions.
+
+Constructor/destructor classification is retained as native EDG kinds, and
+no source spelling is reconstructed. Records are available only for function
+scopes traversed by the native bridge. As with the rest of the native IL,
+IDs are not stable across compilations.
 
 ## Function statements (prototype)
 
