@@ -773,7 +773,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         27 => {
             let (Some(function), Some(statement_path), Some(role),
                  Some(path), Some(kind)) = (t(0), t(1), n(2), t(3), n(5)) else { return; };
-            if !(1..=3).contains(&role) { return; }
+            if !(1..=4).contains(&role) { return; }
             let parent = if fields[4].present() {
                 let Some(parent) = t(4) else { return; };
                 Some(parent)
@@ -1166,6 +1166,18 @@ mod tests {
         assert_eq!(init.symbol, Some(SymbolId(11)));
         assert!(init.follows_execution && init.braced);
         assert_eq!(init.role, 0);
+
+        // Owned statement initializer expressions use supplemental role 4.
+        let initializer_expr = [
+            string(b"f"), string(b"1"), number(4), string(b"0"), absent,
+            number(1), absent, number(12), number(11),
+        ];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(), 27,
+                    initializer_expr.as_ptr(), initializer_expr.len(), 0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.control_expressions[0].role, 4);
 
         let ret = [string(b"f"), string(b"2"), absent,
                    number(3), number(0), number(1)];
