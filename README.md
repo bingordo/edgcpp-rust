@@ -548,3 +548,22 @@ the same compilation snapshot; IDs are not stable between compilations.
 
 For bottom-up passes, use `walk_expression_postorder`,
 `walk_statements_postorder`, or `walk_function_expressions_postorder`.
+
+
+## Borrowed type and declaration views
+
+`Graph::type_view(type_id)` combines a captured type definition with optional
+type detail, function signature, and array element count. It returns `None`
+when the type definition was not captured. `symbol_type_view(symbol_id)`
+resolves a symbol's declared type and returns the same borrowed view.
+
+For declaration-level processing, use `walk_record_fields`,
+`walk_base_classes`, `walk_type_parameters`, and
+`walk_member_functions`. These visitors return borrowed IL records and stop
+when their callback returns `false`. They follow the captured IL order;
+callers requiring a different ordering should sort their own collected IDs.
+Missing owners simply produce no callbacks.
+
+The type view is deliberately non-recursive: it does not infer semantic type
+relationships that the EDG snapshot did not explicitly capture. References
+are valid only while the owning `Graph` is alive.
