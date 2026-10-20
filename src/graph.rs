@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -85,6 +85,9 @@ pub enum GraphError {
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
     DuplicateSymbol(SymbolId),
+    InvalidRoutineIdentity(SymbolId),
+    DuplicateRoutineIdentity(SymbolId),
+    DuplicateRoutineFunction(String),
     DuplicateSymbolType(SymbolId),
     InvalidFunctionParameter { routine: SymbolId, symbol: SymbolId },
     DuplicateFunctionParameter { routine: SymbolId, position: Option<u32> },
@@ -145,12 +148,15 @@ pub struct Graph {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    pub routine_identities: Vec<RoutineIdentity>,
     pub symbol_types: Vec<SymbolType>,
     pub variable_initializers: Vec<VariableInitializer>,
     pub initializer_integers: Vec<InitializerInteger>,
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    routine_by_function: HashMap<String, SymbolId>,
+    routine_function_by_id: HashMap<SymbolId, String>,
     label_definitions: HashMap<SymbolId, StatementId>,
     statement_label_index: HashMap<StatementId, usize>,
     lifetime_index: HashMap<(SymbolId, u32), usize>,
@@ -331,6 +337,24 @@ impl Graph {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
+        }
+        for identity in &il.routine_identities {
+            if !graph.symbols.iter().any(|sym|
+                    sym.id == identity.routine && sym.kind == 1)
+                || identity.function.is_empty() {
+                return Err(GraphError::InvalidRoutineIdentity(identity.routine));
+            }
+            if graph.routine_function_by_id.insert(
+                identity.routine, identity.function.clone()).is_some()
+            {
+                return Err(GraphError::DuplicateRoutineIdentity(identity.routine));
+            }
+            if graph.routine_by_function.insert(
+                identity.function.clone(), identity.routine).is_some()
+            {
+                return Err(GraphError::DuplicateRoutineFunction(identity.function.clone()));
+            }
+            graph.routine_identities.push(identity.clone());
         }
         let mut typed_symbols = std::collections::HashSet::new();
         for edge in &il.symbol_types {
@@ -615,11 +639,15 @@ impl Graph {
                 scope.parent.is_some_and(|parent|
                     parent < scope.id && scope_keys.contains(&(scope.routine, parent)))
             };
-            let valid_statement = scope.statement_path.as_ref().is_none_or(|path|
-                smap.contains_key(&(
-                    graph.symbols.iter().find(|s| s.id == scope.routine).unwrap().name.clone(),
-                    path.clone(),
-                )));
+            let valid_statement = scope.statement_path.as_ref().is_none_or(|path| {
+                let name = graph.routine_function_by_id.get(&scope.routine)
+                    .map(String::as_str)
+                    .or_else(|| graph.symbols.iter()
+                        .find(|sym| sym.id == scope.routine)
+                        .map(|sym| sym.name.as_str()));
+                name.is_some_and(|function|
+                    smap.contains_key(&(function.to_owned(), path.clone())))
+            });
             if !valid_parent || !valid_statement {
                 return Err(GraphError::InvalidLocalScope {
                     routine: scope.routine, scope: scope.id,
@@ -1066,10 +1094,13 @@ impl Graph {
             }
             graph.scope_lifetimes.push(item.clone());
         }
-        let routine_names: HashMap<String, SymbolId> = graph.symbols.iter()
-            .filter(|s| s.kind == 1)
-            .map(|s| (s.name.clone(), s.id))
-            .collect();
+        let routine_names: HashMap<String, SymbolId> =
+            if graph.routine_by_function.is_empty() {
+                graph.symbols.iter().filter(|s| s.kind == 1)
+                    .map(|s| (s.name.clone(), s.id)).collect()
+            } else {
+                graph.routine_by_function.clone()
+            };
         for item in &il.initialization_lifetimes {
             let key = (item.function.clone(), item.statement_path.clone());
             let owner = routine_names.get(&item.function);
@@ -1436,6 +1467,17 @@ impl Graph {
     pub fn variable_initializer(&self, id: SymbolId) -> Option<&VariableInitializer> {
         self.variable_initializers.iter().find(|v| v.symbol == id)
     }
+    /// Canonical exported IL function name for an emitted routine.
+    /// Unlike Symbol.name, this is independent of the first reference's spelling.
+    pub fn routine_function(&self, id: SymbolId) -> Option<&str> {
+        self.routine_function_by_id.get(&id).map(String::as_str)
+    }
+
+    /// Resolve the function key of a statement body to its native routine.
+    pub fn routine_for_function(&self, function: &str) -> Option<SymbolId> {
+        self.routine_by_function.get(function).copied()
+    }
+
     pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
         self.symbols.iter().find(|s| s.id == id)
     }
@@ -1640,6 +1682,48 @@ mod tests {
         il.symbols[0].kind = 1;
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidStatementLabel { .. })));
+    }
+
+    #[test]
+    fn routine_identity_is_not_inferred_from_symbol_display_name() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1,
+            name: "ns::overloaded(int)".into(),
+        });
+        il.routine_identities.push(RoutineIdentity {
+            routine: SymbolId(1), function: "ns::overloaded".into(),
+        });
+        il.statements.push(Statement {
+            function: "ns::overloaded".into(), path: "0".into(),
+            parent: None, kind: 1,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None, kind: 17,
+            statement_path: Some("0".into()),
+        });
+        il.statement_initializations.push(StatementInitialization {
+            function: "ns::overloaded".into(), statement_path: "0".into(),
+            symbol: None, kind: 1, follows_execution: false,
+            braced: false, role: 1,
+        });
+        il.object_lifetimes.push(ObjectLifetime {
+            routine: SymbolId(1), id: 0, parent: None, kind: 1,
+        });
+        il.initialization_lifetimes.push(InitializationLifetime {
+            function: "ns::overloaded".into(), statement_path: "0".into(),
+            lifetime: Some(0), destructor: None,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.routine_for_function("ns::overloaded"), Some(SymbolId(1)));
+        assert_eq!(graph.routine_function(SymbolId(1)), Some("ns::overloaded"));
+        assert_eq!(graph.initialization_lifetime("ns::overloaded", "0")
+            .unwrap().lifetime, Some(0));
+        il.routine_identities.push(RoutineIdentity {
+            routine: SymbolId(1), function: "other".into(),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::DuplicateRoutineIdentity(SymbolId(1)));
     }
 
     #[test]
