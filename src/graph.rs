@@ -1455,7 +1455,7 @@ impl Graph {
         mut visit: impl FnMut(StatementId, ExpressionId, &ExpressionNode) -> bool,
     ) {
         let mut continuing = true;
-        self.walk_statements(function, |_, statement| {
+        self.walk_statements(function, |statement_id, statement| {
             if let Some(root) = statement.expression {
                 self.walk_expression(root, |expression_id, node| {
                     continuing = visit(statement_id, expression_id, node);
