@@ -192,6 +192,48 @@ pub enum AnyExpressionRef<'a> {
     ConstructorInitializer(&'a ConstructorInitializerExpression),
 }
 
+impl AnyExpressionRef<'_> {
+    /// Referenced declaration, if this expression names one.
+    pub fn symbol_id(self) -> Option<SymbolId> {
+        match self {
+            Self::Primary(node) => node.data.symbol_id,
+            Self::Control(node) => node.symbol_id,
+            Self::VariableInitializer(node) => node.symbol_id,
+            Self::ConstructorInitializer(node) => node.symbol_id,
+        }
+    }
+
+    /// Expression's EDG kind discriminator.
+    pub fn kind(self) -> u32 {
+        match self {
+            Self::Primary(node) => node.data.kind,
+            Self::Control(node) => node.kind,
+            Self::VariableInitializer(node) => node.kind,
+            Self::ConstructorInitializer(node) => node.kind,
+        }
+    }
+
+    /// Operator discriminator, when supplied by EDG.
+    pub fn operator(self) -> Option<u32> {
+        match self {
+            Self::Primary(node) => node.data.operator,
+            Self::Control(node) => node.operator,
+            Self::VariableInitializer(node) => node.operator,
+            Self::ConstructorInitializer(node) => node.operator,
+        }
+    }
+
+    /// Type associated with the expression, if available.
+    pub fn type_id(self) -> Option<TypeId> {
+        match self {
+            Self::Primary(node) => node.data.type_id,
+            Self::Control(node) => node.type_id,
+            Self::VariableInitializer(node) => node.type_id,
+            Self::ConstructorInitializer(node) => node.type_id,
+        }
+    }
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
