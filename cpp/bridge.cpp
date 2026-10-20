@@ -31,6 +31,7 @@ thread_local std::unordered_map<const void *, uint32_t> type_ids;
 thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
+thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
 thread_local std::unordered_map<const void *, std::string> scope_statement_paths;
 thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
@@ -499,6 +500,83 @@ static uint32_t emit_variable_type(a_variable_ptr var)
 // The IL owns a function-scope tree independently of the statement tree.
 // Walk only a routine's own scope region and retain parent relationships.
 // The lifetime of all pointers is limited to the synchronous EDG callback.
+// Runtime object lifetimes are not equivalent to lexical scopes.
+// ID assignment and traversal are limited to one function's live IL region.
+static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
+                               uint32_t routine, unsigned parent,
+                               unsigned depth)
+{
+  if (lifetime == nullptr || depth > 64 || current_callback == nullptr ||
+      current_lifetime_ids.size() >= 10000) return;
+  if (current_lifetime_ids.find(lifetime) != current_lifetime_ids.end()) return;
+  const uint32_t id = static_cast<uint32_t>(current_lifetime_ids.size());
+  current_lifetime_ids.emplace(lifetime, id);
+  emit_record(38, {num(routine), num(id),
+                   parent == std::numeric_limits<uint32_t>::max() ?
+                       absent() : num(parent),
+                   num(static_cast<unsigned>(lifetime->kind))});
+
+  // EDG orders this list in destruction order; preserve that order.
+  unsigned position = 0;
+  std::unordered_set<a_dynamic_init_ptr> seen;
+  for (a_dynamic_init_ptr d = lifetime->destructions;
+       d != nullptr && position < 10000 && seen.insert(d).second;
+       d = d->next_in_destruction_list) {
+    uint32_t variable = 0, destructor = 0;
+    if (d->variable != nullptr) {
+      a_variable_ptr v = d->variable;
+      const char *raw = source_name(v->source_corresp);
+      variable = emit_symbol(v, 2, raw == nullptr ? "<destructible>" :
+                             declaration_name(v->source_corresp, false));
+      emit_variable_type(v);
+    }
+    if (d->destructor != nullptr) {
+      a_routine_ptr r = d->destructor;
+      destructor = emit_symbol(r, 1,
+          declaration_name(r->source_corresp, true, true));
+    }
+    emit_record(41, {num(routine), num(id), num(position++),
+                     variable ? num(variable) : absent(),
+                     destructor ? num(destructor) : absent()});
+  }
+  unsigned children = 0;
+  for (an_object_lifetime_ptr child = lifetime->child_lifetime;
+       child != nullptr && children++ < 10000; child = child->next) {
+    emit_lifetime_tree(child, routine, id, depth + 1);
+  }
+}
+
+static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
+{
+  current_lifetime_ids.clear();
+  if (body == nullptr || body->kind != sck_function) return;
+  emit_lifetime_tree(body->lifetime, routine,
+                     std::numeric_limits<uint32_t>::max(), 0);
+  emit_lifetime_tree(body->variant.routine.lifetime_of_local_static_vars,
+                     routine, std::numeric_limits<uint32_t>::max(), 0);
+  // A scope's lifetime can be distinct from its parent's lifetime
+  // (e.g., after labels, temporaries and special static regions).
+  std::vector<a_scope_ptr> pending{body};
+  std::unordered_set<a_scope_ptr> visited;
+  while (!pending.empty() && visited.size() < 10000) {
+    a_scope_ptr scope = pending.back();
+    pending.pop_back();
+    if (scope == nullptr || !visited.insert(scope).second) continue;
+    if (scope->lifetime != nullptr &&
+        current_lifetime_ids.find(scope->lifetime) == current_lifetime_ids.end()) {
+      unsigned parent = std::numeric_limits<uint32_t>::max();
+      auto prior = current_lifetime_ids.find(scope->lifetime->parent_lifetime);
+      if (prior != current_lifetime_ids.end()) parent = prior->second;
+      emit_lifetime_tree(scope->lifetime, routine, parent, 0);
+    }
+    unsigned children = 0;
+    for (a_scope_ptr child = scope->scopes;
+         child != nullptr && children++ < 10000; child = child->next) {
+      pending.push_back(child);
+    }
+  }
+}
+
 static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
                              const std::string &function, uint32_t parent,
                              unsigned &next_id,
@@ -516,6 +594,10 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
                    num(static_cast<unsigned>(scope->kind)),
                    known_path == scope_statement_paths.end() ?
                        absent() : txt(known_path->second)});
+  const auto region = current_lifetime_ids.find(scope->lifetime);
+  if (region != current_lifetime_ids.end()) {
+    emit_record(39, {num(routine), num(id), num(region->second)});
+  }
 
   for (unsigned group = 0; group < 2; ++group) {
     a_variable_ptr first = group == 0 ?
@@ -683,6 +765,20 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                        variable_symbol ? num(variable_symbol) : absent(),
                        num(static_cast<unsigned>(init->kind)),
                        num(init_flags), num(init_role)});
+      const auto region = current_lifetime_ids.find(init->lifetime);
+      uint32_t destructor = 0;
+      if (init->destructor != nullptr) {
+        a_routine_ptr r = init->destructor;
+        destructor = emit_symbol(r, 1,
+            declaration_name(r->source_corresp, true, true));
+      }
+      if (region != current_lifetime_ids.end() || destructor != 0) {
+        emit_record(40, {txt(function), txt(path),
+                         region == current_lifetime_ids.end() ?
+                             absent() : num(region->second),
+                         destructor ? num(destructor) : absent()});
+      }
+
       if ((init->kind == dik_expression ||
            init->kind == dik_class_result_via_ctor) &&
           init->variant.expression != nullptr) {
@@ -961,8 +1057,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           if (body->assoc_block != nullptr) {
             scope_statement_paths.emplace(body, "0");
           }
+          prepare_lifetimes(body, routine_symbol);
           emit_statements(body->assoc_block, name, "", "", 0);
           emit_function_locals(body, routine_symbol, name);
+          current_lifetime_ids.clear();
         }
       }
     }
@@ -1141,6 +1239,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   symbol_ids.clear();
   visited_scopes.clear();
   emitted_symbol_types.clear();
+  current_lifetime_ids.clear();
   scope_statement_paths.clear();
   emitted_routines.clear();
   emitted_member_edges.clear();
@@ -1161,6 +1260,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   symbol_ids.clear();
   visited_scopes.clear();
   emitted_symbol_types.clear();
+  current_lifetime_ids.clear();
   scope_statement_paths.clear();
   emitted_routines.clear();
   emitted_member_edges.clear();
