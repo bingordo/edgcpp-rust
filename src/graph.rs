@@ -3419,6 +3419,183 @@ mod tests {
     }
 
     #[test]
+    fn batched_type_updates_match_sequential_edits_and_keep_reverse_order() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(3)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(3)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: None },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: Some(TypeId(3)) },
+        ]);
+        graph.symbols.extend([
+            Symbol { id: SymbolId(10), kind: 1, name: "first".into() },
+            Symbol { id: SymbolId(11), kind: 1, name: "second".into() },
+        ]);
+        graph.symbol_types.extend([
+            SymbolType { symbol: SymbolId(10), ty: TypeId(1) },
+            SymbolType { symbol: SymbolId(11), ty: TypeId(2) },
+        ]);
+        let mut batch = graph.type_dependency_index();
+        let mut sequential = batch.clone();
+        let changes = vec![
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(1),
+                dependencies: vec![
+                    TypeDependency { target: TypeId(5), kind: TypeDependencyKind::Field },
+                    TypeDependency { target: TypeId(5), kind: TypeDependencyKind::Related },
+                ],
+            },
+            TypeIndexChange::RemoveType { ty: TypeId(4) },
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(1),
+                dependencies: vec![
+                    TypeDependency { target: TypeId(3), kind: TypeDependencyKind::Base },
+                    TypeDependency { target: TypeId(3), kind: TypeDependencyKind::Field },
+                ],
+            },
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(6),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(3), kind: TypeDependencyKind::Related,
+                }],
+            },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(10), ty: Some(TypeId(6)) },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(10), ty: Some(TypeId(3)) },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(12), ty: Some(TypeId(6)) },
+        ];
+        batch.apply_changes(&changes);
+        for change in changes {
+            match change {
+                TypeIndexChange::ReplaceType { ty, dependencies } => {
+                    sequential.replace_type_dependencies(ty, dependencies);
+                }
+                TypeIndexChange::RemoveType { ty } => {
+                    assert!(sequential.remove_type(ty));
+                }
+                TypeIndexChange::SetSymbolType { symbol, ty } => {
+                    sequential.set_symbol_type(symbol, ty);
+                }
+            }
+        }
+        for target in [TypeId(3), TypeId(4), TypeId(5), TypeId(6)] {
+            assert_eq!(batch.dependents(target), sequential.dependents(target));
+        }
+        assert_eq!(batch.dependents(TypeId(3)),
+            [TypeId(1), TypeId(2), TypeId(6)]);
+        assert_eq!(batch.dependencies(TypeId(1)).len(), 2);
+        assert!(batch.dependents(TypeId(5)).is_empty());
+        assert!(batch.dependencies(TypeId(4)).is_empty());
+        assert_eq!(batch.affected_types(&[TypeId(3)]),
+            sequential.affected_types(&[TypeId(3)]));
+        assert_eq!(batch.invalidation_schedule(&[TypeId(3)]),
+            sequential.invalidation_schedule(&[TypeId(3)]));
+        assert_eq!(batch.affected_symbols(&[TypeId(3)]),
+            [SymbolId(10), SymbolId(11), SymbolId(12)]);
+        assert_eq!(batch.affected_symbols(&[TypeId(3)]),
+            sequential.affected_symbols(&[TypeId(3)]));
+    }
+
+    #[test]
+    fn differential_invalidation_reports_additions_removals_and_shortest_depths() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: None },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: None },
+            TypeDef { id: TypeId(5), kind: 1, related_role: None, related: None },
+        ]);
+        graph.symbols.extend([
+            Symbol { id: SymbolId(4), kind: 1, name: "added".into() },
+            Symbol { id: SymbolId(3), kind: 1, name: "removed".into() },
+            Symbol { id: SymbolId(1), kind: 1, name: "retained".into() },
+        ]);
+        graph.symbol_types.extend([
+            SymbolType { symbol: SymbolId(4), ty: TypeId(4) },
+            SymbolType { symbol: SymbolId(3), ty: TypeId(3) },
+            SymbolType { symbol: SymbolId(1), ty: TypeId(1) },
+        ]);
+        let mut index = graph.type_dependency_index();
+        let delta = index.apply_changes_with_diff(&[
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(2),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(6), kind: TypeDependencyKind::Related,
+                }],
+            },
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(4),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(1), kind: TypeDependencyKind::Related,
+                }],
+            },
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(5),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(4), kind: TypeDependencyKind::Related,
+                }],
+            },
+        ], &[TypeId(1)]);
+        assert_eq!(delta.before_types, vec![
+            ReachableType { ty: TypeId(1), depth: 0 },
+            ReachableType { ty: TypeId(2), depth: 1 },
+            ReachableType { ty: TypeId(3), depth: 2 },
+        ]);
+        assert_eq!(delta.after_types, vec![
+            ReachableType { ty: TypeId(1), depth: 0 },
+            ReachableType { ty: TypeId(4), depth: 1 },
+            ReachableType { ty: TypeId(5), depth: 2 },
+        ]);
+        assert_eq!(delta.newly_affected_types, vec![
+            ReachableType { ty: TypeId(4), depth: 1 },
+            ReachableType { ty: TypeId(5), depth: 2 },
+        ]);
+        assert_eq!(delta.no_longer_affected_types, vec![
+            ReachableType { ty: TypeId(2), depth: 1 },
+            ReachableType { ty: TypeId(3), depth: 2 },
+        ]);
+        assert_eq!(delta.newly_affected_symbols, [SymbolId(4)]);
+        assert_eq!(delta.no_longer_affected_symbols, [SymbolId(3)]);
+        let unchanged = index.apply_changes_with_diff(&[], &[TypeId(1)]);
+        assert!(unchanged.newly_affected_types.is_empty());
+        assert!(unchanged.no_longer_affected_types.is_empty());
+        assert!(unchanged.newly_affected_symbols.is_empty());
+        assert!(unchanged.no_longer_affected_symbols.is_empty());
+    }
+
+    #[test]
+    fn batch_can_delete_and_recreate_types_or_remove_symbol_links() {
+        let mut index = TypeDependencyIndex::default();
+        let changes = [
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(7),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(8), kind: TypeDependencyKind::Field,
+                }],
+            },
+            TypeIndexChange::RemoveType { ty: TypeId(7) },
+            TypeIndexChange::ReplaceType {
+                ty: TypeId(7),
+                dependencies: vec![TypeDependency {
+                    target: TypeId(9), kind: TypeDependencyKind::Related,
+                }],
+            },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(1), ty: Some(TypeId(7)) },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(2), ty: Some(TypeId(7)) },
+            TypeIndexChange::SetSymbolType { symbol: SymbolId(1), ty: None },
+        ];
+        let delta = index.apply_changes_with_diff(&changes, &[TypeId(9)]);
+        assert_eq!(index.dependents(TypeId(9)), [TypeId(7)]);
+        assert!(index.dependents(TypeId(8)).is_empty());
+        assert!(delta.before_types.contains(&ReachableType { ty: TypeId(9), depth: 0 }));
+        assert_eq!(delta.newly_affected_types, vec![
+            ReachableType { ty: TypeId(7), depth: 1 },
+        ]);
+        assert_eq!(delta.newly_affected_symbols, [SymbolId(2)]);
+        assert_eq!(index.affected_symbols(&[TypeId(9)]), [SymbolId(2)]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
