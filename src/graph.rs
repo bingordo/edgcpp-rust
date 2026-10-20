@@ -600,8 +600,10 @@ impl TypeDependencyIndex {
 
         // Stable tie-breaking by initial affected-type discovery order.
         let mut rank = vec![usize::MAX; components.len()];
+        let mut node_rank = HashMap::new();
         for (position, &node) in nodes.iter().enumerate() {
             rank[component_of[&node]] = rank[component_of[&node]].min(position);
+            node_rank.insert(node, position);
         }
         let mut ready: std::collections::BTreeSet<(usize, usize)> = indegree.iter()
             .enumerate()
@@ -612,7 +614,7 @@ impl TypeDependencyIndex {
         while let Some(&(priority, id)) = ready.iter().next() {
             ready.remove(&(priority, id));
             let mut members = components[id].clone();
-            members.sort_by_key(|ty| nodes.iter().position(|node| node == ty).unwrap_or(usize::MAX));
+            members.sort_by_key(|ty| node_rank.get(ty).copied().unwrap_or(usize::MAX));
             schedule.push(members);
             for &next in &successors[id] {
                 indegree[next] -= 1;
@@ -2766,19 +2768,64 @@ impl Graph {
     /// This is a snapshot: rebuild it after changing public Graph collections.
     pub fn type_dependency_index(&self) -> TypeDependencyIndex {
         let mut index = TypeDependencyIndex::default();
+
+        // Populate the forward index in category order with one pass over
+        // each IL collection. Querying each type through type_dependencies()
+        // would repeatedly scan the complete field/base/parameter tables.
         for ty in &self.types {
+            if index.forward.contains_key(&ty.id) {
+                continue;
+            }
             index.type_order.push(ty.id);
-            let edges = self.type_dependencies(ty.id);
-            for edge in &edges {
-                let dependents = index.reverse.entry(edge.target).or_default();
-                if !dependents.contains(&ty.id) {
-                    dependents.push(ty.id);
+            let mut dependencies = Vec::new();
+            if let Some(target) = ty.related {
+                dependencies.push(TypeDependency {
+                    target, kind: TypeDependencyKind::Related,
+                });
+            }
+            index.forward.insert(ty.id, dependencies);
+        }
+        for base in &self.base_classes {
+            if let Some(edges) = index.forward.get_mut(&base.derived) {
+                edges.push(TypeDependency {
+                    target: base.base, kind: TypeDependencyKind::Base,
+                });
+            }
+        }
+        for field in &self.record_fields {
+            if let Some(edges) = index.forward.get_mut(&field.owner) {
+                edges.push(TypeDependency {
+                    target: field.ty, kind: TypeDependencyKind::Field,
+                });
+            }
+        }
+        for parameter in &self.type_parameters {
+            if let Some(edges) = index.forward.get_mut(&parameter.owner) {
+                edges.push(TypeDependency {
+                    target: parameter.ty, kind: TypeDependencyKind::Parameter,
+                });
+            }
+        }
+
+        // Reverse edges are unique even if several relationships reference
+        // the same target. Keep dependent order equal to captured type order.
+        for &source in &index.type_order {
+            let mut emitted = std::collections::HashSet::new();
+            for edge in index.forward.get(&source).map(Vec::as_slice).unwrap_or(&[]) {
+                if emitted.insert(edge.target) {
+                    index.reverse.entry(edge.target).or_default().push(source);
                 }
             }
-            index.forward.insert(ty.id, edges);
+        }
+
+        // A symbol may have no declared type. In a malformed synthetic graph
+        // multiple edges can exist; match symbol_type()'s first-edge rule.
+        let mut symbol_types = HashMap::new();
+        for edge in &self.symbol_types {
+            symbol_types.entry(edge.symbol).or_insert(edge.ty);
         }
         for symbol in &self.symbols {
-            if let Some(ty) = self.symbol_type(symbol.id) {
+            if let Some(&ty) = symbol_types.get(&symbol.id) {
                 index.symbols_by_type.entry(ty).or_default().push(symbol.id);
                 index.symbol_order.push((symbol.id, ty));
             }
