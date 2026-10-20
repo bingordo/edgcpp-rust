@@ -442,22 +442,6 @@ impl Graph {
         for node in &mut graph.statements {
             node.children.sort_by_key(|id| stmt_order[id.0]);
         }
-        // Every expression's child indices must be dense. Otherwise a
-        // truncated native snapshot can silently change operand semantics,
-        // even when the parent is not a function call.
-        for node in &graph.expressions {
-            for (index, child) in node.operands.iter().enumerate() {
-                if graph.expressions[child.0].data.path
-                    != format!("{}.{}", node.data.path, index)
-                {
-                    return Err(GraphError::InvalidExpressionOperandPath {
-                        function: node.data.function.clone(),
-                        statement: node.data.statement_path.clone(),
-                        path: node.data.path.clone(),
-                    });
-                }
-            }
-        }
         // A call's first operand is its callee; member calls additionally
         // carry an object operand. Missing required operands indicate a
         // truncated native snapshot rather than a valid zero-argument call.
@@ -487,6 +471,22 @@ impl Graph {
                         function: call.function.clone(),
                         statement: call.statement_path.clone(),
                         path: call.path.clone(),
+                    });
+                }
+            }
+        }
+        // Every expression's child indices must be dense. Otherwise a
+        // truncated native snapshot can silently change operand semantics,
+        // even when the parent is not a function call.
+        for node in &graph.expressions {
+            for (index, child) in node.operands.iter().enumerate() {
+                if graph.expressions[child.0].data.path
+                    != format!("{}.{}", node.data.path, index)
+                {
+                    return Err(GraphError::InvalidExpressionOperandPath {
+                        function: node.data.function.clone(),
+                        statement: node.data.statement_path.clone(),
+                        path: node.data.path.clone(),
                     });
                 }
             }
