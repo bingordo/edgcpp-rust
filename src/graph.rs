@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -40,6 +40,8 @@ pub enum GraphError {
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateBaseClass { derived: TypeId, position: u32 },
+    InvalidBaseClassAccess { derived: TypeId, position: u32 },
+    DuplicateBaseClassAccess { derived: TypeId, position: u32 },
     InvalidBaseClass { derived: TypeId, base: TypeId },
     InvalidBaseClassPosition(TypeId),
     CyclicInheritance(TypeId),
@@ -81,6 +83,7 @@ pub struct Graph {
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
     pub base_classes: Vec<BaseClass>,
+    pub base_class_access: Vec<BaseClassAccess>,
     pub constructor_initializers: Vec<ConstructorInitializer>,
     pub constructor_initializer_expressions: Vec<ConstructorInitializerExpression>,
     pub member_functions: Vec<MemberFunction>,
@@ -182,6 +185,22 @@ impl Graph {
             graph.base_classes.push(edge.clone());
         }
         graph.base_classes.sort_by_key(|edge| (edge.derived.0, edge.position));
+        let mut seen_access = std::collections::HashSet::new();
+        for access in &il.base_class_access {
+            if !base_positions.contains(&(access.derived, access.position)) {
+                return Err(GraphError::InvalidBaseClassAccess {
+                    derived: access.derived, position: access.position,
+                });
+            }
+            if !seen_access.insert((access.derived, access.position)) {
+                return Err(GraphError::DuplicateBaseClassAccess {
+                    derived: access.derived, position: access.position,
+                });
+            }
+            graph.base_class_access.push(access.clone());
+        }
+        graph.base_class_access.sort_by_key(|edge| (edge.derived.0, edge.position));
+
         // Direct bases are a source-order list, not a sparse index space.
         // Reject missing entries and cycles before exposing inheritance APIs.
         let mut grouped: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
@@ -773,6 +792,12 @@ impl Graph {
         self.constructor_initializers.iter().filter(move |v| v.routine == routine)
     }
 
+    /// Direct base access and pack-expansion details if available.
+    pub fn base_access(&self, derived: TypeId, position: u32) -> Option<&BaseClassAccess> {
+        self.base_class_access.iter().find(|access|
+            access.derived == derived && access.position == position)
+    }
+
     /// Direct bases in source declaration order, including virtual bases.
     pub fn bases(&self, derived: TypeId) -> impl Iterator<Item = &BaseClass> {
         self.base_classes.iter().filter(move |edge| edge.derived == derived)
@@ -937,6 +962,32 @@ mod tests {
         il.constructor_initializers[0].position = 3;
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidConstructorInitializer { .. })));
+    }
+
+    #[test]
+    fn validates_direct_base_access_edges() {
+        let mut il = Il::default();
+        for id in 1..=2 {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 1, related_role: None, related: None,
+            });
+        }
+        il.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 0, base: TypeId(2), is_virtual: false,
+        });
+        il.base_class_access.push(BaseClassAccess {
+            derived: TypeId(1), position: 0, access: Some(1),
+            pack_expansion: false,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.base_access(TypeId(1), 0), il.base_class_access.first());
+        il.base_class_access.push(il.base_class_access[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateBaseClassAccess { .. })));
+        il.base_class_access.pop();
+        il.base_class_access[0].position = 1;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidBaseClassAccess { .. })));
     }
 
     #[test]
