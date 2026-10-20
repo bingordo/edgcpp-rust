@@ -19,19 +19,27 @@ int nested = 7;
 }
 
 namespace cpp_bridge_verification {
-struct Base { int value; Base() : value(1) {} virtual ~Base() {} };
+struct Base { int value; Base() : value(1) {} virtual ~Base() {} virtual int virtual_method() const { return value; } };
 struct Secondary { int other; };
 struct Derived : public Base, virtual public Secondary {
     int field;
     Derived();
     int method() const;
+    int virtual_method() const override;
     static int static_method();
 };
 Derived::Derived() : Base(), Secondary(), field(7) {}
 int Derived::method() const { return field + value; }
+int Derived::virtual_method() const { return field; }
 int Derived::static_method() { return 3; }
+struct InitializerExpressionProbe {
+    int field;
+    explicit InitializerExpressionProbe(int value);
+};
+InitializerExpressionProbe::InitializerExpressionProbe(int value) : field(value + 3) {}
 int exercise() {
     Derived d;
-    return d.method() + Derived::static_method();
+    InitializerExpressionProbe probe(2);
+    return d.virtual_method() + d.method() + Derived::static_method() + probe.field;
 }
 }
