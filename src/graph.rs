@@ -327,9 +327,60 @@ pub struct TypeDependencyIndex {
     reverse: HashMap<TypeId, Vec<TypeId>>,
     symbols_by_type: HashMap<TypeId, Vec<SymbolId>>,
     symbol_order: Vec<(SymbolId, TypeId)>,
+    type_order: Vec<TypeId>,
 }
 
 impl TypeDependencyIndex {
+    /// Replace the outgoing relationships for one captured type without
+    /// rebuilding unrelated forward edges. The supplied relationships
+    /// become the authoritative outgoing edges for this snapshot.
+    /// Duplicate edges are retained in the forward index.
+    pub fn replace_type_dependencies(&mut self, ty: TypeId, edges: Vec<TypeDependency>) {
+        if !self.type_order.contains(&ty) {
+            self.type_order.push(ty);
+        }
+        self.forward.insert(ty, edges);
+        self.rebuild_reverse();
+    }
+
+    /// Remove a type's outgoing relationships and its captured definition.
+    /// Incoming references from other types are intentionally preserved.
+    pub fn remove_type(&mut self, ty: TypeId) -> bool {
+        if self.forward.remove(&ty).is_none() { return false; }
+        self.type_order.retain(|&id| id != ty);
+        self.rebuild_reverse();
+        true
+    }
+
+    /// Update the declared type of a captured symbol, or remove its
+    /// type association with None. New symbols are appended to symbol order.
+    pub fn set_symbol_type(&mut self, symbol: SymbolId, ty: Option<TypeId>) {
+        self.symbol_order.retain(|(id, _)| *id != symbol);
+        if let Some(ty) = ty {
+            self.symbol_order.push((symbol, ty));
+        }
+        self.symbols_by_type.clear();
+        for &(id, ty) in &self.symbol_order {
+            self.symbols_by_type.entry(ty).or_default().push(id);
+        }
+    }
+
+    /// Reconstruct reverse adjacency from the index's current forward edges.
+    /// This preserves captured type order and deduplicates repeated edges.
+    fn rebuild_reverse(&mut self) {
+        self.reverse.clear();
+        for &ty in &self.type_order {
+            if let Some(edges) = self.forward.get(&ty) {
+                for edge in edges {
+                    let dependents = self.reverse.entry(edge.target).or_default();
+                    if !dependents.contains(&ty) {
+                        dependents.push(ty);
+                    }
+                }
+            }
+        }
+    }
+
     /// Direct captured dependencies in the same order as Graph queries.
     pub fn dependencies(&self, ty: TypeId) -> &[TypeDependency] {
         self.forward.get(&ty).map(Vec::as_slice).unwrap_or(&[])
@@ -2596,6 +2647,7 @@ impl Graph {
     pub fn type_dependency_index(&self) -> TypeDependencyIndex {
         let mut index = TypeDependencyIndex::default();
         for ty in &self.types {
+            index.type_order.push(ty.id);
             let edges = self.type_dependencies(ty.id);
             for edge in &edges {
                 let dependents = index.reverse.entry(edge.target).or_default();
