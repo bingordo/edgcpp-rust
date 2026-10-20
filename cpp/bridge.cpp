@@ -487,7 +487,7 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   std::unordered_set<a_variable_ptr> seen_parameters;
   for (a_variable_ptr var = body->variant.routine.parameters;
        var != nullptr && count++ < 10000; var = var->next) {
-    if (!seen_parameters.insert(var).second || var->is_this_parameter) continue;
+    if (var->is_this_parameter || !seen_parameters.insert(var).second) continue;
     const char *raw_name = source_name(var->source_corresp);
     const std::string name = function + "::" +
         (raw_name == nullptr ? "<parameter>" : raw_name);
