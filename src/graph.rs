@@ -1490,8 +1490,9 @@ mod tests {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None, kind: 1,
             operator: None, type_kind: None, reference: None,
-            type_size: None, type_alignment: None, constant_integer: None,
-            type_id: None, symbol_id: None,
+            type_size: None, type_alignment: None, constant_kind: None,
+            constant_integer: None, related_type_role: None,
+            related_type_kind: None, type_id: None, symbol_id: None,
         });
         let location = SourceLocation {
             sequence: 12, column: 7, file: "example.cpp".into(), line: 4,
