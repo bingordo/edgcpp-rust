@@ -41,6 +41,8 @@ pub enum GraphError {
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateBaseClass { derived: TypeId, position: u32 },
     InvalidBaseClass { derived: TypeId, base: TypeId },
+    InvalidBaseClassPosition(TypeId),
+    CyclicInheritance(TypeId),
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
@@ -165,6 +167,44 @@ impl Graph {
             graph.base_classes.push(edge.clone());
         }
         graph.base_classes.sort_by_key(|edge| (edge.derived.0, edge.position));
+        // Direct bases are a source-order list, not a sparse index space.
+        // Reject missing entries and cycles before exposing inheritance APIs.
+        let mut grouped: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+        for edge in &graph.base_classes {
+            let entry = grouped.entry(edge.derived).or_default();
+            if edge.position as usize != entry.len() {
+                return Err(GraphError::InvalidBaseClassPosition(edge.derived));
+            }
+            entry.push(edge.base);
+        }
+        // Iterative DFS avoids stack overflow on malformed deep inheritance.
+        let mut visited = std::collections::HashSet::new();
+        let mut active = std::collections::HashSet::new();
+        for &root in grouped.keys() {
+            if visited.contains(&root) { continue; }
+            let mut stack = vec![(root, false)];
+            while let Some((node, exiting)) = stack.pop() {
+                if exiting {
+                    active.remove(&node);
+                    visited.insert(node);
+                    continue;
+                }
+                if visited.contains(&node) { continue; }
+                if !active.insert(node) {
+                    return Err(GraphError::CyclicInheritance(node));
+                }
+                stack.push((node, true));
+                if let Some(bases) = grouped.get(&node) {
+                    for &base in bases.iter().rev() {
+                        if active.contains(&base) {
+                            return Err(GraphError::CyclicInheritance(base));
+                        }
+                        if !visited.contains(&base) { stack.push((base, false)); }
+                    }
+                }
+            }
+        }
+
         let mut detailed = std::collections::HashSet::new();
         for detail in &il.type_details {
             if !type_map.contains_key(&detail.owner) {
@@ -593,6 +633,30 @@ mod tests {
         il.base_classes.push(il.base_classes[0].clone());
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::DuplicateBaseClass { .. })));
+    }
+
+    #[test]
+    fn rejects_sparse_and_cyclic_inheritance() {
+        let mut il = Il::default();
+        for id in 1..=3 {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 1, related_role: None, related: None,
+            });
+        }
+        il.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 1, base: TypeId(2), is_virtual: false,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+                   GraphError::InvalidBaseClassPosition(TypeId(1)));
+        il.base_classes[0].position = 0;
+        il.base_classes.push(BaseClass {
+            derived: TypeId(2), position: 0, base: TypeId(3), is_virtual: false,
+        });
+        il.base_classes.push(BaseClass {
+            derived: TypeId(3), position: 0, base: TypeId(1), is_virtual: false,
+        });
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::CyclicInheritance(_))));
     }
 
     #[test]
