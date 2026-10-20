@@ -71,6 +71,8 @@ pub struct Il {
     pub record_fields: Vec<RecordField>,
     /// Direct class bases in declaration order.
     pub base_classes: Vec<BaseClass>,
+    /// Direct-base access specifiers keyed by derived type and position.
+    pub base_class_access: Vec<BaseClassAccess>,
     /// Constructor and destructor subobject initialization records.
     pub constructor_initializers: Vec<ConstructorInitializer>,
     /// Owned expression trees attached to constructor initializer entries.
@@ -186,6 +188,16 @@ pub struct BaseClass {
     pub position: u32,
     pub base: TypeId,
     pub is_virtual: bool,
+}
+
+/// Native direct-base access from EDG's selected direct derivation path.
+/// Access discriminants are EDG-native; None indicates no path was retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseClassAccess {
+    pub derived: TypeId,
+    pub position: u32,
+    pub access: Option<u32>,
+    pub pack_expansion: bool,
 }
 
 /// One constructor/destructor subobject initializer in execution order.
@@ -440,6 +452,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         21 => Some(il.member_functions.len()),
         22 => Some(il.routine_attributes.len()),
         23 => Some(il.constructor_initializer_expressions.len()),
+        24 => Some(il.base_class_access.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -453,7 +466,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -522,6 +535,15 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        24 => {
+            let (Some(derived), Some(position), Some(expansion)) =
+                (n(0), n(1), n(3)) else { return; };
+            if expansion > 1 { return; }
+            output.base_class_access.push(BaseClassAccess {
+                derived: TypeId(derived), position,
+                access: n(2), pack_expansion: expansion == 1,
+            });
         }
         23 => {
             let (Some(routine), Some(position), Some(path), Some(kind)) =
