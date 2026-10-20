@@ -1491,7 +1491,7 @@ impl Graph {
         let mut record = |id: SymbolId| {
             if seen.insert(id) { result.push(id); }
         };
-        self.walk_statements(function, |statement_id, statement| {
+        self.walk_statements(function, |_, statement| {
             if let Some(root) = statement.expression {
                 self.walk_expression(root, |_, expr| {
                     if let Some(id) = expr.data.symbol_id { record(id); }
@@ -1507,6 +1507,28 @@ impl Graph {
             true
         });
         result
+    }
+
+    /// Visit supplemental control expressions in statement order, then role and
+    /// numeric tree-path order. Returning false stops the entire walk.
+    pub fn walk_function_control_expressions(
+        &self, function: &str,
+        mut visit: impl FnMut(StatementId, &ControlExpression) -> bool,
+    ) {
+        let mut continuing = true;
+        self.walk_statements(function, |statement_id, statement| {
+            if let Some(indices) = self.control_expr_by_statement
+                .get(&(function.to_owned(), statement.data.path.clone()))
+            {
+                for &index in indices {
+                    if !visit(statement_id, &self.control_expressions[index]) {
+                        continuing = false;
+                        break;
+                    }
+                }
+            }
+            continuing
+        });
     }
 
     /// Symbol references from a variable's initializer expression tree.
@@ -1874,7 +1896,7 @@ mod tests {
             paths.push(node.data.path.clone());
             true
         });
-        assert_eq!(paths, ["0", "0.0", "0.0.0.0.0", "0.0.1", "1"]);
+        assert_eq!(paths, ["0", "0.0.0", "0.0.0.0.0", "0.0.1", "1"]);
         let mut stopped = Vec::new();
         graph.walk_statements("f", |_, node| {
             stopped.push(node.data.path.clone());
