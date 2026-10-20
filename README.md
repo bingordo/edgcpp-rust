@@ -567,3 +567,27 @@ Missing owners simply produce no callbacks.
 The type view is deliberately non-recursive: it does not infer semantic type
 relationships that the EDG snapshot did not explicitly capture. References
 are valid only while the owning `Graph` is alive.
+
+
+## Declaration and record-layout API
+
+`Graph::routine_view(symbol_id)` and `Graph::variable_view(symbol_id)`
+provide borrowed declaration summaries. Both require a captured symbol;
+uncaptured type metadata is represented by `None`, rather than inventing a
+type or failing the entire query. Routine views expose the canonical captured
+function name and optional implicit C++ `this` parameter. Variable views
+expose optional initialization classification.
+
+`walk_routine_parameters` visits explicit parameters, excluding implicit
+`this`. `routine_parameter_types` returns their type IDs in captured order.
+
+`walk_record_layout` visits direct base-class edges before nonstatic fields,
+using `RecordLayoutItem::Base` and `RecordLayoutItem::Field`. It is a
+declaration stream, **not** an ABI layout calculator: base offsets and
+padding must not be inferred from this order. For direct dependencies,
+`direct_base_types` and `record_field_types` return type IDs in captured
+order. All visitors stop when the callback returns `false`.
+
+These APIs retain the compilation-local ID and borrowing constraints of
+`Graph`. They do not promise cross-compilation identity or complete
+C++ semantic reconstruction.
