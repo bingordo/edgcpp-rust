@@ -554,6 +554,81 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
              (stmt->is_lowering_boilerplate ? 64u : 0u);
 #endif
     emit_record(26, {txt(function), txt(path), num(flags)});
+    // Preserve where declarations occur, not only which scope owns them.
+    // An stmk_decl can declare multiple entities, some of which are types
+    // or static assertions. Only variable entries have a variable identity.
+    if (stmt->kind == stmk_decl) {
+      unsigned position = 0;
+      unsigned traversed = 0;
+      for (an_il_entity_list_entry_ptr entity = stmt->variant.decl.entities;
+           entity != nullptr && traversed++ < 10000; entity = entity->next) {
+        if (entity->entity.kind != iek_variable || entity->entity.ptr == nullptr)
+          continue;
+        a_variable_ptr variable =
+            reinterpret_cast<a_variable_ptr>(entity->entity.ptr);
+        const char *raw = source_name(variable->source_corresp);
+        const uint32_t symbol = emit_symbol(
+            variable, 2, raw == nullptr ? "<declared>" :
+            declaration_name(variable->source_corresp, false));
+        const uint32_t ty = emit_variable_type(variable);
+        if (symbol != 0 && ty != 0) {
+          emit_record(33, {txt(function), txt(path), num(position++),
+                           num(symbol), num(ty), num(0)});
+        }
+      }
+    } else if (stmt->kind == stmk_vla_decl &&
+               !stmt->variant.vla.is_typedef_decl &&
+               stmt->variant.vla.variant.variable != nullptr) {
+      a_variable_ptr variable = stmt->variant.vla.variant.variable;
+      const char *raw = source_name(variable->source_corresp);
+      const uint32_t symbol = emit_symbol(
+          variable, 2, raw == nullptr ? "<vla>" :
+          declaration_name(variable->source_corresp, false));
+      const uint32_t ty = emit_variable_type(variable);
+      if (symbol != 0 && ty != 0) {
+        emit_record(33, {txt(function), txt(path), num(0),
+                         num(symbol), num(ty), num(1)});
+      }
+    }
+    // Initialization is an execution point, which can differ from the
+    // declaration. Preserve the variable link and any representable
+    // expression without conflating this with stmk_decl.
+    a_dynamic_init_ptr init = nullptr;
+    unsigned init_role = 0;
+    if (stmt->kind == stmk_init) {
+      init = stmt->variant.dynamic_init;
+    } else if (stmt->kind == stmk_return) {
+      init = stmt->variant.return_dynamic_init;
+      init_role = 1;
+    } else if (stmt->kind == stmk_stmt_expr_result) {
+      init = stmt->variant.stmt_expr_result.dynamic_init;
+      init_role = 2;
+    }
+    if (init != nullptr) {
+      uint32_t variable_symbol = 0;
+      if (init->variable != nullptr) {
+        a_variable_ptr variable = init->variable;
+        const char *raw = source_name(variable->source_corresp);
+        variable_symbol = emit_symbol(
+            variable, 2, raw == nullptr ? "<initialized>" :
+            declaration_name(variable->source_corresp, false));
+        emit_variable_type(variable);
+      }
+      const unsigned init_flags =
+          (init->follows_an_exec_statement ? 1u : 0u) |
+          (init->is_braced_initializer ? 2u : 0u);
+      emit_record(34, {txt(function), txt(path),
+                       variable_symbol ? num(variable_symbol) : absent(),
+                       num(static_cast<unsigned>(init->kind)),
+                       num(init_flags), num(init_role)});
+      if ((init->kind == dik_expression ||
+           init->kind == dik_class_result_via_ctor) &&
+          init->variant.expression != nullptr) {
+        // Role 4 identifies the initializer tree of this statement.
+        emit_control_expr(init->variant.expression, function, path, 4,
+                          "0", "", 0);
+      }
+    }
     if ((stmt->kind == stmk_goto || stmt->kind == stmk_label) &&
         stmt->variant.label.ptr != nullptr) {
       a_label_ptr label = stmt->variant.label.ptr;
