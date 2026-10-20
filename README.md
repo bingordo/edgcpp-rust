@@ -507,3 +507,44 @@ expressions, in addition to ordinary operation operand lists. Type-form
 size/alignment operations have no expression child. Both function-body and
 dynamic-initializer visitors use this rule. The overall snapshot remains
 partial for other EDG expression variants.
+
+
+## Graph expression analysis
+
+The owned `graph::Graph` API supports compiler passes that need to inspect
+function-body expressions, supplemental control expressions, constructor
+initializers, and variable initializers without retaining EDG native pointers.
+
+```rust
+use edgcpp::graph::Graph;
+use edgcpp::SymbolId;
+
+fn inspect(graph: &Graph, function: &str, routine: SymbolId, variable: SymbolId) {
+    let stats = graph.routine_expression_stats(function, routine);
+    println!("routine nodes: {}, unique symbols: {}",
+        stats.total(), stats.distinct_symbols);
+
+    for use_count in graph.routine_symbol_use_counts(function, routine) {
+        println!("{:?}: {} uses", use_count.symbol, use_count.count);
+    }
+
+    let initializer = graph.variable_expression_stats(variable);
+    println!("initializer nodes: {}", initializer.total());
+}
+```
+
+`AnyExpressionRef` provides common `symbol_id()`, `type_id()`,
+`kind()`, and `operator()` accessors. Traversal callbacks can stop early
+by returning `false`. `walk_routine_expressions` visits primary and
+supplemental control expressions in statement order, followed by constructor
+initializers in position/tree-path order. `walk_variable_expressions`
+visits initializer expressions in numeric tree-path order.
+
+The statistics count **captured IL nodes**, not source-language expressions
+or runtime operations. `symbol_uses` includes repeated references;
+`distinct_symbols` counts each symbol once. Per-symbol use counts are
+ordered by first occurrence. Function names and symbol IDs must refer to
+the same compilation snapshot; IDs are not stable between compilations.
+
+For bottom-up passes, use `walk_expression_postorder`,
+`walk_statements_postorder`, or `walk_function_expressions_postorder`.
