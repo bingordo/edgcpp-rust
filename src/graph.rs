@@ -1735,6 +1735,54 @@ impl Graph {
         });
     }
 
+    /// Count all expression nodes associated with a routine, including
+    /// supplemental controls and constructor initializers.
+    pub fn routine_expression_count(&self, function: &str, routine: SymbolId) -> usize {
+        let mut count = 0;
+        self.walk_routine_expressions(function, routine, |_| {
+            count += 1;
+            true
+        });
+        count
+    }
+
+    /// Count all expression nodes associated with a variable initializer.
+    pub fn variable_expression_count(&self, owner: SymbolId) -> usize {
+        let mut count = 0;
+        self.walk_variable_expressions(owner, |_| {
+            count += 1;
+            true
+        });
+        count
+    }
+
+    /// Visit expressions referencing a particular symbol in a routine.
+    /// Returning false stops traversal immediately.
+    pub fn walk_routine_symbol_uses(
+        &self,
+        function: &str,
+        routine: SymbolId,
+        symbol: SymbolId,
+        mut visit: impl FnMut(AnyExpressionRef<'_>) -> bool,
+    ) {
+        self.walk_routine_expressions(function, routine, |expression| {
+            expression.symbol_id() != Some(symbol) || visit(expression)
+        });
+    }
+
+    /// Visit expressions referencing a particular symbol in a variable
+    /// initializer. Returning false stops traversal immediately.
+    pub fn walk_variable_symbol_uses(
+        &self,
+        owner: SymbolId,
+        symbol: SymbolId,
+        mut visit: impl FnMut(AnyExpressionRef<'_>) -> bool,
+    ) {
+        self.walk_variable_expressions(owner, |expression| {
+            expression.symbol_id() != Some(symbol) || visit(expression)
+        });
+    }
+
     /// Collect unique symbol references across function-body and constructor
     /// initializer expressions, preserving first-encounter order.
     pub fn routine_referenced_symbols(&self, function: &str, routine: SymbolId) -> Vec<SymbolId> {
