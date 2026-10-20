@@ -339,16 +339,16 @@ impl TypeDependencyIndex {
         if !self.type_order.contains(&ty) {
             self.type_order.push(ty);
         }
-        self.forward.insert(ty, edges);
-        self.rebuild_reverse();
+        let old = self.forward.insert(ty, edges);
+        self.update_reverse_for_type(ty, old.as_deref().unwrap_or(&[]));
     }
 
     /// Remove a type's outgoing relationships and its captured definition.
     /// Incoming references from other types are intentionally preserved.
     pub fn remove_type(&mut self, ty: TypeId) -> bool {
-        if self.forward.remove(&ty).is_none() { return false; }
+        let Some(old) = self.forward.remove(&ty) else { return false; };
         self.type_order.retain(|&id| id != ty);
-        self.rebuild_reverse();
+        self.update_reverse_for_type(ty, &old);
         true
     }
 
@@ -365,18 +365,25 @@ impl TypeDependencyIndex {
         }
     }
 
-    /// Reconstruct reverse adjacency from the index's current forward edges.
-    /// This preserves captured type order and deduplicates repeated edges.
-    fn rebuild_reverse(&mut self) {
-        self.reverse.clear();
-        for &ty in &self.type_order {
-            if let Some(edges) = self.forward.get(&ty) {
-                for edge in edges {
-                    let dependents = self.reverse.entry(edge.target).or_default();
-                    if !dependents.contains(&ty) {
-                        dependents.push(ty);
-                    }
-                }
+    /// Refresh only reverse adjacency lists touched by a changed source.
+    /// Existing source ordering is preserved using captured type order.
+    fn update_reverse_for_type(&mut self, ty: TypeId, old: &[TypeDependency]) {
+        let mut touched = std::collections::HashSet::new();
+        for edge in old { touched.insert(edge.target); }
+        for edge in self.dependencies(ty) { touched.insert(edge.target); }
+        for target in touched {
+            let mut dependents = self.reverse.remove(&target).unwrap_or_default();
+            dependents.retain(|&source| source != ty);
+            if self.dependencies(ty).iter().any(|edge| edge.target == target) {
+                let rank = self.type_order.iter().position(|&id| id == ty).unwrap_or(usize::MAX);
+                let insert_at = dependents.iter().position(|source| {
+                    self.type_order.iter().position(|id| id == source)
+                        .unwrap_or(usize::MAX) > rank
+                }).unwrap_or(dependents.len());
+                dependents.insert(insert_at, ty);
+            }
+            if !dependents.is_empty() {
+                self.reverse.insert(target, dependents);
             }
         }
     }
