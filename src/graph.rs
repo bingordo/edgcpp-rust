@@ -1504,6 +1504,65 @@ impl Graph {
         }
     }
 
+    /// Visit statements in post-order: children before their parent.
+    /// Returning false terminates the entire traversal.
+    pub fn walk_statements_postorder(
+        &self,
+        function: &str,
+        mut visit: impl FnMut(StatementId, &StatementNode) -> bool,
+    ) {
+        let mut stack: Vec<_> = self.roots(function)
+            .map(|(id, _)| (id, false)).collect();
+        stack.reverse();
+        while let Some((id, expanded)) = stack.pop() {
+            let Some(node) = self.statement(id) else { continue };
+            if expanded {
+                if !visit(id, node) { break; }
+            } else {
+                stack.push((id, true));
+                stack.extend(node.children.iter().rev().map(|id| (*id, false)));
+            }
+        }
+    }
+
+    /// Visit an expression tree in post-order, with operands before users.
+    /// Returning false terminates the entire traversal.
+    pub fn walk_expression_postorder(
+        &self,
+        root: ExpressionId,
+        mut visit: impl FnMut(ExpressionId, &ExpressionNode) -> bool,
+    ) {
+        let mut stack = vec![(root, false)];
+        while let Some((id, expanded)) = stack.pop() {
+            let Some(node) = self.expression(id) else { continue };
+            if expanded {
+                if !visit(id, node) { break; }
+            } else {
+                stack.push((id, true));
+                stack.extend(node.operands.iter().rev().map(|id| (*id, false)));
+            }
+        }
+    }
+
+    /// Visit primary expression trees of a function in post-order.
+    /// Statements are visited in statement post-order as well.
+    pub fn walk_function_expressions_postorder(
+        &self,
+        function: &str,
+        mut visit: impl FnMut(StatementId, ExpressionId, &ExpressionNode) -> bool,
+    ) {
+        let mut continuing = true;
+        self.walk_statements_postorder(function, |statement_id, statement| {
+            if let Some(root) = statement.expression {
+                self.walk_expression_postorder(root, |expression_id, expression| {
+                    continuing = visit(statement_id, expression_id, expression);
+                    continuing
+                });
+            }
+            continuing
+        });
+    }
+
     /// Visit all primary expression trees attached to a function's statements.
     /// Statements and expression operands are visited in their IL order.
     /// Returning false stops the entire traversal.
