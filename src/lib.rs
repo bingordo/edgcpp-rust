@@ -73,6 +73,8 @@ pub struct Il {
     pub base_classes: Vec<BaseClass>,
     /// Constructor and destructor subobject initialization records.
     pub constructor_initializers: Vec<ConstructorInitializer>,
+    /// Owned expression trees attached to constructor initializer entries.
+    pub constructor_initializer_expressions: Vec<ConstructorInitializerExpression>,
     /// Class ownership edges for declared member functions.
     pub member_functions: Vec<MemberFunction>,
     /// Special-function and virtual dispatch attributes of routines.
@@ -200,6 +202,20 @@ pub struct ConstructorInitializer {
     pub braced: bool,
     pub use_field_initializer: bool,
     pub pack_expansion: bool,
+}
+
+/// Expression tree belonging to one constructor/destructor subobject
+/// initializer. Paths are local to (routine, position).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructorInitializerExpression {
+    pub routine: SymbolId,
+    pub position: u32,
+    pub path: String,
+    pub parent: Option<String>,
+    pub kind: u32,
+    pub operator: Option<u32>,
+    pub type_id: Option<TypeId>,
+    pub symbol_id: Option<SymbolId>,
 }
 
 /// Member function belonging to a class, struct or union.
@@ -423,6 +439,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         20 => Some(il.constructor_initializers.len()),
         21 => Some(il.member_functions.len()),
         22 => Some(il.routine_attributes.len()),
+        23 => Some(il.constructor_initializer_expressions.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -436,7 +453,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -505,6 +522,19 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        23 => {
+            let (Some(routine), Some(position), Some(path), Some(kind)) =
+                (n(0), n(1), t(2), n(4)) else { return; };
+            let parent = if fields[3].present() {
+                let Some(parent) = t(3) else { return; };
+                Some(parent)
+            } else { None };
+            output.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+                routine: SymbolId(routine), position, path, parent, kind,
+                operator: n(5), type_id: n(6).map(TypeId),
+                symbol_id: n(7).map(SymbolId),
+            });
         }
         22 => {
             let (Some(routine), Some(special_kind), Some(flags)) =
