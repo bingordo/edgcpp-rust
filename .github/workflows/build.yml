@@ -101,6 +101,12 @@ jobs:
             grep -F 'reference=true rvalue=false' il_result.txt
             grep -F 'reference=true rvalue=true' il_result.txt
             grep -E 'function signature id=[0-9]+ prototyped=true variadic=true' il_result.txt
+            # Declaration and initializer positions are distinct in lowered EDG.
+            grep -E 'statement declaration declaration_site_verification::mixed path=.* position=0 name=declaration_site_verification::first symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
+            grep -E 'statement declaration declaration_site_verification::mixed path=.* position=1 name=declaration_site_verification::second symbol=[0-9]+ type=[0-9]+ vla=false' il_result.txt
+            grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::first"\).*role=0 ' il_result.txt
+            grep -E 'statement initialization declaration_site_verification::mixed path=.* name=Some\("declaration_site_verification::second"\).*role=0 ' il_result.txt
+            grep -E 'control expression declaration_site_verification::mixed statement=.* role=4 path=0 parent=None ' il_result.txt
             grep -F 'routine outer::big_unsigned, defined=true' il_result.txt
             grep -F 'routine outer::overloaded(int), defined=true' il_result.txt
             grep -F 'routine outer::overloaded(long), defined=true' il_result.txt
