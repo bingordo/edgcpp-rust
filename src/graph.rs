@@ -1709,6 +1709,34 @@ fn graph_path_index(path: &str) -> usize {
 mod tests {
     use super::*;
     #[test]
+    fn control_symbol_references_are_indexed_and_deduplicated() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "a".into() });
+        il.symbols.push(Symbol { id: SymbolId(2), kind: 2, name: "b".into() });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent, symbol) in [
+            ("0", None, Some(SymbolId(1))),
+            ("0.0", Some("0"), Some(SymbolId(2))),
+            ("0.1", Some("0"), Some(SymbolId(1))),
+        ] {
+            il.control_expressions.push(ControlExpression {
+                function: "f".into(), statement_path: "0".into(), role: 1,
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_id: None, symbol_id: symbol,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(
+            graph.referenced_symbols_including_controls("f"),
+            vec![SymbolId(1), SymbolId(2)]
+        );
+        assert!(graph.referenced_symbols_including_controls("other").is_empty());
+    }
+
+
+    #[test]
     fn numeric_tree_paths_sort_by_operand_index() {
         let mut paths = vec!["0.10", "0.2", "0.1", "0.2.0", "0"];
         paths.sort_by(|a, b| compare_tree_paths(a, b));
