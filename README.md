@@ -155,6 +155,45 @@ no source spelling is reconstructed. Records are available only for function
 scopes traversed by the native bridge. As with the rest of the native IL,
 IDs are not stable across compilations.
 
+## Declaration sites and initializer execution
+
+EDG's lexical scopes identify which function or block *owns* a variable;
+they do not necessarily identify the statement where it is declared or
+initialized. The bridge now captures `stmk_decl` variable lists and VLA
+declarations as ordered `StatementDeclaration` records, each with the
+function, statement path, list position, `SymbolId`, `TypeId`, and VLA
+marker. Non-variable declarations (types, static assertions, etc.) are
+not included.
+
+```rust
+for declaration in graph.declarations_at("f", "0.block.1") {
+    println!("{:?}: {:?}", declaration.symbol, declaration.ty);
+}
+for site in graph.declaration_sites(variable_symbol_id) {
+    println!("declared at {}", site.statement_path);
+}
+```
+
+Dynamic initializations in `stmk_init`, return-value initialization, and
+GNU statement-expression result initialization are represented separately
+as `StatementInitialization` records. They preserve the variable symbol
+if present, the native EDG dynamic-init kind, and two initialization flags.
+The role identifies the statement variant: 0 for `stmk_init`, 1 for
+return, and 2 for statement-expression result. For
+`dik_expression`/`dik_class_result_via_ctor`, the initializer expression
+tree is available through `Graph::statement_initializer_expression` and
+`Graph::control_operands`, using supplemental expression role 4.
+
+`Graph::statement_initialization(function, path)` resolves an execution
+site. `Graph::variable_initialization_sites(symbol)` enumerates its
+captured executions; these are not assumed to be the same as declaration
+sites. The graph validates symbols, types, statement references, duplicate
+positions, dense declaration indices, and expression-tree ownership.
+Lowering may eliminate an explicit `stmk_decl`, synthesize an initialization
+or represent scalar initialization directly as operations in the function
+body. An absent record therefore does **not** imply that a C++ source
+variable is uninitialized.
+
 ## Function parameters and lexical scope trees
 
 For function definitions, the native bridge snapshots the EDG function
