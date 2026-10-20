@@ -168,6 +168,7 @@ pub struct Graph {
     expression_source_index: HashMap<(String, String, u32, String), usize>,
     control_expr_index: HashMap<(String, String, u32, String), usize>,
     control_expr_children: HashMap<(String, String, u32, String), Vec<usize>>,
+    control_expr_by_statement: HashMap<(String, String), Vec<usize>>,
     constructor_expr_index: HashMap<(SymbolId, u32, String), usize>,
     constructor_expr_children: HashMap<(SymbolId, u32, String), Vec<usize>>,
     initializer_index: HashMap<(SymbolId, String), usize>,
@@ -178,6 +179,21 @@ pub struct Graph {
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
+        for (index, expr) in il.control_expressions.iter().enumerate() {
+            graph.control_expr_by_statement
+                .entry((expr.function.clone(), expr.statement_path.clone()))
+                .or_default()
+                .push(index);
+        }
+        for indices in graph.control_expr_by_statement.values_mut() {
+            indices.sort_by(|&a, &b| {
+                let left = &il.control_expressions[a];
+                let right = &il.control_expressions[b];
+                left.role.cmp(&right.role)
+                    .then_with(|| compare_tree_paths(&left.path, &right.path))
+            });
+        }
+
         let mut smap = HashMap::new();
         let mut emap = HashMap::new();
         let mut type_map = HashMap::new();
@@ -1483,14 +1499,10 @@ impl Graph {
                 });
             }
             let _ = statement_id;
-            // Supplemental expressions are ordered by role and tree path.
-            let mut controls: Vec<_> = self.control_expressions.iter()
-                .filter(|expr| expr.function == function
-                    && expr.statement_path == statement.data.path)
-                .collect();
-            controls.sort_by(|a, b| a.role.cmp(&b.role)
-                .then_with(|| compare_tree_paths(&a.path, &b.path)));
-            for expr in controls {
+            let controls = self.control_expr_by_statement
+                .get(&(function.to_owned(), statement.data.path.clone()));
+            for &index in controls.into_iter().flatten() {
+                let expr = &self.control_expressions[index];
                 if let Some(id) = expr.symbol_id { record(id); }
             }
             true
