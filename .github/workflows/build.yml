@@ -5,6 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Keep only the newest push/PR verification. EDG is expensive to rebuild.
+concurrency:
+  group: edgcpp-rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -29,6 +34,12 @@ jobs:
           repository: bingundu/edgcpp
           ref: ci/x86_64-callable-release
           path: edgcpp
+
+      - name: Restore EDG compilation cache
+        uses: actions/cache@v4
+        with:
+          path: edgcpp/build/gcc-release
+          key: edgcpp-gcc-release-${{ hashFiles('edgcpp/src/il_def.h', 'edgcpp/CMakePresets.json') }}
 
       - name: Configure EDG
         env:
@@ -92,6 +103,8 @@ jobs:
             grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
             grep -E 'member function owner=[0-9]+ name=.*Derived::method' il_result.txt
             grep -E 'member function owner=[0-9]+ name=.*Derived::static_method' il_result.txt
+            grep -E 'routine attributes name=.*Derived::virtual_method.*virtual=true override=true' il_result.txt
+            grep -E 'constructor expression routine=.*InitializerExpressionProbe.*position=[0-9]+ path=0 ' il_result.txt
             grep -E 'constructor initializer routine=.*Derived::Derived.*position=[0-9]+ kind=[0-3]' il_result.txt
             grep -F 'variable outer::constant_answer' il_result.txt
             grep -E 'initializer integer symbol=[0-9]+ value=42' il_result.txt
