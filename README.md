@@ -12,8 +12,9 @@ It is not yet a complete EDG IL binding, AST, or stable serialized IL format.
 
 GitHub Actions downloads a verified, commit-pinned **prebuilt EDG x86-64
 archive** from `bingundu/edgcpp` instead of compiling the front end on
-each Rust change. CI checks out matching EDG headers and runs CMake
-*configuration only* to generate the exact bridge compiler flags. Cargo's
+each Rust change. CI checks out matching EDG headers, configures CMake to
+generate the exact bridge compiler flags, and builds only the small
+`error-info` generator needed for the bridge. Cargo's
 incremental compilation outputs are cached between successful main-branch
 runs; documentation-only commits and duplicate feature-branch pushes do
 not trigger expensive verification.
