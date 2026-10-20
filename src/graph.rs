@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, ConstructorInitializer, TypeDetail, FunctionSignature, Symbol, SymbolId, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -43,6 +43,7 @@ pub enum GraphError {
     InvalidBaseClass { derived: TypeId, base: TypeId },
     InvalidBaseClassPosition(TypeId),
     CyclicInheritance(TypeId),
+    InvalidConstructorInitializer { routine: SymbolId, position: u32 },
     DuplicateTypeDetail(TypeId),
     DuplicateFunctionSignature(TypeId),
     InvalidTypeRelation(TypeId),
@@ -72,6 +73,7 @@ pub struct Graph {
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
     pub base_classes: Vec<BaseClass>,
+    pub constructor_initializers: Vec<ConstructorInitializer>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
@@ -146,6 +148,46 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
+        // Constructor initializers refer to routine symbols, field symbols,
+        // or record types. Check the complete snapshot before indexing them.
+        let mut ctor_positions = std::collections::HashSet::new();
+        for init in &il.constructor_initializers {
+            let valid_routine = graph.symbols.iter()
+                .any(|s| s.id == init.routine && s.kind == 1);
+            let valid_target = match init.kind {
+                0 | 1 => init.target_type.is_some_and(|ty| type_map.contains_key(&ty))
+                    && init.target_field.is_none(),
+                2 => init.target_field.is_some_and(|field| graph.symbols.iter()
+                    .any(|s| s.id == field && s.kind == 3))
+                    && init.target_type.is_none(),
+                3 => init.target_type.is_none() && init.target_field.is_none(),
+                _ => false,
+            };
+            if !valid_routine || !valid_target ||
+               !ctor_positions.insert((init.routine, init.position)) {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: init.routine, position: init.position,
+                });
+            }
+            graph.constructor_initializers.push(init.clone());
+        }
+        graph.constructor_initializers.sort_by_key(|v| (v.routine.0, v.position));
+        for window in graph.constructor_initializers.windows(2) {
+            if window[0].routine == window[1].routine
+                && window[1].position != window[0].position + 1 {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: window[1].routine, position: window[1].position,
+                });
+            }
+        }
+        for init in &graph.constructor_initializers {
+            if init.position == 0 { continue; }
+            if !ctor_positions.contains(&(init.routine, 0)) {
+                return Err(GraphError::InvalidConstructorInitializer {
+                    routine: init.routine, position: init.position,
+                });
+            }
+        }
         let mut base_positions = std::collections::HashSet::new();
         for edge in &il.base_classes {
             if !type_map.contains_key(&edge.derived) {
@@ -580,6 +622,12 @@ impl Graph {
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
     }
+    /// Subobject initialization/destruction entries in EDG execution order.
+    pub fn constructor_initializers(&self, routine: SymbolId)
+        -> impl Iterator<Item = &ConstructorInitializer> {
+        self.constructor_initializers.iter().filter(move |v| v.routine == routine)
+    }
+
     /// Direct bases in source declaration order, including virtual bases.
     pub fn bases(&self, derived: TypeId) -> impl Iterator<Item = &BaseClass> {
         self.base_classes.iter().filter(move |edge| edge.derived == derived)
@@ -610,6 +658,35 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validates_constructor_initializer_targets_and_order() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "C::C".into() });
+        il.symbols.push(Symbol { id: SymbolId(2), kind: 3, name: "member".into() });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine: SymbolId(1), position: 1, kind: 2,
+            target_type: None, target_field: Some(SymbolId(2)),
+            compiler_generated: false, braced: true,
+            use_field_initializer: false, pack_expansion: false,
+        });
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine: SymbolId(1), position: 0, kind: 1,
+            target_type: Some(TypeId(1)), target_field: None,
+            compiler_generated: true, braced: false,
+            use_field_initializer: false, pack_expansion: false,
+        });
+        let graph = Graph::from_il(&il).unwrap();
+        let entries: Vec<_> = graph.constructor_initializers(SymbolId(1)).collect();
+        assert_eq!(entries.iter().map(|v| v.kind).collect::<Vec<_>>(), vec![1, 2]);
+        assert!(entries[1].braced);
+        il.constructor_initializers[0].position = 3;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidConstructorInitializer { .. })));
+    }
+
     #[test]
     fn orders_direct_base_classes_and_rejects_duplicates() {
         let mut il = Il::default();
