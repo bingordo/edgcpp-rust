@@ -45,6 +45,7 @@ jobs:
       # CI needs failures and diagnostics but not bulky debug symbols.
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_TOOLCHAIN_VERSION: 1.99.1
 
     steps:
       - name: Check out Rust bindings
@@ -70,10 +71,10 @@ jobs:
             edgcpp-rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
+          key: rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
           restore-keys: |
-            rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
-            rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-
+            rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
+            rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
 
       # EDG's IL layout depends on compile-time macros. CMake configure is
       # cheap and generates matching compile_commands.json and environment.sh.
@@ -114,13 +115,16 @@ jobs:
           cp build/prebuilt-edg/lib/libedgcpfe.a build/gcc-release/lib/libedgcpfe.a
           echo "Using prebuilt EDG $EDG_SOURCE_SHA; no EDG native compilation"
 
-      - name: Install Rust toolchain
+      - name: Install pinned Rust toolchain
         run: |
           if ! command -v cargo >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN_VERSION"
           fi
           export PATH="$HOME/.cargo/bin:$PATH"
-          rustup component add clippy
+          rustup toolchain install "$RUST_TOOLCHAIN_VERSION" --profile minimal
+          rustup component add clippy --toolchain "$RUST_TOOLCHAIN_VERSION"
+          rustup default "$RUST_TOOLCHAIN_VERSION"
 
       - name: Build bindings and tests
         working-directory: edgcpp-rust
@@ -128,6 +132,7 @@ jobs:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
           EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
           EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --lib --tests
