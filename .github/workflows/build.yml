@@ -107,6 +107,11 @@ jobs:
             grep -F 'indexed symbols=' il_result.txt
             grep -E 'symbol type name=outer::count id=[0-9]+ type=[0-9]+' il_result.txt
             grep -E 'symbol type name=.*Derived::method id=[0-9]+ type=[0-9]+' il_result.txt
+            grep -E 'function parameter routine=scope_verification::shadow.*position=Some\(0\).*type=[0-9]+ this=false' il_result.txt
+            grep -E 'function parameter routine=scope_verification::shadow.*position=Some\(1\).*type=[0-9]+ this=false' il_result.txt
+            grep -E 'function parameter routine=.*Receiver::read.*this=true' il_result.txt
+            grep -E 'local scope routine=scope_verification::shadow id=0 parent=None' il_result.txt
+            grep -E 'local variable routine=scope_verification::shadow scope=[0-9]+ name=.*value.*type=[0-9]+' il_result.txt
             grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
             grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
             grep -E 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
