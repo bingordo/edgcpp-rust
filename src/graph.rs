@@ -2328,6 +2328,61 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_type_views_and_record_visitors() {
+        let mut graph = Graph::default();
+        graph.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        graph.array_bounds.push(ArrayBound { array: TypeId(1), elements: 17 });
+        graph.record_fields.extend([
+            RecordField { owner: TypeId(1), position: 0, ty: TypeId(2),
+                name: "first".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 },
+            RecordField { owner: TypeId(1), position: 1, ty: TypeId(2),
+                name: "second".into(), byte_offset: 8, bit_offset: 0, bit_width: 0 },
+        ]);
+        graph.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 0, base: TypeId(3), is_virtual: false,
+        });
+        graph.type_parameters.push(TypeParameter {
+            owner: TypeId(1), position: 0, ty: TypeId(2),
+        });
+        graph.member_functions.push(MemberFunction {
+            owner: TypeId(1), routine: SymbolId(4),
+        });
+        let view = graph.type_view(TypeId(1)).unwrap();
+        assert_eq!(view.definition.id, TypeId(1));
+        assert_eq!(view.array_elements, Some(17));
+        assert!(view.detail.is_none());
+        assert!(view.signature.is_none());
+        assert!(graph.type_view(TypeId(99)).is_none());
+        assert!(graph.symbol_type_view(SymbolId(99)).is_none());
+        let mut fields = Vec::new();
+        graph.walk_record_fields(TypeId(1), |field| {
+            fields.push(field.name.clone());
+            false
+        });
+        assert_eq!(fields, ["first"]);
+        let mut bases = Vec::new();
+        graph.walk_base_classes(TypeId(1), |base| {
+            bases.push(base.base);
+            true
+        });
+        assert_eq!(bases, [TypeId(3)]);
+        let mut parameters = Vec::new();
+        graph.walk_type_parameters(TypeId(1), |parameter| {
+            parameters.push(parameter.ty);
+            true
+        });
+        assert_eq!(parameters, [TypeId(2)]);
+        let mut members = Vec::new();
+        graph.walk_member_functions(TypeId(1), |member| {
+            members.push(member.routine);
+            true
+        });
+        assert_eq!(members, [SymbolId(4)]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
