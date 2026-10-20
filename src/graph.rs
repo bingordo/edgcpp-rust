@@ -2292,6 +2292,75 @@ mod tests {
     }
 
     #[test]
+    fn postorder_statement_walk_is_bottom_up_and_stoppable() {
+        let mut il = Il::default();
+        for (path, parent) in [
+            ("0", None), ("0.0.0", Some("0")),
+            ("0.0.0.0.0", Some("0.0.0")),
+            ("0.0.1", Some("0")), ("1", None),
+        ] {
+            il.statements.push(Statement {
+                function: "f".into(), path: path.into(),
+                parent: parent.map(str::to_owned), kind: 1,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let mut paths = Vec::new();
+        graph.walk_statements_postorder("f", |_, node| {
+            paths.push(node.data.path.clone());
+            true
+        });
+        assert_eq!(paths, ["0.0.0.0.0", "0.0.0", "0.0.1", "0", "1"]);
+        let mut stopped = Vec::new();
+        graph.walk_statements_postorder("f", |_, node| {
+            stopped.push(node.data.path.clone());
+            stopped.len() < 2
+        });
+        assert_eq!(stopped, ["0.0.0.0.0", "0.0.0"]);
+    }
+
+    #[test]
+    fn postorder_expression_walk_visits_operands_first() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent) in [
+            ("0", None), ("0.0", Some("0")), ("0.1", Some("0")),
+            ("0.0.0", Some("0.0")),
+        ] {
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: "0".into(),
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_kind: None, reference: None,
+                type_size: None, type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None, symbol_id: None,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let mut paths = Vec::new();
+        graph.walk_function_expressions_postorder("f", |_, _, node| {
+            paths.push(node.data.path.clone());
+            true
+        });
+        assert_eq!(paths, ["0.0.0", "0.0", "0.1", "0"]);
+        let mut stopped = Vec::new();
+        graph.walk_function_expressions_postorder("f", |_, _, node| {
+            stopped.push(node.data.path.clone());
+            stopped.len() < 2
+        });
+        assert_eq!(stopped, ["0.0.0", "0.0"]);
+        let root = graph.statements[0].expression.unwrap();
+        let mut direct = Vec::new();
+        graph.walk_expression_postorder(root, |_, node| {
+            direct.push(node.data.path.clone());
+            true
+        });
+        assert_eq!(direct, paths);
+    }
+
+    #[test]
     fn depth_first_walk_preserves_order_and_supports_early_exit() {
         let mut il = Il::default();
         for (path, parent) in [
