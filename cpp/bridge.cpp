@@ -426,6 +426,12 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           declaration_name(r->source_corresp, true, true) : base;
       emit_type(r->type, 0);
       emit_symbol(r, 1, name);
+      if (scope->kind == sck_class_struct_union &&
+          scope->variant.assoc_type != nullptr) {
+        uint32_t owner_type = emit_type(scope->variant.assoc_type, 0);
+        uint32_t routine_symbol = emit_symbol(r, 1, name);
+        emit_record(21, {num(owner_type), num(routine_symbol)});
+      }
       emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
@@ -515,6 +521,14 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(t->source_corresp, false);
       emit_type(t, 0);
       emit_record(3, {txt(name)}, 0);
+      if ((t->kind == tk_class || t->kind == tk_struct ||
+           t->kind == tk_union) &&
+          t->variant.class_struct_union.extra_info != nullptr) {
+        a_scope_ptr members = t->variant.class_struct_union.extra_info->assoc_scope;
+        if (members != nullptr && members != scope) {
+          collect_scope(members, prefix, depth + 1);
+        }
+      }
     }
   }
   for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
