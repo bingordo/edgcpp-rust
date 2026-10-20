@@ -8,6 +8,7 @@ uses an upstream *binary EDG release* rather than compiling the EDG compiler.
 - Source repository: `bingundu/edgcpp`
 - EDG source commit: `799603e0b5ab272d9418e2d44a53a95bc73dfdc4`
 - GitHub release tag: `edgcpfe-ci-799603e0b5ab`
+- Release asset SHA-256: `fa769825e70766fbefe017806816b2338acd03daa93bb5562369c293972ce64c`
 - Asset: `edgcpfe-ci-x86_64-callable-release-linux-x86_64.tar.gz`
 - Permanent release URL:
   https://github.com/bingundu/edgcpp/releases/tag/edgcpfe-ci-799603e0b5ab
@@ -16,7 +17,9 @@ uses an upstream *binary EDG release* rather than compiling the EDG compiler.
 
 The package contains a PIC-capable `libedgcpfe.a` and its `BUILD-INFO.txt`.
 A lightweight upstream *publisher* workflow promoted that previously tested
-artifact into a permanent GitHub Release; it did not recompile EDG:
+artifact into a permanent GitHub Release; it did not recompile EDG.
+The publisher is now manual-only, and it verifies the existing asset instead
+of overwriting the same release tag:
 
 https://github.com/bingundu/edgcpp/blob/ci/x86_64-callable-release/.github/workflows/publish-callable-artifact.yml
 
@@ -27,17 +30,21 @@ environment, and generates EDG's error-message headers with the small `error-inf
 (`mk_errinfo`), **without building the EDG front end**. All links use the
 upstream library binary. The archive
 metadata is checked against the pinned EDG source SHA before testing.
+CI also checks the complete archive against the pinned SHA-256 digest **before
+extracting it**, and verifies that the actual checkout HEAD matches the
+binary's source revision.
 
 ### Updating EDG
 
 When the upstream EDG version changes:
 
 1. Build and test the callable EDG archive in `bingundu/edgcpp`.
-2. Publish that successful archive to an immutable, version-specific
-   GitHub Release with a matching `BUILD-INFO.txt` commit SHA.
+2. Publish that successful archive under a **new**, version-specific
+   GitHub Release with a matching `BUILD-INFO.txt` commit SHA, and record its
+   SHA-256 digest. Avoid overwriting an existing release asset.
 3. Update the SHA under the EDG `checkout` step and the
-   `EDG_SOURCE_SHA`/`EDG_RELEASE_TAG` environment variables in
-   `build.yml` **together**.
+   `EDG_SOURCE_SHA`/`EDG_RELEASE_TAG`/`EDG_RELEASE_SHA256` environment variables
+   in `build.yml` **together**.
 4. Confirm that the Rust bridge still compiles and the IL integration tests
    pass. Never switch only the library without its corresponding headers,
    macro configuration and compilation database.
@@ -53,7 +60,16 @@ with `actions/cache/restore` before the Rust build. On a successful
 `main` push, it saves the updated snapshot once using
 `actions/cache/save`. Pull requests restore but do not upload their own
 large target snapshots. Cache keys contain the source commit SHA; restore
-prefixes reuse the latest compatible prior incremental build.
+prefixes reuse the latest compatible prior incremental build. Cache keys
+include both the pinned EDG source revision and Rust toolchain version;
+artifacts compiled against different EDG IL layouts cannot be restored
+through these prefixes.
+
+The build script also observes `EDGCPP_EDG_REVISION` in CI so updating the
+revision invalidates the native bridge even when Cargo has a warm cache. Local
+builds without this variable instead watch EDG source/header inputs and the
+native archive for changes. CI uses Rust toolchain `1.99.1` to make incremental
+outputs reproducible across runs.
 
 This intentionally favors reduced compilation CPU over accumulating
 unbounded caches from every PR. The cache is purely an optimization:
@@ -79,7 +95,9 @@ CI: https://github.com/bingundu/edgcpp-rust/actions/workflows/build.yml
 ## Limitations
 
 The EDG release binary is Linux x86-64 GCC ABI-specific and must match the
-toolchain/macro configuration recorded in `compile_commands.json`. A new
-EDG archive should be published with a new versioned tag; do not mutate the
+toolchain/macro configuration recorded in `compile_commands.json`. GitHub
+Release assets can technically be replaced by a maintainer, but the pinned
+SHA-256 checksum ensures such a replacement fails this workflow. A new EDG
+archive should be published with a new versioned tag; do not mutate the
 pinned artifact in-place. Rust cache reuse does not imply EDG binary
 compatibility across upstream revisions.
