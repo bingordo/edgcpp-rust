@@ -2283,6 +2283,120 @@ impl Graph {
         result
     }
 
+    /// Find captured types that directly reference the target type.
+    /// The result is deduplicated and follows type-definition order.
+    /// Only captured type definitions can act as sources.
+    pub fn direct_type_dependents(&self, target: TypeId) -> Vec<TypeId> {
+        let mut result = Vec::new();
+        for ty in &self.types {
+            let mut found = false;
+            self.walk_type_dependencies(ty.id, |edge| {
+                if edge.target == target {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if found && !result.contains(&ty.id) {
+                result.push(ty.id);
+            }
+        }
+        result
+    }
+
+    /// Cycle-safe breadth-first traversal of reverse type dependencies.
+    /// Includes the requested type at depth zero. A dependent type is
+    /// reported at its shortest reverse-edge distance from the root.
+    pub fn walk_type_dependents(
+        &self, root: TypeId, mut visit: impl FnMut(ReachableType) -> bool,
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        seen.insert(root);
+        queue.push_back(ReachableType { ty: root, depth: 0 });
+        while let Some(node) = queue.pop_front() {
+            if !visit(node) { break; }
+            for ty in self.direct_type_dependents(node.ty) {
+                if seen.insert(ty) {
+                    queue.push_back(ReachableType {
+                        ty, depth: node.depth + 1,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Collect reverse-reachable types in breadth-first order.
+    pub fn type_dependents(&self, root: TypeId) -> Vec<ReachableType> {
+        let mut result = Vec::new();
+        self.walk_type_dependents(root, |node| {
+            result.push(node);
+            true
+        });
+        result
+    }
+
+    /// Partition captured types into strongly connected components.
+    /// Each type appears exactly once. Edges to uncaptured types are ignored
+    /// for component membership. Uses an iterative two-pass DFS.
+    pub fn type_strongly_connected_components(&self) -> Vec<Vec<TypeId>> {
+        let nodes: Vec<TypeId> = self.types.iter().map(|ty| ty.id).collect();
+        let present: std::collections::HashSet<TypeId> = nodes.iter().copied().collect();
+        let mut forward: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+        let mut reverse: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+        for &node in &nodes {
+            let mut edges = Vec::new();
+            self.walk_type_dependencies(node, |edge| {
+                if present.contains(&edge.target) {
+                    edges.push(edge.target);
+                    reverse.entry(edge.target).or_default().push(node);
+                }
+                true
+            });
+            forward.insert(node, edges);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut finish = Vec::new();
+        for &root in &nodes {
+            if !seen.insert(root) { continue; }
+            let mut stack = vec![(root, false)];
+            while let Some((node, exiting)) = stack.pop() {
+                if exiting {
+                    finish.push(node);
+                    continue;
+                }
+                stack.push((node, true));
+                if let Some(edges) = forward.get(&node) {
+                    for &next in edges.iter().rev() {
+                        if seen.insert(next) {
+                            stack.push((next, false));
+                        }
+                    }
+                }
+            }
+        }
+        seen.clear();
+        let mut components = Vec::new();
+        for &root in finish.iter().rev() {
+            if !seen.insert(root) { continue; }
+            let mut component = Vec::new();
+            let mut stack = vec![root];
+            while let Some(node) = stack.pop() {
+                component.push(node);
+                if let Some(edges) = reverse.get(&node) {
+                    for &next in edges {
+                        if seen.insert(next) {
+                            stack.push(next);
+                        }
+                    }
+                }
+            }
+            components.push(component);
+        }
+        components
+    }
+
     /// Traverse the type graph starting from a symbol's declared type.
     /// Returns None if the symbol has no captured type edge.
     pub fn symbol_reachable_types(&self, symbol: SymbolId) -> Option<Vec<ReachableType>> {
