@@ -109,6 +109,8 @@ pub struct Il {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    /// Authoritative routine IDs and their names as used by statement IL.
+    pub routine_identities: Vec<RoutineIdentity>,
     /// Type edges for named declarations.
     pub symbol_types: Vec<SymbolType>,
     pub variable_initializers: Vec<VariableInitializer>,
@@ -129,6 +131,14 @@ pub struct Symbol {
     /// 1=routine, 2=variable, 3=field, 4=goto label.
     pub kind: u32,
     pub name: String,
+}
+
+/// Stable link within one compilation between a native routine symbol and
+/// the exported function-name key used for statement and scope paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineIdentity {
+    pub routine: SymbolId,
+    pub function: String,
 }
 
 /// Declared type of a routine, variable, or other symbol.
@@ -694,6 +704,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         39 => Some(il.scope_lifetimes.len()),
         40 => Some(il.initialization_lifetimes.len()),
         41 => Some(il.lifetime_destructions.len()),
+        42 => Some(il.routine_identities.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -707,7 +718,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -776,6 +787,13 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
+        }
+        42 => {
+            let (Some(routine), Some(function)) = (n(0), t(1)) else { return; };
+            if routine == 0 || function.is_empty() { return; }
+            output.routine_identities.push(RoutineIdentity {
+                routine: SymbolId(routine), function,
+            });
         }
         41 => {
             let (Some(routine), Some(lifetime), Some(position)) =
