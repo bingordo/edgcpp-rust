@@ -1556,3 +1556,45 @@ mod tests {
         assert_eq!(compile(&["edgcpfe", "a\0b"]).unwrap_err(), Error::NulArgument);
     }
 }
+
+
+#[cfg(test)]
+mod wire_field_regression_tests {
+    use super::WireField;
+
+    #[test]
+    fn string_fields_require_utf8_and_string_tag() {
+        let bytes = b"hello";
+        let field = WireField {
+            data: bytes.as_ptr(),
+            length: bytes.len(),
+            value: 0,
+            tag: 1,
+        };
+        assert_eq!(field.string().as_deref(), Some("hello"));
+        assert_eq!(WireField { tag: 2, ..field }.string(), None);
+        assert_eq!(WireField { data: std::ptr::null(), ..field }.string(), None);
+        let invalid = [0xff];
+        assert_eq!(WireField {
+            data: invalid.as_ptr(),
+            length: invalid.len(),
+            ..field
+        }.string(), None);
+    }
+
+    #[test]
+    fn numeric_fields_check_tags_and_widths() {
+        let field = WireField {
+            data: std::ptr::null(),
+            length: 0,
+            value: u64::MAX,
+            tag: 2,
+        };
+        assert_eq!(field.unsigned(), Some(u64::MAX));
+        assert_eq!(field.u32(), None);
+        assert_eq!(WireField { value: u32::MAX as u64, ..field }.u32(), Some(u32::MAX));
+        assert_eq!(WireField { tag: 3, ..field }.signed(), Some(-1));
+        assert_eq!(WireField { tag: 3, ..field }.unsigned(), None);
+        assert!(!WireField { tag: 0, ..field }.present());
+    }
+}
