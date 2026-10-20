@@ -366,34 +366,123 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   }
 }
 
+// EDG stores several control expressions outside a_statement::expr.
+// Preserve their own operand trees with keys (function, statement, role, path).
+// Roles: 1=for increment, 2=range test, 3=range increment.
+static void emit_control_expr(an_expr_node_ptr node, const std::string &function,
+                              const std::string &statement, unsigned role,
+                              const std::string &path, const std::string &parent,
+                              unsigned depth)
+{
+  if (node == nullptr || current_callback == nullptr || depth > 64) return;
+  uint32_t symbol = 0;
+  if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
+    a_variable_ptr var = node->variant.variable.ptr;
+    symbol = emit_symbol(var, 2, declaration_name(var->source_corresp, false));
+  } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
+    a_routine_ptr routine = node->variant.routine.ptr;
+    symbol = emit_symbol(routine, 1, declaration_name(routine->source_corresp, true, true));
+  } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
+    a_field_ptr field = node->variant.field.ptr;
+    const char *name = source_name(field->source_corresp);
+    symbol = emit_symbol(field, 3, name == nullptr ? "" : name);
+  }
+  const uint32_t type_id = emit_type(node->type, 0);
+  emit_record(27, {txt(function), txt(statement), num(role), txt(path),
+                   parent.empty() ? absent() : txt(parent),
+                   num(static_cast<unsigned>(node->kind)),
+                   node->kind == enk_operation ?
+                       num(static_cast<unsigned>(node->variant.operation.kind)) : absent(),
+                   type_id ? num(type_id) : absent(),
+                   symbol ? num(symbol) : absent()});
+  const auto children = children_of(node);
+  unsigned index = 0;
+  for (an_expr_node_ptr operand = children.first;
+       operand != nullptr && index < 10000;
+       operand = children.linked_list ? operand->next : nullptr, ++index) {
+    emit_control_expr(operand, function, statement, role,
+                      path + "." + std::to_string(index), path, depth + 1);
+  }
+}
+
+// A dependent statement is a *single* IL node, whereas block.statements is
+// a linked sequence. Never follow dependent->next into the enclosing list.
 static void emit_statements(a_statement_ptr head, const std::string &function,
-                            const std::string &parent, const std::string &edge, unsigned depth)
+                            const std::string &parent, const std::string &edge,
+                            unsigned depth, bool single = false)
 {
   if (head == nullptr || depth > 64 || current_callback == nullptr) return;
   unsigned index = 0;
   for (a_statement_ptr stmt = head; stmt != nullptr && index < 10000;
-       stmt = stmt->next, ++index) {
+       stmt = single ? nullptr : stmt->next, ++index) {
     std::string path = parent.empty() ? std::to_string(index) :
                          parent + "." + edge + "." + std::to_string(index);
     emit_record(5, {txt(function), txt(path), parent.empty() ? absent() : txt(parent)},
                 static_cast<uint32_t>(stmt->kind));
+    uint32_t flags = (stmt->compiler_generated ? 1u : 0u) |
+                     (stmt->is_initialization_guard ? 2u : 0u) |
+                     (stmt->is_fallthrough_statement ? 4u : 0u) |
+                     (stmt->is_likely ? 8u : 0u) |
+                     (stmt->is_unlikely ? 16u : 0u);
+#if DO_IL_LOWERING
+    flags |= (stmt->lowering_generated ? 32u : 0u) |
+             (stmt->is_lowering_boilerplate ? 64u : 0u);
+#endif
+    emit_record(26, {txt(function), txt(path), num(flags)});
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
     if (stmt->kind == stmk_block) {
       emit_statements(stmt->variant.block.statements, function, path, "block", depth + 1);
-    } else if (stmt->kind == stmk_if) {
+    } else if (stmt->kind == stmk_if ||
+               stmt->kind == stmk_if_consteval ||
+               stmt->kind == stmk_if_not_consteval) {
       emit_statements(stmt->variant.if_stmt.then_statement,
-                      function, path, "then", depth + 1);
+                      function, path, "then", depth + 1, true);
       emit_statements(stmt->variant.if_stmt.else_statement,
-                      function, path, "else", depth + 1);
+                      function, path, "else", depth + 1, true);
+    } else if (stmt->kind == stmk_constexpr_if) {
+      a_constexpr_if_ptr info = stmt->variant.constexpr_if;
+      if (info != nullptr) {
+        emit_statements(info->then_statement, function, path, "then", depth + 1, true);
+        emit_statements(info->else_statement, function, path, "else", depth + 1, true);
+      }
     } else if (stmt->kind == stmk_while ||
                stmt->kind == stmk_end_test_while) {
       emit_statements(stmt->variant.loop_statement,
-                      function, path, "body", depth + 1);
+                      function, path, "body", depth + 1, true);
     } else if (stmt->kind == stmk_for) {
+      a_for_loop_ptr info = stmt->variant.for_loop.extra_info;
+      if (info != nullptr) {
+        emit_statements(info->initialization, function, path, "init", depth + 1, true);
+        emit_control_expr(info->increment, function, path, 1, "0", "", 0);
+      }
       emit_statements(stmt->variant.for_loop.statement,
-                      function, path, "body", depth + 1);
+                      function, path, "body", depth + 1, true);
+    } else if (stmt->kind == stmk_range_based_for) {
+      a_range_based_for_loop_ptr info = stmt->variant.range_based_for_loop.extra_info;
+      if (info != nullptr) {
+        emit_statements(info->initialization, function, path, "init", depth + 1, true);
+        emit_control_expr(info->ne_call_expr, function, path, 2, "0", "", 0);
+        emit_control_expr(info->incr_call_expr, function, path, 3, "0", "", 0);
+      }
+      emit_statements(stmt->variant.range_based_for_loop.statement,
+                      function, path, "body", depth + 1, true);
+    } else if (stmt->kind == stmk_switch) {
+      emit_statements(stmt->variant.switch_stmt.body_statement,
+                      function, path, "body", depth + 1, true);
+    } else if (stmt->kind == stmk_try_block) {
+      a_try_supplement_ptr info = stmt->variant.try_block;
+      if (info != nullptr) {
+        emit_statements(info->statement, function, path, "try", depth + 1, true);
+        unsigned handler_index = 0;
+        for (a_handler_ptr handler = info->handlers;
+             handler != nullptr && handler_index < 10000;
+             handler = handler->next, ++handler_index) {
+          emit_statements(handler->statement, function, path,
+                          "catch" + std::to_string(handler_index), depth + 1, true);
+        }
+      }
     }
   }
 }
