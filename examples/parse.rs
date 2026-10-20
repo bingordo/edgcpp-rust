@@ -89,6 +89,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("local scope routine={} id={} parent={:?} kind={} statement={:?}",
                  routine.name, scope.id, scope.parent, scope.kind, scope.statement_path);
     }
+    for owner in &graph.static_local_owners {
+        let routine = graph.symbol(owner.routine).ok_or("missing static local routine")?;
+        let variable = graph.symbol(owner.symbol).ok_or("missing static local symbol")?;
+        println!("static local owner routine={} name={} symbol={}",
+                 routine.name, variable.name, owner.symbol.0);
+    }
     for local in &graph.local_variables {
         let routine = graph.symbol(local.routine).ok_or("missing local routine")?;
         let symbol = graph.symbol(local.symbol).ok_or("missing local symbol")?;
