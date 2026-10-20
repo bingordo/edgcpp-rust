@@ -3660,6 +3660,103 @@ mod tests {
     }
 
     #[test]
+    fn indexed_type_construction_matches_all_direct_graph_queries() {
+        let mut graph = Graph::default();
+        for i in 1..=32u32 {
+            graph.types.push(TypeDef {
+                id: TypeId(i), kind: 1, related_role: Some(1),
+                related: Some(TypeId((i % 32) + 1)),
+            });
+            graph.base_classes.push(BaseClass {
+                derived: TypeId(i), position: 0,
+                base: TypeId(((i + 1) % 32) + 1), is_virtual: false,
+            });
+            graph.record_fields.push(RecordField {
+                owner: TypeId(i), position: 0, ty: TypeId(99),
+                name: format!("field_{i}"),
+                byte_offset: 0, bit_offset: 0, bit_width: 0,
+            });
+            graph.type_parameters.push(TypeParameter {
+                owner: TypeId(i), position: 0, ty: TypeId(((i + 2) % 32) + 1),
+            });
+            graph.symbols.push(Symbol {
+                id: SymbolId(i), kind: 1, name: format!("symbol_{i}"),
+            });
+            graph.symbol_types.push(SymbolType {
+                symbol: SymbolId(i), ty: TypeId(i),
+            });
+        }
+        let index = graph.type_dependency_index();
+        for i in 1..=32u32 {
+            let ty = TypeId(i);
+            assert_eq!(index.dependencies(ty), graph.type_dependencies(ty));
+            assert_eq!(index.dependents(ty), graph.direct_type_dependents(ty));
+            assert_eq!(index.symbols_with_type(ty), [SymbolId(i)]);
+        }
+        assert_eq!(index.dependents(TypeId(99)),
+            graph.direct_type_dependents(TypeId(99)));
+        assert_eq!(index.dependencies(TypeId(99)), []);
+        assert_eq!(index.affected_types(&[TypeId(7)]),
+            graph.affected_types(&[TypeId(7)]));
+        assert_eq!(index.affected_symbols(&[TypeId(7)]),
+            graph.affected_symbols(&[TypeId(7)]));
+    }
+
+    #[test]
+    fn type_invalidation_schedule_and_waves_respect_every_condensed_edge() {
+        let mut graph = Graph::default();
+        for i in 1..=24u32 {
+            graph.types.push(TypeDef {
+                id: TypeId(i), kind: 1, related_role: Some(1),
+                related: Some(TypeId(if i <= 2 { 3 - i } else { i - 1 })),
+            });
+            if i > 3 {
+                graph.record_fields.push(RecordField {
+                    owner: TypeId(i), position: 0,
+                    ty: TypeId(i - 3), name: String::new(),
+                    byte_offset: 0, bit_offset: 0, bit_width: 0,
+                });
+            }
+        }
+        let index = graph.type_dependency_index();
+        let schedule = index.invalidation_schedule(&[TypeId(1)]);
+        let mut order = HashMap::new();
+        for (step, component) in schedule.iter().enumerate() {
+            for &ty in component {
+                assert!(order.insert(ty, step).is_none());
+            }
+        }
+        assert_eq!(order.len(), 24);
+        for (&ty, &step) in &order {
+            for edge in index.dependencies(ty) {
+                if let Some(&prerequisite) = order.get(&edge.target) {
+                    assert!(prerequisite <= step,
+                        "type {:?} was scheduled before dependency {:?}", ty, edge.target);
+                }
+            }
+        }
+        let waves = index.invalidation_waves(&[TypeId(1)]);
+        let mut levels = HashMap::new();
+        for (level, wave) in waves.iter().enumerate() {
+            for component in wave {
+                for &ty in component {
+                    assert!(levels.insert(ty, level).is_none());
+                }
+            }
+        }
+        assert_eq!(levels.len(), order.len());
+        for (&ty, &level) in &levels {
+            for edge in index.dependencies(ty) {
+                if let Some(&prerequisite) = levels.get(&edge.target) {
+                    if order[&ty] != order[&edge.target] {
+                        assert!(prerequisite < level);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
