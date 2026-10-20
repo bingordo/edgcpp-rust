@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, FunctionParameter, LocalScope, LocalVariable, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -68,6 +68,13 @@ pub enum GraphError {
     InvalidTypeRelation(TypeId),
     DuplicateSymbol(SymbolId),
     DuplicateSymbolType(SymbolId),
+    InvalidFunctionParameter { routine: SymbolId, symbol: SymbolId },
+    DuplicateFunctionParameter { routine: SymbolId, position: Option<u32> },
+    InvalidFunctionParameterPosition(SymbolId),
+    DuplicateLocalScope { routine: SymbolId, scope: u32 },
+    InvalidLocalScope { routine: SymbolId, scope: u32 },
+    DuplicateLocalVariable(SymbolId),
+    InvalidLocalVariable(SymbolId),
     InvalidSymbolType(SymbolId),
     MissingSymbol(SymbolId),
     DuplicateVariableInitializer(SymbolId),
@@ -91,6 +98,9 @@ pub struct Graph {
     pub statement_attributes: Vec<StatementAttributes>,
     pub control_expressions: Vec<ControlExpression>,
     pub statement_labels: Vec<StatementLabel>,
+    pub function_parameters: Vec<FunctionParameter>,
+    pub local_scopes: Vec<LocalScope>,
+    pub local_variables: Vec<LocalVariable>,
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
@@ -538,6 +548,107 @@ impl Graph {
                 data: item.clone(), parent: None, children: Vec::new(), expression: None,
             });
         }
+        // Scope IDs are dense per routine in the native snapshot and
+        // parents precede their children. Validate after collecting all
+        // statements and symbols, since EDG emits these independently.
+        let is_routine = |id: SymbolId| graph.symbols.iter()
+            .any(|s| s.id == id && s.kind == 1);
+        let is_variable = |id: SymbolId| graph.symbols.iter()
+            .any(|s| s.id == id && s.kind == 2);
+        let mut scope_keys = std::collections::HashSet::new();
+        for scope in &il.local_scopes {
+            if !is_routine(scope.routine)
+                || !scope_keys.insert((scope.routine, scope.id)) {
+                if is_routine(scope.routine) {
+                    return Err(GraphError::DuplicateLocalScope {
+                        routine: scope.routine, scope: scope.id,
+                    });
+                }
+                return Err(GraphError::InvalidLocalScope {
+                    routine: scope.routine, scope: scope.id,
+                });
+            }
+            graph.local_scopes.push(scope.clone());
+        }
+        let mut scope_groups: HashMap<SymbolId, Vec<u32>> = HashMap::new();
+        for scope in &graph.local_scopes {
+            let valid_parent = if scope.id == 0 {
+                scope.parent.is_none()
+            } else {
+                scope.parent.is_some_and(|parent|
+                    parent < scope.id && scope_keys.contains(&(scope.routine, parent)))
+            };
+            let valid_statement = scope.statement_path.as_ref().is_none_or(|path|
+                smap.contains_key(&(
+                    graph.symbols.iter().find(|s| s.id == scope.routine).unwrap().name.clone(),
+                    path.clone(),
+                )));
+            if !valid_parent || !valid_statement {
+                return Err(GraphError::InvalidLocalScope {
+                    routine: scope.routine, scope: scope.id,
+                });
+            }
+            scope_groups.entry(scope.routine).or_default().push(scope.id);
+        }
+        for (routine, mut ids) in scope_groups {
+            ids.sort_unstable();
+            if ids.iter().enumerate().any(|(index, &id)| index as u32 != id) {
+                return Err(GraphError::InvalidLocalScope {
+                    routine, scope: ids[0],
+                });
+            }
+        }
+
+        let mut parameter_positions: HashMap<SymbolId, std::collections::HashSet<Option<u32>>> =
+            HashMap::new();
+        let mut parameter_symbols = std::collections::HashSet::new();
+        for param in &il.function_parameters {
+            if !is_routine(param.routine) || !is_variable(param.symbol)
+                || !type_map.contains_key(&param.ty)
+                || param.implicit_this != param.position.is_none()
+            {
+                return Err(GraphError::InvalidFunctionParameter {
+                    routine: param.routine, symbol: param.symbol,
+                });
+            }
+            if !parameter_symbols.insert(param.symbol)
+                || !parameter_positions.entry(param.routine).or_default().insert(param.position)
+            {
+                return Err(GraphError::DuplicateFunctionParameter {
+                    routine: param.routine, position: param.position,
+                });
+            }
+            graph.function_parameters.push(param.clone());
+        }
+        for (routine, positions) in &parameter_positions {
+            let mut indices: Vec<_> = positions.iter().flatten().copied().collect();
+            indices.sort_unstable();
+            if indices.iter().enumerate().any(|(index, &position)|
+                index as u32 != position)
+            {
+                return Err(GraphError::InvalidFunctionParameterPosition(*routine));
+            }
+        }
+        graph.function_parameters.sort_by_key(|p|
+            (p.routine.0, p.position.unwrap_or(u32::MAX)));
+
+        let mut declared_locals = std::collections::HashSet::new();
+        for var in &il.local_variables {
+            if !is_routine(var.routine) || !is_variable(var.symbol)
+                || !type_map.contains_key(&var.ty)
+                || !scope_keys.contains(&(var.routine, var.scope))
+                || parameter_symbols.contains(&var.symbol)
+            {
+                return Err(GraphError::InvalidLocalVariable(var.symbol));
+            }
+            if !declared_locals.insert(var.symbol) {
+                return Err(GraphError::DuplicateLocalVariable(var.symbol));
+            }
+            graph.local_variables.push(var.clone());
+        }
+        graph.local_scopes.sort_by_key(|scope| (scope.routine.0, scope.id));
+        graph.local_variables.sort_by_key(|var| (var.routine.0, var.scope, var.symbol.0));
+
         for label in &il.statement_labels {
             let key = (label.function.clone(), label.statement_path.clone());
             let Some(&statement) = smap.get(&key) else {
@@ -815,6 +926,42 @@ impl Graph {
         (!info.definition).then(|| self.label_target(info.label)).flatten()
     }
 
+    /// Explicit parameters of a defined routine, in declaration order.
+    pub fn function_parameters(&self, routine: SymbolId)
+        -> impl Iterator<Item = &FunctionParameter> {
+        self.function_parameters.iter().filter(move |p|
+            p.routine == routine && !p.implicit_this)
+    }
+
+    /// The implicit C++ `this` parameter, if EDG retained it.
+    pub fn implicit_this(&self, routine: SymbolId) -> Option<&FunctionParameter> {
+        self.function_parameters.iter().find(|p| p.routine == routine && p.implicit_this)
+    }
+
+    /// Lexical scopes belonging to a function, including the function root.
+    pub fn local_scopes(&self, routine: SymbolId) -> impl Iterator<Item = &LocalScope> {
+        self.local_scopes.iter().filter(move |scope| scope.routine == routine)
+    }
+
+    /// Look up a function's lexical scope by its compilation-local ID.
+    pub fn local_scope(&self, routine: SymbolId, id: u32) -> Option<&LocalScope> {
+        self.local_scopes.iter().find(|scope|
+            scope.routine == routine && scope.id == id)
+    }
+
+    /// Locals declared in this scope (not in its descendants).
+    pub fn locals_in_scope(&self, routine: SymbolId, scope: u32)
+        -> impl Iterator<Item = &LocalVariable> {
+        self.local_variables.iter().filter(move |var|
+            var.routine == routine && var.scope == scope)
+    }
+
+    /// The exact declaring lexical scope of a local variable.
+    pub fn local_variable_scope(&self, symbol: SymbolId) -> Option<&LocalScope> {
+        let local = self.local_variables.iter().find(|var| var.symbol == symbol)?;
+        self.local_scope(local.routine, local.scope)
+    }
+
     /// Flags supplied by EDG for a statement in a function.
     pub fn statement_attributes(&self, function: &str, path: &str)
         -> Option<&StatementAttributes> {
@@ -1022,6 +1169,63 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn indexed_function_locals_preserve_scope_and_shadowing() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "f".into() });
+        for symbol in 2..=5 {
+            il.symbols.push(Symbol {
+                id: SymbolId(symbol), kind: 2, name: "x".into(),
+            });
+        }
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 2, related_role: None, related: None,
+        });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 11,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 1, parent: Some(0),
+            kind: 2, statement_path: None,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None,
+            kind: 17, statement_path: Some("0".into()),
+        });
+        il.function_parameters.push(FunctionParameter {
+            routine: SymbolId(1), position: Some(0), symbol: SymbolId(2),
+            ty: TypeId(1), implicit_this: false, compiler_generated: false,
+        });
+        il.function_parameters.push(FunctionParameter {
+            routine: SymbolId(1), position: None, symbol: SymbolId(3),
+            ty: TypeId(1), implicit_this: true, compiler_generated: true,
+        });
+        for (scope, symbol) in [(0, SymbolId(4)), (1, SymbolId(5))] {
+            il.local_variables.push(LocalVariable {
+                routine: SymbolId(1), scope, symbol, ty: TypeId(1),
+                storage_class: 0, compiler_generated: false,
+                static_storage: false, structured_binding: false,
+                handler_parameter: false,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert_eq!(graph.function_parameters(SymbolId(1)).count(), 1);
+        assert_eq!(graph.implicit_this(SymbolId(1)).unwrap().symbol, SymbolId(3));
+        assert_eq!(graph.locals_in_scope(SymbolId(1), 0).count(), 1);
+        assert_eq!(graph.locals_in_scope(SymbolId(1), 1).count(), 1);
+        assert_eq!(graph.local_variable_scope(SymbolId(5)).unwrap().parent, Some(0));
+        il.local_scopes[0].parent = Some(1);
+        assert!(matches!(Graph::from_il(&il), Err(GraphError::InvalidLocalScope { .. })));
+        il.local_scopes[0].parent = Some(0);
+        il.function_parameters[0].position = Some(2);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidFunctionParameterPosition(SymbolId(1)))));
+        il.function_parameters[0].position = Some(0);
+        il.local_variables.push(il.local_variables[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateLocalVariable(SymbolId(4)))));
+    }
+
     #[test]
     fn resolves_goto_labels_and_rejects_duplicate_definitions() {
         let mut il = Il::default();
