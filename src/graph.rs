@@ -1879,6 +1879,46 @@ mod tests {
 
 
     #[test]
+    fn walks_control_expressions_in_index_order_and_stops_early() {
+        let mut il = Il::default();
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 2, name: "a".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "b".into() },
+        ]);
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(),
+            parent: None, kind: 1,
+        });
+        for (role, path, parent, symbol) in [
+            (2, "0", None, Some(SymbolId(2))),
+            (1, "0", None, Some(SymbolId(1))),
+            (1, "0.1", Some("0"), Some(SymbolId(2))),
+            (1, "0.0", Some("0"), None),
+        ] {
+            il.control_expressions.push(ControlExpression {
+                function: "f".into(), statement_path: "0".into(), role,
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_id: None, symbol_id: symbol,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let mut visited = Vec::new();
+        graph.walk_function_control_expressions("f", |statement, expr| {
+            visited.push((statement, expr.role, expr.path.clone()));
+            true
+        });
+        assert_eq!(visited.iter().map(|(_, role, path)| (*role, path.as_str()))
+            .collect::<Vec<_>>(),
+            vec![(1, "0"), (1, "0.0"), (1, "0.1"), (2, "0")]);
+        let mut count = 0;
+        graph.walk_function_control_expressions("f", |_, _| {
+            count += 1;
+            count < 2
+        });
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn depth_first_walk_preserves_order_and_supports_early_exit() {
         let mut il = Il::default();
         for (path, parent) in [
