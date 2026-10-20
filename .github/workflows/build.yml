@@ -85,6 +85,12 @@ jobs:
             grep -F 'namespace outer' il_result.txt
             grep -F 'variable outer::count' il_result.txt
             grep -F 'routine outer::calculate, defined=true' il_result.txt
+            grep -F 'routine control_flow_verification::branching, defined=true' il_result.txt
+            grep -F 'routine control_flow_verification::ranged, defined=true' il_result.txt
+            grep -F 'routine control_flow_verification::exception_handling, defined=true' il_result.txt
+            grep -F 'statement control_flow_verification::branching path=' il_result.txt
+            grep -F 'statement attributes control_flow_verification::branching path=' il_result.txt
+            grep -E 'control expression control_flow_verification::branching statement=.*role=1 path=0 ' il_result.txt
             grep -F 'variable outer::inner::nested' il_result.txt
             grep -F 'statement outer::calculate path=' il_result.txt
             grep -F 'expression outer::calculate statement=' il_result.txt
