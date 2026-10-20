@@ -1570,6 +1570,34 @@ impl Graph {
         });
     }
 
+    /// Visit a variable's initializer expression tree in numeric path order.
+    /// Returning false stops traversal. Missing owners produce no callbacks.
+    pub fn walk_initializer_expressions(
+        &self, owner: SymbolId,
+        mut visit: impl FnMut(&InitializerExpression) -> bool,
+    ) {
+        let mut nodes: Vec<_> = self.initializer_expressions(owner).collect();
+        nodes.sort_by(|a, b| compare_tree_paths(&a.path, &b.path));
+        for node in nodes {
+            if !visit(node) { break; }
+        }
+    }
+
+    /// Visit constructor initializer expressions in initializer-position and
+    /// numeric tree-path order, stopping when the callback returns false.
+    pub fn walk_constructor_expressions(
+        &self, routine: SymbolId,
+        mut visit: impl FnMut(&ConstructorInitializerExpression) -> bool,
+    ) {
+        let mut nodes: Vec<_> = self.constructor_initializer_expressions.iter()
+            .filter(|node| node.routine == routine).collect();
+        nodes.sort_by(|a, b| a.position.cmp(&b.position)
+            .then_with(|| compare_tree_paths(&a.path, &b.path)));
+        for node in nodes {
+            if !visit(node) { break; }
+        }
+    }
+
     /// Symbol references from a variable's initializer expression tree.
     /// Returns unique symbols in numeric tree-path order.
     pub fn initializer_referenced_symbols(&self, owner: SymbolId) -> Vec<SymbolId> {
