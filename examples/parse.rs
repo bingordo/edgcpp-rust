@@ -78,5 +78,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  expr.owner.0, expr.path, expr.parent, expr.kind, expr.operator,
                  expr.type_id, expr.symbol_id);
     }
+    for base in &graph.base_classes {
+        println!("base class derived={} position={} base={} virtual={}",
+                 base.derived.0, base.position, base.base.0, base.is_virtual);
+    }
+    for member in &graph.member_functions {
+        let symbol = graph.symbol(member.routine).ok_or("missing member symbol")?;
+        println!("member function owner={} name={}", member.owner.0, symbol.name);
+    }
+    for init in &graph.constructor_initializers {
+        let symbol = graph.symbol(init.routine).ok_or("missing constructor symbol")?;
+        println!("constructor initializer routine={} position={} kind={} base={:?} field={:?}",
+                 symbol.name, init.position, init.kind, init.target_type, init.target_field);
+    }
     Ok(())
 }
