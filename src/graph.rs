@@ -2997,6 +2997,31 @@ mod tests {
     }
 
     #[test]
+    fn indexed_type_queries_match_graph_and_remain_snapshots() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+        ]);
+        graph.symbols.push(Symbol { id: SymbolId(7), kind: 1, name: "x".into() });
+        graph.symbol_types.push(SymbolType { symbol: SymbolId(7), ty: TypeId(3) });
+        let index = graph.type_dependency_index();
+        assert_eq!(index.dependencies(TypeId(1)), graph.type_dependencies(TypeId(1)));
+        assert_eq!(index.dependents(TypeId(2)), graph.direct_type_dependents(TypeId(2)));
+        assert_eq!(index.affected_types(&[TypeId(2)]), graph.affected_types(&[TypeId(2)]));
+        assert_eq!(index.affected_symbols(&[TypeId(2)]), graph.affected_symbols(&[TypeId(2)]));
+        assert!(index.dependencies(TypeId(99)).is_empty());
+        assert!(index.dependents(TypeId(99)).is_empty());
+        graph.types.push(TypeDef {
+            id: TypeId(4), kind: 1, related_role: None, related: Some(TypeId(2)),
+        });
+        assert_eq!(index.dependents(TypeId(2)), [TypeId(1), TypeId(3)]);
+        assert_eq!(graph.type_dependency_index().dependents(TypeId(2)),
+            [TypeId(1), TypeId(3), TypeId(4)]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
