@@ -22,15 +22,15 @@ fn main() {
         println!("cargo:rerun-if-changed={commands}");
         println!(
             "cargo:rerun-if-changed={}",
-            PathBuf::from(&libdir).join("libedgcpfe.a").display()
+            PathBuf::from(libdir.as_str()).join("libedgcpfe.a").display()
         );
         println!(
             "cargo:rerun-if-changed={}",
-            PathBuf::from(&source).join("src").display()
+            PathBuf::from(source.as_str()).join("src").display()
         );
         println!(
             "cargo:rerun-if-changed={}",
-            PathBuf::from(&source).join("build/gcc-release/src/includes").display()
+            PathBuf::from(source.as_str()).join("build/gcc-release/src/includes").display()
         );
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
