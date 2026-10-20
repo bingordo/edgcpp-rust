@@ -628,3 +628,19 @@ Edges to uncaptured type IDs do not create component members. Component
 ordering is an implementation detail; callers should not use it as a stable
 serialization order. These relationships reflect only the captured EDG
 snapshot, not every possible C++ semantic dependency.
+
+
+## Incremental type invalidation
+
+`affected_types(&changed_type_ids)` computes a conservative reverse
+dependency closure for one or more changed type IDs. It deduplicates seeds,
+includes each seed at depth zero, and reports the shortest reverse-edge
+distance from any seed. `affected_symbols(&changed_type_ids)` returns
+captured symbols whose declared type lies in that closure, in symbol order.
+
+`affected_type_groups(&changed_type_ids)` groups affected captured types
+by strongly connected components, so mutually dependent types can be
+reprocessed together. Uncaptured IDs remain singleton groups. The groups
+are not a topological build schedule; callers must order them according to
+their pass dependencies. This analysis reflects captured structural type
+edges only, and does not substitute for complete C++ semantic invalidation.
