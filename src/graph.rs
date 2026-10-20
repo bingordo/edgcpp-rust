@@ -1527,21 +1527,13 @@ impl Graph {
     pub fn referenced_symbols_including_controls(&self, function: &str) -> Vec<SymbolId> {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();
-        let mut record = |id: SymbolId| {
-            if seen.insert(id) { result.push(id); }
-        };
-        self.walk_statements(function, |_, statement| {
-            if let Some(root) = statement.expression {
-                self.walk_expression(root, |_, expr| {
-                    if let Some(id) = expr.data.symbol_id { record(id); }
-                    true
-                });
-            }
-            let controls = self.control_expr_by_statement
-                .get(&(function.to_owned(), statement.data.path.clone()));
-            for &index in controls.into_iter().flatten() {
-                let expr = &self.control_expressions[index];
-                if let Some(id) = expr.symbol_id { record(id); }
+        self.walk_function_all_expressions(function, |_, expression| {
+            let id = match expression {
+                FunctionExpressionRef::Primary(node) => node.data.symbol_id,
+                FunctionExpressionRef::Control(node) => node.symbol_id,
+            };
+            if let Some(id) = id {
+                if seen.insert(id) { result.push(id); }
             }
             true
         });
