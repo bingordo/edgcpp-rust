@@ -101,6 +101,8 @@ jobs:
             grep -F 'indexed symbols=' il_result.txt
             grep -E 'base class derived=[0-9]+ position=0 base=[0-9]+ virtual=false' il_result.txt
             grep -E 'base class derived=[0-9]+ position=1 base=[0-9]+ virtual=true' il_result.txt
+            grep -E 'base access derived=[0-9]+ position=0 access=Some\([0-9]+\) pack=false' il_result.txt
+            grep -E 'base access derived=[0-9]+ position=1 access=Some\([0-9]+\) pack=false' il_result.txt
             grep -E 'member function owner=[0-9]+ name=.*Derived::method' il_result.txt
             grep -E 'member function owner=[0-9]+ name=.*Derived::static_method' il_result.txt
             grep -E 'routine attributes name=.*Derived::virtual_method.*virtual=true override=true' il_result.txt
