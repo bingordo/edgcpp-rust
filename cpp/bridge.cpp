@@ -478,6 +478,26 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // Out-of-line definitions may be visible through multiple IL scope
       // lists. Export their body and entity only once per routine pointer.
       if (!emitted_routines.insert(r).second) continue;
+      // Routine classification and dispatch properties are EDG-native.
+      // Bit 9 reflects the implicit this parameter, not a source keyword.
+      const bool has_this = r->type != nullptr &&
+          r->type->kind == tk_routine &&
+          r->type->variant.routine.extra_info != nullptr &&
+          r->type->variant.routine.extra_info->has_this_param;
+      const uint32_t attributes =
+          (r->is_virtual ? 1u : 0u) |
+          (r->pure_virtual ? 2u : 0u) |
+          (r->override ? 4u : 0u) |
+          (r->final ? 8u : 0u) |
+          (r->overrides_base_member ? 16u : 0u) |
+          (r->is_inline ? 32u : 0u) |
+          (r->is_constexpr ? 64u : 0u) |
+          (r->defined ? 128u : 0u) |
+          (r->is_explicit_constructor ? 256u : 0u) |
+          (has_this ? 512u : 0u);
+      emit_record(22, {num(routine_symbol),
+                       num(static_cast<unsigned>(r->special_kind)),
+                       num(attributes)});
       emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
