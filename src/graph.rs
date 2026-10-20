@@ -2450,6 +2450,66 @@ mod tests {
     }
 
     #[test]
+    fn declaration_views_handle_partial_metadata_and_missing_symbols() {
+        let mut graph = Graph::default();
+        graph.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "run".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "value".into() },
+        ]);
+        graph.types.push(TypeDef {
+            id: TypeId(3), kind: 1, related_role: None, related: None,
+        });
+        graph.symbol_types.push(SymbolType { symbol: SymbolId(1), ty: TypeId(3) });
+        graph.symbol_types.push(SymbolType { symbol: SymbolId(2), ty: TypeId(99) });
+        assert!(graph.routine_view(SymbolId(99)).is_none());
+        assert!(graph.variable_view(SymbolId(99)).is_none());
+        let routine = graph.routine_view(SymbolId(1)).unwrap();
+        assert_eq!(routine.symbol.name, "run");
+        assert_eq!(routine.ty.unwrap().definition.id, TypeId(3));
+        assert!(routine.implicit_this.is_none());
+        let variable = graph.variable_view(SymbolId(2)).unwrap();
+        assert_eq!(variable.symbol.name, "value");
+        assert!(variable.ty.is_none());
+        assert!(variable.initializer.is_none());
+        let mut calls = 0;
+        graph.walk_routine_parameters(SymbolId(1), |_| {
+            calls += 1;
+            true
+        });
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn record_layout_stream_places_bases_before_fields_and_stops() {
+        let mut graph = Graph::default();
+        graph.base_classes.push(BaseClass {
+            derived: TypeId(1), position: 0, base: TypeId(2), is_virtual: false,
+        });
+        graph.record_fields.push(RecordField {
+            owner: TypeId(1), position: 0, ty: TypeId(3),
+            name: "x".into(), byte_offset: 0, bit_offset: 0, bit_width: 0,
+        });
+        let mut kinds = Vec::new();
+        graph.walk_record_layout(TypeId(1), |item| {
+            kinds.push(match item {
+                RecordLayoutItem::Base(_) => "base",
+                RecordLayoutItem::Field(_) => "field",
+            });
+            true
+        });
+        assert_eq!(kinds, ["base", "field"]);
+        kinds.clear();
+        graph.walk_record_layout(TypeId(1), |item| {
+            kinds.push(match item {
+                RecordLayoutItem::Base(_) => "base",
+                RecordLayoutItem::Field(_) => "field",
+            });
+            false
+        });
+        assert_eq!(kinds, ["base"]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
