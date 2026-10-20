@@ -384,7 +384,7 @@ impl TypeDependencyIndex {
     pub fn apply_changes(&mut self, changes: &[TypeIndexChange]) {
         let mut changed_sources = std::collections::HashSet::new();
         let mut touched_targets = std::collections::HashSet::new();
-        let mut symbols_changed = false;
+        let mut touched_symbol_types = std::collections::HashSet::new();
         for change in changes {
             match change {
                 TypeIndexChange::ReplaceType { ty, dependencies } => {
@@ -405,6 +405,14 @@ impl TypeDependencyIndex {
                     }
                 }
                 TypeIndexChange::SetSymbolType { symbol, ty } => {
+                    if let Some(old_ty) = self.symbol_order.iter()
+                        .find(|(id, _)| id == symbol).map(|(_, ty)| *ty)
+                    {
+                        touched_symbol_types.insert(old_ty);
+                    }
+                    if let Some(new_ty) = ty {
+                        touched_symbol_types.insert(*new_ty);
+                    }
                     if let Some(position) = self.symbol_order.iter()
                         .position(|(id, _)| id == symbol)
                     {
@@ -416,7 +424,6 @@ impl TypeDependencyIndex {
                     } else if let Some(new_type) = ty {
                         self.symbol_order.push((*symbol, *new_type));
                     }
-                    symbols_changed = true;
                 }
             }
         }
@@ -438,10 +445,15 @@ impl TypeDependencyIndex {
                 }
             }
         }
-        if symbols_changed {
-            self.symbols_by_type.clear();
+        // Refresh only buckets whose symbol/type associations changed.
+        if !touched_symbol_types.is_empty() {
+            for &ty in &touched_symbol_types {
+                self.symbols_by_type.remove(&ty);
+            }
             for &(symbol, ty) in &self.symbol_order {
-                self.symbols_by_type.entry(ty).or_default().push(symbol);
+                if touched_symbol_types.contains(&ty) {
+                    self.symbols_by_type.entry(ty).or_default().push(symbol);
+                }
             }
         }
     }
@@ -482,6 +494,11 @@ impl TypeDependencyIndex {
             no_longer_affected_types, newly_affected_symbols,
             no_longer_affected_symbols,
         }
+    }
+
+    /// Symbols with the requested declared type, in captured symbol order.
+    pub fn symbols_with_type(&self, ty: TypeId) -> &[SymbolId] {
+        self.symbols_by_type.get(&ty).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Direct captured dependencies in the same order as Graph queries.
