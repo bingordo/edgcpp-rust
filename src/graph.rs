@@ -1430,6 +1430,41 @@ impl Graph {
         }
     }
 
+    /// Visit all primary expression trees attached to a function's statements.
+    /// Statements and expression operands are visited in their IL order.
+    /// Returning false stops the entire traversal.
+    pub fn walk_function_expressions(
+        &self,
+        function: &str,
+        mut visit: impl FnMut(StatementId, ExpressionId, &ExpressionNode) -> bool,
+    ) {
+        let mut continuing = true;
+        self.walk_statements(function, |statement_id, statement| {
+            if let Some(root) = statement.expression {
+                self.walk_expression(root, |expression_id, node| {
+                    continuing = visit(statement_id, expression_id, node);
+                    continuing
+                });
+            }
+            continuing
+        });
+    }
+
+    /// Collect all referenced symbol IDs from primary expression trees in
+    /// first-encounter order, without duplicates. Supplemental control and
+    /// initializer expressions are not included.
+    pub fn referenced_symbols(&self, function: &str) -> Vec<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut symbols = Vec::new();
+        self.walk_function_expressions(function, |_, _, node| {
+            if let Some(id) = node.data.symbol_id {
+                if seen.insert(id) { symbols.push(id); }
+            }
+            true
+        });
+        symbols
+    }
+
     /// Expression operands in the original IL order.
     pub fn operands(&self, id: ExpressionId) -> impl Iterator<Item = &ExpressionNode> {
         self.expression(id).into_iter()
@@ -1609,6 +1644,42 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn function_expression_walk_and_symbol_collection() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 2, name: "x".into() });
+        il.statements.push(Statement {
+            function: "f".into(), path: "0".into(), parent: None, kind: 1,
+        });
+        for (path, parent) in [("0", None), ("0.0", Some("0"))] {
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: "0".into(),
+                path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_kind: None, reference: None,
+                type_size: None, type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None,
+                symbol_id: Some(SymbolId(1)),
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        let mut paths = Vec::new();
+        graph.walk_function_expressions("f", |_, _, node| {
+            paths.push(node.data.path.clone());
+            true
+        });
+        assert_eq!(paths, ["0", "0.0"]);
+        assert_eq!(graph.referenced_symbols("f"), vec![SymbolId(1)]);
+        let mut count = 0;
+        graph.walk_function_expressions("f", |_, _, _| {
+            count += 1;
+            false
+        });
+        assert_eq!(count, 1);
+        assert!(graph.referenced_symbols("missing").is_empty());
+    }
+
+
     #[test]
     fn depth_first_walk_preserves_order_and_supports_early_exit() {
         let mut il = Il::default();
