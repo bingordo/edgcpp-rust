@@ -572,7 +572,9 @@ are valid only while the owning `Graph` is alive.
 ## Declaration and record-layout API
 
 `Graph::routine_view(symbol_id)` and `Graph::variable_view(symbol_id)`
-provide borrowed declaration summaries. The former requires EDG symbol kind 1\n(routine), and the latter kind 2 (variable); wrong-kind or absent symbols\nreturn `None`. Both require a captured symbol;
+provide borrowed declaration summaries. The former requires EDG symbol kind 1
+(routine), and the latter kind 2 (variable); wrong-kind or absent symbols
+return `None`. Both require a captured symbol;
 uncaptured type metadata is represented by `None`, rather than inventing a
 type or failing the entire query. Routine views expose the canonical captured
 function name and optional implicit C++ `this` parameter. Variable views
@@ -655,7 +657,8 @@ edges, plus captured symbol ownership, so repeated calls to
 `index.affected_types(&changed)`, and
 `index.affected_symbols(&changed)` do not rescan the Graph's type records.
 
-The index is an owned **snapshot**, not a live view: if public Graph\ncollections are mutated, rebuild the index or apply matching incremental edits. Reverse closure uses breadth-first
+The index is an owned **snapshot**, not a live view: if public Graph
+collections are mutated, rebuild the index or apply matching incremental edits. Reverse closure uses breadth-first
 search and handles cycles. Indexed `affected_symbols` preserves overall captured symbol order,
 matching `Graph::affected_symbols`.
 
