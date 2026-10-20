@@ -326,6 +326,7 @@ pub struct TypeDependencyIndex {
     forward: HashMap<TypeId, Vec<TypeDependency>>,
     reverse: HashMap<TypeId, Vec<TypeId>>,
     symbols_by_type: HashMap<TypeId, Vec<SymbolId>>,
+    symbol_order: Vec<(SymbolId, TypeId)>,
 }
 
 impl TypeDependencyIndex {
@@ -361,18 +362,14 @@ impl TypeDependencyIndex {
         result
     }
 
-    /// Affected captured symbols, in first captured-symbol order.
+    /// Affected captured symbols in overall captured symbol order.
     pub fn affected_symbols(&self, changed: &[TypeId]) -> Vec<SymbolId> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for node in self.affected_types(changed) {
-            for &symbol in self.symbols_by_type.get(&node.ty).map(Vec::as_slice).unwrap_or(&[]) {
-                if seen.insert(symbol) {
-                    result.push(symbol);
-                }
-            }
-        }
-        result
+        let affected: std::collections::HashSet<TypeId> =
+            self.affected_types(changed).into_iter().map(|node| node.ty).collect();
+        self.symbol_order.iter()
+            .filter(|(_, ty)| affected.contains(ty))
+            .map(|(symbol, _)| *symbol)
+            .collect()
     }
 }
 
@@ -2471,6 +2468,7 @@ impl Graph {
         for symbol in &self.symbols {
             if let Some(ty) = self.symbol_type(symbol.id) {
                 index.symbols_by_type.entry(ty).or_default().push(symbol.id);
+                index.symbol_order.push((symbol.id, ty));
             }
         }
         index
