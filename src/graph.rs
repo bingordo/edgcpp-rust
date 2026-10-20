@@ -2885,6 +2885,38 @@ mod tests {
     }
 
     #[test]
+    fn incremental_invalidation_merges_seeds_and_expands_cycles() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: None },
+        ]);
+        graph.symbols.extend([
+            Symbol { id: SymbolId(10), kind: 1, name: "a".into() },
+            Symbol { id: SymbolId(11), kind: 1, name: "b".into() },
+            Symbol { id: SymbolId(12), kind: 1, name: "c".into() },
+        ]);
+        graph.symbol_types.extend([
+            SymbolType { symbol: SymbolId(10), ty: TypeId(3) },
+            SymbolType { symbol: SymbolId(11), ty: TypeId(4) },
+            SymbolType { symbol: SymbolId(12), ty: TypeId(1) },
+        ]);
+        assert_eq!(graph.affected_types(&[TypeId(2), TypeId(2)]), vec![
+            ReachableType { ty: TypeId(2), depth: 0 },
+            ReachableType { ty: TypeId(1), depth: 1 },
+            ReachableType { ty: TypeId(3), depth: 1 },
+        ]);
+        assert_eq!(graph.affected_symbols(&[TypeId(2)]), [SymbolId(10), SymbolId(12)]);
+        let mut groups = graph.affected_type_groups(&[TypeId(2)]);
+        for group in &mut groups { group.sort_by_key(|ty| ty.0); }
+        assert_eq!(groups, vec![vec![TypeId(1), TypeId(2)], vec![TypeId(3)]]);
+        assert_eq!(graph.affected_types(&[]), Vec::<ReachableType>::new());
+        assert_eq!(graph.affected_type_groups(&[TypeId(99)]), vec![vec![TypeId(99)]]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
