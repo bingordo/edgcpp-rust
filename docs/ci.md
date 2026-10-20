@@ -18,8 +18,9 @@ uses an upstream *binary EDG release* rather than compiling the EDG compiler.
 The package contains a PIC-capable `libedgcpfe.a` and its `BUILD-INFO.txt`.
 A lightweight upstream *publisher* workflow promoted that previously tested
 artifact into a permanent GitHub Release; it did not recompile EDG.
-The publisher is now manual-only, and it verifies the existing asset instead
-of overwriting the same release tag:
+The publisher only runs when its own workflow file changes on the upstream
+EDG branch (with a manual dispatch trigger where available). It verifies the
+existing asset instead of overwriting the same release tag:
 
 https://github.com/bingundu/edgcpp/blob/ci/x86_64-callable-release/.github/workflows/publish-callable-artifact.yml
 
