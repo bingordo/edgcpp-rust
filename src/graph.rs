@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -27,6 +27,12 @@ pub struct ExpressionNode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateStatement { function: String, path: String },
+    DuplicateStatementAttributes { function: String, path: String },
+    InvalidStatementAttributes { function: String, path: String },
+    DuplicateControlExpression { function: String, statement: String, role: u32, path: String },
+    InvalidControlExpression { function: String, statement: String, role: u32, path: String },
+    MissingControlExpressionRoot { function: String, statement: String, role: u32 },
+    InvalidControlExpressionOperandPath { function: String, statement: String, role: u32, path: String },
     MissingStatement { function: String, path: String },
     DuplicateExpression { function: String, statement: String, path: String },
     MissingExpression { function: String, statement: String, path: String },
@@ -79,6 +85,8 @@ pub enum GraphError {
 #[derive(Clone, Debug, Default)]
 pub struct Graph {
     pub statements: Vec<StatementNode>,
+    pub statement_attributes: Vec<StatementAttributes>,
+    pub control_expressions: Vec<ControlExpression>,
     pub expressions: Vec<ExpressionNode>,
     pub types: Vec<TypeDef>,
     pub type_parameters: Vec<TypeParameter>,
@@ -99,6 +107,8 @@ pub struct Graph {
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    control_expr_index: HashMap<(String, String, u32, String), usize>,
+    control_expr_children: HashMap<(String, String, u32, String), Vec<usize>>,
     constructor_expr_index: HashMap<(SymbolId, u32, String), usize>,
     constructor_expr_children: HashMap<(SymbolId, u32, String), Vec<usize>>,
     initializer_index: HashMap<(SymbolId, String), usize>,
@@ -522,6 +532,91 @@ impl Graph {
                 data: item.clone(), parent: None, children: Vec::new(), expression: None,
             });
         }
+        let mut statement_metadata = std::collections::HashSet::new();
+        for attributes in &il.statement_attributes {
+            let key = (attributes.function.clone(), attributes.statement_path.clone());
+            if !smap.contains_key(&key)
+                || (attributes.likely && attributes.unlikely)
+            {
+                return Err(GraphError::InvalidStatementAttributes {
+                    function: key.0, path: key.1,
+                });
+            }
+            if !statement_metadata.insert(key.clone()) {
+                return Err(GraphError::DuplicateStatementAttributes {
+                    function: key.0, path: key.1,
+                });
+            }
+            graph.statement_attributes.push(attributes.clone());
+        }
+
+        let mut control_paths = std::collections::HashSet::new();
+        for expr in &il.control_expressions {
+            let key = (expr.function.clone(), expr.statement_path.clone(),
+                       expr.role, expr.path.clone());
+            if !(1..=3).contains(&expr.role)
+                || !smap.contains_key(&(expr.function.clone(), expr.statement_path.clone()))
+                || expr.type_id.is_some_and(|id| !type_map.contains_key(&id))
+                || expr.symbol_id.is_some_and(|id| !symbol_ids.contains(&id))
+            {
+                return Err(GraphError::InvalidControlExpression {
+                    function: expr.function.clone(), statement: expr.statement_path.clone(),
+                    role: expr.role, path: expr.path.clone(),
+                });
+            }
+            if !control_paths.insert(key.clone()) {
+                return Err(GraphError::DuplicateControlExpression {
+                    function: expr.function.clone(), statement: expr.statement_path.clone(),
+                    role: expr.role, path: expr.path.clone(),
+                });
+            }
+            graph.control_expr_index.insert(key, graph.control_expressions.len());
+            graph.control_expressions.push(expr.clone());
+        }
+        for expr in &graph.control_expressions {
+            if !control_paths.contains(&(expr.function.clone(), expr.statement_path.clone(),
+                                          expr.role, String::from("0"))) {
+                return Err(GraphError::MissingControlExpressionRoot {
+                    function: expr.function.clone(), statement: expr.statement_path.clone(),
+                    role: expr.role,
+                });
+            }
+        }
+        for (idx, expr) in graph.control_expressions.iter().enumerate() {
+            let valid = match &expr.parent {
+                None => expr.path == "0",
+                Some(parent) => expr.path.strip_prefix(&(parent.clone() + "."))
+                    .is_some_and(|suffix| !suffix.is_empty() && !suffix.contains('.')
+                        && suffix.parse::<u32>().is_ok())
+                    && control_paths.contains(&(expr.function.clone(), expr.statement_path.clone(),
+                                                expr.role, parent.clone())),
+            };
+            if !valid {
+                return Err(GraphError::InvalidControlExpression {
+                    function: expr.function.clone(), statement: expr.statement_path.clone(),
+                    role: expr.role, path: expr.path.clone(),
+                });
+            }
+            if let Some(parent) = &expr.parent {
+                graph.control_expr_children.entry((
+                    expr.function.clone(), expr.statement_path.clone(),
+                    expr.role, parent.clone(),
+                )).or_default().push(idx);
+            }
+        }
+        for children in graph.control_expr_children.values_mut() {
+            children.sort_by_key(|&idx| graph_path_index(&graph.control_expressions[idx].path));
+        }
+        for ((function, statement, role, parent), children) in &graph.control_expr_children {
+            for (index, &idx) in children.iter().enumerate() {
+                if graph.control_expressions[idx].path != format!("{}.{}", parent, index) {
+                    return Err(GraphError::InvalidControlExpressionOperandPath {
+                        function: function.clone(), statement: statement.clone(),
+                        role: *role, path: parent.clone(),
+                    });
+                }
+            }
+        }
         for item in &il.expressions {
             let key = (item.function.clone(), item.statement_path.clone(), item.path.clone());
             if emap.insert(key.clone(), ExpressionId(graph.expressions.len())).is_some() {
@@ -671,6 +766,38 @@ impl Graph {
         }
         Ok(graph)
     }
+    /// Flags supplied by EDG for a statement in a function.
+    pub fn statement_attributes(&self, function: &str, path: &str)
+        -> Option<&StatementAttributes> {
+        self.statement_attributes.iter().find(|a|
+            a.function == function && a.statement_path == path)
+    }
+
+    /// Root of a supplemental control-expression tree.
+    pub fn control_expression_root(
+        &self, function: &str, statement: &str, role: u32,
+    ) -> Option<&ControlExpression> {
+        self.control_expression(function, statement, role, "0")
+    }
+
+    /// Resolve one expression in a supplemental control-expression tree.
+    pub fn control_expression(
+        &self, function: &str, statement: &str, role: u32, path: &str,
+    ) -> Option<&ControlExpression> {
+        self.control_expr_index.get(&(function.to_owned(), statement.to_owned(),
+                                      role, path.to_owned()))
+            .map(|&idx| &self.control_expressions[idx])
+    }
+
+    /// Immediate operands of a supplemental control expression in EDG order.
+    pub fn control_operands<'a>(&'a self, expr: &ControlExpression)
+        -> Vec<&'a ControlExpression> {
+        self.control_expr_children.get(&(expr.function.clone(), expr.statement_path.clone(),
+                                         expr.role, expr.path.clone()))
+            .map(|children| children.iter().map(|&idx| &self.control_expressions[idx]).collect())
+            .unwrap_or_default()
+    }
+
     /// Root statements belonging to the specified function.
     pub fn roots<'a>(&'a self, function: &'a str)
         -> impl Iterator<Item = (StatementId, &'a StatementNode)> + 'a {
@@ -846,6 +973,44 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validates_statement_flags_and_auxiliary_control_expressions() {
+        let mut il = Il::default();
+        il.statements.push(Statement {
+            function: "loop".into(), path: "0".into(), parent: None, kind: 14,
+        });
+        il.statement_attributes.push(StatementAttributes {
+            function: "loop".into(), statement_path: "0".into(),
+            compiler_generated: false, initialization_guard: false,
+            fallthrough: false, likely: true, unlikely: false,
+            lowering_generated: false, lowering_boilerplate: false,
+        });
+        for (path, parent) in [("0.1", Some("0")), ("0", None), ("0.0", Some("0"))] {
+            il.control_expressions.push(ControlExpression {
+                function: "loop".into(), statement_path: "0".into(),
+                role: 1, path: path.into(), parent: parent.map(str::to_owned),
+                kind: 1, operator: None, type_id: None, symbol_id: None,
+            });
+        }
+        let graph = Graph::from_il(&il).unwrap();
+        assert!(graph.statement_attributes("loop", "0").unwrap().likely);
+        let root = graph.control_expression_root("loop", "0", 1).unwrap();
+        assert_eq!(graph.control_operands(root).iter()
+                   .map(|node| node.path.as_str()).collect::<Vec<_>>(),
+                   vec!["0.0", "0.1"]);
+        il.control_expressions[0].path = "0.2".into();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidControlExpressionOperandPath { .. })));
+        il.control_expressions[0].path = "0.1".into();
+        il.control_expressions.push(il.control_expressions[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateControlExpression { .. })));
+        il.control_expressions.pop();
+        il.statement_attributes[0].unlikely = true;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidStatementAttributes { .. })));
+    }
+
     #[test]
     fn constructor_records_are_independent_of_symbol_callback_order() {
         let mut il = Il::default();
