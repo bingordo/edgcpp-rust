@@ -2220,6 +2220,53 @@ mod tests {
     }
 
     #[test]
+    fn variable_analysis_reports_counts_and_first_use_order() {
+        let mut graph = Graph::default();
+        for (path, symbol) in [
+            ("0.10", Some(SymbolId(2))),
+            ("0", None),
+            ("0.2", Some(SymbolId(1))),
+            ("0.1", Some(SymbolId(2))),
+        ] {
+            graph.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(7), path: path.into(), parent: None,
+                kind: 1, operator: None, type_id: None, symbol_id: symbol,
+            });
+        }
+        assert_eq!(graph.variable_symbol_use_counts(SymbolId(7)), vec![
+            SymbolUseCount { symbol: SymbolId(2), count: 2 },
+            SymbolUseCount { symbol: SymbolId(1), count: 1 },
+        ]);
+        assert_eq!(graph.variable_expression_stats(SymbolId(7)), ExpressionStats {
+            variable_initializers: 4, symbol_uses: 3, distinct_symbols: 2,
+            ..ExpressionStats::default()
+        });
+        assert_eq!(graph.variable_expression_stats(SymbolId(7)).total(), 4);
+        assert_eq!(graph.variable_expression_stats(SymbolId(99)), ExpressionStats::default());
+    }
+
+    #[test]
+    fn routine_analysis_includes_constructor_initializers() {
+        let mut graph = Graph::default();
+        for (position, symbol) in [(1, SymbolId(1)), (0, SymbolId(2)), (2, SymbolId(2))] {
+            graph.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+                routine: SymbolId(7), position, path: "0".into(),
+                parent: None, kind: 1, operator: None, type_id: None,
+                symbol_id: Some(symbol),
+            });
+        }
+        assert_eq!(graph.routine_symbol_use_counts("absent", SymbolId(7)), vec![
+            SymbolUseCount { symbol: SymbolId(2), count: 2 },
+            SymbolUseCount { symbol: SymbolId(1), count: 1 },
+        ]);
+        assert_eq!(graph.routine_expression_stats("absent", SymbolId(7)), ExpressionStats {
+            constructor_initializers: 3, symbol_uses: 3, distinct_symbols: 2,
+            ..ExpressionStats::default()
+        });
+        assert_eq!(graph.routine_expression_count("absent", SymbolId(7)), 3);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
