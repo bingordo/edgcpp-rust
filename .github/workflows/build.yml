@@ -1,13 +1,26 @@
 name: Rust EDG bridge (Linux x86-64)
 
+# Only the default branch is verified on push. Pull requests get their own
+# verification, avoiding duplicate push + PR builds on feature branches.
+# Documentation-only updates do not compile C++/Rust.
 on:
   push:
+    branches: [main]
+    paths-ignore:
+      - README.md
+      - docs/**
+      - '**/*.md'
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - README.md
+      - docs/**
+      - '**/*.md'
   workflow_dispatch:
 
-# Keep only the newest push/PR verification. EDG is expensive to rebuild.
+# Cancel superseded runs for the same PR/branch before they consume build CPU.
 concurrency:
-  group: edgcpp-rust-${{ github.workflow }}-${{ github.ref }}
+  group: edgcpp-rust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,32 +29,54 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
     container:
-      image: ghcr.io/edgcpp/ci-runner@sha256:14b3948c2ce12cfa5472e5a6c468393d15426f3a67685cc35d830ea5db2acdf8
+      # Identical native toolchain to the published EDG x86-64 archive.
+      image: ghcr.io/edgcpp/ci-runner@sha256:14b3948c2ce12cfa5472e5a6c468393d15426f3
     defaults:
       run:
         shell: edg-container-exec "bash -eo pipefail {0}"
+    env:
+      # The versioned GitHub Release is built from exactly this EDG source.
+      EDG_SOURCE_SHA: 799603e0b5ab272d9418e2d44a53a95bc73dfdc4
+      EDG_RELEASE_TAG: edgcpfe-ci-799603e0b5ab
+      # CI needs failures and diagnostics but not bulky debug symbols.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+
     steps:
       - name: Check out Rust bindings
         uses: actions/checkout@v7
         with:
           path: edgcpp-rust
 
-      - name: Check out matching EDG source
+      - name: Check out exact EDG headers/configuration sources
         uses: actions/checkout@v7
         with:
           repository: bingundu/edgcpp
-          ref: ci/x86_64-callable-release
+          ref: 799603e0b5ab272d9418e2d44a53a95bc73dfdc4
           path: edgcpp
+          persist-credentials: false
 
-      - name: Restore EDG compilation cache
-        uses: actions/cache@v4
+      # GitHub's cache entries are immutable, so restore the newest matching
+      # prior cache; only new main-branch builds save a replacement snapshot.
+      - name: Restore Rust/Cargo incremental compilation cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
-          path: edgcpp/build/gcc-release
-          key: edgcpp-gcc-release-${{ hashFiles('edgcpp/src/il_def.h', 'edgcpp/CMakePresets.json') }}
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
+          restore-keys: |
+            rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
+            rust-edgcpp-v3-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Configure EDG
+      # EDG's IL layout depends on compile-time macros. CMake configure is
+      # cheap and generates matching compile_commands.json and environment.sh.
+      # Do not build the native archive here; download its tested binary.
+      - name: Configure metadata for EDG bridge compilation (no native build)
         env:
           EDG_BASE: ${{ github.workspace }}/edgcpp/bases/docker/dev-env/gcc
         working-directory: edgcpp
@@ -51,11 +86,21 @@ jobs:
             -DEDG_BUILD_CALLABLE_LIBRARY=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      - name: Build EDG static archive
-        env:
-          EDG_BASE: ${{ github.workspace }}/edgcpp/bases/docker/dev-env/gcc
+      - name: Download pinned, prebuilt EDG archive
         working-directory: edgcpp
-        run: cmake --build build/gcc-release --target edgcpfe --parallel 2
+        run: |
+          set -euo pipefail
+          url="https://github.com/bingundu/edgcpp/releases/download/$EDG_RELEASE_TAG/edgcpfe-ci-x86_64-callable-release-linux-x86_64.tar.gz"
+          mkdir -p build/gcc-release/lib build/prebuilt-edg
+          curl --fail --location --silent --show-error \
+            --retry 4 --retry-delay 2 \
+            "$url" --output build/prebuilt-edg/archive.tar.gz
+          tar -xzf build/prebuilt-edg/archive.tar.gz -C build/prebuilt-edg
+          grep -Fx "commit=$EDG_SOURCE_SHA" build/prebuilt-edg/BUILD-INFO.txt
+          grep -Fx 'platform=linux-x86_64' build/prebuilt-edg/BUILD-INFO.txt
+          test -s build/prebuilt-edg/lib/libedgcpfe.a
+          cp build/prebuilt-edg/lib/libedgcpfe.a build/gcc-release/lib/libedgcpfe.a
+          echo "Using prebuilt EDG $EDG_SOURCE_SHA; no EDG native compilation"
 
       - name: Install Rust toolchain
         run: |
@@ -73,9 +118,9 @@ jobs:
           EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
+          cargo test --lib --tests
           cargo build --example parse
+          cargo clippy --all-targets -- -D warnings
           cp tests/fixtures/namespaces.cpp ../edgcpp/build/gcc-release/il_fixture.cpp
           (
             cd ../edgcpp/build/gcc-release
@@ -150,3 +195,13 @@ jobs:
               exit 1
             fi
           )
+
+      - name: Save incremental Rust cache (successful main builds only)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
