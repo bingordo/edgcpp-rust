@@ -3118,6 +3118,30 @@ mod tests {
     }
 
     #[test]
+    fn invalidation_schedule_orders_dependencies_and_collapses_cycles() {
+        let mut graph = Graph::default();
+        graph.types.extend([
+            TypeDef { id: TypeId(1), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(2), kind: 1, related_role: None, related: Some(TypeId(1)) },
+            TypeDef { id: TypeId(3), kind: 1, related_role: None, related: Some(TypeId(2)) },
+            TypeDef { id: TypeId(4), kind: 1, related_role: None, related: Some(TypeId(3)) },
+            TypeDef { id: TypeId(5), kind: 1, related_role: None, related: None },
+        ]);
+        let index = graph.type_dependency_index();
+        let schedule = index.invalidation_schedule(&[TypeId(2)]);
+        assert_eq!(schedule.len(), 3);
+        let mut cycle = schedule[0].clone();
+        cycle.sort_by_key(|ty| ty.0);
+        assert_eq!(cycle, [TypeId(1), TypeId(2)]);
+        assert_eq!(schedule[1], [TypeId(3)]);
+        assert_eq!(schedule[2], [TypeId(4)]);
+        assert_eq!(graph.type_invalidation_schedule(&[TypeId(2)]), schedule);
+        assert_eq!(index.invalidation_schedule(&[]), Vec::<Vec<TypeId>>::new());
+        assert_eq!(index.invalidation_schedule(&[TypeId(99)]), vec![vec![TypeId(99)]]);
+        assert_eq!(index.invalidation_schedule(&[TypeId(5)]), vec![vec![TypeId(5)]]);
+    }
+
+    #[test]
     fn initializer_symbol_references_follow_numeric_tree_order() {
         let mut il = Il::default();
         il.symbols.extend([
