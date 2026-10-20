@@ -318,6 +318,64 @@ pub struct ReachableType {
     pub depth: usize,
 }
 
+/// Reusable snapshot of forward/reverse type edges and symbol ownership.
+/// Construct after the Graph is populated; rebuild after mutating its public
+/// collections. Queries never rescan Graph's type relationships.
+#[derive(Clone, Debug, Default)]
+pub struct TypeDependencyIndex {
+    forward: HashMap<TypeId, Vec<TypeDependency>>,
+    reverse: HashMap<TypeId, Vec<TypeId>>,
+    symbols_by_type: HashMap<TypeId, Vec<SymbolId>>,
+}
+
+impl TypeDependencyIndex {
+    /// Direct captured dependencies in the same order as Graph queries.
+    pub fn dependencies(&self, ty: TypeId) -> &[TypeDependency] {
+        self.forward.get(&ty).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Direct dependent type IDs, deduplicated in captured definition order.
+    pub fn dependents(&self, ty: TypeId) -> &[TypeId] {
+        self.reverse.get(&ty).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Reverse dependency closure from multiple seeds. Shortest distances
+    /// and first-encounter ordering are preserved.
+    pub fn affected_types(&self, changed: &[TypeId]) -> Vec<ReachableType> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut result = Vec::new();
+        for &ty in changed {
+            if seen.insert(ty) {
+                queue.push_back(ReachableType { ty, depth: 0 });
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            for &ty in self.dependents(node.ty) {
+                if seen.insert(ty) {
+                    queue.push_back(ReachableType { ty, depth: node.depth + 1 });
+                }
+            }
+            result.push(node);
+        }
+        result
+    }
+
+    /// Affected captured symbols, in first captured-symbol order.
+    pub fn affected_symbols(&self, changed: &[TypeId]) -> Vec<SymbolId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for node in self.affected_types(changed) {
+            for &symbol in self.symbols_by_type.get(&node.ty).map(Vec::as_slice).unwrap_or(&[]) {
+                if seen.insert(symbol) {
+                    result.push(symbol);
+                }
+            }
+        }
+        result
+    }
+}
+
 impl Graph {
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
@@ -2394,6 +2452,28 @@ impl Graph {
             components.push(component);
         }
         components
+    }
+
+    /// Build a reusable dependency index for repeated invalidation queries.
+    /// This is a snapshot: rebuild it after changing public Graph collections.
+    pub fn type_dependency_index(&self) -> TypeDependencyIndex {
+        let mut index = TypeDependencyIndex::default();
+        for ty in &self.types {
+            let edges = self.type_dependencies(ty.id);
+            for edge in &edges {
+                let dependents = index.reverse.entry(edge.target).or_default();
+                if !dependents.contains(&ty.id) {
+                    dependents.push(ty.id);
+                }
+            }
+            index.forward.insert(ty.id, edges);
+        }
+        for symbol in &self.symbols {
+            if let Some(ty) = self.symbol_type(symbol.id) {
+                index.symbols_by_type.entry(ty).or_default().push(symbol.id);
+            }
+        }
+        index
     }
 
     /// Find the conservative set of captured types affected by changes to
