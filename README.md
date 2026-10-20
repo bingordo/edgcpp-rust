@@ -80,8 +80,13 @@ for edge in graph.bases(derived_type_id) {
 }
 ```
 
-Only direct inheritance edges are exported. Access control, transitive
-inheritance and base-subobject layout are not yet exposed.
+Direct base access specifiers are available through
+`Compilation::il.base_class_access` and `Graph::base_access(derived, position)`.
+Their `access` value is a native EDG enum, or `None` when no direct
+derivation path is retained; `pack_expansion` indicates a variadic base
+specifier. Only **direct** inheritance edges are exported. Transitive
+inheritance, base-subobject layout and complete C++ access checking are not
+yet modeled.
 
 ## Class member functions
 
