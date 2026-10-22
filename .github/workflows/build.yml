@@ -5,7 +5,7 @@ name: Rust EDG bridge (Linux x86-64)
 # Documentation-only updates do not compile C++/Rust.
 on:
   push:
-    branches: [main]
+    branches: [cranelift-codegen]
     paths-ignore:
       - README.md
       - docs/**
@@ -67,7 +67,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EDG_SOURCE_SHA"
 
       # GitHub's cache entries are immutable, so restore the newest matching
-      # prior cache; only new main-branch builds save a replacement snapshot.
+      # prior cache; only new development-branch builds save a replacement snapshot.
       - name: Restore Rust/Cargo incremental compilation cache
         id: rust-cache
         uses: actions/cache/restore@v4
@@ -76,10 +76,10 @@ jobs:
             edgcpp-rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
+          key: rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
           restore-keys: |
-            rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
-            rust-edgcpp-v4-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
+            rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
+            rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
 
       # EDG's IL layout depends on compile-time macros. CMake configure is
       # cheap and generates matching compile_commands.json and environment.sh.
@@ -219,8 +219,8 @@ jobs:
             fi
           )
 
-      - name: Save incremental Rust cache (successful main builds only)
-        if: ${{ success() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true' }}
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |
