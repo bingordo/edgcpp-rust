@@ -141,6 +141,7 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --lib --tests
+          cargo test --lib --features codegen codegen::tests
           cargo build --example parse
           cargo clippy --all-targets -- -D warnings
           cp tests/fixtures/namespaces.cpp ../edgcpp/build/gcc-release/il_fixture.cpp
