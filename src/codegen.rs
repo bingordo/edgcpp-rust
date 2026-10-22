@@ -112,7 +112,7 @@ mod tests {
             parameters: 2,
             result: Expr::Add(Box::new(Expr::Parameter(0)), Box::new(Expr::Parameter(1))),
         }]).unwrap();
-        assert_eq!(&bytes[..4], b"\\x7fELF");
+        assert_eq!(&bytes[..4], b"\x7fELF");
         assert_eq!(bytes[4], 2); // ELFCLASS64
     }
     #[test]
