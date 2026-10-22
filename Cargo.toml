@@ -10,3 +10,13 @@ license = "Apache-2.0 WITH LLVM-exception"
 [lib]
 name = "edgcpp"
 path = "src/lib.rs"
+
+[features]
+default = []
+codegen = ["dep:cranelift-codegen", "dep:cranelift-module", "dep:cranelift-object", "dep:cranelift-frontend"]
+
+[dependencies]
+cranelift-codegen = { version = "0.121", optional = true }
+cranelift-module = { version = "0.121", optional = true }
+cranelift-object = { version = "0.121", optional = true }
+cranelift-frontend = { version = "0.121", optional = true }
