@@ -230,6 +230,7 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --features codegen --lib codegen::tests::
+          cargo test --features codegen --test codegen_native
 
       - name: Save incremental Rust cache (successful codegen-branch builds only)
         if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
