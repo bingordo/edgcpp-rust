@@ -219,6 +219,17 @@ jobs:
             fi
           )
 
+      - name: Test optional Cranelift ELF backend (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --features codegen --lib codegen::tests::
+
       - name: Save incremental Rust cache (successful codegen-branch builds only)
         if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
