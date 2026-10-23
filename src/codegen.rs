@@ -102,6 +102,103 @@ pub fn emit_object(functions: &[Function]) -> Result<Vec<u8>, CodegenError> {
     object.emit().map_err(|e| CodegenError::Backend(e.to_string()))
 }
 
+
+use crate::{Il, graph::{Graph, ExpressionId}};
+
+extern "C" {
+    fn edgcpp_codegen_kind(category: u32, value: u32) -> u32;
+}
+fn semantic(category: u32, value: u32) -> u32 {
+    unsafe { edgcpp_codegen_kind(category, value) }
+}
+
+/// Decode a conservative, side-effect-free EDG expression into the reference IR.
+/// Unsupported nodes are errors, never silently replaced with zero.
+fn lower_expression(
+    graph: &Graph,
+    id: ExpressionId,
+    parameters: &[crate::SymbolId],
+) -> Result<Expr, CodegenError> {
+    let node = graph.expression(id).ok_or_else(|| CodegenError::InvalidFunction("missing expression".into()))?;
+    let data = &node.data;
+    match semantic(2, data.kind) {
+        1 => data.constant_integer.map(Expr::Constant)
+            .ok_or_else(|| CodegenError::InvalidFunction("unsupported constant".into())),
+        2 => {
+            let symbol = data.symbol_id.ok_or_else(|| CodegenError::InvalidFunction("unresolved variable".into()))?;
+            let index = parameters.iter().position(|p| *p == symbol)
+                .ok_or_else(|| CodegenError::InvalidFunction("non-parameter variable".into()))?;
+            Ok(Expr::Parameter(index))
+        }
+        3 => {
+            if node.operands.len() != 2 {
+                return Err(CodegenError::InvalidFunction("expected binary expression".into()));
+            }
+            let operator = data.operator.map(|op| semantic(3, op)).unwrap_or(0);
+            if !(1..=3).contains(&operator) {
+                return Err(CodegenError::InvalidFunction("unsupported operator".into()));
+            }
+            let left = Box::new(lower_expression(graph, node.operands[0], parameters)?);
+            let right = Box::new(lower_expression(graph, node.operands[1], parameters)?);
+            Ok(match operator {
+                1 => Expr::Add(left, right),
+                2 => Expr::Sub(left, right),
+                3 => Expr::Mul(left, right),
+                _ => unreachable!(),
+            })
+        }
+        _ => Err(CodegenError::InvalidFunction(format!("unsupported EDG expression kind {}", data.kind))),
+    }
+}
+
+/// Lower functions consisting of a single return expression, optionally nested
+/// in a block. Other functions are rejected rather than miscompiled.
+pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
+    let graph = Graph::from_il(il)
+        .map_err(|e| CodegenError::InvalidFunction(format!("invalid EDG graph: {e:?}")))?;
+    let mut output = Vec::new();
+    for entity in &il.entities {
+        let crate::Entity::Routine { name, has_definition: true } = entity else { continue };
+        let mut returns = Vec::new();
+        let mut invalid = false;
+        graph.walk_statements(name, |_, node| {
+            match semantic(1, node.data.kind) {
+                1 => returns.push(node.expression),
+                2 => {}
+                _ => invalid = true,
+            }
+            true
+        });
+        if invalid || returns.len() != 1 {
+            return Err(CodegenError::InvalidFunction(format!(
+                "{name}: only one return in a block is supported"
+            )));
+        }
+        let expression = returns[0].ok_or_else(|| CodegenError::InvalidFunction(format!(
+            "{name}: return has no expression"
+        )))?;
+        let routine = graph.routine_for_function(name).ok_or_else(|| CodegenError::InvalidFunction(format!(
+            "{name}: missing routine identity"
+        )))?;
+        let mut parameters: Vec<_> = il.function_parameters.iter()
+            .filter(|p| p.routine == routine && !p.implicit_this)
+            .collect();
+        parameters.sort_by_key(|p| p.position);
+        if parameters.iter().enumerate().any(|(i, p)| p.position != Some(i as u32)) {
+            return Err(CodegenError::InvalidFunction(format!("{name}: invalid parameter positions")));
+        }
+        let ids: Vec<_> = parameters.iter().map(|p| p.symbol).collect();
+        let result = lower_expression(&graph, expression, &ids)?;
+        output.push(Function { name: name.clone(), parameters: ids.len(), result });
+    }
+    Ok(output)
+}
+
+/// Translate an owned EDG compilation snapshot directly into a relocatable ELF.
+pub fn emit_edg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
+    emit_object(&lower_edg(il)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
