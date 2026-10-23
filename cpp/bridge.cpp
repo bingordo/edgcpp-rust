@@ -1278,3 +1278,22 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_named_statics.clear();
   return status;
 }
+
+/* Stable semantic discriminants for the optional Rust reference backend.
+ * Never duplicate EDG's private numeric enum layout in Rust. */
+extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
+{
+  if (category == 1) {
+    if (value == static_cast<unsigned>(stmk_return)) return 1;
+    if (value == static_cast<unsigned>(stmk_block)) return 2;
+  } else if (category == 2) {
+    if (value == static_cast<unsigned>(enk_constant)) return 1;
+    if (value == static_cast<unsigned>(enk_variable)) return 2;
+    if (value == static_cast<unsigned>(enk_operation)) return 3;
+  } else if (category == 3) {
+    if (value == static_cast<unsigned>(eok_add)) return 1;
+    if (value == static_cast<unsigned>(eok_subtract)) return 2;
+    if (value == static_cast<unsigned>(eok_multiply)) return 3;
+  }
+  return 0;
+}
