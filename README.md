@@ -59,4 +59,25 @@ Keep the native compiler backend independent of EDG.
   at milestones or by manual dispatch.
 - Avoid duplicate PR/push builds and documentation-only rebuilds.
 
-**CI:** [Build workflow](https://github.com/bingundu/edgcpp-rust/actions/workflows/build.yml).
+**CI:** [bingordo/edgcpp-rust Actions](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).
+
+
+## EDG-to-Cranelift smoke test
+
+The optional `codegen` feature exposes `examples/codegen.rs`, which runs the
+EDG frontend, lowers the currently supported single-return integer subset, and
+writes a relocatable x86-64 ELF object:
+
+```sh
+cargo build --features codegen --example codegen
+# Run from the configured EDG build directory after sourcing environment.sh:
+path/to/examples/codegen output.o --c++20 input.cpp
+```
+
+The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
+both EDG/Cranelift and GCC, links each with the same test driver, and compares
+execution results. Unsupported EDG constructs are rejected rather than lowered
+incorrectly. This is a reference backend, not a general C++ compiler.
+
+**CI is run on [bingordo/edgcpp-rust](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).**
+The `bingundu` mirror uses a manual-only workflow to avoid duplicate CPU usage.
