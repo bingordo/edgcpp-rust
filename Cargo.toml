@@ -20,3 +20,7 @@ cranelift-codegen = { version = "0.121", optional = true }
 cranelift-module = { version = "0.121", optional = true }
 cranelift-object = { version = "0.121", optional = true }
 cranelift-frontend = { version = "0.121", optional = true }
+
+[[example]]
+name = "codegen"
+required-features = ["codegen"]
