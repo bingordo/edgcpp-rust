@@ -232,6 +232,30 @@ jobs:
           cargo test --features codegen --lib codegen::tests::
           cargo test --features codegen --test codegen_native
 
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
       - name: Save incremental Rust cache (successful codegen-branch builds only)
         if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
