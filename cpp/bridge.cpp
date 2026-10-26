@@ -1283,6 +1283,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
  * Never duplicate EDG's private numeric enum layout in Rust. */
 extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
 {
+  using namespace edg;
   if (category == 1) {
     if (value == static_cast<unsigned>(stmk_return)) return 1;
     if (value == static_cast<unsigned>(stmk_block)) return 2;
