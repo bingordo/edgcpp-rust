@@ -1308,6 +1308,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_and)) return 13;
     if (value == static_cast<unsigned>(eok_or)) return 14;
     if (value == static_cast<unsigned>(eok_xor)) return 15;
+    if (value == static_cast<unsigned>(eok_cast)) return 16;
+    if (value == static_cast<unsigned>(eok_bool_cast)) return 17;
   }
   return 0;
 }
