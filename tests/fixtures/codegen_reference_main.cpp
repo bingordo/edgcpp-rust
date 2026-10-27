@@ -3,6 +3,10 @@
 extern "C" long long edg_add(long long, long long);
 extern "C" long long edg_affine(long long, long long);
 extern "C" long long edg_constant();
+extern "C" long long edg_choose(long long, long long);
+extern "C" long long edg_absolute(long long);
+extern "C" long long edg_compare(long long, long long);
+extern "C" long long edg_bits(long long, long long);
 
 int main() {
     long long checksum = 0;
@@ -11,7 +15,17 @@ int main() {
             const auto add = edg_add(a, b);
             const auto affine = edg_affine(a, b);
             if (add != a + b || affine != a * 7 - b) return 1;
-            checksum += (add * 3 + affine) * (a + 31);
+            const auto choose = edg_choose(a, b);
+            const auto abs = edg_absolute(a);
+            const auto cmp = edg_compare(a, b);
+            const auto bits = edg_bits(a, b);
+            const auto expected_choose = a < b ? a + 11 : b - 13;
+            const auto expected_abs = a < 0 ? -a : a;
+            const auto expected_cmp = (a >= b) + (a != b) * 2;
+            const auto expected_bits = (a & b) ^ (a | b);
+            if (choose != expected_choose || abs != expected_abs ||
+                cmp != expected_cmp || bits != expected_bits) return 3;
+            checksum += (add * 3 + affine + choose + abs + cmp + bits) * (a + 31);
         }
     }
     if (edg_constant() != 42) return 2;
