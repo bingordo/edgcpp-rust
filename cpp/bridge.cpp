@@ -1287,6 +1287,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
   if (category == 1) {
     if (value == static_cast<unsigned>(stmk_return)) return 1;
     if (value == static_cast<unsigned>(stmk_block)) return 2;
+    if (value == static_cast<unsigned>(stmk_if)) return 3;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
@@ -1295,6 +1296,18 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_add)) return 1;
     if (value == static_cast<unsigned>(eok_subtract)) return 2;
     if (value == static_cast<unsigned>(eok_multiply)) return 3;
+    if (value == static_cast<unsigned>(eok_negate)) return 4;
+    if (value == static_cast<unsigned>(eok_eq)) return 5;
+    if (value == static_cast<unsigned>(eok_ne)) return 6;
+    if (value == static_cast<unsigned>(eok_lt)) return 7;
+    if (value == static_cast<unsigned>(eok_le)) return 8;
+    if (value == static_cast<unsigned>(eok_gt)) return 9;
+    if (value == static_cast<unsigned>(eok_ge)) return 10;
+    if (value == static_cast<unsigned>(eok_parens)) return 11;
+    if (value == static_cast<unsigned>(eok_unary_plus)) return 12;
+    if (value == static_cast<unsigned>(eok_and)) return 13;
+    if (value == static_cast<unsigned>(eok_or)) return 14;
+    if (value == static_cast<unsigned>(eok_xor)) return 15;
   }
   return 0;
 }
