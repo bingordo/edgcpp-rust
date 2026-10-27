@@ -191,7 +191,10 @@ fn lower_expression(
                 return Ok(if operator == 4 { Expr::Neg(Box::new(arg)) } else { arg });
             }
             if node.operands.len() != 2 {
-                return Err(CodegenError::InvalidFunction("expected binary expression".into()));
+                return Err(CodegenError::InvalidFunction(format!(
+                    "expected binary expression: function={} statement={} path={} operator={:?} semantic={} operands={}",
+                    data.function, data.statement_path, data.path, data.operator, operator, node.operands.len()
+                )));
             }
             if !(1..=3).contains(&operator) && !(5..=10).contains(&operator)
                 && !(13..=15).contains(&operator)
