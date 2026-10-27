@@ -25,7 +25,7 @@ extern "C" long long edg_absolute(long long a) {
     }
 }
 extern "C" long long edg_compare(long long a, long long b) {
-    return (a >= b) + (a != b) * 2;
+    return (long long)(a >= b) + (long long)(a != b) * 2LL;
 }
 extern "C" long long edg_bits(long long a, long long b) {
     return (a & b) ^ (a | b);
