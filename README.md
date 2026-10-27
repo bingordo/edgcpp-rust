@@ -89,9 +89,9 @@ point, missing metadata, parameter mismatches and implicit C++ object
 parameters. Only plain signed-64-bit C-linkage functions are currently
 supported; C++ name mangling is not implemented.
 
-Local assignments, loops, calls, global memory and general C++ features are
-still not implemented. The signed-i64 restriction is intentional until
-properly typed signatures and expressions are implemented.
+Local assignments, structured if/else and pretest while loops are supported
+by the newer CFG emitter (see below). Calls, global memory and general C++
+features are still unsupported. The signed-i64 restriction remains intentional.
 
 The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
 both EDG/Cranelift and GCC, links each with the same test driver, and compares
@@ -115,13 +115,11 @@ The bridge retains initializer expressions as primary expression trees as well
 as their existing role-4 control snapshot. Each assignment becomes an ordered
 SSA value update (no explicit memory slot), with rejected uninitialized reads.
 
-The supported subset intentionally excludes initializer forms without a
-captured expression, globals, static locals, parameter writes, pointer and
-array assignment, narrow/unsigned locals, side-effecting expressions,
-nonreturning if statements, and loops. Conditional branches that mutate locals
-are rejected because the reference backend currently uses an eager select,
-not basic blocks. The next stage should lower if/else and while using proper
-Cranelift basic blocks and block parameters/variables.
+The supported subset still excludes initializer forms without a captured
+expression, globals, static locals, parameter writes, pointer and array
+assignment, narrow/unsigned locals and side-effecting expressions. The initial
+straight-line implementation is preserved for reference; the newer structured
+CFG backend supports assignment in conditional branches and while loops.
 
 CI performs native execution with two sequential locals plus reassignment,
 checks a local value across returning if/else branches, and compares outputs
