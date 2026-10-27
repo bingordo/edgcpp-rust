@@ -37,3 +37,12 @@ extern "C" long long edg_locals(long long a, long long b) {
     long long total = tmp + a;
     return total * 2 - b;
 }
+
+extern "C" long long edg_locals_choose(long long a, long long b) {
+    long long intermediate = a * 3 + b;
+    if (a < b) {
+        return intermediate + a;
+    } else {
+        return intermediate - b;
+    }
+}

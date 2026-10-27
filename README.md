@@ -105,3 +105,25 @@ The CI negative-ABI fixture verifies that int parameters, unsigned returns,
 floating-point returns and pointer parameters are rejected without creating
 object files. Unit tests cover missing/cyclic type metadata and mismatched
 signatures.
+
+## Milestone: signed-i64 local variables
+
+The reference code generator now handles a straight-line sequence of local
+signed-i64 declarations, dynamic initializers, simple assignments and
+reassignments followed by an unconditional return or a pure returning if/else.
+The bridge retains initializer expressions as primary expression trees as well
+as their existing role-4 control snapshot. Each assignment becomes an ordered
+SSA value update (no explicit memory slot), with rejected uninitialized reads.
+
+The supported subset intentionally excludes initializer forms without a
+captured expression, globals, static locals, parameter writes, pointer and
+array assignment, narrow/unsigned locals, side-effecting expressions,
+nonreturning if statements, and loops. Conditional branches that mutate locals
+are rejected because the reference backend currently uses an eager select,
+not basic blocks. The next stage should lower if/else and while using proper
+Cranelift basic blocks and block parameters/variables.
+
+CI performs native execution with two sequential locals plus reassignment,
+checks a local value across returning if/else branches, and compares outputs
+with GCC over a signed input grid. Standalone ELF tests additionally check
+multiple writes to one local and rejection of uninitialized local reads.

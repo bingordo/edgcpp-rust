@@ -15,6 +15,27 @@ fn cranelift_object_links_and_runs() {
             )),
             Box::new(Expr::Parameter(1)),
         ),
+    }, Function {
+        name: "edg_local_ssa".into(),
+        parameters: 2,
+        result: Expr::StoreLocal(
+            0,
+            Box::new(Expr::Add(
+                Box::new(Expr::Parameter(0)),
+                Box::new(Expr::Parameter(1)),
+            )),
+            Box::new(Expr::StoreLocal(
+                0,
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Local(0)),
+                    Box::new(Expr::Constant(3)),
+                )),
+                Box::new(Expr::Sub(
+                    Box::new(Expr::Local(0)),
+                    Box::new(Expr::Parameter(1)),
+                )),
+            )),
+        ),
     }]).expect("generate ELF");
     let unique = format!("edgcpp-codegen-{}-{:?}", std::process::id(), std::thread::current().id());
     let dir = std::env::temp_dir().join(unique);
@@ -27,9 +48,12 @@ fn cranelift_object_links_and_runs() {
         fs::write(&source, r#"
             #include <stdint.h>
             extern int64_t edg_reference(int64_t a, int64_t b);
+            extern int64_t edg_local_ssa(int64_t a, int64_t b);
             int main(void) {
                 return edg_reference(9, 5) == 58 &&
-                       edg_reference(-2, 3) == -17 ? 0 : 1;
+                       edg_reference(-2, 3) == -17 &&
+                       edg_local_ssa(9, 5) == 37 &&
+                       edg_local_ssa(-2, 3) == 0 ? 0 : 1;
             }
         "#).unwrap();
         let status = Command::new("cc").arg(&source).arg(&obj)

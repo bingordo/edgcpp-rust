@@ -60,6 +60,10 @@ fn emit_expr(
         })?,
         Expr::StoreLocal(index, value, body) => {
             let value = emit_expr(value, builder, params, locals)?;
+            if *index >= 10_000 {
+                return Err(CodegenError::InvalidFunction(format!(
+                    "local index {index} exceeds reference backend limit")));
+            }
             if *index >= locals.len() {
                 locals.resize(*index + 1, None);
             }
@@ -117,6 +121,10 @@ fn emit_expr(
             builder.ins().select(condition, one, zero)
         }
         Expr::Select(condition, yes, no) => {
+            if contains_local_write(yes) || contains_local_write(no) {
+                return Err(CodegenError::InvalidFunction(
+                    "mutable locals in eager select are unsupported".into()));
+            }
             let condition = emit_expr(condition, builder, params, locals)?;
             let yes = emit_expr(yes, builder, params, locals)?;
             let no = emit_expr(no, builder, params, locals)?;
@@ -618,6 +626,28 @@ mod tests {
     fn rejects_invalid_parameter() {
         assert!(matches!(emit_object(&[Function {
             name: "bad".into(), parameters: 0, result: Expr::Parameter(0)
+        }]), Err(CodegenError::InvalidFunction(_))));
+    }
+
+    #[test]
+    fn rejects_read_before_local_write() {
+        assert!(matches!(emit_object(&[Function {
+            name: "bad_uninitialized".into(), parameters: 1,
+            result: Expr::Local(0),
+        }]), Err(CodegenError::InvalidFunction(_))));
+    }
+
+    #[test]
+    fn rejects_mutating_eager_select() {
+        let mutating_arm = Expr::StoreLocal(
+            0, Box::new(Expr::Constant(9)), Box::new(Expr::Local(0)),
+        );
+        assert!(matches!(emit_object(&[Function {
+            name: "bad_select".into(), parameters: 0,
+            result: Expr::Select(
+                Box::new(Expr::Constant(1)),
+                Box::new(mutating_arm),
+                Box::new(Expr::Constant(2))),
         }]), Err(CodegenError::InvalidFunction(_))));
     }
 
