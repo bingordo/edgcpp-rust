@@ -65,7 +65,7 @@ Keep the native compiler backend independent of EDG.
 ## EDG-to-Cranelift smoke test
 
 The optional `codegen` feature exposes `examples/codegen.rs`, which runs the
-EDG frontend, lowers the currently supported single-return integer subset, and
+EDG frontend, lowers the currently supported signed-64-bit pure-expression subset, and
 writes a relocatable x86-64 ELF object:
 
 ```sh
@@ -73,6 +73,20 @@ cargo build --features codegen --example codegen
 # Run from the configured EDG build directory after sourcing environment.sh:
 path/to/examples/codegen output.o --c++20 input.cpp
 ```
+
+The verified subset includes constants, parameters, add/subtract/multiply,
+unary negation, integer bitwise operations, signed comparisons and structured
+`if/else` where both branches return a pure expression. The comparison
+results are canonical 0/1 integers. Boolean-to-integer casts of comparison
+results are supported; other width-changing conversions remain unsupported.
+
+**Important ABI limitation:** this reference backend currently emits i64
+parameters and an i64 result for every function, without validating its
+captured signature. Only feed it functions with signed 64-bit parameters
+and return types; using other signatures could generate incorrect ABI code.
+Local assignments, loops, calls, global memory and general C++ features are
+not implemented. The next milestone must validate ABI types before
+expanding the accepted language subset.
 
 The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
 both EDG/Cranelift and GCC, links each with the same test driver, and compares
