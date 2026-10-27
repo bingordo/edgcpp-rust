@@ -183,12 +183,34 @@ fn lower_expression(
         }
         3 => {
             let operator = data.operator.map(|op| semantic(3, op)).unwrap_or(0);
-            if matches!(operator, 4 | 11 | 12) {
+            if matches!(operator, 4 | 11 | 12 | 16 | 17) {
                 if node.operands.len() != 1 {
-                    return Err(CodegenError::InvalidFunction("expected unary expression".into()));
+                    return Err(CodegenError::InvalidFunction(format!(
+                        "expected unary expression: function={} statement={} path={} operator={:?} operands={}",
+                        data.function, data.statement_path, data.path, data.operator, node.operands.len()
+                    )));
                 }
                 let arg = lower_expression(graph, node.operands[0], parameters)?;
-                return Ok(if operator == 4 { Expr::Neg(Box::new(arg)) } else { arg });
+                return Ok(match operator {
+                    4 => Expr::Neg(Box::new(arg)),
+                    11 | 12 => arg,
+                    16 => {
+                        // A bool-to-integral cast of a comparison only widens
+                        // the already canonical 0/1 result. Other casts may
+                        // change width or signedness and must be rejected.
+                        if !matches!(arg, Expr::Compare(..)) {
+                            return Err(CodegenError::InvalidFunction(format!(
+                                "unsupported integer cast at {}:{}:{}",
+                                data.function, data.statement_path, data.path
+                            )));
+                        }
+                        arg
+                    }
+                    17 => Expr::Compare(
+                        CompareOp::NotEqual, Box::new(arg), Box::new(Expr::Constant(0))
+                    ),
+                    _ => unreachable!(),
+                });
             }
             if node.operands.len() != 2 {
                 return Err(CodegenError::InvalidFunction(format!(
