@@ -459,4 +459,66 @@ mod tests {
             name: "bad".into(), parameters: 0, result: Expr::Parameter(0)
         }]), Err(CodegenError::InvalidFunction(_))));
     }
+
+    #[test]
+    fn enforces_signed_i64_abi_from_owned_type_metadata() {
+        use crate::{FunctionParameter, FunctionSignature, SymbolId, SymbolType,
+                    TypeDef, TypeId, TypeParameter};
+        let routine_kind = (0..128).find(|&kind| semantic(4, kind) == 2)
+            .expect("EDG routine kind mapping");
+        let integer_kind = (0..128).find(|&kind| semantic(4, kind) == 1)
+            .expect("EDG integer kind mapping");
+        let routine = SymbolId(10);
+        let signed = TypeId(2);
+        let unsigned = TypeId(3);
+        let routine_ty = TypeId(1);
+        let mut il = Il::default();
+        il.types.extend([
+            TypeDef { id: routine_ty, kind: routine_kind,
+                      related_role: Some(3), related: Some(signed) },
+            TypeDef { id: signed, kind: integer_kind, related_role: None, related: None },
+            TypeDef { id: unsigned, kind: integer_kind, related_role: None, related: None },
+        ]);
+        il.signed_i64_types.push(signed);
+        il.symbol_types.push(SymbolType { symbol: routine, ty: routine_ty });
+        il.function_signatures.push(FunctionSignature {
+            owner: routine_ty, prototyped: true, variadic: false,
+        });
+        il.type_parameters.push(TypeParameter { owner: routine_ty, position: 0, ty: signed });
+        let mut parameter = FunctionParameter {
+            routine, position: Some(0), symbol: SymbolId(11), ty: signed,
+            implicit_this: false, compiler_generated: false,
+        };
+        assert!(validate_routine_abi(&il, "f", routine, &[&parameter]).is_ok());
+        il.types[0].related = Some(unsigned);
+        assert!(matches!(validate_routine_abi(&il, "f", routine, &[&parameter]),
+            Err(CodegenError::InvalidFunction(_))));
+        il.types[0].related = Some(signed);
+        il.type_parameters[0].ty = unsigned;
+        parameter.ty = unsigned;
+        assert!(matches!(validate_routine_abi(&il, "f", routine, &[&parameter]),
+            Err(CodegenError::InvalidFunction(_))));
+        il.type_parameters[0].ty = signed;
+        parameter.ty = signed;
+        il.function_signatures[0].variadic = true;
+        assert!(matches!(validate_routine_abi(&il, "f", routine, &[&parameter]),
+            Err(CodegenError::InvalidFunction(_))));
+        il.function_signatures[0].variadic = false;
+        assert!(matches!(validate_routine_abi(&il, "f", routine, &[]),
+            Err(CodegenError::InvalidFunction(_))));
+    }
+
+    #[test]
+    fn rejects_cycle_in_typedef_abi() {
+        use crate::{TypeDef, TypeId};
+        let alias_kind = (0..128).find(|&kind| semantic(4, kind) == 3)
+            .expect("EDG typeref kind mapping");
+        let mut il = Il::default();
+        il.types.push(TypeDef {
+            id: TypeId(5), kind: alias_kind,
+            related_role: Some(4), related: Some(TypeId(5)),
+        });
+        assert!(matches!(canonical_abi_type(&il, TypeId(5)),
+            Err(CodegenError::InvalidFunction(_))));
+    }
 }
