@@ -80,13 +80,18 @@ unary negation, integer bitwise operations, signed comparisons and structured
 results are canonical 0/1 integers. Boolean-to-integer casts of comparison
 results are supported; other width-changing conversions remain unsupported.
 
-**Important ABI limitation:** this reference backend currently emits i64
-parameters and an i64 result for every function, without validating its
-captured signature. Only feed it functions with signed 64-bit parameters
-and return types; using other signatures could generate incorrect ABI code.
+**ABI guard:** the bridge records which EDG integer types are verified
+signed 64-bit types (excluding enums). The reference backend checks the
+routine's declared return type, prototype/variadic status and every declared
+and defined parameter type before emitting machine code. It resolves typedef
+wrappers but rejects non-i64 widths, unsigned integers, pointers, floating
+point, missing metadata, parameter mismatches and implicit C++ object
+parameters. Only plain signed-64-bit C-linkage functions are currently
+supported; C++ name mangling is not implemented.
+
 Local assignments, loops, calls, global memory and general C++ features are
-not implemented. The next milestone must validate ABI types before
-expanding the accepted language subset.
+still not implemented. The signed-i64 restriction is intentional until
+properly typed signatures and expressions are implemented.
 
 The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
 both EDG/Cranelift and GCC, links each with the same test driver, and compares
@@ -95,3 +100,8 @@ incorrectly. This is a reference backend, not a general C++ compiler.
 
 **CI is run on [bingordo/edgcpp-rust](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).**
 The `bingundu` mirror uses a manual-only workflow to avoid duplicate CPU usage.
+
+The CI negative-ABI fixture verifies that int parameters, unsigned returns,
+floating-point returns and pointer parameters are rejected without creating
+object files. Unit tests cover missing/cyclic type metadata and mismatched
+signatures.
