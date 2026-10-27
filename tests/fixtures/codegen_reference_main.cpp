@@ -9,6 +9,9 @@ extern "C" long long edg_compare(long long, long long);
 extern "C" long long edg_bits(long long, long long);
 extern "C" long long edg_locals(long long, long long);
 extern "C" long long edg_locals_choose(long long, long long);
+extern "C" long long edg_mutable_if(long long, long long);
+extern "C" long long edg_no_else(long long, long long);
+extern "C" long long edg_while(long long, long long);
 
 int main() {
     long long checksum = 0;
@@ -34,7 +37,21 @@ int main() {
             const auto expected_locals_choose = a < b
                 ? a * 3 + b + a : a * 3;
             if (edg_locals_choose(a, b) != expected_locals_choose) return 5;
-            checksum += (add * 3 + affine + choose + abs + cmp + bits +
+            long long current = a + b;
+            if (a < b) current = current * 2; else current = current - a;
+            if (edg_mutable_if(a, b) != current + b) return 6;
+            long long conditional = a + b;
+            if (a < b) conditional = conditional * 3;
+            if (edg_no_else(a, b) != conditional - b) return 7;
+            long long i = a;
+            long long loop_result = b + 1;
+            while (i < b) {
+                loop_result = loop_result + i;
+                i = i + 1;
+            }
+            if (edg_while(a, b) != loop_result + i) return 8;
+            checksum += (edg_mutable_if(a, b) + edg_no_else(a, b) + edg_while(a, b) +
+                         add * 3 + affine + choose + abs + cmp + bits +
                          edg_locals(a, b) + edg_locals_choose(a, b)) * (a + 31);
         }
     }

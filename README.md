@@ -127,3 +127,17 @@ CI performs native execution with two sequential locals plus reassignment,
 checks a local value across returning if/else branches, and compares outputs
 with GCC over a signed input grid. Standalone ELF tests additionally check
 multiple writes to one local and rejection of uninitialized local reads.
+
+## Structured control-flow milestone
+
+The ELF-emitting EDG reference backend uses real Cranelift basic blocks and SSA
+variables for mutable signed-64-bit locals in if/else (with optional else) and
+pretest while loops. Loop headers remain unsealed until the backedge is built.
+A path-sensitive definite-initialization check rejects reads of locals set
+only in a potentially untaken branch or loop. Every reachable path must return.
+The former lower_edg function remains a narrow pure-expression API;
+emit_edg_object uses structured CFG lowering. Calls, pointers, globals,
+complex C++ expressions, and for/do loops are still unsupported.
+
+CI compares generated ELF with GCC for mutable branches and loop-carried
+variables over the existing signed input grid.

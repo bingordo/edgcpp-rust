@@ -46,3 +46,29 @@ extern "C" long long edg_locals_choose(long long a, long long b) {
         return intermediate - b;
     }
 }
+
+extern "C" long long edg_mutable_if(long long a, long long b) {
+    long long current = a + b;
+    if (a < b) {
+        current = current * 2;
+    } else {
+        current = current - a;
+    }
+    return current + b;
+}
+extern "C" long long edg_no_else(long long a, long long b) {
+    long long current = a + b;
+    if (a < b) {
+        current = current * 3;
+    }
+    return current - b;
+}
+extern "C" long long edg_while(long long a, long long b) {
+    long long i = a;
+    long long result = b + 1;
+    while (i < b) {
+        result = result + i;
+        i = i + 1;
+    }
+    return result + i;
+}

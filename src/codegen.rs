@@ -606,7 +606,7 @@ pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
 
 /// Translate an owned EDG compilation snapshot directly into a relocatable ELF.
 pub fn emit_edg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
-    emit_object(&lower_edg(il)?)
+    cfg::emit_edg_cfg_object(il)
 }
 
 #[cfg(test)]
@@ -713,3 +713,6 @@ mod tests {
             Err(CodegenError::InvalidFunction(_))));
     }
 }
+
+// Structured blocks/loops use their own SSA-generating backend.
+mod cfg;

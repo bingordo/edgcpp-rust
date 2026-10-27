@@ -1308,6 +1308,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_decl)) return 4;
     if (value == static_cast<unsigned>(stmk_init)) return 5;
     if (value == static_cast<unsigned>(stmk_expr)) return 6;
+    if (value == static_cast<unsigned>(stmk_while)) return 7;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
