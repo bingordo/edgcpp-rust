@@ -272,6 +272,18 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   emit_record(7, {num(id), num(static_cast<unsigned>(type->kind)),
                   num(relation), num(child)});
+  // This reference backend only promises the signed i64 SysV C ABI.
+  // Do not guess from EDG enum numbers, typenames or argument expressions.
+  // Typerefs are resolved by Rust through the type graph.
+  if (type->kind == tk_integer && !type->incomplete && type->size == 8 &&
+      !type->variant.integer.enum_type) {
+    const auto integer_kind = type->variant.integer.int_kind;
+    bool signed_64 = integer_kind == ik_long;
+#if LONG_LONG_ALLOWED
+    signed_64 = signed_64 || integer_kind == ik_long_long;
+#endif
+    if (signed_64) emit_record(43, {num(id)});
+  }
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {
@@ -1312,6 +1324,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_bool_cast)) return 17;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_integer)) return 1;
+    if (value == static_cast<unsigned>(tk_routine)) return 2;
+    if (value == static_cast<unsigned>(tk_typeref)) return 3;
   }
   return 0;
 }
