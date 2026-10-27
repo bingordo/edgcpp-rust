@@ -324,9 +324,84 @@ fn lower_statement(
     }
 }
 
-/// Only functions returning signed 64-bit integers are currently supported.
-/// Require a single structured root, reject implicit this and unsupported
-/// native constructs before emitting any machine code.
+/// Resolve any typedef/qualifier wrappers before validating a C ABI type.
+/// Cycles, missing definitions and unrelated reference/pointer types are errors.
+fn canonical_abi_type(il: &Il, mut ty: crate::TypeId) -> Result<crate::TypeId, CodegenError> {
+    for _ in 0..=il.types.len() {
+        let definition = il.types.iter().find(|t| t.id == ty).ok_or_else(|| {
+            CodegenError::InvalidFunction(format!("missing EDG type {}", ty.0))
+        })?;
+        if semantic(4, definition.kind) != 3 {
+            return Ok(ty);
+        }
+        if definition.related_role != Some(4) {
+            return Err(CodegenError::InvalidFunction(format!(
+                "malformed EDG typeref {}", ty.0
+            )));
+        }
+        ty = definition.related.ok_or_else(|| {
+            CodegenError::InvalidFunction(format!("unresolved EDG typeref {}", ty.0))
+        })?;
+    }
+    Err(CodegenError::InvalidFunction("cyclic EDG typeref".into()))
+}
+
+/// All accepted functions must have an exact, nonvariadic signed-i64 signature.
+/// This is checked before evaluating the body because an otherwise valid body
+/// does not prove the machine-level calling convention is correct.
+fn validate_routine_abi(
+    il: &Il,
+    name: &str,
+    routine: crate::SymbolId,
+    parameters: &[&crate::FunctionParameter],
+) -> Result<(), CodegenError> {
+    let error = |message: &str| CodegenError::InvalidFunction(format!("{name}: {message}"));
+    let function_type = il.symbol_types.iter()
+        .find(|s| s.symbol == routine)
+        .map(|s| canonical_abi_type(il, s.ty))
+        .ok_or_else(|| error("missing declared routine type"))??;
+    let definition = il.types.iter().find(|t| t.id == function_type)
+        .ok_or_else(|| error("missing function type definition"))?;
+    if semantic(4, definition.kind) != 2 || definition.related_role != Some(3) {
+        return Err(error("expected EDG routine type with a return type"));
+    }
+    let signature = il.function_signatures.iter().find(|s| s.owner == function_type)
+        .ok_or_else(|| error("missing function signature"))?;
+    if !signature.prototyped || signature.variadic {
+        return Err(error("unprototyped and variadic functions are unsupported"));
+    }
+    let returns = canonical_abi_type(il, definition.related
+        .ok_or_else(|| error("missing return type"))?)?;
+    if !il.signed_i64_types.contains(&returns) {
+        return Err(error("return ABI must be signed 64-bit integer"));
+    }
+    let mut declared: Vec<_> = il.type_parameters.iter()
+        .filter(|p| p.owner == function_type).collect();
+    declared.sort_by_key(|p| p.position);
+    if declared.len() != parameters.len() {
+        return Err(error("declared/defined parameter count mismatch"));
+    }
+    for (i, (decl, param)) in declared.iter().zip(parameters).enumerate() {
+        if decl.position != i as u32 || param.position != Some(i as u32) {
+            return Err(error("noncontiguous parameter positions"));
+        }
+        if param.compiler_generated {
+            return Err(error("compiler-generated ABI parameter unsupported"));
+        }
+        let declared_type = canonical_abi_type(il, decl.ty)?;
+        let defined_type = canonical_abi_type(il, param.ty)?;
+        if declared_type != defined_type {
+            return Err(error("declared/defined parameter types disagree"));
+        }
+        if !il.signed_i64_types.contains(&declared_type) {
+            return Err(error("parameter ABI must be signed 64-bit integer"));
+        }
+    }
+    Ok(())
+}
+
+/// Require validated signed-i64 signatures and a single structured root.
+   /// Unsupported native constructs are rejected before machine code emission.
 pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
     let graph = Graph::from_il(il)
         .map_err(|e| CodegenError::InvalidFunction(format!("invalid EDG graph: {e:?}")))?;
@@ -352,6 +427,7 @@ pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
         if parameters.iter().enumerate().any(|(i, p)| p.position != Some(i as u32)) {
             return Err(CodegenError::InvalidFunction(format!("{name}: invalid parameter positions")));
         }
+        validate_routine_abi(il, name, routine, &parameters)?;
         let ids: Vec<_> = parameters.iter().map(|p| p.symbol).collect();
         let result = lower_statement(&graph, roots[0], &ids)?;
         output.push(Function { name: name.clone(), parameters: ids.len(), result });
