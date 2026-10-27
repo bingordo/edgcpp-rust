@@ -91,6 +91,8 @@ pub struct Il {
     pub expressions: Vec<Expression>,
     /// Identity-preserving types captured during this compilation.
     pub types: Vec<TypeDef>,
+    /// EDG-verified signed, non-enum 64-bit integer ABI types (event 43).
+    pub signed_i64_types: Vec<TypeId>,
     /// Ordered parameter edges belonging to routine types.
     pub type_parameters: Vec<TypeParameter>,
     /// Known fixed array bounds (in elements).
@@ -707,6 +709,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         40 => Some(il.initialization_lifetimes.len()),
         41 => Some(il.lifetime_destructions.len()),
         42 => Some(il.routine_identities.len()),
+        43 => Some(il.signed_i64_types.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -720,7 +723,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -762,6 +765,11 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.types.push(TypeDef { id: TypeId(id), kind,
                 related_role: (role != 0).then_some(role),
                 related: (child != 0).then_some(TypeId(child)) });
+        }
+        43 => {
+            let Some(id) = n(0) else { return; };
+            if id == 0 { return; }
+            output.signed_i64_types.push(TypeId(id));
         }
         8 => {
             let (Some(owner), Some(position), Some(ty)) = (n(0), n(1), n(2)) else { return; };
