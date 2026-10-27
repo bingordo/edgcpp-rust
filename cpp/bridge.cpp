@@ -797,6 +797,11 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         // Role 4 identifies the initializer tree of this statement.
         emit_control_expr(init->variant.expression, function, path, 4,
                           "0", "", 0);
+        // The existing control snapshot does not include constant payloads.
+        // Also retain a primary expression for plain initializer statements,
+        // enabling checked i64 local initialization in the reference backend.
+        if (stmt->kind == stmk_init && stmt->expr == nullptr)
+          emit_expr(init->variant.expression, function, path, "0", "", 0);
       }
     }
     if ((stmt->kind == stmk_goto || stmt->kind == stmk_label) &&
@@ -1300,6 +1305,9 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_return)) return 1;
     if (value == static_cast<unsigned>(stmk_block)) return 2;
     if (value == static_cast<unsigned>(stmk_if)) return 3;
+    if (value == static_cast<unsigned>(stmk_decl)) return 4;
+    if (value == static_cast<unsigned>(stmk_init)) return 5;
+    if (value == static_cast<unsigned>(stmk_expr)) return 6;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
@@ -1322,6 +1330,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_xor)) return 15;
     if (value == static_cast<unsigned>(eok_cast)) return 16;
     if (value == static_cast<unsigned>(eok_bool_cast)) return 17;
+    if (value == static_cast<unsigned>(eok_assign)) return 18;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_integer)) return 1;
     if (value == static_cast<unsigned>(tk_routine)) return 2;

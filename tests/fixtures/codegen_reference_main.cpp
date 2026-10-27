@@ -7,6 +7,7 @@ extern "C" long long edg_choose(long long, long long);
 extern "C" long long edg_absolute(long long);
 extern "C" long long edg_compare(long long, long long);
 extern "C" long long edg_bits(long long, long long);
+extern "C" long long edg_locals(long long, long long);
 
 int main() {
     long long checksum = 0;
@@ -25,7 +26,12 @@ int main() {
             const auto expected_bits = (a & b) ^ (a | b);
             if (choose != expected_choose || abs != expected_abs ||
                 cmp != expected_cmp || bits != expected_bits) return 3;
-            checksum += (add * 3 + affine + choose + abs + cmp + bits) * (a + 31);
+            long long tmp = a * 3 + b;
+            tmp = tmp ^ (a - b);
+            const long long expected_locals = (tmp + a) * 2 - b;
+            if (edg_locals(a, b) != expected_locals) return 4;
+            checksum += (add * 3 + affine + choose + abs + cmp + bits +
+                         edg_locals(a, b)) * (a + 31);
         }
     }
     if (edg_constant() != 42) return 2;

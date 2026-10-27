@@ -30,3 +30,10 @@ extern "C" long long edg_compare(long long a, long long b) {
 extern "C" long long edg_bits(long long a, long long b) {
     return (a & b) ^ (a | b);
 }
+
+extern "C" long long edg_locals(long long a, long long b) {
+    long long tmp = a * 3 + b;
+    tmp = tmp ^ (a - b);
+    long long total = tmp + a;
+    return total * 2 - b;
+}

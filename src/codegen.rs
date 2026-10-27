@@ -19,6 +19,10 @@ pub struct Function {
 pub enum Expr {
     Constant(i64),
     Parameter(usize),
+    /// Read a checked, function-local signed i64 variable.
+    Local(usize),
+    /// Evaluate an assignment before its continuation (in source order).
+    StoreLocal(usize, Box<Expr>, Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
@@ -44,49 +48,61 @@ fn emit_expr(
     expr: &Expr,
     builder: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value],
+    locals: &mut Vec<Option<cranelift_codegen::ir::Value>>,
 ) -> Result<cranelift_codegen::ir::Value, CodegenError> {
     Ok(match expr {
         Expr::Constant(value) => builder.ins().iconst(types::I64, *value),
         Expr::Parameter(index) => *params.get(*index).ok_or_else(|| {
             CodegenError::InvalidFunction(format!("parameter {index} out of range"))
         })?,
+        Expr::Local(index) => locals.get(*index).and_then(|v| *v).ok_or_else(|| {
+            CodegenError::InvalidFunction(format!("read of uninitialized local {index}"))
+        })?,
+        Expr::StoreLocal(index, value, body) => {
+            let value = emit_expr(value, builder, params, locals)?;
+            if *index >= locals.len() {
+                locals.resize(*index + 1, None);
+            }
+            locals[*index] = Some(value);
+            emit_expr(body, builder, params, locals)?
+        }
         Expr::Add(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().iadd(a, b)
         }
         Expr::Sub(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().isub(a, b)
         }
         Expr::Mul(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().imul(a, b)
         }
         Expr::Neg(a) => {
-            let a = emit_expr(a, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
             builder.ins().ineg(a)
         }
         Expr::BitAnd(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().band(a, b)
         }
         Expr::BitOr(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().bor(a, b)
         }
         Expr::BitXor(a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             builder.ins().bxor(a, b)
         }
         Expr::Compare(op, a, b) => {
-            let a = emit_expr(a, builder, params)?;
-            let b = emit_expr(b, builder, params)?;
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
             let cc = match op {
                 CompareOp::Equal => IntCC::Equal,
                 CompareOp::NotEqual => IntCC::NotEqual,
@@ -101,9 +117,9 @@ fn emit_expr(
             builder.ins().select(condition, one, zero)
         }
         Expr::Select(condition, yes, no) => {
-            let condition = emit_expr(condition, builder, params)?;
-            let yes = emit_expr(yes, builder, params)?;
-            let no = emit_expr(no, builder, params)?;
+            let condition = emit_expr(condition, builder, params, locals)?;
+            let yes = emit_expr(yes, builder, params, locals)?;
+            let no = emit_expr(no, builder, params, locals)?;
             let nonzero = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
             builder.ins().select(nonzero, yes, no)
         }
@@ -141,7 +157,7 @@ pub fn emit_object(functions: &[Function]) -> Result<Vec<u8>, CodegenError> {
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params = fb.block_params(entry).to_vec();
-            let result = emit_expr(&function.result, &mut fb, &params)?;
+            let result = emit_expr(&function.result, &mut fb, &params, &mut Vec::new())?;
             fb.ins().return_(&[result]);
             fb.finalize();
         }
@@ -169,6 +185,8 @@ fn lower_expression(
     graph: &Graph,
     id: ExpressionId,
     parameters: &[crate::SymbolId],
+    locals: &[&crate::LocalVariable],
+    il: &Il,
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| CodegenError::InvalidFunction("missing expression".into()))?;
     let data = &node.data;
@@ -177,9 +195,11 @@ fn lower_expression(
             .ok_or_else(|| CodegenError::InvalidFunction("unsupported constant".into())),
         2 => {
             let symbol = data.symbol_id.ok_or_else(|| CodegenError::InvalidFunction("unresolved variable".into()))?;
-            let index = parameters.iter().position(|p| *p == symbol)
-                .ok_or_else(|| CodegenError::InvalidFunction("non-parameter variable".into()))?;
-            Ok(Expr::Parameter(index))
+            if let Some(index) = parameters.iter().position(|p| *p == symbol) {
+                Ok(Expr::Parameter(index))
+            } else {
+                Ok(Expr::Local(checked_local(il, locals, symbol)?))
+            }
         }
         3 => {
             let operator = data.operator.map(|op| semantic(3, op)).unwrap_or(0);
@@ -190,7 +210,7 @@ fn lower_expression(
                         data.function, data.statement_path, data.path, data.operator, node.operands.len()
                     )));
                 }
-                let arg = lower_expression(graph, node.operands[0], parameters)?;
+                let arg = lower_expression(graph, node.operands[0], parameters, locals, il)?;
                 return Ok(match operator {
                     4 => Expr::Neg(Box::new(arg)),
                     11 | 12 => arg,
@@ -225,8 +245,8 @@ fn lower_expression(
                     "unsupported EDG operator {:?}", data.operator
                 )));
             }
-            let left = Box::new(lower_expression(graph, node.operands[0], parameters)?);
-            let right = Box::new(lower_expression(graph, node.operands[1], parameters)?);
+            let left = Box::new(lower_expression(graph, node.operands[0], parameters, locals, il)?);
+            let right = Box::new(lower_expression(graph, node.operands[1], parameters, locals, il)?);
             Ok(match operator {
                 1 => Expr::Add(left, right),
                 2 => Expr::Sub(left, right),
@@ -247,12 +267,149 @@ fn lower_expression(
     }
 }
 
-/// Lower a structured pure-value control-flow tree. Unsupported statements
-/// are rejected (including loops and assignments); no side effects are elided.
+/// Permit only real stack-compatible signed i64 locals, not static storage,
+/// destructible C++ objects, generated temporaries or ABI-incompatible types.
+fn checked_local(
+    il: &Il, locals: &[&crate::LocalVariable], symbol: crate::SymbolId,
+) -> Result<usize, CodegenError> {
+    let index = locals.iter().position(|v| v.symbol == symbol)
+        .ok_or_else(|| CodegenError::InvalidFunction(format!(
+            "unsupported/nonlocal variable {}", symbol.0)))?;
+    let local = locals[index];
+    if local.static_storage || local.compiler_generated || local.structured_binding ||
+        local.handler_parameter {
+        return Err(CodegenError::InvalidFunction(format!(
+            "unsupported local storage for symbol {}", symbol.0)));
+    }
+    let ty = canonical_abi_type(il, local.ty)?;
+    if !il.signed_i64_types.contains(&ty) {
+        return Err(CodegenError::InvalidFunction(format!(
+            "local {} must have signed 64-bit integer type", symbol.0)));
+    }
+    Ok(index)
+}
+
+/// The expression-level if is eager: keep writes out of either arm until
+/// proper Cranelift blocks, branches and phi handling are implemented.
+fn contains_local_write(expr: &Expr) -> bool {
+    match expr {
+        Expr::StoreLocal(..) => true,
+        Expr::Select(a, b, c) => contains_local_write(a) ||
+            contains_local_write(b) || contains_local_write(c),
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) |
+        Expr::BitAnd(a, b) | Expr::BitOr(a, b) | Expr::BitXor(a, b) |
+        Expr::Compare(_, a, b) => contains_local_write(a) || contains_local_write(b),
+        Expr::Neg(a) => contains_local_write(a),
+        Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) => false,
+    }
+}
+
+/// Convert a straight-line block into a chain of ordered local updates.
+/// Each update evaluates its RHS exactly once before executing the rest.
+fn lower_block(
+    graph: &Graph, children: &[crate::graph::StatementId],
+    parameters: &[crate::SymbolId], locals: &[&crate::LocalVariable], il: &Il,
+) -> Result<Expr, CodegenError> {
+    let mut continuation = None;
+    for &id in children.iter().rev() {
+        let node = graph.statement(id)
+            .ok_or_else(|| CodegenError::InvalidFunction("missing block child".into()))?;
+        let kind = semantic(1, node.data.kind);
+        match kind {
+            4 => {
+                // Declarations only reserve lexical names. Initializers have
+                // distinct execution statements, and are handled below.
+                if node.expression.is_some() || !node.children.is_empty() {
+                    return Err(CodegenError::InvalidFunction(
+                        "unexpected executable declaration".into()));
+                }
+                let mut found = false;
+                for decl in graph.declarations_at(&node.data.function, &node.data.path) {
+                    found = true;
+                    if decl.is_vla {
+                        return Err(CodegenError::InvalidFunction(
+                            "variable-length local unsupported".into()));
+                    }
+                    checked_local(il, locals, decl.symbol)?;
+                }
+                if !found {
+                    return Err(CodegenError::InvalidFunction(
+                        "non-variable declaration unsupported".into()));
+                }
+            }
+            5 | 6 => {
+                let body = continuation.take().ok_or_else(|| {
+                    CodegenError::InvalidFunction("assignment after final return or missing return".into())
+                })?;
+                if !node.children.is_empty() {
+                    return Err(CodegenError::InvalidFunction(
+                        "assignment statement has unexpected children".into()));
+                }
+                let (symbol, value) = if kind == 5 {
+                    let init = graph.statement_initialization(
+                        &node.data.function, &node.data.path)
+                        .ok_or_else(|| CodegenError::InvalidFunction(
+                            "missing EDG initializer metadata".into()))?;
+                    if init.role != 0 {
+                        return Err(CodegenError::InvalidFunction(
+                            "unexpected initializer role".into()));
+                    }
+                    let symbol = init.symbol.ok_or_else(|| CodegenError::InvalidFunction(
+                        "initializer has no local target".into()))?;
+                    let root = node.expression.ok_or_else(|| CodegenError::InvalidFunction(
+                        "initializer cannot be represented as an integer expression".into()))?;
+                    (symbol, lower_expression(graph, root, parameters, locals, il)?)
+                } else {
+                    let root = node.expression.ok_or_else(|| CodegenError::InvalidFunction(
+                        "assignment missing expression".into()))?;
+                    let expression = graph.expression(root).ok_or_else(|| {
+                        CodegenError::InvalidFunction("missing assignment root".into())
+                    })?;
+                    if semantic(2, expression.data.kind) != 3 ||
+                        expression.data.operator.map(|o| semantic(3, o)) != Some(18) ||
+                        expression.operands.len() != 2 {
+                        return Err(CodegenError::InvalidFunction(
+                            "only simple local assignment statements supported".into()));
+                    }
+                    let lhs = graph.expression(expression.operands[0]).ok_or_else(|| {
+                        CodegenError::InvalidFunction("missing assignment target".into())
+                    })?;
+                    if semantic(2, lhs.data.kind) != 2 || !lhs.operands.is_empty() {
+                        return Err(CodegenError::InvalidFunction(
+                            "assignment target must be a scalar local".into()));
+                    }
+                    let symbol = lhs.data.symbol_id.ok_or_else(|| {
+                        CodegenError::InvalidFunction("unresolved assignment target".into())
+                    })?;
+                    (symbol, lower_expression(
+                        graph, expression.operands[1], parameters, locals, il)?)
+                };
+                let index = checked_local(il, locals, symbol)?;
+                continuation = Some(Expr::StoreLocal(index, Box::new(value), Box::new(body)));
+            }
+            1 | 2 | 3 => {
+                if continuation.is_some() {
+                    return Err(CodegenError::InvalidFunction(
+                        "unreachable or nonterminal control statement unsupported".into()));
+                }
+                continuation = Some(lower_statement(graph, id, parameters, locals, il)?);
+            }
+            _ => return Err(CodegenError::InvalidFunction(format!(
+                "unsupported EDG block statement kind {}", node.data.kind))),
+        }
+    }
+    continuation.ok_or_else(|| CodegenError::InvalidFunction(
+        "block has no unconditional return".into()))
+}
+
+/// Lower only structured pure-return control flow or straight-line i64 local
+/// writes. Side effects within expressions and loops are not accepted.
 fn lower_statement(
     graph: &Graph,
     id: crate::graph::StatementId,
     parameters: &[crate::SymbolId],
+    locals: &[&crate::LocalVariable],
+    il: &Il,
 ) -> Result<Expr, CodegenError> {
     let node = graph.statement(id).ok_or_else(|| {
         CodegenError::InvalidFunction("missing statement".into())
@@ -265,17 +422,14 @@ fn lower_statement(
             let expr = node.expression.ok_or_else(|| {
                 CodegenError::InvalidFunction("return is missing an expression".into())
             })?;
-            lower_expression(graph, expr, parameters)
+            lower_expression(graph, expr, parameters, locals, il)
         }
         2 => {
-            // A single statement can be enclosed in arbitrarily many lexical
-            // blocks; a sequence of statements is not yet supported.
-            if node.expression.is_some() || node.children.len() != 1 {
+            if node.expression.is_some() {
                 return Err(CodegenError::InvalidFunction(
-                    "block must contain exactly one executable statement".into()
-                ));
+                    "block contains an unexpected expression".into()));
             }
-            lower_statement(graph, node.children[0], parameters)
+            lower_block(graph, &node.children, parameters, locals, il)
         }
         3 => {
             let condition = node.expression.ok_or_else(|| {
@@ -312,10 +466,15 @@ fn lower_statement(
             let else_stmt = else_stmt.ok_or_else(|| {
                 CodegenError::InvalidFunction("missing else branch".into())
             })?;
+            let yes = lower_statement(graph, then_stmt, parameters, locals, il)?;
+            let no = lower_statement(graph, else_stmt, parameters, locals, il)?;
+            if contains_local_write(&yes) || contains_local_write(&no) {
+                return Err(CodegenError::InvalidFunction(
+                    "local mutation inside conditional requires control-flow blocks".into()));
+            }
             Ok(Expr::Select(
-                Box::new(lower_expression(graph, condition, parameters)?),
-                Box::new(lower_statement(graph, then_stmt, parameters)?),
-                Box::new(lower_statement(graph, else_stmt, parameters)?),
+                Box::new(lower_expression(graph, condition, parameters, locals, il)?),
+                Box::new(yes), Box::new(no),
             ))
         }
         _ => Err(CodegenError::InvalidFunction(format!(
@@ -429,7 +588,9 @@ pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
         }
         validate_routine_abi(il, name, routine, &parameters)?;
         let ids: Vec<_> = parameters.iter().map(|p| p.symbol).collect();
-        let result = lower_statement(&graph, roots[0], &ids)?;
+        let local_variables: Vec<_> = il.local_variables.iter()
+            .filter(|v| v.routine == routine).collect();
+        let result = lower_statement(&graph, roots[0], &ids, &local_variables, il)?;
         output.push(Function { name: name.clone(), parameters: ids.len(), result });
     }
     Ok(output)
