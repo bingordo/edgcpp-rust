@@ -1,7 +1,7 @@
 //! Small standalone Cranelift ELF emitter, intentionally independent of EDG's
 //! native enum discriminants. EDG lowering will feed this backend after decoding
 //! the IL; it must never silently guess a native expression operator.
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
+use cranelift_codegen::ir::{types, condcodes::IntCC, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
@@ -22,7 +22,16 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
+    Neg(Box<Expr>),
+    BitAnd(Box<Expr>, Box<Expr>),
+    BitOr(Box<Expr>, Box<Expr>),
+    BitXor(Box<Expr>, Box<Expr>),
+    Compare(CompareOp, Box<Expr>, Box<Expr>),
+    Select(Box<Expr>, Box<Expr>, Box<Expr>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual }
 
 #[derive(Debug)]
 pub enum CodegenError {
@@ -55,6 +64,48 @@ fn emit_expr(
             let a = emit_expr(a, builder, params)?;
             let b = emit_expr(b, builder, params)?;
             builder.ins().imul(a, b)
+        }
+        Expr::Neg(a) => {
+            let a = emit_expr(a, builder, params)?;
+            builder.ins().ineg(a)
+        }
+        Expr::BitAnd(a, b) => {
+            let a = emit_expr(a, builder, params)?;
+            let b = emit_expr(b, builder, params)?;
+            builder.ins().band(a, b)
+        }
+        Expr::BitOr(a, b) => {
+            let a = emit_expr(a, builder, params)?;
+            let b = emit_expr(b, builder, params)?;
+            builder.ins().bor(a, b)
+        }
+        Expr::BitXor(a, b) => {
+            let a = emit_expr(a, builder, params)?;
+            let b = emit_expr(b, builder, params)?;
+            builder.ins().bxor(a, b)
+        }
+        Expr::Compare(op, a, b) => {
+            let a = emit_expr(a, builder, params)?;
+            let b = emit_expr(b, builder, params)?;
+            let cc = match op {
+                CompareOp::Equal => IntCC::Equal,
+                CompareOp::NotEqual => IntCC::NotEqual,
+                CompareOp::Less => IntCC::SignedLessThan,
+                CompareOp::LessEqual => IntCC::SignedLessThanOrEqual,
+                CompareOp::Greater => IntCC::SignedGreaterThan,
+                CompareOp::GreaterEqual => IntCC::SignedGreaterThanOrEqual,
+            };
+            let condition = builder.ins().icmp(cc, a, b);
+            let one = builder.ins().iconst(types::I64, 1);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.ins().select(condition, one, zero)
+        }
+        Expr::Select(condition, yes, no) => {
+            let condition = emit_expr(condition, builder, params)?;
+            let yes = emit_expr(yes, builder, params)?;
+            let no = emit_expr(no, builder, params)?;
+            let nonzero = builder.ins().icmp_imm(IntCC::NotEqual, condition, 0);
+            builder.ins().select(nonzero, yes, no)
         }
     })
 }
@@ -131,12 +182,23 @@ fn lower_expression(
             Ok(Expr::Parameter(index))
         }
         3 => {
+            let operator = data.operator.map(|op| semantic(3, op)).unwrap_or(0);
+            if matches!(operator, 4 | 11 | 12) {
+                if node.operands.len() != 1 {
+                    return Err(CodegenError::InvalidFunction("expected unary expression".into()));
+                }
+                let arg = lower_expression(graph, node.operands[0], parameters)?;
+                return Ok(if operator == 4 { Expr::Neg(Box::new(arg)) } else { arg });
+            }
             if node.operands.len() != 2 {
                 return Err(CodegenError::InvalidFunction("expected binary expression".into()));
             }
-            let operator = data.operator.map(|op| semantic(3, op)).unwrap_or(0);
-            if !(1..=3).contains(&operator) {
-                return Err(CodegenError::InvalidFunction("unsupported operator".into()));
+            if !(1..=3).contains(&operator) && !(5..=10).contains(&operator)
+                && !(13..=15).contains(&operator)
+            {
+                return Err(CodegenError::InvalidFunction(format!(
+                    "unsupported EDG operator {:?}", data.operator
+                )));
             }
             let left = Box::new(lower_expression(graph, node.operands[0], parameters)?);
             let right = Box::new(lower_expression(graph, node.operands[1], parameters)?);
@@ -144,6 +206,15 @@ fn lower_expression(
                 1 => Expr::Add(left, right),
                 2 => Expr::Sub(left, right),
                 3 => Expr::Mul(left, right),
+                5 => Expr::Compare(CompareOp::Equal, left, right),
+                6 => Expr::Compare(CompareOp::NotEqual, left, right),
+                7 => Expr::Compare(CompareOp::Less, left, right),
+                8 => Expr::Compare(CompareOp::LessEqual, left, right),
+                9 => Expr::Compare(CompareOp::Greater, left, right),
+                10 => Expr::Compare(CompareOp::GreaterEqual, left, right),
+                13 => Expr::BitAnd(left, right),
+                14 => Expr::BitOr(left, right),
+                15 => Expr::BitXor(left, right),
                 _ => unreachable!(),
             })
         }
@@ -151,44 +222,113 @@ fn lower_expression(
     }
 }
 
-/// Lower functions consisting of a single return expression, optionally nested
-/// in a block. Other functions are rejected rather than miscompiled.
+/// Lower a structured pure-value control-flow tree. Unsupported statements
+/// are rejected (including loops and assignments); no side effects are elided.
+fn lower_statement(
+    graph: &Graph,
+    id: crate::graph::StatementId,
+    parameters: &[crate::SymbolId],
+) -> Result<Expr, CodegenError> {
+    let node = graph.statement(id).ok_or_else(|| {
+        CodegenError::InvalidFunction("missing statement".into())
+    })?;
+    match semantic(1, node.data.kind) {
+        1 => {
+            if !node.children.is_empty() {
+                return Err(CodegenError::InvalidFunction("return has nested statements".into()));
+            }
+            let expr = node.expression.ok_or_else(|| {
+                CodegenError::InvalidFunction("return is missing an expression".into())
+            })?;
+            lower_expression(graph, expr, parameters)
+        }
+        2 => {
+            // A single statement can be enclosed in arbitrarily many lexical
+            // blocks; a sequence of statements is not yet supported.
+            if node.expression.is_some() || node.children.len() != 1 {
+                return Err(CodegenError::InvalidFunction(
+                    "block must contain exactly one executable statement".into()
+                ));
+            }
+            lower_statement(graph, node.children[0], parameters)
+        }
+        3 => {
+            let condition = node.expression.ok_or_else(|| {
+                CodegenError::InvalidFunction("if is missing a condition".into())
+            })?;
+            if node.children.len() != 2 {
+                return Err(CodegenError::InvalidFunction(
+                    "if must have both returning branches".into()
+                ));
+            }
+            let then_prefix = format!("{}.then.", node.data.path);
+            let else_prefix = format!("{}.else.", node.data.path);
+            let mut then_stmt = None;
+            let mut else_stmt = None;
+            for child in &node.children {
+                let child_node = graph.statement(*child).ok_or_else(|| {
+                    CodegenError::InvalidFunction("missing if child".into())
+                })?;
+                if child_node.data.path.starts_with(&then_prefix) {
+                    if then_stmt.replace(*child).is_some() {
+                        return Err(CodegenError::InvalidFunction("duplicate then branch".into()));
+                    }
+                } else if child_node.data.path.starts_with(&else_prefix) {
+                    if else_stmt.replace(*child).is_some() {
+                        return Err(CodegenError::InvalidFunction("duplicate else branch".into()));
+                    }
+                } else {
+                    return Err(CodegenError::InvalidFunction("unknown if branch".into()));
+                }
+            }
+            let then_stmt = then_stmt.ok_or_else(|| {
+                CodegenError::InvalidFunction("missing then branch".into())
+            })?;
+            let else_stmt = else_stmt.ok_or_else(|| {
+                CodegenError::InvalidFunction("missing else branch".into())
+            })?;
+            Ok(Expr::Select(
+                Box::new(lower_expression(graph, condition, parameters)?),
+                Box::new(lower_statement(graph, then_stmt, parameters)?),
+                Box::new(lower_statement(graph, else_stmt, parameters)?),
+            ))
+        }
+        _ => Err(CodegenError::InvalidFunction(format!(
+            "unsupported EDG statement kind {}", node.data.kind
+        ))),
+    }
+}
+
+/// Only functions returning signed 64-bit integers are currently supported.
+/// Require a single structured root, reject implicit this and unsupported
+/// native constructs before emitting any machine code.
 pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
     let graph = Graph::from_il(il)
         .map_err(|e| CodegenError::InvalidFunction(format!("invalid EDG graph: {e:?}")))?;
     let mut output = Vec::new();
     for entity in &il.entities {
         let crate::Entity::Routine { name, has_definition: true } = entity else { continue };
-        let mut returns = Vec::new();
-        let mut invalid = false;
-        graph.walk_statements(name, |_, node| {
-            match semantic(1, node.data.kind) {
-                1 => returns.push(node.expression),
-                2 => {}
-                _ => invalid = true,
-            }
-            true
-        });
-        if invalid || returns.len() != 1 {
+        let roots: Vec<_> = graph.roots(name).map(|(id, _)| id).collect();
+        if roots.len() != 1 {
             return Err(CodegenError::InvalidFunction(format!(
-                "{name}: only one return in a block is supported"
+                "{name}: expected one statement root, found {}", roots.len()
             )));
         }
-        let expression = returns[0].ok_or_else(|| CodegenError::InvalidFunction(format!(
-            "{name}: return has no expression"
-        )))?;
         let routine = graph.routine_for_function(name).ok_or_else(|| CodegenError::InvalidFunction(format!(
             "{name}: missing routine identity"
         )))?;
         let mut parameters: Vec<_> = il.function_parameters.iter()
             .filter(|p| p.routine == routine && !p.implicit_this)
             .collect();
+        if il.function_parameters.iter().any(|p| p.routine == routine && p.implicit_this) {
+            return Err(CodegenError::InvalidFunction(format!("{name}: member functions unsupported")));
+        }
         parameters.sort_by_key(|p| p.position);
         if parameters.iter().enumerate().any(|(i, p)| p.position != Some(i as u32)) {
             return Err(CodegenError::InvalidFunction(format!("{name}: invalid parameter positions")));
         }
         let ids: Vec<_> = parameters.iter().map(|p| p.symbol).collect();
-        let result = lower_expression(&graph, expression, &ids)?;
+        let result = lower_statement(&graph, roots[0], &ids)?;
         output.push(Function { name: name.clone(), parameters: ids.len(), result });
     }
     Ok(output)
