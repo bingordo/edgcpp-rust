@@ -241,7 +241,8 @@ fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), Code
         Expr::Neg(a) | Expr::Normalize(_, a) => check_expr(a, vars, params),
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) |
-        Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) => {
+        Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
+        Expr::IntegerBinary(_,a,b) => {
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)
         }
@@ -373,11 +374,10 @@ fn lower_c_expression(
                     _ => unreachable!(),
                 }
             } else {
-                // Reject unknown operators before enforcing the usual
-                // arithmetic-conversion rules. Shifts and division do not
-                // necessarily have equal operand types, so applying binary
-                // arithmetic assumptions first gives misleading diagnostics.
-                if !matches!(op, 1 | 2 | 3 | 5..=10 | 13 | 14 | 15) {
+                // Reject unknown operators before checking conversions.
+                // Shifts promote both operands independently; the right
+                // operand's promoted type need not match the left one.
+                if !matches!(op, 1 | 2 | 3 | 5..=10 | 13 | 14 | 15 | 19..=22) {
                     return Err(invalid(format!(
                         "unsupported EDG operation at {}:{}:{}",
                         node.data.function, node.data.statement_path, node.data.path)));
@@ -391,12 +391,13 @@ fn lower_c_expression(
                 // common promoted integer type in EDG's typed expression IL.
                 // Refuse missing conversions rather than silently comparing
                 // signed and unsigned or using the wrong intermediate width.
-                if lhs_ty != rhs_ty {
+                if !matches!(op, 21 | 22) && lhs_ty != rhs_ty {
                     return Err(invalid(format!(
                         "unconverted operand types at {}:{}:{} ({lhs_ty:?}, {rhs_ty:?})",
                         node.data.function, node.data.statement_path, node.data.path)));
                 }
-                if matches!(op, 1 | 2 | 3 | 13 | 14 | 15) && output != lhs_ty {
+                if matches!(op, 1 | 2 | 3 | 13 | 14 | 15 | 19..=22)
+                    && output != lhs_ty {
                     return Err(invalid("arithmetic result/operand types disagree"));
                 }
                 let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il)?);
@@ -405,6 +406,16 @@ fn lower_c_expression(
                     1 => Expr::Add(a,b),
                     2 => Expr::Sub(a,b),
                     3 => Expr::Mul(a,b),
+                    19 => Expr::IntegerBinary(
+                        if lhs_ty.signed { CIntBinaryOp::SignedDivide }
+                        else { CIntBinaryOp::UnsignedDivide }, a, b),
+                    20 => Expr::IntegerBinary(
+                        if lhs_ty.signed { CIntBinaryOp::SignedRemainder }
+                        else { CIntBinaryOp::UnsignedRemainder }, a, b),
+                    21 => Expr::IntegerBinary(CIntBinaryOp::ShiftLeft, a, b),
+                    22 => Expr::IntegerBinary(
+                        if lhs_ty.signed { CIntBinaryOp::SignedShiftRight }
+                        else { CIntBinaryOp::UnsignedShiftRight }, a, b),
                     5..=10 => {
                         let cmp = match op {
                             5 => CompareOp::Equal, 6 => CompareOp::NotEqual,
@@ -480,6 +491,11 @@ fn emit_expr(
         Expr::Neg(a) => {
             let v = emit_expr(a, fb, params, vars)?;
             fb.ins().ineg(v)
+        }
+        Expr::IntegerBinary(op,a,b) => {
+            let lhs = emit_expr(a, fb, params, vars)?;
+            let rhs = emit_expr(b, fb, params, vars)?;
+            emit_integer_binary(*op, fb, lhs, rhs)
         }
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) => {

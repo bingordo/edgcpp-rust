@@ -26,6 +26,8 @@ pub enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
+    /// C scalar binary op whose signedness determines instruction selection.
+    IntegerBinary(CIntBinaryOp, Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     BitOr(Box<Expr>, Box<Expr>),
@@ -40,6 +42,29 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CIntBinaryOp {
+    SignedDivide, UnsignedDivide,
+    SignedRemainder, UnsignedRemainder,
+    ShiftLeft, SignedShiftRight, UnsignedShiftRight,
+}
+/// Generic Cranelift instruction selection for integer binary operations.
+/// EDG typed lowering is responsible for promotions, conversion and C UB.
+fn emit_integer_binary(
+    op: CIntBinaryOp, fb: &mut FunctionBuilder<'_>,
+    lhs: cranelift_codegen::ir::Value, rhs: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    match op {
+        CIntBinaryOp::SignedDivide => fb.ins().sdiv(lhs,rhs),
+        CIntBinaryOp::UnsignedDivide => fb.ins().udiv(lhs,rhs),
+        CIntBinaryOp::SignedRemainder => fb.ins().srem(lhs,rhs),
+        CIntBinaryOp::UnsignedRemainder => fb.ins().urem(lhs,rhs),
+        CIntBinaryOp::ShiftLeft => fb.ins().ishl(lhs,rhs),
+        CIntBinaryOp::SignedShiftRight => fb.ins().sshr(lhs,rhs),
+        CIntBinaryOp::UnsignedShiftRight => fb.ins().ushr(lhs,rhs),
+    }
+}
 
 #[derive(Debug)]
 pub enum CodegenError {
@@ -88,6 +113,11 @@ fn emit_expr(
             let a = emit_expr(a, builder, params, locals)?;
             let b = emit_expr(b, builder, params, locals)?;
             builder.ins().imul(a, b)
+        }
+        Expr::IntegerBinary(op, a, b) => {
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
+            emit_integer_binary(*op, builder, a, b)
         }
         Expr::Neg(a) => {
             let a = emit_expr(a, builder, params, locals)?;
@@ -335,7 +365,8 @@ fn contains_local_write(expr: &Expr) -> bool {
             contains_local_write(b) || contains_local_write(c),
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) |
         Expr::BitAnd(a, b) | Expr::BitOr(a, b) | Expr::BitXor(a, b) |
-        Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) =>
+        Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) |
+        Expr::IntegerBinary(_, a, b) =>
             contains_local_write(a) || contains_local_write(b),
         Expr::Normalize(_, a) => contains_local_write(a),
         Expr::Neg(a) => contains_local_write(a),
