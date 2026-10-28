@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0 and M1 complete (2026-10-28); M2 next**.
+Status: **M0 and M1 complete; M2 started (2026-10-28), partial typed ABI milestone green**.
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -101,6 +101,27 @@ workflow's `release` job publishes permanent versioned GitHub Release
 assets. **M0 must create/verify such a release**; do not pin an expiring
 Actions artifact as a permanent build dependency. Until then, an Actions
 artifact can serve only as a temporary manual bootstrap.
+
+## M2 implementation checkpoint (2026-10-28)
+
+The first M2 implementation landed in
+[bingordo/edgcpp-rust](https://github.com/bingordo/edgcpp-rust/tree/cranelift-codegen)
+and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/runs/40654173606).
+
+* EDG bridge exports ordinary 8/16/32/64-bit integer widths and signedness.
+* CFG emitter supports `void` return signatures and `return;`, including
+  implicit fallthrough returns from void functions.
+* Cranelift signatures use actual parameter and result widths for safe
+  direct parameter/constant returns, with proper parameter widening and
+  return narrowing. Signed 8-bit, unsigned 32-bit and 16-bit direct returns
+  have GCC native execution checks.
+* Mixed-width/unsigned arithmetic is **not** yet supported; only trivial,
+  side-effect-free bodies can use the broader ABI. This deliberately avoids
+  incorrect C promotions or intermediate unsigned wrapping. The legacy
+  pure-expression reference still requires signed i64.
+* Remaining M2: typed intermediate expression semantics, C integer
+  promotions, conversions, local scalar storage, unsigned comparisons,
+  `_Bool` and parameter edge cases. M2 is **not complete**.
 
 ## Milestones and dependency gates
 
