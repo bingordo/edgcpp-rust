@@ -169,7 +169,11 @@ fn lower(
                 return Err(invalid("assignment target must be scalar local"));
             }
             let symbol = lhs.data.symbol_id.ok_or_else(|| invalid("unresolved assignment target"))?;
-            let i = cfg_checked_local(il, locals, symbol)?;
+            let i = if let Some(p) = params.iter().position(|v| *v == symbol) {
+                locals.len()+p
+            } else {
+                cfg_checked_local(il, locals, symbol)?
+            };
             Ok(vec![Stmt::Store(i, expr(op.operands[1])?)])
         }
         7 | 8 => {
@@ -399,15 +403,22 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
 /// those conversions rather than evaluating all expressions as signed i64.
 /// Resolve a scalar local lvalue. No address-taken, pointer or field writes.
 fn scalar_lvalue(
-    graph: &Graph, id: ExpressionId, locals: &[&crate::LocalVariable],
-    il: &Il,
+    graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
+    locals: &[&crate::LocalVariable], il: &Il,
 ) -> Result<(usize,CAbiInt), CodegenError> {
     let n = graph.expression(id).ok_or_else(|| invalid("missing local lvalue"))?;
     if semantic(2,n.data.kind) != 2 || !n.operands.is_empty() {
         return Err(invalid("assignment target must be direct scalar local"));
     }
-    let index = cfg_checked_local(il,locals,n.data.symbol_id
-        .ok_or_else(|| invalid("missing assignment symbol"))?)?;
+    let symbol = n.data.symbol_id
+        .ok_or_else(|| invalid("missing assignment symbol"))?;
+    if let Some(i) = params.iter().position(|p| *p == symbol) {
+        // Parameter writes share the same SSA slots as locals, immediately
+        // after the declared local slots. All parameters are initialized on entry.
+        let ty = integer_expression_type(il,graph,id)?;
+        return Ok((locals.len()+i,ty));
+    }
+    let index = cfg_checked_local(il,locals,symbol)?;
     let ty = cfg_local_type(il,locals[index])?;
     Ok((index,ty))
 }
@@ -424,7 +435,7 @@ fn lower_c_expression(
         2 => {
             let symbol = node.data.symbol_id.ok_or_else(|| invalid("unresolved scalar variable"))?;
             if let Some(i) = params.iter().position(|p| *p == symbol) {
-                Expr::Parameter(i)
+                Expr::Local(locals.len()+i)
             } else {
                 Expr::Local(cfg_checked_local(il, locals, symbol)?)
             }
@@ -437,7 +448,7 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
-                    let (index,ty) = scalar_lvalue(graph,operands[0],locals,il)?;
+                    let (index,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
                     if matches!(op,29|30) {
                         Expr::PostLocal(index,ty,if op==29 {1} else {-1})
                     } else {
@@ -471,7 +482,7 @@ fn lower_c_expression(
                 if operands.len() != 2 {
                     return Err(invalid("assignment expression requires 2 operands"));
                 }
-                let (index,ty) = scalar_lvalue(graph,operands[0],locals,il)?;
+                let (index,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
                 let rhs = Box::new(lower_c_expression(
                     graph,operands[1],params,locals,il)?);
                 if op==18 {
@@ -600,10 +611,14 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         let ids: Vec<_> = args.iter().map(|p| p.symbol).collect();
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
-        let local_types = locals.iter().map(|v| cfg_local_type(il,v))
+        let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
             .collect::<Result<Vec<_>,_>>()?;
+        local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
-        let has_fallthrough = check(&body, &mut HashSet::new(), ids.len(), locals.len(), 0)?;
+        let initialized: HashSet<usize> =
+            (locals.len()..(locals.len()+ids.len())).collect();
+        let has_fallthrough = check(&body, &mut initialized.clone(),
+            ids.len(), local_types.len(), 0)?;
         if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
         }
@@ -966,16 +981,23 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
                     else if ty.signed { fb.ins().sextend(types::I64, value) }
                     else { fb.ins().uextend(types::I64, value) }
                 }).collect();
-            let vars: Vec<_> = (0..func.locals).map(|i| {
+            let local_types = func.local_types.clone().unwrap_or_else(|| {
+                vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
+            });
+            if local_types.len() != func.locals + if func.abi.is_some() {
+                func.parameters
+            } else { 0 } {
+                return Err(invalid("local/parameter SSA slot count mismatch"));
+            }
+            let vars: Vec<_> = (0..local_types.len()).map(|i| {
                 let v = Variable::from_u32(i as u32);
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            let local_types = func.local_types.clone().unwrap_or_else(|| {
-                vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
-            });
-            if local_types.len() != func.locals {
-                return Err(invalid("local type count mismatch"));
+            if func.abi.is_some() {
+                for (i,value) in params.iter().enumerate() {
+                    fb.def_var(vars[func.locals+i],*value);
+                }
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result)?;

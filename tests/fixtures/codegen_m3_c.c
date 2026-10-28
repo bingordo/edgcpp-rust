@@ -11,3 +11,22 @@ unsigned int m3_c_compound(unsigned int a, int rhs) {
 }
 int m3_c_for(int n) { int i=0; int sum=0; for(i=0;i<n;i++) sum+=i; return sum; }
 _Bool m3_c_bool(int x) { _Bool b=x; b=b&&1; return b; }
+
+int m3_c_param_assign(int a) {
+    a += 7;
+    a = a * 2;
+    return a;
+}
+int m3_c_param_post(int a) {
+    int previous = a++;
+    return previous * 100 + a;
+}
+int m3_c_param_branch(int a) {
+    if (a > 0) a--;
+    else a++;
+    return a;
+}
+unsigned int m3_c_param_unsigned(unsigned int a, int rhs) {
+    a %= rhs;
+    return a;
+}
