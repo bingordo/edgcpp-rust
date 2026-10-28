@@ -75,8 +75,19 @@ fn lower(
                 return Err(invalid("unsupported initializer"));
             }
             let symbol = init.symbol.ok_or_else(|| invalid("initializer has no target"))?;
-            let id = node.expression.ok_or_else(|| invalid("initializer has no integer expression"))?;
-            Ok(vec![Stmt::Store(checked_local(il, locals, symbol)?, expr(id)?)])
+            let value = if let Some(id) = node.expression {
+                expr(id)?
+            } else {
+                let scalars: Vec<_> = il.statement_integer_initializers.iter()
+                    .filter(|v| v.function == *function && v.statement_path == *path)
+                    .collect();
+                if scalars.len() != 1 {
+                    return Err(invalid(format!(
+                        "{function}:{path}: initializer has no supported integer expression or constant")));
+                }
+                Expr::Constant(scalars[0].value)
+            };
+            Ok(vec![Stmt::Store(checked_local(il, locals, symbol)?, value)])
         }
         6 => {
             if !node.children.is_empty() { return Err(invalid("expression statement has children")); }

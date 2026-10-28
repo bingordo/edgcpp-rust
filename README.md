@@ -153,3 +153,8 @@ source-level `break` / `continue` are represented by EDG goto/label nodes,
 which require a separate, label-aware CFG milestone; they are not silently
 accepted. Other unsupported operators, calls, pointers and non-i64 types
 remain errors.
+
+Constant signed-i64 dynamic initializers (including zero initialization)
+are now carried as explicit native wire events, because EDG represents their
+values without expression nodes. No default zero is invented for unknown
+initializer forms.

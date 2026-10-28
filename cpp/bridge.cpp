@@ -791,6 +791,39 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                          destructor ? num(destructor) : absent()});
       }
 
+      if (stmt->kind == stmk_init) {
+        // Constant scalar initializers do not own an expression tree.
+        // Export their exact i64 value at this execution site; never guess
+        // zero when a constant cannot be represented.
+        if (init->kind == dik_zero) {
+          emit_record(45, {txt(function), txt(path), signed_num(0)});
+        } else if (init->kind == dik_constant &&
+                   init->variant.constant.ptr != nullptr &&
+                   init->variant.constant.ptr->kind == ck_integer) {
+          a_constant_ptr constant = init->variant.constant.ptr;
+          a_boolean overflow = FALSE;
+          bool fits = false;
+          int64_t value = 0;
+          if (int_constant_is_signed(constant)) {
+            a_host_large_integer signed_value =
+                value_of_integer_constant(constant, &overflow);
+            if (!overflow && sizeof(signed_value) <= sizeof(int64_t)) {
+              value = static_cast<int64_t>(signed_value);
+              fits = true;
+            }
+          } else {
+            a_host_large_unsigned unsigned_value =
+                unsigned_value_of_integer_constant(constant, &overflow);
+            if (!overflow && unsigned_value <=
+                static_cast<a_host_large_unsigned>(
+                    std::numeric_limits<int64_t>::max())) {
+              value = static_cast<int64_t>(unsigned_value);
+              fits = true;
+            }
+          }
+          if (fits) emit_record(45, {txt(function), txt(path), signed_num(value)});
+        }
+      }
       if ((init->kind == dik_expression ||
            init->kind == dik_class_result_via_ctor) &&
           init->variant.expression != nullptr) {
