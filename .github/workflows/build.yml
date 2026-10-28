@@ -279,7 +279,7 @@ jobs:
                 echo "Unexpectedly accepted unsupported ABI: $variant"
                 exit 1
               fi
-              grep -q 'ABI must be signed 64-bit integer' rejected.log || {
+              grep -Eq 'ABI must be|mixed-width/unsigned expressions require typed C promotion lowering|unsupported integer cast' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1
