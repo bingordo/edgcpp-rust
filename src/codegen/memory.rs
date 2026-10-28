@@ -4,6 +4,36 @@
 use super::*;
 use cranelift_codegen::ir::MemFlags;
 
+/// Read a C integer scalar from an address, preserving native width and
+/// canonicalizing it to the I64 representation used by the CFG IR.
+/// The address must refer to valid, suitably aligned nonvolatile storage.
+pub(super) fn load_integer(
+    fb: &mut FunctionBuilder<'_>,
+    address: cranelift_codegen::ir::Value,
+    ty: CAbiInt,
+) -> cranelift_codegen::ir::Value {
+    let raw = fb.ins().load(ty.cranelift(), MemFlags::new(), address, 0);
+    let extended = if ty.bits == 64 { raw }
+        else if ty.signed { fb.ins().sextend(types::I64, raw) }
+        else { fb.ins().uextend(types::I64, raw) };
+    normalize_c_value(fb, extended, ty)
+}
+
+/// Store a scalar after C assignment conversion; return the canonical stored
+/// value so an assignment expression can use it without reloading memory.
+pub(super) fn store_integer(
+    fb: &mut FunctionBuilder<'_>,
+    address: cranelift_codegen::ir::Value,
+    value: cranelift_codegen::ir::Value,
+    ty: CAbiInt,
+) -> cranelift_codegen::ir::Value {
+    let value = normalize_c_value(fb, value, ty);
+    let narrow = if ty.bits == 64 { value }
+        else { fb.ins().ireduce(ty.cranelift(), value) };
+    fb.ins().store(MemFlags::new(), narrow, address, 0);
+    value
+}
+
 /// Emit an ELF object exporting `m4_increment`. The function increments an
 /// externally defined 32-bit C unsigned variable, without owning its storage.
 /// The linker resolves the data relocation against the C translation unit.
@@ -34,10 +64,11 @@ pub fn external_u32_increment_object(symbol: &str) -> Result<Vec<u8>, CodegenErr
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         let address = fb.ins().global_value(types::I64, global);
-        let old = fb.ins().load(types::I32, MemFlags::new(), address, 0);
-        let one = fb.ins().iconst(types::I32, 1);
+        let ty = CAbiInt { bits: 32, signed: false, is_bool: false };
+        let old = load_integer(&mut fb, address, ty);
+        let one = fb.ins().iconst(types::I64, 1);
         let next = fb.ins().iadd(old, one);
-        fb.ins().store(MemFlags::new(), next, address, 0);
+        store_integer(&mut fb, address, next, ty);
         fb.ins().return_(&[]);
         fb.finalize();
     }
