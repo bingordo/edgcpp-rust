@@ -132,3 +132,25 @@ extern "C" void edg_void_branch(long long a) {
 extern "C" signed char edg_i8_identity(signed char a) { return a; }
 extern "C" unsigned int edg_u32_identity(unsigned int a) { return a; }
 extern "C" short edg_i16_constant(void) { return 123; }
+
+extern "C" unsigned int edg_u32_wrap(unsigned int a) {
+    return a + 0xf0000000U;
+}
+extern "C" signed char edg_i8_promote(signed char a) {
+    return (signed char)((int)a + 20);
+}
+extern "C" unsigned long long edg_u64_order(unsigned long long a, unsigned long long b) {
+    return a < b;
+}
+extern "C" unsigned int edg_u32_order(unsigned int a, unsigned int b) {
+    return a >= b;
+}
+extern "C" unsigned int edg_u32_cast(unsigned long long a) {
+    return (unsigned int)a;
+}
+extern "C" long long edg_signed_convert(unsigned int a) {
+    return (long long)(int)a;
+}
+extern "C" unsigned long long edg_u64_top_constant() {
+    return 18446744073709551615ULL;
+}

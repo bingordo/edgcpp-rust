@@ -31,6 +31,10 @@ pub enum Expr {
     BitOr(Box<Expr>, Box<Expr>),
     BitXor(Box<Expr>, Box<Expr>),
     Compare(CompareOp, Box<Expr>, Box<Expr>),
+    /// Compare after EDG's usual arithmetic conversions using unsigned ordering.
+    UnsignedCompare(CompareOp, Box<Expr>, Box<Expr>),
+    /// Normalize the represented C integer value to its declared width/sign.
+    Normalize(CAbiInt, Box<Expr>),
     Select(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
@@ -119,6 +123,31 @@ fn emit_expr(
             let one = builder.ins().iconst(types::I64, 1);
             let zero = builder.ins().iconst(types::I64, 0);
             builder.ins().select(condition, one, zero)
+        }
+        Expr::Normalize(ty, a) => {
+            let v = emit_expr(a, builder, params, locals)?;
+            if ty.bits == 64 { v }
+            else {
+                let narrow = builder.ins().ireduce(ty.cranelift(), v);
+                if ty.signed { builder.ins().sextend(types::I64, narrow) }
+                else { builder.ins().uextend(types::I64, narrow) }
+            }
+        }
+        Expr::UnsignedCompare(op, a, b) => {
+            let a = emit_expr(a, builder, params, locals)?;
+            let b = emit_expr(b, builder, params, locals)?;
+            let cc = match op {
+                CompareOp::Equal => IntCC::Equal,
+                CompareOp::NotEqual => IntCC::NotEqual,
+                CompareOp::Less => IntCC::UnsignedLessThan,
+                CompareOp::LessEqual => IntCC::UnsignedLessThanOrEqual,
+                CompareOp::Greater => IntCC::UnsignedGreaterThan,
+                CompareOp::GreaterEqual => IntCC::UnsignedGreaterThanOrEqual,
+            };
+            let cmp = builder.ins().icmp(cc, a, b);
+            let one = builder.ins().iconst(types::I64, 1);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.ins().select(cmp, one, zero)
         }
         Expr::Select(condition, yes, no) => {
             if contains_local_write(yes) || contains_local_write(no) {
@@ -306,7 +335,9 @@ fn contains_local_write(expr: &Expr) -> bool {
             contains_local_write(b) || contains_local_write(c),
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) |
         Expr::BitAnd(a, b) | Expr::BitOr(a, b) | Expr::BitXor(a, b) |
-        Expr::Compare(_, a, b) => contains_local_write(a) || contains_local_write(b),
+        Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) =>
+            contains_local_write(a) || contains_local_write(b),
+        Expr::Normalize(_, a) => contains_local_write(a),
         Expr::Neg(a) => contains_local_write(a),
         Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) => false,
     }

@@ -33,7 +33,7 @@ fn lower(
     let node = graph.statement(id).ok_or_else(|| invalid("missing statement"))?;
     let path = &node.data.path;
     let function = &node.data.function;
-    let expr = |id| lower_expression(graph, id, params, locals, il);
+    let expr = |id| lower_c_expression(graph, id, params, locals, il);
     match semantic(1, node.data.kind) {
         1 => {
             if !node.children.is_empty() { return Err(invalid("return with nested statements")); }
@@ -186,10 +186,10 @@ fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), Code
         Expr::Parameter(i) => if *i < params { Ok(()) } else { Err(invalid("invalid parameter")) },
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
-        Expr::Neg(a) => check_expr(a, vars, params),
+        Expr::Neg(a) | Expr::Normalize(_, a) => check_expr(a, vars, params),
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) |
-        Expr::Compare(_,a,b) => {
+        Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) => {
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)
         }
@@ -266,6 +266,109 @@ fn check(
     Ok(live)
 }
 
+/// Retrieve native, non-enum integer type information for a C expression.
+/// EDG already inserts the usual arithmetic conversion nodes. Never guess
+/// signedness from the result of a comparison (which is boolean).
+fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
+    -> Result<CAbiInt, CodegenError>
+{
+    let node = graph.expression(id).ok_or_else(|| invalid("missing typed expression"))?;
+    let ty = node.data.type_id.ok_or_else(|| invalid(format!(
+        "missing EDG expression type at {}:{}:{}",
+        node.data.function, node.data.statement_path, node.data.path)))?;
+    let canonical = canonical_abi_type(il, ty)?;
+    let ty = il.c_integer_types.iter().find(|v| v.id == canonical)
+        .ok_or_else(|| invalid(format!(
+            "unsupported C expression type at {}:{}:{}",
+            node.data.function, node.data.statement_path, node.data.path)))?;
+    Ok(CAbiInt { bits: ty.bits, signed: ty.signed })
+}
+
+/// Every EDG operation has a result type, and each operand already carries
+/// explicit integer promotions and usual arithmetic conversions. Track
+/// those conversions rather than evaluating all expressions as signed i64.
+fn lower_c_expression(
+    graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
+    locals: &[&crate::LocalVariable], il: &Il,
+) -> Result<Expr, CodegenError> {
+    let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
+    let output = integer_expression_type(il, graph, id)?;
+    let wrap = |e| Expr::Normalize(output, Box::new(e));
+    let inner = match semantic(2, node.data.kind) {
+        1 => Expr::Constant(node.data.constant_integer
+            .ok_or_else(|| invalid("unsupported/non-i64-representable constant"))?),
+        2 => {
+            let symbol = node.data.symbol_id.ok_or_else(|| invalid("unresolved scalar variable"))?;
+            if let Some(i) = params.iter().position(|p| *p == symbol) {
+                Expr::Parameter(i)
+            } else {
+                Expr::Local(checked_local(il, locals, symbol)?)
+            }
+        }
+        3 => {
+            let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
+            let operands = &node.operands;
+            if matches!(op, 4 | 11 | 12 | 16 | 17) {
+                if operands.len() != 1 {
+                    return Err(invalid("unary expression requires exactly one operand"));
+                }
+                let a = lower_c_expression(graph, operands[0], params, locals, il)?;
+                match op {
+                    4 => Expr::Neg(Box::new(a)),
+                    11 | 12 | 16 => a,
+                    17 => Expr::Compare(CompareOp::NotEqual,
+                        Box::new(a), Box::new(Expr::Constant(0))),
+                    _ => unreachable!(),
+                }
+            } else {
+                if operands.len() != 2 {
+                    return Err(invalid("binary expression requires two operands"));
+                }
+                let lhs_ty = integer_expression_type(il, graph, operands[0])?;
+                let rhs_ty = integer_expression_type(il, graph, operands[1])?;
+                // Arithmetic operations and comparisons are defined over a
+                // common promoted integer type in EDG's typed expression IL.
+                // Refuse missing conversions rather than silently comparing
+                // signed and unsigned or using the wrong intermediate width.
+                if lhs_ty != rhs_ty {
+                    return Err(invalid(format!(
+                        "unconverted operand types at {}:{}:{} ({lhs_ty:?}, {rhs_ty:?})",
+                        node.data.function, node.data.statement_path, node.data.path)));
+                }
+                if matches!(op, 1 | 2 | 3 | 13 | 14 | 15) && output != lhs_ty {
+                    return Err(invalid("arithmetic result/operand types disagree"));
+                }
+                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il)?);
+                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il)?);
+                match op {
+                    1 => Expr::Add(a,b),
+                    2 => Expr::Sub(a,b),
+                    3 => Expr::Mul(a,b),
+                    5..=10 => {
+                        let cmp = match op {
+                            5 => CompareOp::Equal, 6 => CompareOp::NotEqual,
+                            7 => CompareOp::Less, 8 => CompareOp::LessEqual,
+                            9 => CompareOp::Greater, 10 => CompareOp::GreaterEqual,
+                            _ => unreachable!(),
+                        };
+                        if lhs_ty.signed { Expr::Compare(cmp,a,b) }
+                        else { Expr::UnsignedCompare(cmp,a,b) }
+                    }
+                    13 => Expr::BitAnd(a,b),
+                    14 => Expr::BitOr(a,b),
+                    15 => Expr::BitXor(a,b),
+                    _ => return Err(invalid(format!(
+                        "unsupported EDG operation at {}:{}:{}",
+                        node.data.function, node.data.statement_path, node.data.path))),
+                }
+            }
+        }
+        _ => return Err(invalid(format!("unsupported typed EDG expression kind {}",
+                                        node.data.kind))),
+    };
+    Ok(wrap(inner))
+}
+
 fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
     let graph = Graph::from_il(il).map_err(|e| invalid(format!("EDG graph: {e:?}")))?;
     let mut out = Vec::new();
@@ -311,8 +414,20 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
 /// For non-i64 ABIs, only effect-free returns of parameters/constants
 /// are currently known to have correct C semantics without promotions.
 fn is_abi_simple_body(body: &[Stmt]) -> bool {
+    fn pure(e: &Expr) -> bool {
+        match e {
+            Expr::Constant(_) | Expr::Parameter(_) => true,
+            Expr::Normalize(_, a) | Expr::Neg(a) => pure(a),
+            Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
+            Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) |
+            Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) =>
+                pure(a) && pure(b),
+            _ => false,
+        }
+    }
     body.iter().all(|stmt| match stmt {
-        Stmt::Return(Expr::Parameter(_) | Expr::Constant(_)) | Stmt::ReturnVoid => true,
+        Stmt::Return(e) => pure(e),
+        Stmt::ReturnVoid => true,
         _ => false,
     })
 }
@@ -325,6 +440,15 @@ fn emit_expr(
         Expr::Parameter(i) => *params.get(*i).ok_or_else(|| invalid("invalid parameter"))?,
         Expr::Local(i) => fb.use_var(*vars.get(*i).ok_or_else(|| invalid("invalid local"))?),
         Expr::StoreLocal(..) => return Err(invalid("nested assignment unsupported")),
+        Expr::Normalize(ty, a) => {
+            let value = emit_expr(a, fb, params, vars)?;
+            if ty.bits == 64 { value }
+            else {
+                let narrowed = fb.ins().ireduce(ty.cranelift(), value);
+                if ty.signed { fb.ins().sextend(types::I64, narrowed) }
+                else { fb.ins().uextend(types::I64, narrowed) }
+            }
+        }
         Expr::Neg(a) => {
             let v = emit_expr(a, fb, params, vars)?;
             fb.ins().ineg(v)
@@ -343,15 +467,21 @@ fn emit_expr(
                 _ => unreachable!(),
             }
         }
-        Expr::Compare(op,a,b) => {
+        Expr::Compare(op,a,b) | Expr::UnsignedCompare(op,a,b) => {
+            let unsigned = matches!(e, Expr::UnsignedCompare(..));
             let a = emit_expr(a, fb, params, vars)?;
             let b = emit_expr(b, fb, params, vars)?;
-            let cc = match op {
-                CompareOp::Equal => IntCC::Equal, CompareOp::NotEqual => IntCC::NotEqual,
-                CompareOp::Less => IntCC::SignedLessThan,
-                CompareOp::LessEqual => IntCC::SignedLessThanOrEqual,
-                CompareOp::Greater => IntCC::SignedGreaterThan,
-                CompareOp::GreaterEqual => IntCC::SignedGreaterThanOrEqual,
+            let cc = match (op, unsigned) {
+                (CompareOp::Equal, _) => IntCC::Equal,
+                (CompareOp::NotEqual, _) => IntCC::NotEqual,
+                (CompareOp::Less, false) => IntCC::SignedLessThan,
+                (CompareOp::LessEqual, false) => IntCC::SignedLessThanOrEqual,
+                (CompareOp::Greater, false) => IntCC::SignedGreaterThan,
+                (CompareOp::GreaterEqual, false) => IntCC::SignedGreaterThanOrEqual,
+                (CompareOp::Less, true) => IntCC::UnsignedLessThan,
+                (CompareOp::LessEqual, true) => IntCC::UnsignedLessThanOrEqual,
+                (CompareOp::Greater, true) => IntCC::UnsignedGreaterThan,
+                (CompareOp::GreaterEqual, true) => IntCC::UnsignedGreaterThanOrEqual,
             };
             let test = fb.ins().icmp(cc,a,b);
             let one = fb.ins().iconst(types::I64,1);

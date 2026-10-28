@@ -5,6 +5,13 @@ extern "C" void edg_void_branch(long long);
 extern "C" signed char edg_i8_identity(signed char);
 extern "C" unsigned int edg_u32_identity(unsigned int);
 extern "C" short edg_i16_constant(void);
+extern "C" unsigned int edg_u32_wrap(unsigned int);
+extern "C" signed char edg_i8_promote(signed char);
+extern "C" unsigned long long edg_u64_order(unsigned long long, unsigned long long);
+extern "C" unsigned int edg_u32_order(unsigned int, unsigned int);
+extern "C" unsigned int edg_u32_cast(unsigned long long);
+extern "C" long long edg_signed_convert(unsigned int);
+extern "C" unsigned long long edg_u64_top_constant();
 extern "C" long long edg_add(long long, long long);
 extern "C" long long edg_affine(long long, long long);
 extern "C" long long edg_constant();
@@ -24,6 +31,14 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_u32_wrap(0xfedcba98U) != (0xfedcba98U + 0xf0000000U)) return 25;
+    if (edg_i8_promote(-100) != (signed char)((int)-100 + 20)) return 26;
+    if (edg_u64_order(0xffffffffffffffffULL, 1ULL) != 0) return 27;
+    if (edg_u64_order(1ULL, 0xffffffffffffffffULL) != 1) return 28;
+    if (edg_u32_order(0xf0000000U, 1U) != 1U) return 29;
+    if (edg_u32_cast(0xabcdef0198765432ULL) != 0x98765432U) return 30;
+    if (edg_signed_convert(0xffffffffU) != -1LL) return 31;
+    if (edg_u64_top_constant() != 18446744073709551615ULL) return 32;
     edg_void_empty();
     edg_void_branch(-1);
     edg_void_branch(1);

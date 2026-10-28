@@ -415,9 +415,11 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     } else {
       a_host_large_unsigned value =
           unsigned_value_of_integer_constant(constant, &overflow);
-      if (!overflow && value <=
-          static_cast<a_host_large_unsigned>(std::numeric_limits<int64_t>::max())) {
-        integer_value = static_cast<int64_t>(value);
+      if (!overflow && sizeof(value) <= sizeof(uint64_t)) {
+        // Carry the full 64-bit bit pattern of unsigned C constants.
+        // The Rust wire value is a signed i64 carrier, not the C type.
+        uint64_t bits = static_cast<uint64_t>(value);
+        std::memcpy(&integer_value, &bits, sizeof(bits));
         has_integer = true;
       }
     }
