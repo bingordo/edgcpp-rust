@@ -80,18 +80,19 @@ unary negation, integer bitwise operations, signed comparisons and structured
 results are canonical 0/1 integers. Boolean-to-integer casts of comparison
 results are supported; other width-changing conversions remain unsupported.
 
-**ABI guard:** the bridge records which EDG integer types are verified
-signed 64-bit types (excluding enums). The reference backend checks the
-routine's declared return type, prototype/variadic status and every declared
-and defined parameter type before emitting machine code. It resolves typedef
-wrappers but rejects non-i64 widths, unsigned integers, pointers, floating
-point, missing metadata, parameter mismatches and implicit C++ object
-parameters. Only plain signed-64-bit C-linkage functions are currently
-supported; C++ name mangling is not implemented.
+**ABI guard:** the bridge records EDG-native scalar integer width and
+signedness, and validates routine return and parameter types before emitting
+machine code. The CFG backend accepts `void` functions and restricted direct
+returns using 8/16/32/64-bit signed or unsigned C ABI types. General arithmetic
+with narrow/unsigned values, pointer/float parameters, missing metadata,
+variadic interfaces, implicit C++ object parameters, and complex C++ features
+are still rejected. The earlier standalone pure-expression API remains
+signed-i64 only. C++ name mangling is not implemented.
 
 Local assignments, structured if/else and pretest while loops are supported
 by the newer CFG emitter (see below). Calls, global memory and general C++
-features are still unsupported. The signed-i64 restriction remains intentional.
+features are still unsupported. Non-i64 expressions remain restricted until
+full C integer promotion and conversion semantics are implemented.
 
 The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
 both EDG/Cranelift and GCC, links each with the same test driver, and compares
@@ -101,10 +102,11 @@ incorrectly. This is a reference backend, not a general C++ compiler.
 **CI is run on [bingordo/edgcpp-rust](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).**
 The `bingundu` mirror uses a manual-only workflow to avoid duplicate CPU usage.
 
-The CI negative-ABI fixture verifies that int parameters, unsigned returns,
-floating-point returns and pointer parameters are rejected without creating
-object files. Unit tests cover missing/cyclic type metadata and mismatched
-signatures.
+The CI negative-ABI fixture verifies rejection of unsupported *mixed-width
+arithmetic*, floating-point returns and pointer parameters, without creating
+object files. Ordinary 8/16/32/64-bit scalar integer ABI signatures with simple
+returns are now accepted and executed in differential tests. Unit tests cover
+missing/cyclic type metadata and mismatched signatures.
 
 ## Milestone: signed-i64 local variables
 
@@ -151,8 +153,8 @@ handle forward/backward edges and Cranelift SSA merges. Differential tests
 compare output to GCC across the existing signed input grid. At present,
 source-level `break` / `continue` are accepted only when EDG's native
 label flags identify a compiler-generated loop jump. Arbitrary goto and
-switch-break targets are still rejected. Other unsupported operators, calls, pointers and non-i64 types
-remain errors.
+switch-break targets are still rejected. Other unsupported operators, calls,
+pointers and complex non-i64 expressions remain errors.
 
 Constant signed-i64 dynamic initializers (including zero initialization)
 are now carried as explicit native wire events, because EDG represents their
