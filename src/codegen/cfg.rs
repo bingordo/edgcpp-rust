@@ -246,7 +246,11 @@ fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), Code
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)
         }
-        Expr::Select(a,b,c) => {
+        Expr::Sequence(a,b) => {
+            check_expr(a, vars, params)?;
+            check_expr(b, vars, params)
+        }
+        Expr::Conditional(a,b,c) | Expr::Select(a,b,c) => {
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)?;
             check_expr(c, vars, params)
@@ -361,7 +365,7 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op, 4 | 11 | 12 | 16 | 17) {
+            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28) {
                 if operands.len() != 1 {
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
@@ -371,6 +375,36 @@ fn lower_c_expression(
                     11 | 12 | 16 => a,
                     17 => Expr::Compare(CompareOp::NotEqual,
                         Box::new(a), Box::new(Expr::Constant(0))),
+                    27 => Expr::BitXor(Box::new(a), Box::new(Expr::Constant(-1))),
+                    28 => Expr::Compare(CompareOp::Equal,
+                        Box::new(a), Box::new(Expr::Constant(0))),
+                    _ => unreachable!(),
+                }
+            } else if op == 25 {
+                if operands.len() != 3 {
+                    return Err(invalid("conditional expression needs three operands"));
+                }
+                Expr::Conditional(
+                    Box::new(lower_c_expression(graph, operands[0], params, locals, il)?),
+                    Box::new(lower_c_expression(graph, operands[1], params, locals, il)?),
+                    Box::new(lower_c_expression(graph, operands[2], params, locals, il)?),
+                )
+            } else if matches!(op, 23 | 24 | 26) {
+                if operands.len() != 2 {
+                    return Err(invalid("logical/comma expression needs two operands"));
+                }
+                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il)?);
+                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il)?);
+                match op {
+                    23 => Expr::Conditional(a,
+                        Box::new(Expr::Compare(CompareOp::NotEqual, b,
+                            Box::new(Expr::Constant(0)))),
+                        Box::new(Expr::Constant(0))),
+                    24 => Expr::Conditional(a,
+                        Box::new(Expr::Constant(1)),
+                        Box::new(Expr::Compare(CompareOp::NotEqual, b,
+                            Box::new(Expr::Constant(0))))),
+                    26 => Expr::Sequence(a,b),
                     _ => unreachable!(),
                 }
             } else {
@@ -496,6 +530,30 @@ fn emit_expr(
             let lhs = emit_expr(a, fb, params, vars)?;
             let rhs = emit_expr(b, fb, params, vars)?;
             emit_integer_binary(*op, fb, lhs, rhs)
+        }
+        Expr::Sequence(a,b) => {
+            let _ = emit_expr(a, fb, params, vars)?;
+            emit_expr(b, fb, params, vars)?
+        }
+        Expr::Conditional(c,a,b) => {
+            let test = emit_expr(c, fb, params, vars)?;
+            let flag = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
+            let yes = fb.create_block();
+            let no = fb.create_block();
+            let merge = fb.create_block();
+            fb.append_block_param(merge, types::I64);
+            fb.ins().brif(flag, yes, &[], no, &[]);
+            fb.seal_block(yes);
+            fb.seal_block(no);
+            fb.switch_to_block(yes);
+            let yes_value = emit_expr(a, fb, params, vars)?;
+            fb.ins().jump(merge, &[yes_value]);
+            fb.switch_to_block(no);
+            let no_value = emit_expr(b, fb, params, vars)?;
+            fb.ins().jump(merge, &[no_value]);
+            fb.seal_block(merge);
+            fb.switch_to_block(merge);
+            fb.block_params(merge)[0]
         }
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) => {

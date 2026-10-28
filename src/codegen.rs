@@ -28,6 +28,10 @@ pub enum Expr {
     Mul(Box<Expr>, Box<Expr>),
     /// C scalar binary op whose signedness determines instruction selection.
     IntegerBinary(CIntBinaryOp, Box<Expr>, Box<Expr>),
+    /// Side-effect and control-flow-aware expressions; evaluation must not
+    /// be replaced by an eager Cranelift select.
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    Sequence(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     BitOr(Box<Expr>, Box<Expr>),
@@ -119,6 +123,12 @@ fn emit_expr(
             let b = emit_expr(b, builder, params, locals)?;
             emit_integer_binary(*op, builder, a, b)
         }
+        Expr::Sequence(a,b) => {
+            let _ = emit_expr(a, builder, params, locals)?;
+            emit_expr(b, builder, params, locals)?
+        }
+        Expr::Conditional(..) => return Err(CodegenError::InvalidFunction(
+            "conditional expression needs CFG backend".into())),
         Expr::Neg(a) => {
             let a = emit_expr(a, builder, params, locals)?;
             builder.ins().ineg(a)
@@ -361,8 +371,9 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::StoreLocal(..) => true,
-        Expr::Select(a, b, c) => contains_local_write(a) ||
-            contains_local_write(b) || contains_local_write(c),
+        Expr::Select(a, b, c) | Expr::Conditional(a,b,c) =>
+            contains_local_write(a) || contains_local_write(b) || contains_local_write(c),
+        Expr::Sequence(a,b) => contains_local_write(a) || contains_local_write(b),
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) |
         Expr::BitAnd(a, b) | Expr::BitOr(a, b) | Expr::BitXor(a, b) |
         Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) |

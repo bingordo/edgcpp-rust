@@ -1412,6 +1412,12 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_remainder)) return 20;
     if (value == static_cast<unsigned>(eok_shiftl)) return 21;
     if (value == static_cast<unsigned>(eok_shiftr)) return 22;
+    if (value == static_cast<unsigned>(eok_land)) return 23;
+    if (value == static_cast<unsigned>(eok_lor)) return 24;
+    if (value == static_cast<unsigned>(eok_question)) return 25;
+    if (value == static_cast<unsigned>(eok_comma)) return 26;
+    if (value == static_cast<unsigned>(eok_complement)) return 27;
+    if (value == static_cast<unsigned>(eok_not)) return 28;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
