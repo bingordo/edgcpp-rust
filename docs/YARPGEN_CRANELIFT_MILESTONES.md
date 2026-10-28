@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0 and M1 complete; M2 type/SSA and bool checkpoints green (2026-10-28), final edge cases open**.
+Status: **M0 and M1 complete; M2 core typed SSA/bool green with edge cases open; M3 divide/remainder/shifts implemented and CI-green (2026-10-28), remainder pending**.
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -137,14 +137,42 @@ and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/run
   ABIs and local stores canonicalize nonzero to 1; native differential
   fixtures test zero, positive, negative, and branch-dependent assignments.
 * **Still unsupported:** qualified/volatile or address-taken locals,
-  side-effectful expression trees, unhandled operators (division, modulus,
-  shifts, logical short-circuit, etc.), float/pointer types, calls and
-  global memory. Mixed signedness without explicit EDG conversions is
-  rejected, not guessed. The legacy expression-only API is signed-i64.
+  side-effectful expression trees, some C scalar operators (including
+  short-circuit logic), float/pointer types, calls and global memory.
+  Mixed signedness without explicit EDG conversions is rejected,
+  not guessed. The legacy expression-only API is signed-i64.
 * **Remaining M2:** exercise additional C ABI and integer-promotion edge
   cases (including typedef/qualifier behavior and C-mode _Bool tests).
   M2 is **not formally closed**; the next high-payoff feature work is M3
   scalar operators, followed by M4 external objects/memory.
+
+## M3 operator checkpoint (2026-10-28)
+
+[CI #40690504958](https://github.com/bingordo/edgcpp-rust/actions/runs/40690504958)
+passed 93 EDG bridge tests, six targeted codegen tests, native ELF creation,
+the full GCC differential executable, and rejection of four genuinely
+unsupported constructs.
+
+* EDG `eok_divide`, `eok_remainder`, `eok_shiftl` and `eok_shiftr`
+  have stable native-to-Rust semantic discriminants; no EDG enum numbers
+  are hardcoded in the Rust codegen.
+* A shared typed integer IR instruction mapping chooses `sdiv`, `udiv`,
+  `srem`, `urem`, `ishl`, `sshr` and `ushr`. Signedness and promoted
+  result width are derived from EDG, not operand guesses. For shifts,
+  the right operand may have a different integer type from the left.
+* Deterministic GCC differential fixtures cover 32/64-bit division and
+  remainder, unsigned high-bit operands, negative signed remainder,
+  left/unsigned-right/signed-right shifts and typed mutable local stores.
+* C undefined behavior (zero divisor, signed overflow and out-of-range
+  shift counts) is excluded from defined-output comparison tests. An
+  overflow-trap/UB test mode could be added later if useful.
+* **M3 remains open:** short-circuit `&&`/`||`, conditional expressions
+  with evaluation sequencing, prefix/postfix updates, compound assignment,
+  and general side-effectful expression evaluation. The existing
+  standalone `lower_edg()` signed-i64 expression API is unchanged.
+* This still does **not** establish any YARPGen program passing Cranelift;
+  the GCC/Clang seed baseline and native scalar differential tests are
+  different acceptance measures.
 
 ## Milestones and dependency gates
 

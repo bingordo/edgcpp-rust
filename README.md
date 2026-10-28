@@ -238,3 +238,27 @@ unsigned-byte truncation, short conditional merges, 32-bit wrapping loops,
 C scalar corner cases and general side-effecting expression trees are still
 unsupported. Pointers, globals, arrays and calls are later milestones.
 The legacy `lower_edg()` expression-only API remains signed-i64 only.
+
+### M3 scalar divide, remainder and shifts (2026-10-28)
+
+The CFG reference now lowers EDG-native C operators for signed and unsigned
+division and remainder, plus left shift, logical right shift and arithmetic
+right shift. These are represented by typed integer operations in the shared
+expression IR and use one generic Cranelift instruction mapping, rather than
+a post-codegen peephole. Signedness comes from EDG's left-hand operand type;
+shifts correctly permit an independently promoted right-hand operand type.
+Intermediate arithmetic and local stores retain C's 8/16/32/64-bit
+normalization semantics.
+
+[Native CI #40690504958](https://github.com/bingordo/edgcpp-rust/actions/runs/40690504958)
+compared the resulting ELF against GCC with fixed signed/unsigned division,
+negative remainders, 32/64-bit boundary values, differing shift operand types,
+signed negative right shifts and local reassignment examples. Four negative
+construct tests (global reads, calls, floating-point and pointers) still
+reject as expected. As in C, division by zero, signed overflow such as
+INT_MIN / -1 and invalid shift counts are **undefined behavior** and are not
+accepted as correctness test vectors.
+
+M3 is **partial**: logical short-circuit evaluation, conditionals with
+side effects, compound assignments, increment/decrement, comma sequencing,
+and remaining scalar operators still need implementation and tests.
