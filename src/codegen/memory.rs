@@ -2,6 +2,7 @@
 //! avoids the EDG decoder: the same imported-data mechanism can be reused by
 //! typed lvalue lowering once global symbol metadata is available.
 use super::*;
+use super::cfg::normalize_c_value;
 use cranelift_codegen::ir::MemFlags;
 
 /// Read a C integer scalar from an address, preserving native width and
