@@ -234,6 +234,8 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --features codegen --lib codegen::tests::
           cargo test --features codegen --test codegen_native
+          cargo test --features codegen --lib codegen::memory::tests::
+          bash tools/m4_data_probe.sh
 
       - name: EDG to Cranelift vs GCC native execution
         working-directory: edgcpp-rust
