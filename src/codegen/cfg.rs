@@ -611,7 +611,8 @@ fn emit_expr(
             let old = fb.use_var(var);
             let amount = fb.ins().iconst(types::I64,*delta);
             let next = fb.ins().iadd(old,amount);
-            fb.def_var(var,normalize_c_value(fb,next,*ty));
+            let normalized = normalize_c_value(fb,next,*ty);
+            fb.def_var(var,normalized);
             old
         }
         Expr::CompoundLocal(index,ty,op,rhs) => {
