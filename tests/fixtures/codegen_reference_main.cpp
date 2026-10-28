@@ -15,6 +15,16 @@ extern "C" int edg_sshr32(int, unsigned int);
 extern "C" unsigned int edg_shl32(unsigned int, int);
 extern "C" unsigned int edg_udiv_local(unsigned int, unsigned int);
 extern "C" unsigned int edg_shift_local(unsigned int, int);
+extern "C" int edg_short_and(int);
+extern "C" int edg_short_or(int);
+extern "C" int edg_conditional_mutation(int);
+extern "C" int edg_comma_mutation();
+extern "C" unsigned int edg_postfix_value();
+extern "C" unsigned short edg_compound_unsigned();
+extern "C" int edg_for_postfix(int);
+extern "C" int edg_conditional_side_effect(int);
+extern "C" int edg_nested_ternary(int,int);
+extern "C" int edg_unary_not_bits(int);
 extern "C" void edg_void_empty(void);
 extern "C" void edg_void_branch(long long);
 extern "C" signed char edg_i8_identity(signed char);
@@ -54,6 +64,26 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_short_and(0) != 0 || edg_short_and(1) != 107) return 66;
+    if (edg_short_or(0) != 105 || edg_short_or(1) != 100) return 67;
+    if (edg_conditional_mutation(0) != 88 ||
+        edg_conditional_mutation(1) != 55) return 68;
+    if (edg_comma_mutation() != 99) return 69;
+    if (edg_postfix_value() !=
+        (250U + 251U*256U + 250U*65536U)) return 70;
+    unsigned short expected = 65532;
+    expected += 10;
+    expected ^= 0x00ff;
+    expected /= 3;
+    expected <<= 2;
+    if (edg_compound_unsigned() != expected) return 71;
+    if (edg_for_postfix(0) != 0 || edg_for_postfix(15) != 105) return 72;
+    if (edg_conditional_side_effect(0) != 0 ||
+        edg_conditional_side_effect(2) != 5) return 73;
+    if (edg_nested_ternary(0,1) != 15 || edg_nested_ternary(1,0) != 3 ||
+        edg_nested_ternary(1,1) != 9) return 74;
+    if (edg_unary_not_bits(0) != 256 ||
+        edg_unary_not_bits(7) != 248) return 75;
     if (edg_sdiv64(-5000000001LL, 7LL) != (-5000000001LL / 7LL)) return 50;
     if (edg_srem64(-5000000001LL, 7LL) != (-5000000001LL % 7LL)) return 51;
     if (edg_sdiv64(5000000001LL, -7LL) != (5000000001LL / -7LL)) return 52;

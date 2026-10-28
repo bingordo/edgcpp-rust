@@ -253,3 +253,57 @@ extern "C" unsigned int edg_shift_local(unsigned int a, int amount) {
     value = value << amount;
     return value;
 }
+
+extern "C" int edg_short_and(int a) {
+    int changed = 0;
+    int answer = a && (changed = 7);
+    return answer * 100 + changed;
+}
+extern "C" int edg_short_or(int a) {
+    int changed = 0;
+    int answer = a || (changed = 5);
+    return answer * 100 + changed;
+}
+extern "C" int edg_conditional_mutation(int a) {
+    int x = 2;
+    int y = a ? (x += 3) : (x *= 4);
+    return x + y * 10;
+}
+extern "C" int edg_comma_mutation() {
+    int x = 1;
+    int y = (x += 2, x *= 3);
+    return x + y * 10;
+}
+extern "C" unsigned int edg_postfix_value() {
+    unsigned char x = 250;
+    unsigned char previous = x++;
+    unsigned char before_decrement = x--;
+    return previous + (unsigned int)before_decrement * 256U
+           + (unsigned int)x * 65536U;
+}
+extern "C" unsigned short edg_compound_unsigned() {
+    unsigned short x = 65532;
+    x += 10;
+    x ^= 0x00ff;
+    x /= 3;
+    x <<= 2;
+    return x;
+}
+extern "C" int edg_for_postfix(int n) {
+    int i = 0;
+    int result = 0;
+    for (i = 0; i < n; i++) result += i;
+    return result;
+}
+extern "C" int edg_conditional_side_effect(int a) {
+    int x = 0;
+    if (a && (x = 3)) x += 2;
+    return x;
+}
+extern "C" int edg_nested_ternary(int a, int b) {
+    int x = 5;
+    return a ? (b ? (x += 4) : (x -= 2)) : (x *= 3);
+}
+extern "C" int edg_unary_not_bits(int a) {
+    return !a + (~a & 255);
+}
