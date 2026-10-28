@@ -548,7 +548,7 @@ fn canonical_abi_type(il: &Il, mut ty: crate::TypeId) -> Result<crate::TypeId, C
 /// Until full C promotions and conversions are lowered, mixed-width/unsigned
 /// arithmetic is NOT accepted. Pure return of a literal or parameter is safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CAbiInt {
+pub struct CAbiInt {
     bits: u8,
     signed: bool,
 }

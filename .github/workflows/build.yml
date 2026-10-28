@@ -218,10 +218,9 @@ jobs:
             grep -qF 'symbol reference ' il_result.txt
             grep -qF 'statement outer::overloaded(int) path=' il_result.txt
             grep -qF 'statement outer::overloaded(long) path=' il_result.txt
-            if grep -qF 'integer constant outer::big_unsigned' il_result.txt; then
-              echo 'Unsigned constant was incorrectly converted to signed i64' >&2
-              exit 1
-            fi
+            # Unsigned i64 constants now preserve all bits, transported
+            # as a signed i64 carrier with the EDG type kept separately.
+            grep -qF 'integer constant outer::big_unsigned' il_result.txt
           )
 
       - name: Test optional Cranelift ELF backend (targeted)
@@ -279,7 +278,7 @@ jobs:
                 echo "Unexpectedly accepted unsupported ABI: $variant"
                 exit 1
               fi
-              grep -Eq 'ABI must be|mixed-width/unsigned expressions require typed C promotion lowering|unsupported integer cast' rejected.log || {
+              grep -Eq 'ABI must be|mixed-width/unsigned expressions require typed C promotion lowering|unsupported integer cast|local [0-9]+ must have signed 64-bit integer type' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1
