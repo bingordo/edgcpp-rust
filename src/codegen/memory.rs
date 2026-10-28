@@ -90,5 +90,14 @@ mod tests {
     #[test]
     fn rejects_invalid_external_symbol() {
         assert!(external_u32_increment_object("bad\0symbol").is_err());
+        assert!(external_u32_increment_object("").is_err());
+    }
+    #[test]
+    fn imported_global_has_no_owning_definition() {
+        let object = external_u32_increment_object("m4_counter").unwrap();
+        // The ELF carries the unresolved external's symbol spelling. Its
+        // definition belongs to the GCC-compiled translation unit.
+        assert!(object.windows(b"m4_increment".len()).any(|w| w == b"m4_increment"));
+        assert!(object.windows(b"m4_counter".len()).any(|w| w == b"m4_counter"));
     }
 }
