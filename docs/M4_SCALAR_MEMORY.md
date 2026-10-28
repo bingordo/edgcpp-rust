@@ -52,3 +52,20 @@ unknown-width, TLS, aggregate, tentative/common-definition and aliased lvalues
 unless implemented explicitly. Never produce an object file on a rejected
 translation unit. M4 is only complete when the generated ELF links and
 executes with a GCC-owned global-data driver.
+
+## Backend relocation checkpoint (unverified)
+
+The optional codegen module now includes `src/codegen/memory.rs` with a
+standalone ELF object builder that imports one writable `u32` global and emits
+an increment using a Cranelift global-value address, typed load, and store.
+`examples/m4_data_probe.rs` writes the object; `tools/m4_data_probe.sh`
+links it with a GCC-built owner of `m4_counter` and checks wraparound and
+subsequent mutation. This validates the relocation strategy separately from
+EDG IL decoding *once executed*. Neither the new Rust module nor this shell
+probe has been verified by CI in this checkpoint; do not count it as passing.
+
+The main M4 fixture `m4_external_globals.c` remains **unsupported** by
+`emit_edg_object()` until variable references are resolved to typed global
+lvalues and imported data are registered in the same `ObjectModule` that
+emits the routines. At that point, run the full differential harness and
+negative tests before marking M4 complete.
