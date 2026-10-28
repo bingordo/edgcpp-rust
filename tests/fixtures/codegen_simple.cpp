@@ -154,3 +154,43 @@ extern "C" long long edg_signed_convert(unsigned int a) {
 extern "C" unsigned long long edg_u64_top_constant() {
     return 18446744073709551615ULL;
 }
+
+extern "C" unsigned char edg_u8_mutable(unsigned char a) {
+    unsigned char value = a;
+    value = (unsigned char)(value + 250);
+    value = (unsigned char)(value + 10);
+    return value;
+}
+extern "C" short edg_i16_branch(short value, int choose) {
+    short local = value;
+    if (choose) {
+        local = (short)(local + 200);
+    } else {
+        local = (short)(local - 100);
+    }
+    return local;
+}
+extern "C" unsigned int edg_u32_while(unsigned int start, unsigned int count) {
+    unsigned int result = start;
+    unsigned int i = 0U;
+    while (i < count) {
+        result = result + 0xf0000000U;
+        i = i + 1U;
+    }
+    return result;
+}
+extern "C" unsigned short edg_u16_for(unsigned short n) {
+    unsigned short sum = 0;
+    unsigned short i = 0;
+    for (i = 0; i < n; i = (unsigned short)(i + 1)) {
+        sum = (unsigned short)(sum + i);
+    }
+    return sum;
+}
+extern "C" unsigned char edg_u8_merge(unsigned char a, unsigned char b, int select) {
+    unsigned char result = a;
+    if (select) {
+        result = b;
+    }
+    return result;
+}

@@ -12,6 +12,11 @@ extern "C" unsigned int edg_u32_order(unsigned int, unsigned int);
 extern "C" unsigned int edg_u32_cast(unsigned long long);
 extern "C" long long edg_signed_convert(unsigned int);
 extern "C" unsigned long long edg_u64_top_constant();
+extern "C" unsigned char edg_u8_mutable(unsigned char);
+extern "C" short edg_i16_branch(short, int);
+extern "C" unsigned int edg_u32_while(unsigned int, unsigned int);
+extern "C" unsigned short edg_u16_for(unsigned short);
+extern "C" unsigned char edg_u8_merge(unsigned char, unsigned char, int);
 extern "C" long long edg_add(long long, long long);
 extern "C" long long edg_affine(long long, long long);
 extern "C" long long edg_constant();
@@ -31,6 +36,17 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_u8_mutable(250U) != (unsigned char)254U) return 33;
+    if (edg_u8_mutable(0U) != (unsigned char)4U) return 34;
+    if (edg_i16_branch(-180, 1) != 20) return 35;
+    if (edg_i16_branch(-180, 0) != -280) return 36;
+    if (edg_u32_while(0xfedcba98U, 3U) !=
+        (0xfedcba98U + 3U * 0xf0000000U)) return 37;
+    if (edg_u32_while(0xfedcba98U, 0U) != 0xfedcba98U) return 38;
+    if (edg_u16_for(15U) != 105U) return 39;
+    if (edg_u16_for(0U) != 0U) return 40;
+    if (edg_u8_merge(250U, 3U, 1) != 3U) return 41;
+    if (edg_u8_merge(250U, 3U, 0) != 250U) return 42;
     if (edg_u32_wrap(0xfedcba98U) != (0xfedcba98U + 0xf0000000U)) return 25;
     if (edg_i8_promote(-100) != (signed char)((int)-100 + 20)) return 26;
     if (edg_u64_order(0xffffffffffffffffULL, 1ULL) != 0) return 27;
