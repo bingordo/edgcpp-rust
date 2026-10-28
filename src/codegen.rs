@@ -876,3 +876,5 @@ mod tests {
 
 // Structured blocks/loops use their own SSA-generating backend.
 mod cfg;
+mod memory;
+pub use memory::external_u32_increment_object;
