@@ -25,6 +25,9 @@ extern "C" int edg_for_postfix(int);
 extern "C" int edg_conditional_side_effect(int);
 extern "C" int edg_nested_ternary(int,int);
 extern "C" int edg_unary_not_bits(int);
+extern "C" unsigned int edg_compound_mixed_div(unsigned int, int);
+extern "C" unsigned int edg_compound_mixed_rem(unsigned int, int);
+extern "C" unsigned char edg_compound_u8_rem(int);
 extern "C" void edg_void_empty(void);
 extern "C" void edg_void_branch(long long);
 extern "C" signed char edg_i8_identity(signed char);
@@ -64,6 +67,9 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_compound_mixed_div(0xffffffffU, -2) != (0xffffffffU / (unsigned)-2)) return 76;
+    if (edg_compound_mixed_rem(0xffffffffU, -2) != (0xffffffffU % (unsigned)-2)) return 77;
+    if (edg_compound_u8_rem(-2) != (unsigned char)(250 % -2)) return 78;
     if (edg_short_and(0) != 0 || edg_short_and(1) != 107) return 66;
     if (edg_short_or(0) != 105 || edg_short_or(1) != 100) return 67;
     if (edg_conditional_mutation(0) != 88 ||

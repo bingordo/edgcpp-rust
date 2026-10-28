@@ -307,3 +307,19 @@ extern "C" int edg_nested_ternary(int a, int b) {
 extern "C" int edg_unary_not_bits(int a) {
     return !a + (~a & 255);
 }
+
+extern "C" unsigned int edg_compound_mixed_div(unsigned int a, int b) {
+    unsigned int x = a;
+    x /= b;
+    return x;
+}
+extern "C" unsigned int edg_compound_mixed_rem(unsigned int a, int b) {
+    unsigned int x = a;
+    x %= b;
+    return x;
+}
+extern "C" unsigned char edg_compound_u8_rem(int divisor) {
+    unsigned char x = 250;
+    x %= divisor;
+    return x;
+}

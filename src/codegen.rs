@@ -35,7 +35,7 @@ pub enum Expr {
     /// C local assignment expression: normalize to the declared scalar type
     /// before updating SSA, and return that normalized value.
     AssignLocal(usize, CAbiInt, Box<Expr>),
-    CompoundLocal(usize, CAbiInt, CCompoundOp, Box<Expr>),
+    CompoundLocal(usize, CAbiInt, CAbiInt, CCompoundOp, Box<Expr>),
     PostLocal(usize, CAbiInt, i64),
     Neg(Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),

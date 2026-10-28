@@ -258,7 +258,7 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             vars.insert(*i);
             Ok(())
         }
-        Expr::CompoundLocal(i,_,_,e) => {
+        Expr::CompoundLocal(i,_,_,_,e) => {
             if !vars.contains(i) { return Err(invalid("compound use of uninitialized local")); }
             check_expr(e, vars, params)
         }
@@ -347,6 +347,33 @@ fn check(
         }
     }
     Ok(live)
+}
+
+/// C integer promotions and usual arithmetic conversions for ordinary
+/// IL scalar types supported by the reference backend. EDG exposes widths
+/// and signedness, so rank is unambiguous for 8/16/32/64-bit builtins on
+/// our LP64 target. Values smaller than int always promote to signed int.
+fn promoted_integer_type(t: CAbiInt) -> CAbiInt {
+    if t.bits < 32 {
+        CAbiInt { bits: 32, signed: true, is_bool: false }
+    } else {
+        CAbiInt { is_bool: false, ..t }
+    }
+}
+fn common_integer_type(lhs: CAbiInt, rhs: CAbiInt) -> CAbiInt {
+    let a = promoted_integer_type(lhs);
+    let b = promoted_integer_type(rhs);
+    let bits = a.bits.max(b.bits);
+    let signed = if a.signed == b.signed {
+        a.signed
+    } else if a.bits == b.bits {
+        false
+    } else if a.bits > b.bits {
+        a.signed
+    } else {
+        b.signed
+    };
+    CAbiInt { bits, signed, is_bool: false }
 }
 
 /// Retrieve native, non-enum integer type information for a C expression.
@@ -452,7 +479,13 @@ fn lower_c_expression(
                         39 => CCompoundOp::Or, 40 => CCompoundOp::Xor,
                         _ => unreachable!(),
                     };
-                    Expr::CompoundLocal(index,ty,kind,rhs)
+                    let rhs_ty = integer_expression_type(il,graph,operands[1])?;
+                    let compute_ty = if matches!(kind,CCompoundOp::Shl|CCompoundOp::Shr) {
+                        promoted_integer_type(ty)
+                    } else {
+                        common_integer_type(ty,rhs_ty)
+                    };
+                    Expr::CompoundLocal(index,ty,compute_ty,kind,rhs)
                 }
             } else if matches!(op, 23 | 24 | 26) {
                 if operands.len() != 2 {
@@ -615,10 +648,16 @@ fn emit_expr(
             fb.def_var(var,normalized);
             old
         }
-        Expr::CompoundLocal(index,ty,op,rhs) => {
+        Expr::CompoundLocal(index,ty,compute_ty,op,rhs) => {
             let var = *vars.get(*index).ok_or_else(|| invalid("invalid compound target"))?;
             let before = fb.use_var(var);
             let after = emit_expr(rhs,fb,params,vars)?;
+            let before = normalize_c_value(fb,before,*compute_ty);
+            let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
+                after
+            } else {
+                normalize_c_value(fb,after,*compute_ty)
+            };
             let result = match op {
                 CCompoundOp::Add => fb.ins().iadd(before,after),
                 CCompoundOp::Sub => fb.ins().isub(before,after),
@@ -627,14 +666,14 @@ fn emit_expr(
                 CCompoundOp::Or => fb.ins().bor(before,after),
                 CCompoundOp::Xor => fb.ins().bxor(before,after),
                 CCompoundOp::Div => emit_integer_binary(
-                    if ty.signed {CIntBinaryOp::SignedDivide}
+                    if compute_ty.signed {CIntBinaryOp::SignedDivide}
                     else {CIntBinaryOp::UnsignedDivide},fb,before,after),
                 CCompoundOp::Rem => emit_integer_binary(
-                    if ty.signed {CIntBinaryOp::SignedRemainder}
+                    if compute_ty.signed {CIntBinaryOp::SignedRemainder}
                     else {CIntBinaryOp::UnsignedRemainder},fb,before,after),
                 CCompoundOp::Shl => fb.ins().ishl(before,after),
                 CCompoundOp::Shr => emit_integer_binary(
-                    if ty.signed {CIntBinaryOp::SignedShiftRight}
+                    if compute_ty.signed {CIntBinaryOp::SignedShiftRight}
                     else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
             };
             let normalized = normalize_c_value(fb,result,*ty);
