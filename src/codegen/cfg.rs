@@ -9,6 +9,7 @@ use cranelift_frontend::Variable;
 enum Stmt {
     Store(usize, Expr),
     Return(Expr),
+    ReturnVoid,
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
     /// Condition is checked before the body; increment runs after the body.
@@ -18,7 +19,11 @@ enum Stmt {
     Break,
     Continue,
 }
-struct Routine { name: String, parameters: usize, locals: usize, body: Vec<Stmt> }
+struct Routine {
+    name: String, parameters: usize, locals: usize, body: Vec<Stmt>,
+    /// None on existing standalone unit-test routines (signed-i64 ABI).
+    abi: Option<CAbi>,
+}
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
 fn lower(
@@ -31,9 +36,12 @@ fn lower(
     let expr = |id| lower_expression(graph, id, params, locals, il);
     match semantic(1, node.data.kind) {
         1 => {
-            let id = node.expression.ok_or_else(|| invalid("missing return expression"))?;
             if !node.children.is_empty() { return Err(invalid("return with nested statements")); }
-            Ok(vec![Stmt::Return(expr(id)?)])
+            if let Some(id) = node.expression {
+                Ok(vec![Stmt::Return(expr(id)?)])
+            } else {
+                Ok(vec![Stmt::ReturnVoid])
+            }
         }
         2 => {
             if node.expression.is_some() { return Err(invalid("block has an expression")); }
@@ -212,6 +220,7 @@ fn check(
                 vars.insert(*i);
             }
             Stmt::Return(e) => { check_expr(e, vars, params)?; live = false; }
+            Stmt::ReturnVoid => { live = false; }
             Stmt::If(e, yes, no) => {
                 check_expr(e, vars, params)?;
                 let mut a = vars.clone();
@@ -274,18 +283,38 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         if args.iter().enumerate().any(|(i,p)| p.position != Some(i as u32)) {
             return Err(invalid("non-contiguous function parameters"));
         }
-        validate_routine_abi(il, name, routine, &args)?;
+        let abi = cfg_routine_abi(il, name, routine, &args)?;
         let ids: Vec<_> = args.iter().map(|p| p.symbol).collect();
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
-        if check(&body, &mut HashSet::new(), ids.len(), locals.len(), 0)? {
+        let has_fallthrough = check(&body, &mut HashSet::new(), ids.len(), locals.len(), 0)?;
+        if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
         }
+        // Before implementing C's usual arithmetic conversions, only
+        // direct returns of constants/parameters (or void functions with
+        // no observable typed expression) can use non-i64 parameters or
+        // results. In particular, never silently miscompile unsigned
+        // comparisons or 32-bit wrapping of intermediate arithmetic.
+        let all_i64 = abi.parameters.iter().all(|p| p.bits == 64 && p.signed)
+            && abi.result.map_or(true, |p| p.bits == 64 && p.signed);
+        if !all_i64 && !is_abi_simple_body(&body) {
+            return Err(invalid(format!(
+                "{name}: mixed-width/unsigned expressions require typed C promotion lowering")));
+        }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
-            locals: locals.len(), body });
+            locals: locals.len(), body, abi: Some(abi) });
     }
     Ok(out)
+}
+/// For non-i64 ABIs, only effect-free returns of parameters/constants
+/// are currently known to have correct C semantics without promotions.
+fn is_abi_simple_body(body: &[Stmt]) -> bool {
+    body.iter().all(|stmt| match stmt {
+        Stmt::Return(Expr::Parameter(_) | Expr::Constant(_)) | Stmt::ReturnVoid => true,
+        _ => false,
+    })
 }
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
@@ -373,6 +402,10 @@ fn emit_body(
             Stmt::Return(e) => {
                 let v = emit_expr(e, fb, args, vars)?;
                 fb.ins().return_(&[v]);
+                live = false;
+            }
+            Stmt::ReturnVoid => {
+                fb.ins().return_(&[]);
                 live = false;
             }
             Stmt::If(cond, yes, no) => {
@@ -514,8 +547,19 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
             return Err(invalid("invalid export name"));
         }
         let mut context = module.make_context();
-        for _ in 0..func.parameters { context.func.signature.params.push(AbiParam::new(types::I64)); }
-        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let abi = func.abi.clone().unwrap_or_else(|| CAbi {
+            parameters: vec![CAbiInt { bits: 64, signed: true }; func.parameters],
+            result: Some(CAbiInt { bits: 64, signed: true }),
+        });
+        if abi.parameters.len() != func.parameters {
+            return Err(invalid("ABI parameter count mismatch"));
+        }
+        for param in &abi.parameters {
+            context.func.signature.params.push(AbiParam::new(param.cranelift()));
+        }
+        if let Some(result) = abi.result {
+            context.func.signature.returns.push(AbiParam::new(result.cranelift()));
+        }
         let id = module.declare_function(&func.name,Linkage::Export,&context.func.signature)
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
         let mut fb_context = FunctionBuilderContext::new();
@@ -525,14 +569,44 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
             fb.append_block_params_for_function_params(entry);
             fb.switch_to_block(entry);
             fb.seal_block(entry);
-            let params = fb.block_params(entry).to_vec();
+            let params: Vec<_> = fb.block_params(entry).to_vec().into_iter()
+                .zip(&abi.parameters).map(|(value, ty)| {
+                    if ty.bits == 64 { value }
+                    else if ty.signed { fb.ins().sextend(types::I64, value) }
+                    else { fb.ins().uextend(types::I64, value) }
+                }).collect();
             let vars: Vec<_> = (0..func.locals).map(|i| {
                 let v = Variable::from_u32(i as u32);
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            if emit_body(&func.body,&mut fb,&params,&vars,None)? {
-                return Err(invalid("fallthrough in code generation"));
+            // Non-i64 direct returns need conversion from the widened
+            // internal i64 value to the ABI return register width.
+            let body = if let Some(ret) = abi.result {
+                if ret.bits < 64 && is_abi_simple_body(&func.body) {
+                    // Emit typed direct-return code without an invalid
+                    // i64 return instruction for an I8/I16/I32 signature.
+                    match func.body.as_slice() {
+                        [Stmt::Return(e)] => {
+                            let v = emit_expr(e, &mut fb, &params, &vars)?;
+                            let small = fb.ins().ireduce(ret.cranelift(), v);
+                            fb.ins().return_(&[small]);
+                            false
+                        }
+                        _ => emit_body(&func.body,&mut fb,&params,&vars,None)?,
+                    }
+                } else {
+                    emit_body(&func.body,&mut fb,&params,&vars,None)?
+                }
+            } else {
+                emit_body(&func.body,&mut fb,&params,&vars,None)?
+            };
+            if body {
+                if abi.result.is_none() {
+                    fb.ins().return_(&[]);
+                } else {
+                    return Err(invalid("fallthrough in code generation"));
+                }
             }
             fb.finalize();
         }
@@ -566,7 +640,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -591,7 +665,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -618,7 +692,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]

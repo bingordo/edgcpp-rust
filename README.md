@@ -203,3 +203,14 @@ baselines](https://github.com/bingordo/edgcpp-rust/actions/runs/40648943692)
 (seeds 12345–12444, GCC -O0/-O2 and Clang -O2). These are
 **baseline-only**, not Cranelift passes. The harness explicitly reports
 unsupported constructs and mismatches rather than counting them as passes.
+
+### M2 initial C ABI support
+
+The CFG emitter now preserves EDG-native scalar integer width/sign (8, 16,
+32, 64 bits) for function parameters and direct simple return values, and
+supports `void` functions and `return;`. Cranelift arguments are extended
+to the internal I64 representation and simple return values are narrowed
+according to the declared C ABI. Full arithmetic/conversion on mixed-width
+or unsigned values remains explicitly rejected until native C promotions,
+intermediate truncation and signed/unsigned comparisons are implemented.
+The separate historical pure-expression `lower_edg()` remains i64-only.

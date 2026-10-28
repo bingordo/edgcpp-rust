@@ -1,5 +1,10 @@
 #include <cstdio>
 
+extern "C" void edg_void_empty(void);
+extern "C" void edg_void_branch(long long);
+extern "C" signed char edg_i8_identity(signed char);
+extern "C" unsigned int edg_u32_identity(unsigned int);
+extern "C" short edg_i16_constant(void);
 extern "C" long long edg_add(long long, long long);
 extern "C" long long edg_affine(long long, long long);
 extern "C" long long edg_constant();
@@ -19,6 +24,13 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    edg_void_empty();
+    edg_void_branch(-1);
+    edg_void_branch(1);
+    if (edg_i8_identity(static_cast<signed char>(-97)) != -97) return 21;
+    if (edg_i8_identity(static_cast<signed char>(127)) != 127) return 22;
+    if (edg_u32_identity(0xf1234567U) != 0xf1234567U) return 23;
+    if (edg_i16_constant() != 123) return 24;
     long long checksum = 0;
     for (long long a = -25; a <= 25; ++a) {
         for (long long b = -17; b <= 17; ++b) {

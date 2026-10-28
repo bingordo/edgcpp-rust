@@ -284,6 +284,22 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
 #endif
     if (signed_64) emit_record(43, {num(id)});
   }
+  // Capture scalar C ABI width/sign from EDG, rather than assuming host
+  // C++ integer layout or manually copying EDG private discriminants.
+  // Restrict to ordinary complete 8/16/32/64-bit integer types (no enums,
+  // bit-precise types, or unsupported extended integer sizes).
+  if (type->kind == tk_integer && !type->incomplete &&
+      !type->variant.integer.enum_type &&
+      (type->size == 1 || type->size == 2 ||
+       type->size == 4 || type->size == 8) &&
+      type->variant.integer.int_kind != ik_bit_precise &&
+      type->variant.integer.int_kind != ik_unsigned_bit_precise) {
+    const auto kind = type->variant.integer.int_kind;
+    if (kind < ik_last) {
+      emit_record(46, {num(id), num(type->size * 8),
+                       num(int_kind_is_signed[kind] ? 1 : 0)});
+    }
+  }
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {
@@ -1388,6 +1404,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_bool_cast)) return 17;
     if (value == static_cast<unsigned>(eok_assign)) return 18;
   } else if (category == 4) {
+    if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
     if (value == static_cast<unsigned>(tk_routine)) return 2;
     if (value == static_cast<unsigned>(tk_typeref)) return 3;

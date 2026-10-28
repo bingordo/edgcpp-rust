@@ -123,3 +123,12 @@ extern "C" long long edg_do_jumps(long long a, long long b) {
     } while (i < b);
     return sum + i;
 }
+
+extern "C" void edg_void_empty(void) {}
+extern "C" void edg_void_branch(long long a) {
+    if (a < 0) return;
+    return;
+}
+extern "C" signed char edg_i8_identity(signed char a) { return a; }
+extern "C" unsigned int edg_u32_identity(unsigned int a) { return a; }
+extern "C" short edg_i16_constant(void) { return 123; }

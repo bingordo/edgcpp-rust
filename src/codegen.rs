@@ -513,6 +513,82 @@ fn canonical_abi_type(il: &Il, mut ty: crate::TypeId) -> Result<crate::TypeId, C
     Err(CodegenError::InvalidFunction("cyclic EDG typeref".into()))
 }
 
+/// The CFG backend uses exact EDG integer metadata to select C ABI widths.
+/// Until full C promotions and conversions are lowered, mixed-width/unsigned
+/// arithmetic is NOT accepted. Pure return of a literal or parameter is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CAbiInt {
+    bits: u8,
+    signed: bool,
+}
+impl CAbiInt {
+    fn cranelift(self) -> cranelift_codegen::ir::Type {
+        match self.bits {
+            8 => types::I8,
+            16 => types::I16,
+            32 => types::I32,
+            64 => types::I64,
+            _ => unreachable!("validated ABI width"),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CAbi {
+    parameters: Vec<CAbiInt>,
+    result: Option<CAbiInt>,
+}
+fn cfg_routine_abi(
+    il: &Il, name: &str, routine: crate::SymbolId,
+    parameters: &[&crate::FunctionParameter],
+) -> Result<CAbi, CodegenError> {
+    let error = |msg: &str| CodegenError::InvalidFunction(format!("{name}: {msg}"));
+    let ty = il.symbol_types.iter().find(|s| s.symbol == routine)
+        .ok_or_else(|| error("missing declared routine type"))?;
+    let function_ty = canonical_abi_type(il, ty.ty)?;
+    let def = il.types.iter().find(|d| d.id == function_ty)
+        .ok_or_else(|| error("missing function type definition"))?;
+    if semantic(4, def.kind) != 2 || def.related_role != Some(3) {
+        return Err(error("expected EDG routine with return type"));
+    }
+    let sig = il.function_signatures.iter().find(|s| s.owner == function_ty)
+        .ok_or_else(|| error("missing function signature"))?;
+    if !sig.prototyped || sig.variadic {
+        return Err(error("unprototyped or variadic ABI unsupported"));
+    }
+    let type_of = |id: crate::TypeId| -> Result<CAbiInt, CodegenError> {
+        let id = canonical_abi_type(il, id)?;
+        let entry = il.c_integer_types.iter().find(|t| t.id == id)
+            .ok_or_else(|| error("parameter/return ABI must be ordinary 8/16/32/64-bit integer"))?;
+        Ok(CAbiInt { bits: entry.bits, signed: entry.signed })
+    };
+    let return_ty = canonical_abi_type(il,
+        def.related.ok_or_else(|| error("missing return type"))?)?;
+    let result = if il.types.iter().any(|t|
+        t.id == return_ty && semantic(4, t.kind) == 4) {
+        None
+    } else {
+        Some(type_of(return_ty)?)
+    };
+    let mut declared: Vec<_> = il.type_parameters.iter()
+        .filter(|p| p.owner == function_ty).collect();
+    declared.sort_by_key(|p| p.position);
+    if declared.len() != parameters.len() {
+        return Err(error("declared/defined parameter count mismatch"));
+    }
+    let mut args = Vec::new();
+    for (i, (decl, param)) in declared.iter().zip(parameters).enumerate() {
+        if decl.position != i as u32 || param.position != Some(i as u32) ||
+           param.compiler_generated || param.implicit_this {
+            return Err(error("unsupported/misordered ABI parameter"));
+        }
+        let a = canonical_abi_type(il, decl.ty)?;
+        let b = canonical_abi_type(il, param.ty)?;
+        if a != b { return Err(error("declared/defined parameter types disagree")); }
+        args.push(type_of(a)?);
+    }
+    Ok(CAbi { parameters: args, result })
+}
+
 /// All accepted functions must have an exact, nonvariadic signed-i64 signature.
 /// This is checked before evaluating the body because an otherwise valid body
 /// does not prove the machine-level calling convention is correct.
