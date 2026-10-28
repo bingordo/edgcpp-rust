@@ -52,11 +52,11 @@ mod tests {
     #[test]
     fn emits_relocatable_external_data_object() {
         let object = external_u32_increment_object("m4_counter").unwrap();
-        assert_eq!(&object[..4], b"\\x7fELF");
+        assert_eq!(&object[..4], b"\x7fELF");
         assert!(object.windows("m4_counter".len()).any(|w| w == b"m4_counter"));
     }
     #[test]
     fn rejects_invalid_external_symbol() {
-        assert!(external_u32_increment_object("bad\\0symbol").is_err());
+        assert!(external_u32_increment_object("bad\0symbol").is_err());
     }
 }
