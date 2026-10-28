@@ -158,3 +158,18 @@ Constant signed-i64 dynamic initializers (including zero initialization)
 are now carried as explicit native wire events, because EDG represents their
 values without expression nodes. No default zero is invented for unknown
 initializer forms.
+
+## Structured loop exits
+
+EDG represents source-level `break` and `continue` as gotos targeting
+compiler-generated labels. The bridge now carries EDG's native label flags,
+including separate switch-break classification. CFG lowering handles only
+confirmed loop-break/continue targets, and rejects user gotos or switch breaks.
+The compiler routes `continue` to a while header, a for increment, or a
+do-while test as appropriate. Loop exit blocks remain unsealed until all break
+edges are built, and loop header blocks until all continue/backedges are built.
+
+A path-sensitive precheck rejects jumps outside a loop and conservatively
+disallows reads of variables only initialized on some loop paths. Native
+differential tests cover loop breaks and continues across for, while, and
+do-while.

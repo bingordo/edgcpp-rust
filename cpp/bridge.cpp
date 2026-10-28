@@ -845,6 +845,15 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                                              label_name == nullptr ? "" : label_name);
       emit_record(28, {txt(function), txt(path), num(label_id),
                        num(stmt->kind == stmk_label ? 1 : 0)});
+      // EDG represents source break/continue as gotos to compiler labels.
+      // Native label flags distinguish those from user gotos and switch breaks.
+      unsigned loop_kind = 0;
+      if (label->continue_label)
+        loop_kind = stmt->kind == stmk_goto ? 2 : 4;
+      else if (label->break_label && !label->switch_break_label)
+        loop_kind = stmt->kind == stmk_goto ? 1 : 3;
+      if (loop_kind != 0)
+        emit_record(44, {txt(function), txt(path), num(loop_kind)});
     }
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
@@ -1353,6 +1362,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_while)) return 7;
     if (value == static_cast<unsigned>(stmk_end_test_while)) return 8;
     if (value == static_cast<unsigned>(stmk_for)) return 9;
+    if (value == static_cast<unsigned>(stmk_goto)) return 10;
+    if (value == static_cast<unsigned>(stmk_label)) return 11;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;

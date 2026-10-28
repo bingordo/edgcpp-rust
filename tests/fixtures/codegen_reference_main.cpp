@@ -14,6 +14,9 @@ extern "C" long long edg_no_else(long long, long long);
 extern "C" long long edg_while(long long, long long);
 extern "C" long long edg_for(long long, long long);
 extern "C" long long edg_do_while(long long, long long);
+extern "C" long long edg_for_jumps(long long, long long);
+extern "C" long long edg_while_jumps(long long, long long);
+extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
     long long checksum = 0;
@@ -63,7 +66,31 @@ int main() {
                 do_i = do_i + 1;
             } while (do_i < b);
             if (edg_do_while(a, b) != do_total + do_i) return 10;
-            checksum += (edg_for(a, b) + edg_do_while(a, b) +
+            long long for_jump_i = a, for_jump_sum = b;
+            for (for_jump_i = a; for_jump_i < b; for_jump_i = for_jump_i + 1) {
+                if (for_jump_i == a + 1) continue;
+                if (for_jump_i > a + 3) break;
+                for_jump_sum = for_jump_sum + for_jump_i;
+            }
+            if (edg_for_jumps(a, b) != for_jump_sum + for_jump_i) return 11;
+            long long while_jump_i = a, while_jump_sum = b;
+            while (while_jump_i < b) {
+                while_jump_i = while_jump_i + 1;
+                if (while_jump_i == a + 1) continue;
+                if (while_jump_i > a + 3) break;
+                while_jump_sum = while_jump_sum + while_jump_i;
+            }
+            if (edg_while_jumps(a, b) != while_jump_sum + while_jump_i) return 12;
+            long long do_jump_i = a, do_jump_sum = b;
+            do {
+                do_jump_i = do_jump_i + 1;
+                if (do_jump_i == a + 1) continue;
+                if (do_jump_i > a + 3) break;
+                do_jump_sum = do_jump_sum + do_jump_i;
+            } while (do_jump_i < b);
+            if (edg_do_jumps(a, b) != do_jump_sum + do_jump_i) return 13;
+            checksum += (edg_for_jumps(a, b) + edg_while_jumps(a, b) +
+                         edg_do_jumps(a, b) + edg_for(a, b) + edg_do_while(a, b) +
                          edg_mutable_if(a, b) + edg_no_else(a, b) + edg_while(a, b) +
                          add * 3 + affine + choose + abs + cmp + bits +
                          edg_locals(a, b) + edg_locals_choose(a, b)) * (a + 31);

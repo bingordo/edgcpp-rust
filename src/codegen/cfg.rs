@@ -1,6 +1,8 @@
 //! EDG structured statements -> Cranelift CFG with SSA for signed-i64 locals.
 use super::*;
 use std::collections::HashSet;
+use std::cell::Cell;
+use cranelift_codegen::ir::Block;
 use cranelift_frontend::Variable;
 
 #[derive(Debug, Clone)]
@@ -13,6 +15,8 @@ enum Stmt {
     For { init: Vec<Stmt>, condition: Expr, increment: Vec<Stmt>, body: Vec<Stmt> },
     /// Test is at the bottom, so the body runs at least once.
     DoWhile(Vec<Stmt>, Expr),
+    Break,
+    Continue,
 }
 struct Routine { name: String, parameters: usize, locals: usize, body: Vec<Stmt> }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
@@ -148,6 +152,23 @@ fn lower(
                 None => Vec::new() };
             Ok(vec![Stmt::For { init, condition, increment, body }])
         }
+        10 | 11 => {
+            // Native EDG records classify only compiler-generated loop
+            // break/continue targets. Never interpret arbitrary gotos.
+            let sem = semantic(1, node.data.kind);
+            let matching: Vec<_> = il.loop_transfers.iter()
+                .filter(|t| t.function == *function && t.statement_path == *path)
+                .collect();
+            if matching.len() != 1 || graph.statement_label(id).is_none() {
+                return Err(invalid("unsupported non-loop goto or label"));
+            }
+            match (sem, matching[0].kind) {
+                (10, 1) => Ok(vec![Stmt::Break]),
+                (10, 2) => Ok(vec![Stmt::Continue]),
+                (11, 3 | 4) => Ok(Vec::new()),
+                _ => Err(invalid("inconsistent EDG loop-label classification")),
+            }
+        }
         _ => Err(invalid(format!("unsupported EDG statement {}", node.data.kind))),
     }
 }
@@ -174,12 +195,17 @@ fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), Code
 }
 // Returns true if execution can reach the end of this sequence.
 fn check(
-    body: &[Stmt], vars: &mut HashSet<usize>, params: usize, locals: usize,
+    body: &[Stmt], vars: &mut HashSet<usize>, params: usize,
+    locals: usize, loop_depth: usize,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in body {
         if !live { return Err(invalid("unreachable statement")); }
         match stmt {
+            Stmt::Break | Stmt::Continue => {
+                if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
+                live = false;
+            }
             Stmt::Store(i,e) => {
                 if *i >= locals { return Err(invalid("invalid local index")); }
                 check_expr(e, vars, params)?;
@@ -190,8 +216,8 @@ fn check(
                 check_expr(e, vars, params)?;
                 let mut a = vars.clone();
                 let mut b = vars.clone();
-                let ra = check(yes, &mut a, params, locals)?;
-                let rb = check(no, &mut b, params, locals)?;
+                let ra = check(yes, &mut a, params, locals, loop_depth)?;
+                let rb = check(no, &mut b, params, locals, loop_depth)?;
                 match (ra, rb) {
                     (true, true) => *vars = a.intersection(&b).copied().collect(),
                     (true, false) => *vars = a,
@@ -202,35 +228,29 @@ fn check(
             Stmt::While(e, inner) => {
                 check_expr(e, vars, params)?;
                 let mut nested = vars.clone();
-                check(inner, &mut nested, params, locals)?;
-                // Zero iterations are possible: don't propagate loop-only definitions.
+                check(inner, &mut nested, params, locals, loop_depth + 1)?;
+                // A while may execute zero times. Do not propagate updates.
             }
             Stmt::For { init, condition, increment, body } => {
-                if !check(init, vars, params, locals)? {
+                if !check(init, vars, params, locals, loop_depth)? {
                     live = false;
                     continue;
                 }
                 check_expr(condition, vars, params)?;
-                let mut body_vars = vars.clone();
-                let body_live = check(body, &mut body_vars, params, locals)?;
-                // Deliberately validate increment against loop-entry values.
-                // A value assigned only by the body is not available if
-                // arbitrary breaks/continues are introduced later.
-                if body_live {
-                    let mut increment_vars = vars.clone();
-                    check(increment, &mut increment_vars, params, locals)?;
-                }
+                let mut nested = vars.clone();
+                check(body, &mut nested, params, locals, loop_depth + 1)?;
+                // Continue paths can execute the increment. Require that all
+                // its reads are safe even without any body-local writes.
+                let mut increment_state = vars.clone();
+                check(increment, &mut increment_state, params, locals, loop_depth + 1)?;
             }
             Stmt::DoWhile(body, condition) => {
-                let mut body_vars = vars.clone();
-                let body_live = check(body, &mut body_vars, params, locals)?;
-                if body_live {
-                    check_expr(condition, &body_vars, params)?;
-                    // Propagate only variables already initialized at entry.
-                    // This is conservative until path-based loop exits exist.
-                } else {
-                    live = false;
-                }
+                let mut nested = vars.clone();
+                check(body, &mut nested, params, locals, loop_depth + 1)?;
+                // Conservative: a continue path can reach the test without
+                // writes made only by other paths of the body.
+                check_expr(condition, vars, params)?;
+                // A break can reach the successor, so keep only entry facts.
             }
         }
     }
@@ -259,7 +279,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
-        if check(&body, &mut HashSet::new(), ids.len(), locals.len())? {
+        if check(&body, &mut HashSet::new(), ids.len(), locals.len(), 0)? {
             return Err(invalid(format!("{name}: some path has no return")));
         }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
@@ -318,14 +338,34 @@ fn emit_expr(
         }
     })
 }
+#[derive(Clone, Copy)]
+struct LoopTargets<'a> {
+    break_to: Block,
+    continue_to: Block,
+    saw_break: &'a Cell<bool>,
+    saw_continue: &'a Cell<bool>,
+}
 fn emit_body(
     stmts: &[Stmt], fb: &mut FunctionBuilder<'_>,
     args: &[cranelift_codegen::ir::Value], vars: &[Variable],
+    outer: Option<LoopTargets<'_>>,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
         if !live { return Err(invalid("unreachable statement")); }
         match stmt {
+            Stmt::Break => {
+                let dest = outer.ok_or_else(|| invalid("break outside loop"))?;
+                fb.ins().jump(dest.break_to, &[]);
+                dest.saw_break.set(true);
+                live = false;
+            }
+            Stmt::Continue => {
+                let dest = outer.ok_or_else(|| invalid("continue outside loop"))?;
+                fb.ins().jump(dest.continue_to, &[]);
+                dest.saw_continue.set(true);
+                live = false;
+            }
             Stmt::Store(i,e) => {
                 let v = emit_expr(e, fb, args, vars)?;
                 fb.def_var(*vars.get(*i).ok_or_else(|| invalid("bad local"))?, v);
@@ -344,7 +384,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes, fb, args, vars)?;
+                let t_live = emit_body(yes, fb, args, vars, outer)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -352,7 +392,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no, fb, args, vars)?;
+                let f_live = emit_body(no, fb, args, vars, outer)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -376,20 +416,29 @@ fn emit_body(
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual,c,0);
                 fb.ins().brif(flag,body_block,&[],exit,&[]);
                 fb.seal_block(body_block);
-                fb.seal_block(exit);
                 fb.switch_to_block(body_block);
-                if emit_body(body,fb,args,vars)? { fb.ins().jump(head,&[]); }
-                // Seal only after the backedge, allowing loop-carried SSA values.
+                let saw_break = Cell::new(false);
+                let saw_continue = Cell::new(false);
+                let targets = LoopTargets {
+                    break_to: exit, continue_to: head,
+                    saw_break: &saw_break, saw_continue: &saw_continue,
+                };
+                if emit_body(body,fb,args,vars,Some(targets))? {
+                    fb.ins().jump(head,&[]);
+                }
+                // Backedges and break edges are complete.
                 fb.seal_block(head);
+                fb.seal_block(exit);
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init, fb, args, vars)? {
+                if !emit_body(init, fb, args, vars, outer)? {
                     live = false;
                     continue;
                 }
                 let head = fb.create_block();
                 let body_block = fb.create_block();
+                let step = fb.create_block();
                 let exit = fb.create_block();
                 fb.ins().jump(head, &[]);
                 fb.switch_to_block(head);
@@ -397,31 +446,52 @@ fn emit_body(
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
                 fb.ins().brif(flag, body_block, &[], exit, &[]);
                 fb.seal_block(body_block);
-                fb.seal_block(exit);
                 fb.switch_to_block(body_block);
-                if emit_body(body, fb, args, vars)? {
-                    if emit_body(increment, fb, args, vars)? {
+                let saw_break = Cell::new(false);
+                let saw_continue = Cell::new(false);
+                let targets = LoopTargets {
+                    break_to: exit, continue_to: step,
+                    saw_break: &saw_break, saw_continue: &saw_continue,
+                };
+                let body_live = emit_body(body, fb, args, vars, Some(targets))?;
+                if body_live { fb.ins().jump(step, &[]); }
+                fb.seal_block(step);
+                if body_live || saw_continue.get() {
+                    fb.switch_to_block(step);
+                    if emit_body(increment, fb, args, vars, Some(targets))? {
                         fb.ins().jump(head, &[]);
                     }
                 }
                 fb.seal_block(head);
+                fb.seal_block(exit);
                 fb.switch_to_block(exit);
             }
             Stmt::DoWhile(body, cond) => {
                 let body_block = fb.create_block();
+                let test_block = fb.create_block();
+                let exit = fb.create_block();
                 fb.ins().jump(body_block, &[]);
                 fb.switch_to_block(body_block);
-                // The backedge is emitted by the test below.
-                if emit_body(body, fb, args, vars)? {
+                let saw_break = Cell::new(false);
+                let saw_continue = Cell::new(false);
+                let targets = LoopTargets {
+                    break_to: exit, continue_to: test_block,
+                    saw_break: &saw_break, saw_continue: &saw_continue,
+                };
+                let body_live = emit_body(body, fb, args, vars, Some(targets))?;
+                if body_live { fb.ins().jump(test_block, &[]); }
+                fb.seal_block(test_block);
+                if body_live || saw_continue.get() {
+                    fb.switch_to_block(test_block);
                     let test = emit_expr(cond, fb, args, vars)?;
                     let flag = fb.ins().icmp_imm(IntCC::NotEqual, test, 0);
-                    let exit = fb.create_block();
                     fb.ins().brif(flag, body_block, &[], exit, &[]);
-                    fb.seal_block(body_block);
-                    fb.seal_block(exit);
+                }
+                fb.seal_block(body_block);
+                fb.seal_block(exit);
+                if body_live || saw_continue.get() || saw_break.get() {
                     fb.switch_to_block(exit);
                 } else {
-                    fb.seal_block(body_block);
                     live = false;
                 }
             }
@@ -461,7 +531,7 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            if emit_body(&func.body,&mut fb,&params,&vars)? {
+            if emit_body(&func.body,&mut fb,&params,&vars,None)? {
                 return Err(invalid("fallthrough in code generation"));
             }
             fb.finalize();
@@ -494,7 +564,7 @@ mod tests {
             ),
             Stmt::Return(Expr::Local(0)),
         ];
-        assert!(!check(&body,&mut HashSet::new(),2,1).unwrap());
+        assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
             name: "cfg_unit".into(), parameters: 2, locals: 1, body,
         }]).unwrap();
@@ -519,9 +589,36 @@ mod tests {
                     Box::new(Expr::Constant(5)))),
             Stmt::Return(Expr::Local(1)),
         ];
-        assert!(!check(&body, &mut HashSet::new(), 2, 2).unwrap());
+        assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
             name: "for_and_do".into(), parameters: 2, locals: 2, body,
+        }]).unwrap()[..4], b"\x7fELF");
+    }
+    #[test]
+    fn rejects_break_outside_loop_and_emits_continue_break() {
+        assert!(check(&[Stmt::Break], &mut HashSet::new(), 0, 0, 0).is_err());
+        let body = vec![
+            Stmt::Store(0, Expr::Parameter(0)),
+            Stmt::For {
+                init: vec![],
+                condition: Expr::Compare(CompareOp::Less,
+                    Box::new(Expr::Local(0)), Box::new(Expr::Parameter(1))),
+                increment: vec![Stmt::Store(0, Expr::Add(
+                    Box::new(Expr::Local(0)), Box::new(Expr::Constant(1))))],
+                body: vec![
+                    Stmt::If(Expr::Compare(CompareOp::Equal,
+                        Box::new(Expr::Local(0)), Box::new(Expr::Constant(0))),
+                        vec![Stmt::Continue], vec![]),
+                    Stmt::If(Expr::Compare(CompareOp::Greater,
+                        Box::new(Expr::Local(0)), Box::new(Expr::Constant(5))),
+                        vec![Stmt::Break], vec![]),
+                ],
+            },
+            Stmt::Return(Expr::Local(0)),
+        ];
+        assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
+        assert_eq!(&emit_routines(&[Routine {
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -532,6 +629,6 @@ mod tests {
                 vec![Stmt::Store(0,Expr::Constant(1))],vec![]),
             Stmt::Return(Expr::Local(0)),
         ];
-        assert!(check(&body,&mut vars,1,1).is_err());
+        assert!(check(&body,&mut vars,1,1,0).is_err());
     }
 }

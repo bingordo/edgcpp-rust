@@ -90,3 +90,36 @@ extern "C" long long edg_do_while(long long a, long long b) {
     } while (i < b);
     return total + i;
 }
+
+extern "C" long long edg_for_jumps(long long a, long long b) {
+    long long i = a;
+    long long sum = b;
+    for (i = a; i < b; i = i + 1) {
+        if (i == a + 1) continue;
+        if (i > a + 3) break;
+        sum = sum + i;
+    }
+    return sum + i;
+}
+extern "C" long long edg_while_jumps(long long a, long long b) {
+    long long i = a;
+    long long sum = b;
+    while (i < b) {
+        i = i + 1;
+        if (i == a + 1) continue;
+        if (i > a + 3) break;
+        sum = sum + i;
+    }
+    return sum + i;
+}
+extern "C" long long edg_do_jumps(long long a, long long b) {
+    long long i = a;
+    long long sum = b;
+    do {
+        i = i + 1;
+        if (i == a + 1) continue;
+        if (i > a + 3) break;
+        sum = sum + i;
+    } while (i < b);
+    return sum + i;
+}

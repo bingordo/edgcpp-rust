@@ -68,6 +68,8 @@ pub struct Il {
     pub control_expressions: Vec<ControlExpression>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
+    /// Native generated-label classification for structured loop transfers.
+    pub loop_transfers: Vec<LoopTransfer>,
     /// Variable declaration positions within structured statements.
     pub statement_declarations: Vec<StatementDeclaration>,
     /// Dynamic initialization execution sites with optional expression trees.
@@ -480,6 +482,14 @@ pub struct StatementLabel {
     pub definition: bool,
 }
 
+/// 1=break goto, 2=continue goto, 3=break label, 4=continue label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopTransfer {
+    pub function: String,
+    pub statement_path: String,
+    pub kind: u32,
+}
+
 /// A snapshot of an EDG expression and its ordered operand tree.
 /// Discriminants are native EDG enums; consumers must use the matching EDG build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -720,6 +730,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         41 => Some(il.lifetime_destructions.len()),
         42 => Some(il.routine_identities.len()),
         43 => Some(il.signed_i64_types.len()),
+        44 => Some(il.loop_transfers.len()),
         45 => Some(il.statement_integer_initializers.len()),
         18 => Some(il.calls.len()),
         _ => None,
@@ -734,7 +745,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 45 => 3, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -781,6 +792,12 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let Some(id) = n(0) else { return; };
             if id == 0 { return; }
             output.signed_i64_types.push(TypeId(id));
+        }
+        44 => {
+            let (Some(function), Some(statement_path), Some(kind)) =
+                (t(0), t(1), n(2)) else { return; };
+            if !(1..=4).contains(&kind) { return; }
+            output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
         }
         45 => {
             let (Some(function), Some(statement_path), Some(value)) =
