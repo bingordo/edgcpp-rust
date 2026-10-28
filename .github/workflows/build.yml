@@ -259,6 +259,29 @@ jobs:
             printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
           )
 
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
       - name: Reject unsupported EDG constructs
         working-directory: edgcpp-rust
         env:
