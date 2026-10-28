@@ -653,10 +653,10 @@ fn emit_expr(
             fb.seal_block(no);
             fb.switch_to_block(yes);
             let yes_value = emit_expr(a, fb, params, vars)?;
-            fb.ins().jump(merge, &[yes_value]);
+            fb.ins().jump(merge, &[yes_value.into()]);
             fb.switch_to_block(no);
             let no_value = emit_expr(b, fb, params, vars)?;
-            fb.ins().jump(merge, &[no_value]);
+            fb.ins().jump(merge, &[no_value.into()]);
             fb.seal_block(merge);
             fb.switch_to_block(merge);
             fb.block_params(merge)[0]
