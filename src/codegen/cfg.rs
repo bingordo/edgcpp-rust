@@ -1,4 +1,4 @@
-//! EDG structured statements -> Cranelift CFG with SSA for signed-i64 locals.
+//! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 use super::*;
 use std::collections::HashSet;
 use std::cell::Cell;
@@ -23,8 +23,53 @@ struct Routine {
     name: String, parameters: usize, locals: usize, body: Vec<Stmt>,
     /// None on existing standalone unit-test routines (signed-i64 ABI).
     abi: Option<CAbi>,
+    /// None only for legacy signed-i64 unit-test routines.
+    local_types: Option<Vec<CAbiInt>>,
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
+
+/// CFG-only scalar local validation. Addressable and volatile storage remains
+/// deliberately unsupported until the memory backend is implemented.
+fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, CodegenError> {
+    if local.static_storage || local.compiler_generated ||
+        local.structured_binding || local.handler_parameter {
+        return Err(invalid(format!("unsupported local storage for {}", local.symbol.0)));
+    }
+    // Typedef chains may hide qualifiers. Conservatively reject them now.
+    let mut ty = local.ty;
+    for _ in 0..=il.types.len() {
+        if let Some(detail) = il.type_details.iter().find(|d| d.owner == ty) {
+            if detail.is_reference || detail.is_rvalue_reference ||
+               detail.qualifiers.unwrap_or(0) != 0 {
+                return Err(invalid("qualified/reference local requires memory semantics"));
+            }
+        }
+        let def = il.types.iter().find(|d| d.id == ty)
+            .ok_or_else(|| invalid("missing local type definition"))?;
+        if semantic(4, def.kind) != 3 { break; }
+        ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
+    }
+    let ty = canonical_abi_type(il, local.ty)?;
+    let info = il.c_integer_types.iter().find(|t| t.id == ty)
+        .ok_or_else(|| invalid(format!("local {} has unsupported scalar type",local.symbol.0)))?;
+    Ok(CAbiInt { bits: info.bits, signed: info.signed })
+}
+fn cfg_checked_local(
+    il: &Il, locals: &[&crate::LocalVariable], symbol: crate::SymbolId,
+) -> Result<usize, CodegenError> {
+    let index = locals.iter().position(|v| v.symbol == symbol)
+        .ok_or_else(|| invalid(format!("unsupported/nonlocal variable {}",symbol.0)))?;
+    cfg_local_type(il, locals[index])?;
+    Ok(index)
+}
+fn normalize_c_value(
+    fb: &mut FunctionBuilder<'_>, value: cranelift_codegen::ir::Value, ty: CAbiInt,
+) -> cranelift_codegen::ir::Value {
+    if ty.bits == 64 { return value; }
+    let small = fb.ins().ireduce(ty.cranelift(), value);
+    if ty.signed { fb.ins().sextend(types::I64, small) }
+    else { fb.ins().uextend(types::I64, small) }
+}
 
 fn lower(
     graph: &Graph, id: crate::graph::StatementId,
@@ -75,7 +120,7 @@ fn lower(
             for decl in graph.declarations_at(function, path) {
                 found = true;
                 if decl.is_vla { return Err(invalid("VLA unsupported")); }
-                checked_local(il, locals, decl.symbol)?;
+                cfg_checked_local(il, locals, decl.symbol)?;
             }
             if !found { return Err(invalid("non-variable declaration unsupported")); }
             Ok(Vec::new())
@@ -99,7 +144,7 @@ fn lower(
                 }
                 Expr::Constant(scalars[0].value)
             };
-            Ok(vec![Stmt::Store(checked_local(il, locals, symbol)?, value)])
+            Ok(vec![Stmt::Store(cfg_checked_local(il, locals, symbol)?, value)])
         }
         6 => {
             if !node.children.is_empty() { return Err(invalid("expression statement has children")); }
@@ -114,7 +159,7 @@ fn lower(
                 return Err(invalid("assignment target must be scalar local"));
             }
             let symbol = lhs.data.symbol_id.ok_or_else(|| invalid("unresolved assignment target"))?;
-            let i = checked_local(il, locals, symbol)?;
+            let i = cfg_checked_local(il, locals, symbol)?;
             Ok(vec![Stmt::Store(i, expr(op.operands[1])?)])
         }
         7 | 8 => {
@@ -302,7 +347,7 @@ fn lower_c_expression(
             if let Some(i) = params.iter().position(|p| *p == symbol) {
                 Expr::Parameter(i)
             } else {
-                Expr::Local(checked_local(il, locals, symbol)?)
+                Expr::Local(cfg_checked_local(il, locals, symbol)?)
             }
         }
         3 => {
@@ -390,46 +435,18 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         let ids: Vec<_> = args.iter().map(|p| p.symbol).collect();
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
+        let local_types = locals.iter().map(|v| cfg_local_type(il,v))
+            .collect::<Result<Vec<_>,_>>()?;
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
         let has_fallthrough = check(&body, &mut HashSet::new(), ids.len(), locals.len(), 0)?;
         if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
         }
-        // Before implementing C's usual arithmetic conversions, only
-        // direct returns of constants/parameters (or void functions with
-        // no observable typed expression) can use non-i64 parameters or
-        // results. In particular, never silently miscompile unsigned
-        // comparisons or 32-bit wrapping of intermediate arithmetic.
-        let all_i64 = abi.parameters.iter().all(|p| p.bits == 64 && p.signed)
-            && abi.result.map_or(true, |p| p.bits == 64 && p.signed);
-        if !all_i64 && !is_abi_simple_body(&body) {
-            return Err(invalid(format!(
-                "{name}: mixed-width/unsigned expressions require typed C promotion lowering")));
-        }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
-            locals: locals.len(), body, abi: Some(abi) });
+            locals: locals.len(), body, abi: Some(abi),
+            local_types: Some(local_types) });
     }
     Ok(out)
-}
-/// For non-i64 ABIs, only effect-free returns of parameters/constants
-/// are currently known to have correct C semantics without promotions.
-fn is_abi_simple_body(body: &[Stmt]) -> bool {
-    fn pure(e: &Expr) -> bool {
-        match e {
-            Expr::Constant(_) | Expr::Parameter(_) => true,
-            Expr::Normalize(_, a) | Expr::Neg(a) => pure(a),
-            Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
-            Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) |
-            Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) =>
-                pure(a) && pure(b),
-            _ => false,
-        }
-    }
-    body.iter().all(|stmt| match stmt {
-        Stmt::Return(e) => pure(e),
-        Stmt::ReturnVoid => true,
-        _ => false,
-    })
 }
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
@@ -442,12 +459,7 @@ fn emit_expr(
         Expr::StoreLocal(..) => return Err(invalid("nested assignment unsupported")),
         Expr::Normalize(ty, a) => {
             let value = emit_expr(a, fb, params, vars)?;
-            if ty.bits == 64 { value }
-            else {
-                let narrowed = fb.ins().ireduce(ty.cranelift(), value);
-                if ty.signed { fb.ins().sextend(types::I64, narrowed) }
-                else { fb.ins().uextend(types::I64, narrowed) }
-            }
+            normalize_c_value(fb, value, *ty)
         }
         Expr::Neg(a) => {
             let v = emit_expr(a, fb, params, vars)?;
@@ -508,6 +520,7 @@ fn emit_body(
     stmts: &[Stmt], fb: &mut FunctionBuilder<'_>,
     args: &[cranelift_codegen::ir::Value], vars: &[Variable],
     outer: Option<LoopTargets<'_>>,
+    local_types: &[CAbiInt], result: Option<CAbiInt>,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
@@ -527,14 +540,20 @@ fn emit_body(
             }
             Stmt::Store(i,e) => {
                 let v = emit_expr(e, fb, args, vars)?;
+                let ty = *local_types.get(*i).ok_or_else(|| invalid("bad local type"))?;
+                let v = normalize_c_value(fb, v, ty);
                 fb.def_var(*vars.get(*i).ok_or_else(|| invalid("bad local"))?, v);
             }
             Stmt::Return(e) => {
+                let ty = result.ok_or_else(|| invalid("value returned from void routine"))?;
                 let v = emit_expr(e, fb, args, vars)?;
+                let v = if ty.bits == 64 { v }
+                    else { fb.ins().ireduce(ty.cranelift(), v) };
                 fb.ins().return_(&[v]);
                 live = false;
             }
             Stmt::ReturnVoid => {
+                if result.is_some() { return Err(invalid("missing non-void return value")); }
                 fb.ins().return_(&[]);
                 live = false;
             }
@@ -547,7 +566,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes, fb, args, vars, outer)?;
+                let t_live = emit_body(yes, fb, args, vars, outer, local_types, result)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -555,7 +574,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no, fb, args, vars, outer)?;
+                let f_live = emit_body(no, fb, args, vars, outer, local_types, result)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -586,7 +605,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets))? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -595,7 +614,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init, fb, args, vars, outer)? {
+                if !emit_body(init, fb, args, vars, outer, local_types, result)? {
                     live = false;
                     continue;
                 }
@@ -616,12 +635,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body, fb, args, vars, Some(targets))?;
+                let body_live = emit_body(body, fb, args, vars, Some(targets), local_types, result)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment, fb, args, vars, Some(targets))? {
+                    if emit_body(increment, fb, args, vars, Some(targets), local_types, result)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -641,7 +660,7 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body, fb, args, vars, Some(targets))?;
+                let body_live = emit_body(body, fb, args, vars, Some(targets), local_types, result)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
@@ -710,27 +729,14 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            // Non-i64 direct returns need conversion from the widened
-            // internal i64 value to the ABI return register width.
-            let body = if let Some(ret) = abi.result {
-                if ret.bits < 64 && is_abi_simple_body(&func.body) {
-                    // Emit typed direct-return code without an invalid
-                    // i64 return instruction for an I8/I16/I32 signature.
-                    match func.body.as_slice() {
-                        [Stmt::Return(e)] => {
-                            let v = emit_expr(e, &mut fb, &params, &vars)?;
-                            let small = fb.ins().ireduce(ret.cranelift(), v);
-                            fb.ins().return_(&[small]);
-                            false
-                        }
-                        _ => emit_body(&func.body,&mut fb,&params,&vars,None)?,
-                    }
-                } else {
-                    emit_body(&func.body,&mut fb,&params,&vars,None)?
-                }
-            } else {
-                emit_body(&func.body,&mut fb,&params,&vars,None)?
-            };
+            let local_types = func.local_types.clone().unwrap_or_else(|| {
+                vec![CAbiInt { bits: 64, signed: true }; func.locals]
+            });
+            if local_types.len() != func.locals {
+                return Err(invalid("local type count mismatch"));
+            }
+            let body = emit_body(
+                &func.body, &mut fb, &params, &vars, None, &local_types, abi.result)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
@@ -770,7 +776,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -795,7 +801,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -822,7 +828,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
