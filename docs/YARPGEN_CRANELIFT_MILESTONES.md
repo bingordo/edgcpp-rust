@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0 and M1 complete; M2 core typed SSA/bool green with edge cases open; M3 divide/remainder/shifts implemented and CI-green (2026-10-28), remainder pending**.
+Status: **M0/M1 complete; M2 ordinary scalar ABI/type work green (qualified/address-taken cases deferred to M4); M3 scalar expression semantics complete and CI-verified (2026-10-28). Next: M4 memory/linkage.**
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -136,43 +136,67 @@ and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/run
   unsigned 8-bit integers. C _Bool/C++ bool conversions, parameter/result
   ABIs and local stores canonicalize nonzero to 1; native differential
   fixtures test zero, positive, negative, and branch-dependent assignments.
-* **Still unsupported:** qualified/volatile or address-taken locals,
-  side-effectful expression trees, some C scalar operators (including
-  short-circuit logic), float/pointer types, calls and global memory.
-  Mixed signedness without explicit EDG conversions is rejected,
-  not guessed. The legacy expression-only API is signed-i64.
-* **Remaining M2:** exercise additional C ABI and integer-promotion edge
-  cases (including typedef/qualifier behavior and C-mode _Bool tests).
-  M2 is **not formally closed**; the next high-payoff feature work is M3
-  scalar operators, followed by M4 external objects/memory.
+* **Still unsupported (later milestones):** qualified, volatile or
+  address-taken locals, global memory, pointers/aggregates, calls, and
+  floating-point types. The CFG emitter now supports sequenced scalar
+  side effects and short-circuit logic. The legacy expression-only
+  API remains signed-i64.
+* **M2 scalar checkpoint:** ordinary integer/`_Bool` parameters, returns,
+  typedef-aware width/sign and local SSA are validated, including C11.
+  Volatile/addressable/qualified object semantics require M4 memory and
+  will not be silently emulated as pure SSA scalars.
 
-## M3 operator checkpoint (2026-10-28)
+## M3 complete: ordinary scalar C expressions (2026-10-28)
 
-[CI #40690504958](https://github.com/bingordo/edgcpp-rust/actions/runs/40690504958)
-passed 93 EDG bridge tests, six targeted codegen tests, native ELF creation,
-the full GCC differential executable, and rejection of four genuinely
-unsupported constructs.
+**Implementation:**
 
-* EDG `eok_divide`, `eok_remainder`, `eok_shiftl` and `eok_shiftr`
-  have stable native-to-Rust semantic discriminants; no EDG enum numbers
-  are hardcoded in the Rust codegen.
-* A shared typed integer IR instruction mapping chooses `sdiv`, `udiv`,
-  `srem`, `urem`, `ishl`, `sshr` and `ushr`. Signedness and promoted
-  result width are derived from EDG, not operand guesses. For shifts,
-  the right operand may have a different integer type from the left.
-* Deterministic GCC differential fixtures cover 32/64-bit division and
-  remainder, unsigned high-bit operands, negative signed remainder,
-  left/unsigned-right/signed-right shifts and typed mutable local stores.
-* C undefined behavior (zero divisor, signed overflow and out-of-range
-  shift counts) is excluded from defined-output comparison tests. An
-  overflow-trap/UB test mode could be added later if useful.
-* **M3 remains open:** short-circuit `&&`/`||`, conditional expressions
-  with evaluation sequencing, prefix/postfix updates, compound assignment,
-  and general side-effectful expression evaluation. The existing
-  standalone `lower_edg()` signed-i64 expression API is unchanged.
-* This still does **not** establish any YARPGen program passing Cranelift;
-  the GCC/Clang seed baseline and native scalar differential tests are
-  different acceptance measures.
+* EDG's native operator semantics are exported through stable C/Rust semantic
+  IDs. Rust does not depend on the private EDG enumeration layout.
+* The shared integer IR and Cranelift emitter implement signed/unsigned
+  division/remainder, shift operations, signedness-aware comparisons,
+  unary logical/bitwise operators, lazy logical AND/OR, ternary `?:`,
+  comma evaluation, simple and nested assignments, all ten supported
+  arithmetic/bitwise compound assignments, prefix and postfix increments
+  and decrements.
+* `&&`, `||`, and `?:` lower into real CFG with SSA merges. Skipped
+  operands are not evaluated, including mutations of local variables.
+  Sequenced comma operations evaluate the left side before the right.
+* Ordinary typed local variables and writable function parameters use
+  unified Cranelift SSA slots. Values normalize at C stores and respect
+  declared widths and signedness. Prefix returns the updated value,
+  postfix returns the previous one. Integer promotions and usual
+  conversions are applied for compound arithmetic, including mixed
+  unsigned/signed 32-bit divisors.
+* No one-off peephole or optimization pass was added.
+
+**Verification:**
+
+* [CI #40690504958](https://github.com/bingordo/edgcpp-rust/actions/runs/40690504958):
+  signed and unsigned 32/64-bit division/remainder, shifts and negative
+  shift/right-boundary GCC comparisons.
+* [CI #40699609390](https://github.com/bingordo/edgcpp-rust/actions/runs/40699609390):
+  lazy expression/assignment/side-effect GCC comparisons.
+* [CI #40700242021](https://github.com/bingordo/edgcpp-rust/actions/runs/40700242021):
+  C usual arithmetic conversion regression cases for compound operators.
+* [CI #40701242410](https://github.com/bingordo/edgcpp-rust/actions/runs/40701242410):
+  EDG C11 frontend and GCC differential compilation/execution, prefix
+  increment/decrement and `_Bool`.
+* [CI #40701834739](https://github.com/bingordo/edgcpp-rust/actions/runs/40701834739):
+  final C11 tests including writable parameters, plus C++-linkage
+  differential tests, 93 bridge tests, targeted ELF/codegen tests and
+  deliberate rejection of unsupported global/pointer/call/float cases.
+
+**Completion boundary:** M3 covers ordinary defined integer/boolean
+expressions with scalar SSA locals and writable integer parameters. C
+undefined behavior (zero divisors, invalid shift counts, signed overflow)
+does not have an expected comparison result. Address-taken/volatile or
+qualified locals, aggregate/pointer lvalues and external memory move to
+M4/M5; calls move to M6. Higher-order or target-specific expression cases
+surfaced by YARPGen belong to the M7 corpus-debugging loop.
+
+This does **not** mean YARPGen `func.c` currently compiles or passes. M1's
+100/100 refers only to GCC/Clang oracle baselines. The next main gate is
+M4: correct external/global scalar memory and ELF data relocations.
 
 ## Milestones and dependency gates
 

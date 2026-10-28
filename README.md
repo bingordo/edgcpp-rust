@@ -259,6 +259,28 @@ reject as expected. As in C, division by zero, signed overflow such as
 INT_MIN / -1 and invalid shift counts are **undefined behavior** and are not
 accepted as correctness test vectors.
 
-M3 is **partial**: logical short-circuit evaluation, conditionals with
-side effects, compound assignments, increment/decrement, comma sequencing,
-and remaining scalar operators still need implementation and tests.
+**M3 completed for ordinary scalar C integer expressions (2026-10-28).**
+The CFG backend now supports lazy `&&`, `||`, `?:`, comma sequencing,
+unary `!`/`~`, prefix/postfix `++`/`--`, nested assignments,
+and compound `+=`, `-=`, `*=`, `/=`, `%=`, `<<=`, `>>=`, `&=`,
+`|=`, and `^=`. It uses Cranelift control-flow blocks to ensure
+unselected branches are not evaluated and typed SSA variable slots to
+preserve side effects and update values. Writable parameters and ordinary
+nonvolatile local variables share that implementation.
+
+Compound operations apply integer promotions and usual arithmetic conversions
+before evaluation; a mixed unsigned 32-bit / negative signed 32-bit divisor
+now uses the correct 32-bit unsigned representation.
+
+[Native CI #40701834739](https://github.com/bingordo/edgcpp-rust/actions/runs/40701834739)
+passed the GCC differential C++-linkage tests and **C11-mode differential
+tests** (including prefix/postfix and parameter writes), 93 bridge tests,
+the targeted Cranelift and ELF tests, and four unsupported-feature guards.
+The generated test binaries are linked with the GCC-built driver; this is
+an executable comparison, not just a compilation test.
+
+**M3 scope boundary:** field/array/pointer lvalues, address-taken or
+volatile/qualified locals, external globals, calls, and floating-point
+expressions require M4–M6. Undefined C behavior is not compared.
+This milestone is not a claim of full C or C++ support, nor of passing
+YARPGen-generated `func.c`; that is gated separately.
