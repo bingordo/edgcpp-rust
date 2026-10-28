@@ -12,6 +12,9 @@ extern "C" unsigned int edg_u32_order(unsigned int, unsigned int);
 extern "C" unsigned int edg_u32_cast(unsigned long long);
 extern "C" long long edg_signed_convert(unsigned int);
 extern "C" unsigned long long edg_u64_top_constant();
+extern "C" bool edg_bool_assign(int);
+extern "C" bool edg_bool_branch(int);
+extern "C" bool edg_bool_identity(bool);
 extern "C" unsigned char edg_u8_mutable(unsigned char);
 extern "C" short edg_i16_branch(short, int);
 extern "C" unsigned int edg_u32_while(unsigned int, unsigned int);
@@ -36,6 +39,13 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_bool_assign(0)) return 43;
+    if (!edg_bool_assign(3)) return 44;
+    if (!edg_bool_assign(-3)) return 45;
+    if (edg_bool_branch(1)) return 46;
+    if (!edg_bool_branch(-3)) return 47;
+    if (edg_bool_branch(-7)) return 48;
+    if (!edg_bool_identity(true) || edg_bool_identity(false)) return 49;
     if (edg_u8_mutable(250U) != (unsigned char)254U) return 33;
     if (edg_u8_mutable(0U) != (unsigned char)4U) return 34;
     if (edg_i16_branch(-180, 1) != 20) return 35;

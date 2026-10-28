@@ -551,6 +551,7 @@ fn canonical_abi_type(il: &Il, mut ty: crate::TypeId) -> Result<crate::TypeId, C
 pub struct CAbiInt {
     bits: u8,
     signed: bool,
+    is_bool: bool,
 }
 impl CAbiInt {
     fn cranelift(self) -> cranelift_codegen::ir::Type {
@@ -590,7 +591,7 @@ fn cfg_routine_abi(
         let id = canonical_abi_type(il, id)?;
         let entry = il.c_integer_types.iter().find(|t| t.id == id)
             .ok_or_else(|| error("parameter/return ABI must be ordinary 8/16/32/64-bit integer"))?;
-        Ok(CAbiInt { bits: entry.bits, signed: entry.signed })
+        Ok(CAbiInt { bits: entry.bits, signed: entry.signed, is_bool: entry.is_bool })
     };
     let return_ty = canonical_abi_type(il,
         def.related.ok_or_else(|| error("missing return type"))?)?;

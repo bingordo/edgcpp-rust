@@ -194,3 +194,22 @@ extern "C" unsigned char edg_u8_merge(unsigned char a, unsigned char b, int sele
     }
     return result;
 }
+
+extern "C" bool edg_bool_assign(int value) {
+    bool flag = false;
+    flag = (bool)value;
+    return flag;
+}
+extern "C" bool edg_bool_branch(int value) {
+    bool flag = (bool)value;
+    if (value < 0) {
+        flag = (bool)(value + 7);
+    } else {
+        flag = (bool)(value - 1);
+    }
+    return flag;
+}
+extern "C" bool edg_bool_identity(bool value) {
+    bool local = value;
+    return local;
+}

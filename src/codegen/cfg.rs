@@ -52,7 +52,7 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
     let ty = canonical_abi_type(il, local.ty)?;
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid(format!("local {} has unsupported scalar type",local.symbol.0)))?;
-    Ok(CAbiInt { bits: info.bits, signed: info.signed })
+    Ok(CAbiInt { bits: info.bits, signed: info.signed, is_bool: info.is_bool })
 }
 fn cfg_checked_local(
     il: &Il, locals: &[&crate::LocalVariable], symbol: crate::SymbolId,
@@ -65,6 +65,13 @@ fn cfg_checked_local(
 fn normalize_c_value(
     fb: &mut FunctionBuilder<'_>, value: cranelift_codegen::ir::Value, ty: CAbiInt,
 ) -> cranelift_codegen::ir::Value {
+    if ty.is_bool {
+        // A C _Bool/C++ bool stores 0 or 1, not arbitrary nonzero bytes.
+        let condition = fb.ins().icmp_imm(IntCC::NotEqual, value, 0);
+        let one = fb.ins().iconst(types::I64, 1);
+        let zero = fb.ins().iconst(types::I64, 0);
+        return fb.ins().select(condition, one, zero);
+    }
     if ty.bits == 64 { return value; }
     let small = fb.ins().ireduce(ty.cranelift(), value);
     if ty.signed { fb.ins().sextend(types::I64, small) }
@@ -326,7 +333,7 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
         .ok_or_else(|| invalid(format!(
             "unsupported C expression type at {}:{}:{}",
             node.data.function, node.data.statement_path, node.data.path)))?;
-    Ok(CAbiInt { bits: ty.bits, signed: ty.signed })
+    Ok(CAbiInt { bits: ty.bits, signed: ty.signed, is_bool: ty.is_bool })
 }
 
 /// Every EDG operation has a result type, and each operand already carries
@@ -706,8 +713,8 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
         }
         let mut context = module.make_context();
         let abi = func.abi.clone().unwrap_or_else(|| CAbi {
-            parameters: vec![CAbiInt { bits: 64, signed: true }; func.parameters],
-            result: Some(CAbiInt { bits: 64, signed: true }),
+            parameters: vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.parameters],
+            result: Some(CAbiInt { bits: 64, signed: true, is_bool: false }),
         });
         if abi.parameters.len() != func.parameters {
             return Err(invalid("ABI parameter count mismatch"));
@@ -739,7 +746,7 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
                 v
             }).collect();
             let local_types = func.local_types.clone().unwrap_or_else(|| {
-                vec![CAbiInt { bits: 64, signed: true }; func.locals]
+                vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
             });
             if local_types.len() != func.locals {
                 return Err(invalid("local type count mismatch"));

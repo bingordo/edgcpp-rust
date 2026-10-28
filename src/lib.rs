@@ -215,6 +215,8 @@ pub struct CIntegerType {
     pub id: TypeId,
     pub bits: u8,
     pub signed: bool,
+    /// EDG's native bool_type bit, distinct from an unsigned byte.
+    pub is_bool: bool,
 }
 
 /// Parameter edge from a routine type, in declaration order.
@@ -756,7 +758,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 3, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -811,13 +813,16 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
         }
         46 => {
-            let (Some(id), Some(bits), Some(signed)) = (n(0), n(1), n(2))
-                else { return; };
-            if id == 0 || !matches!(bits, 8 | 16 | 32 | 64) || signed > 1 {
+            let (Some(id), Some(bits), Some(signed), Some(boolean)) =
+                (n(0), n(1), n(2), n(3)) else { return; };
+            if id == 0 || !matches!(bits, 8 | 16 | 32 | 64) ||
+               signed > 1 || boolean > 1 ||
+               (boolean == 1 && (bits != 8 || signed != 0)) {
                 return;
             }
             output.c_integer_types.push(CIntegerType {
                 id: TypeId(id), bits: bits as u8, signed: signed == 1,
+                is_bool: boolean == 1,
             });
         }
         45 => {

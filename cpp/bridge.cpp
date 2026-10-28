@@ -298,7 +298,9 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     const auto kind = type->variant.integer.int_kind;
     if (kind < ik_last) {
       emit_record(46, {num(id), num(type->size * 8),
-                       num(int_kind_is_signed[kind] ? 1 : 0)});
+                       num(type->variant.integer.bool_type ? 0 :
+                           int_kind_is_signed[kind] ? 1 : 0),
+                       num(type->variant.integer.bool_type ? 1 : 0)});
     }
   }
   // Type qualifiers and reference distinctions are native EDG properties,
