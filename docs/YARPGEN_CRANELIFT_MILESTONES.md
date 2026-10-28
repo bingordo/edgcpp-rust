@@ -115,13 +115,23 @@ and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/run
   direct parameter/constant returns, with proper parameter widening and
   return narrowing. Signed 8-bit, unsigned 32-bit and 16-bit direct returns
   have GCC native execution checks.
-* Mixed-width/unsigned arithmetic is **not** yet supported; only trivial,
-  side-effect-free bodies can use the broader ABI. This deliberately avoids
-  incorrect C promotions or intermediate unsigned wrapping. The legacy
-  pure-expression reference still requires signed i64.
-* Remaining M2: typed intermediate expression semantics, C integer
-  promotions, conversions, local scalar storage, unsigned comparisons,
-  `_Bool` and parameter edge cases. M2 is **not complete**.
+* **Completed next checkpoint** in
+  [CI #40661637692](https://github.com/bingordo/edgcpp-rust/actions/runs/40661637692):
+  signed/unsigned 8–64-bit pure-return expressions carry EDG's native types
+  through the CFG lowering. Integer conversions and intermediate truncation
+  are explicit; unsigned arithmetic wraps at the source width; signedness
+  determines signed vs unsigned relational comparison predicates. Unsigned
+  64-bit constants preserve all bits. GCC differential execution passed
+  expanded edge-case fixtures, along with 93 bridge tests, six targeted
+  codegen tests, native ELF execution and negative ABI checks.
+* **Still unsupported:** narrow/unsigned mutable local variables, complex
+  non-i64 statement bodies, effectful expression trees, floats, pointers,
+  calls, memory objects, and some extended/_Bool types. Mixed signedness
+  without the expected explicit EDG conversion is rejected.
+  The legacy pure-expression reference remains signed i64.
+* Remaining M2: typed local storage and reassignment, more typed
+  conditionals/loops, `_Bool` and remaining parameter/conversion edge cases.
+  M2 is **not complete**.
 
 ## Milestones and dependency gates
 

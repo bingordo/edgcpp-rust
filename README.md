@@ -208,11 +208,19 @@ unsupported constructs and mismatches rather than counting them as passes.
 
 ### M2 initial C ABI support
 
-The CFG emitter now preserves EDG-native scalar integer width/sign (8, 16,
-32, 64 bits) for function parameters and direct simple return values, and
-supports `void` functions and `return;`. Cranelift arguments are extended
-to the internal I64 representation and simple return values are narrowed
-according to the declared C ABI. Full arithmetic/conversion on mixed-width
-or unsigned values remains explicitly rejected until native C promotions,
-intermediate truncation and signed/unsigned comparisons are implemented.
-The separate historical pure-expression `lower_edg()` remains i64-only.
+The CFG emitter preserves EDG-native integer width and signedness
+(8, 16, 32, 64 bits) for function parameters and return values, and
+supports `void` functions and `return;`. Supported *pure integer*
+expressions now normalize every intermediate result according to its EDG
+type, including C integer casts, sign/zero extension, truncation, unsigned
+wraparound and unsigned relational comparisons. EDG's explicit conversion
+nodes are checked rather than silently guessing the common arithmetic
+type. Full 64-bit unsigned constants retain their bit pattern.
+
+This is still a **partial M2**: non-i64/unsigned locals and side-effectful
+expression trees are not yet supported; complex typed control-flow bodies
+are conservatively rejected, as are pointers, arrays and calls. The
+separate historical pure-expression `lower_edg()` remains i64-only.
+Native GCC differential execution now exercises unsigned-32 wrapping,
+signed-8 promotion, unsigned-64 ordering, i64/u32 conversion, truncation,
+and `UINT64_MAX` (in addition to the earlier ABI tests).
