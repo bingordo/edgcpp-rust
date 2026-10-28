@@ -8,6 +8,7 @@
 #include "const_ints.h"
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <cxxabi.h>
