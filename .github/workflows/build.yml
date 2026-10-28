@@ -272,13 +272,13 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            for variant in TEST_DIVISION TEST_SHIFT TEST_FLOAT_RETURN TEST_POINTER_PARAM; do
+            for variant in TEST_GLOBAL_READ TEST_CALL TEST_FLOAT_RETURN TEST_POINTER_PARAM; do
               rm -f rejected.o rejected.log
               if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
                 echo "Unexpectedly accepted unsupported construct: $variant"
                 exit 1
               fi
-              grep -Eq 'parameter/return ABI must be|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type' rejected.log || {
+              grep -Eq 'parameter/return ABI must be|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1

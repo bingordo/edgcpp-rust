@@ -1,5 +1,20 @@
 #include <cstdio>
 
+extern "C" long long edg_sdiv64(long long, long long);
+extern "C" long long edg_srem64(long long, long long);
+extern "C" unsigned long long edg_udiv64(unsigned long long, unsigned long long);
+extern "C" unsigned long long edg_urem64(unsigned long long, unsigned long long);
+extern "C" int edg_sdiv32(int, int);
+extern "C" int edg_srem32(int, int);
+extern "C" unsigned int edg_udiv32(unsigned int, unsigned int);
+extern "C" unsigned int edg_urem32(unsigned int, unsigned int);
+extern "C" unsigned long long edg_shl64(unsigned long long, unsigned int);
+extern "C" unsigned long long edg_ushr64(unsigned long long, unsigned int);
+extern "C" long long edg_sshr64(long long, unsigned int);
+extern "C" int edg_sshr32(int, unsigned int);
+extern "C" unsigned int edg_shl32(unsigned int, int);
+extern "C" unsigned int edg_udiv_local(unsigned int, unsigned int);
+extern "C" unsigned int edg_shift_local(unsigned int, int);
 extern "C" void edg_void_empty(void);
 extern "C" void edg_void_branch(long long);
 extern "C" signed char edg_i8_identity(signed char);
@@ -39,6 +54,24 @@ extern "C" long long edg_while_jumps(long long, long long);
 extern "C" long long edg_do_jumps(long long, long long);
 
 int main() {
+    if (edg_sdiv64(-5000000001LL, 7LL) != (-5000000001LL / 7LL)) return 50;
+    if (edg_srem64(-5000000001LL, 7LL) != (-5000000001LL % 7LL)) return 51;
+    if (edg_sdiv64(5000000001LL, -7LL) != (5000000001LL / -7LL)) return 52;
+    if (edg_udiv64(0xffffffffffffffffULL, 3ULL) != (0xffffffffffffffffULL / 3ULL)) return 53;
+    if (edg_urem64(0xffffffffffffffffULL, 3ULL) != (0xffffffffffffffffULL % 3ULL)) return 54;
+    if (edg_sdiv32(-2147483647, 13) != (-2147483647 / 13)) return 55;
+    if (edg_srem32(-2147483647, 13) != (-2147483647 % 13)) return 56;
+    if (edg_udiv32(0xffffffffU, 7U) != (0xffffffffU / 7U)) return 57;
+    if (edg_urem32(0xffffffffU, 7U) != (0xffffffffU % 7U)) return 58;
+    if (edg_shl64(0x123456789ULL, 17U) != (0x123456789ULL << 17U)) return 59;
+    if (edg_ushr64(0xf000000000000000ULL, 27U) !=
+        (0xf000000000000000ULL >> 27U)) return 60;
+    if (edg_sshr64(-4097LL, 7U) != (-4097LL >> 7U)) return 61;
+    if (edg_sshr32(-4097, 3U) != (-4097 >> 3U)) return 62;
+    if (edg_shl32(0x01234567U, 4) != (0x01234567U << 4)) return 63;
+    if (edg_udiv_local(0xffffffffU, 7U) != ((0xffffffffU / 7U) % 137U)) return 64;
+    if (edg_shift_local(0xfedcba98U, 4) !=
+        ((0xfedcba98U >> 4) << 4)) return 65;
     if (edg_bool_assign(0)) return 43;
     if (!edg_bool_assign(3)) return 44;
     if (!edg_bool_assign(-3)) return 45;

@@ -213,3 +213,43 @@ extern "C" bool edg_bool_identity(bool value) {
     bool local = value;
     return local;
 }
+
+extern "C" long long edg_sdiv64(long long a, long long b) { return a / b; }
+extern "C" long long edg_srem64(long long a, long long b) { return a % b; }
+extern "C" unsigned long long edg_udiv64(unsigned long long a, unsigned long long b) {
+    return a / b;
+}
+extern "C" unsigned long long edg_urem64(unsigned long long a, unsigned long long b) {
+    return a % b;
+}
+extern "C" int edg_sdiv32(int a, int b) { return a / b; }
+extern "C" int edg_srem32(int a, int b) { return a % b; }
+extern "C" unsigned int edg_udiv32(unsigned int a, unsigned int b) { return a / b; }
+extern "C" unsigned int edg_urem32(unsigned int a, unsigned int b) { return a % b; }
+extern "C" unsigned long long edg_shl64(unsigned long long a, unsigned int amount) {
+    return a << amount;
+}
+extern "C" unsigned long long edg_ushr64(unsigned long long a, unsigned int amount) {
+    return a >> amount;
+}
+extern "C" long long edg_sshr64(long long a, unsigned int amount) {
+    return a >> amount;
+}
+extern "C" int edg_sshr32(int a, unsigned int amount) {
+    return a >> amount;
+}
+extern "C" unsigned int edg_shl32(unsigned int a, int amount) {
+    return a << amount;
+}
+extern "C" unsigned int edg_udiv_local(unsigned int a, unsigned int b) {
+    unsigned int value = a;
+    value = value / b;
+    value = value % 137U;
+    return value;
+}
+extern "C" unsigned int edg_shift_local(unsigned int a, int amount) {
+    unsigned int value = a;
+    value = value >> amount;
+    value = value << amount;
+    return value;
+}
