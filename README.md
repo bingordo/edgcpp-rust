@@ -135,7 +135,7 @@ A path-sensitive definite-initialization check rejects reads of locals set
 only in a potentially untaken branch or loop. Every reachable path must return.
 The former lower_edg function remains a narrow pure-expression API;
 emit_edg_object uses structured CFG lowering. Calls, pointers, globals,
-complex C++ expressions, and for/do loops are still unsupported.
+complex C++ expressions and arbitrary goto control flow remain unsupported.
 
 CI compares generated ELF with GCC for mutable branches and loop-carried
 variables over the existing signed input grid.
@@ -149,9 +149,9 @@ synthetic statement carrying the complete executable expression tree. This is
 needed to preserve numeric constants in increments. Generated basic blocks
 handle forward/backward edges and Cranelift SSA merges. Differential tests
 compare output to GCC across the existing signed input grid. At present,
-source-level `break` / `continue` are represented by EDG goto/label nodes,
-which require a separate, label-aware CFG milestone; they are not silently
-accepted. Other unsupported operators, calls, pointers and non-i64 types
+source-level `break` / `continue` are accepted only when EDG's native
+label flags identify a compiler-generated loop jump. Arbitrary goto and
+switch-break targets are still rejected. Other unsupported operators, calls, pointers and non-i64 types
 remain errors.
 
 Constant signed-i64 dynamic initializers (including zero initialization)
