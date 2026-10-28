@@ -432,13 +432,19 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30) {
+            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30 | 41 | 42) {
                 if operands.len() != 1 {
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
-                if matches!(op,29|30) {
+                if matches!(op,29|30|41|42) {
                     let (index,ty) = scalar_lvalue(graph,operands[0],locals,il)?;
-                    Expr::PostLocal(index,ty,if op==29 {1} else {-1})
+                    if matches!(op,29|30) {
+                        Expr::PostLocal(index,ty,if op==29 {1} else {-1})
+                    } else {
+                        Expr::CompoundLocal(index,ty,promoted_integer_type(ty),
+                            if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub},
+                            Box::new(Expr::Constant(1)))
+                    }
                 } else {
                 let a = lower_c_expression(graph, operands[0], params, locals, il)?;
                 match op {

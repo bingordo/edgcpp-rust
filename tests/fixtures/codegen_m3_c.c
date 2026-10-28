@@ -5,6 +5,7 @@ int m3_c_ternary(int a) { int x=2; int y=a ? (x+=3):(x*=4); return x+10*y; }
 int m3_c_comma(int a) { int x=1; return (x+=a, x*=3, x); }
 int m3_c_postfix(int a) { int x=a; int prev=x++; return prev*100+x; }
 int m3_c_prefix(int a) { int x=a; int current=++x; return current*100+x; }
+int m3_c_prefix_dec(int a) { int x=a; int current=--x; return current*100+x; }
 unsigned int m3_c_compound(unsigned int a, int rhs) {
     unsigned int x=a; x%=rhs; return x;
 }

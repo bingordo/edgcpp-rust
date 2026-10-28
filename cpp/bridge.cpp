@@ -1430,6 +1430,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_and_assign)) return 38;
     if (value == static_cast<unsigned>(eok_or_assign)) return 39;
     if (value == static_cast<unsigned>(eok_xor_assign)) return 40;
+    if (value == static_cast<unsigned>(eok_pre_incr)) return 41;
+    if (value == static_cast<unsigned>(eok_pre_decr)) return 42;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
