@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0 and M1 complete; M2 started (2026-10-28), partial typed ABI milestone green**.
+Status: **M0 and M1 complete; M2 type/SSA and bool checkpoints green (2026-10-28), final edge cases open**.
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -124,14 +124,27 @@ and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/run
   64-bit constants preserve all bits. GCC differential execution passed
   expanded edge-case fixtures, along with 93 bridge tests, six targeted
   codegen tests, native ELF execution and negative ABI checks.
-* **Still unsupported:** narrow/unsigned mutable local variables, complex
-  non-i64 statement bodies, effectful expression trees, floats, pointers,
-  calls, memory objects, and some extended/_Bool types. Mixed signedness
-  without the expected explicit EDG conversion is rejected.
-  The legacy pure-expression reference remains signed i64.
-* Remaining M2: typed local storage and reassignment, more typed
-  conditionals/loops, `_Bool` and remaining parameter/conversion edge cases.
-  M2 is **not complete**.
+* **Typed local SSA checkpoint:** [CI #40687389836](https://github.com/bingordo/edgcpp-rust/actions/runs/40687389836)
+  passed GCC differential tests for narrow signed/unsigned locals, local
+  assignments, 8/16/32-bit truncation and wrapping, conditionals, loops
+  and return narrowing. Each store normalizes to the local's declared
+  C width/sign and stores the canonical value in an I64 SSA variable;
+  no special-purpose peephole pass was introduced. Any return site
+  now honors the routine's ABI result width.
+* **Native boolean checkpoint:** [CI #40687818445](https://github.com/bingordo/edgcpp-rust/actions/runs/40687818445)
+  passed after adding EDG's native bool_type metadata, distinct from plain
+  unsigned 8-bit integers. C _Bool/C++ bool conversions, parameter/result
+  ABIs and local stores canonicalize nonzero to 1; native differential
+  fixtures test zero, positive, negative, and branch-dependent assignments.
+* **Still unsupported:** qualified/volatile or address-taken locals,
+  side-effectful expression trees, unhandled operators (division, modulus,
+  shifts, logical short-circuit, etc.), float/pointer types, calls and
+  global memory. Mixed signedness without explicit EDG conversions is
+  rejected, not guessed. The legacy expression-only API is signed-i64.
+* **Remaining M2:** exercise additional C ABI and integer-promotion edge
+  cases (including typedef/qualifier behavior and C-mode _Bool tests).
+  M2 is **not formally closed**; the next high-payoff feature work is M3
+  scalar operators, followed by M4 external objects/memory.
 
 ## Milestones and dependency gates
 

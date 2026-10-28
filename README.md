@@ -78,21 +78,22 @@ The verified subset includes constants, parameters, add/subtract/multiply,
 unary negation, integer bitwise operations, signed comparisons and structured
 `if/else` where both branches return a pure expression. The comparison
 results are canonical 0/1 integers. Boolean-to-integer casts of comparison
-results are supported; other width-changing conversions remain unsupported.
+results are supported in the legacy expression-only API. The newer CFG
+backend also handles typed C conversions and unsigned comparisons.
 
 **ABI guard:** the bridge records EDG-native scalar integer width and
 signedness, and validates routine return and parameter types before emitting
-machine code. The CFG backend accepts `void` functions and restricted direct
-returns using 8/16/32/64-bit signed or unsigned C ABI types. General arithmetic
-with narrow/unsigned values, pointer/float parameters, missing metadata,
-variadic interfaces, implicit C++ object parameters, and complex C++ features
-are still rejected. The earlier standalone pure-expression API remains
-signed-i64 only. C++ name mangling is not implemented.
+machine code. The CFG backend accepts `void` functions, native `bool`, and
+8/16/32/64-bit signed/unsigned C ABI signatures, including typed locals,
+side-effect-free arithmetic, comparisons, conversions and structured control
+flow. Floating-point/pointer ABIs, missing metadata, variadics, implicit C++
+object parameters and complex C++ features are rejected. The earlier standalone
+pure-expression API remains signed-i64 only; C++ name mangling is not implemented.
 
 Local assignments, structured if/else and pretest while loops are supported
 by the newer CFG emitter (see below). Calls, global memory and general C++
-features are still unsupported. Non-i64 expressions remain restricted until
-full C integer promotion and conversion semantics are implemented.
+features are still unsupported. Typed operations use EDG's conversion nodes;
+effectful subexpressions and unsupported operators are rejected explicitly.
 
 The differential CI test compiles `tests/fixtures/codegen_simple.cpp` through
 both EDG/Cranelift and GCC, links each with the same test driver, and compares
@@ -102,10 +103,10 @@ incorrectly. This is a reference backend, not a general C++ compiler.
 **CI is run on [bingordo/edgcpp-rust](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).**
 The `bingundu` mirror uses a manual-only workflow to avoid duplicate CPU usage.
 
-The CI negative-ABI fixture verifies rejection of unsupported *mixed-width
-arithmetic*, floating-point returns and pointer parameters, without creating
-object files. Ordinary 8/16/32/64-bit scalar integer ABI signatures with simple
-returns are now accepted and executed in differential tests. Unit tests cover
+The negative cases verify rejection of division, shifts, floating-point
+returns and pointer parameters without creating object files. Ordinary
+8/16/32/64-bit scalar integer functions, local-variable assignments, loops,
+branches and bool conversions are tested against GCC. Unit tests cover
 missing/cyclic type metadata and mismatched signatures.
 
 ## Milestone: signed-i64 local variables
@@ -117,11 +118,11 @@ The bridge retains initializer expressions as primary expression trees as well
 as their existing role-4 control snapshot. Each assignment becomes an ordered
 SSA value update (no explicit memory slot), with rejected uninitialized reads.
 
-The supported subset still excludes initializer forms without a captured
-expression, globals, static locals, parameter writes, pointer and array
-assignment, narrow/unsigned locals and side-effecting expressions. The initial
-straight-line implementation is preserved for reference; the newer structured
-CFG backend supports assignment in conditional branches and while loops.
+The historical expression-only implementation still has narrow limitations.
+The current CFG emitter also supports constant initializer metadata and
+signed/unsigned narrow locals in conditionals and loops. Globals, static locals,
+parameter writes, pointer/array assignments, qualified/address-taken locals,
+and side-effecting expression trees remain unsupported.
 
 CI performs native execution with two sequential locals plus reassignment,
 checks a local value across returning if/else branches, and compares outputs
@@ -131,7 +132,7 @@ multiple writes to one local and rejection of uninitialized local reads.
 ## Structured control-flow milestone
 
 The ELF-emitting EDG reference backend uses real Cranelift basic blocks and SSA
-variables for mutable signed-64-bit locals in if/else (with optional else) and
+variables for mutable, typed integer locals in if/else (with optional else) and
 pretest while loops. Loop headers remain unsealed until the backedge is built.
 A path-sensitive definite-initialization check rejects reads of locals set
 only in a potentially untaken branch or loop. Every reachable path must return.
@@ -144,7 +145,7 @@ variables over the existing signed input grid.
 
 ## For / do-while control flow
 
-The constrained signed-i64 CFG emitter now supports source-level `for` (with
+The typed C integer CFG emitter supports source-level `for` (with
 assignment-style initializer/increment and a condition) and `do/while` loops.
 For increments retain both EDG's original control expression and a bounded
 synthetic statement carrying the complete executable expression tree. This is
@@ -154,7 +155,7 @@ compare output to GCC across the existing signed input grid. At present,
 source-level `break` / `continue` are accepted only when EDG's native
 label flags identify a compiler-generated loop jump. Arbitrary goto and
 switch-break targets are still rejected. Other unsupported operators, calls,
-pointers and complex non-i64 expressions remain errors.
+pointers and effectful/unsupported expression operations remain errors.
 
 Constant signed-i64 dynamic initializers (including zero initialization)
 are now carried as explicit native wire events, because EDG represents their
@@ -217,10 +218,23 @@ wraparound and unsigned relational comparisons. EDG's explicit conversion
 nodes are checked rather than silently guessing the common arithmetic
 type. Full 64-bit unsigned constants retain their bit pattern.
 
-This is still a **partial M2**: non-i64/unsigned locals and side-effectful
-expression trees are not yet supported; complex typed control-flow bodies
-are conservatively rejected, as are pointers, arrays and calls. The
-separate historical pure-expression `lower_edg()` remains i64-only.
-Native GCC differential execution now exercises unsigned-32 wrapping,
-signed-8 promotion, unsigned-64 ordering, i64/u32 conversion, truncation,
-and `UINT64_MAX` (in addition to the earlier ABI tests).
+**M2 typed-local checkpoint (2026-10-28):** The CFG lowering now tracks
+the declared type of each C scalar local, normalizes assignment values to
+the correct width/sign and keeps normalized I64 values in Cranelift SSA.
+This works across `if/else`, `while`, `for` and `do/while`, with
+path-sensitive definite-initialization checks intact. A common normalization
+helper also handles EDG-native `bool` (C `_Bool`/C++ `bool`), converting
+nonzero values to canonical `1`, including local stores and casts.
+All return paths honor the declared integer result width, not only simple
+one-statement returns.
+
+[Native CI #40687818445](https://github.com/bingordo/edgcpp-rust/actions/runs/40687818445)
+passed the expanded GCC differential fixtures, 93 bridge tests, targeted
+Cranelift tests and negative-construct checks. Coverage includes
+unsigned-byte truncation, short conditional merges, 32-bit wrapping loops,
+16-bit for loops, bool conversions, and the previous ABI boundary cases.
+
+**M2 remains partial:** qualified/volatile or address-taken locals, additional
+C scalar corner cases and general side-effecting expression trees are still
+unsupported. Pointers, globals, arrays and calls are later milestones.
+The legacy `lower_edg()` expression-only API remains signed-i64 only.
