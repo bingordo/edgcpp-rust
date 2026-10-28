@@ -197,3 +197,9 @@ Known unsupported C constructs are reported explicitly and never counted
 as tests passed. Passing test files are removed, but all failures retain
 their generated source, commands, logs and JSON manifest. The M1 baseline
 is deliberately distinct from claiming YARPGen-compatible codegen.
+
+M1 verification: [100 fixed YARPGen C seeds passed their GCC/Clang oracle
+baselines](https://github.com/bingordo/edgcpp-rust/actions/runs/40648943692)
+(seeds 12345–12444, GCC -O0/-O2 and Clang -O2). These are
+**baseline-only**, not Cranelift passes. The harness explicitly reports
+unsupported constructs and mismatches rather than counting them as passes.

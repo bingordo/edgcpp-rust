@@ -1,6 +1,20 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0 complete; M1 harness implementation in progress**.
+Status: **M0 and M1 complete (2026-10-28); M2 next**.
+
+M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
+source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
+Linux archive SHA-256 `fc3c7c80c10c67782c03f9d8b70c426f942332e78701397a14a5edff81cbc2e8`.
+
+M1: deterministic Python harness, negative classification tests, 10-seed
+push CI and manual cohorts up to 100 seeds.
+[100-seed GCC/Clang baseline run](https://github.com/bingordo/edgcpp-rust/actions/runs/40648943692):
+seeds **12345–12444**, GCC -O0, GCC -O2, Clang -O2, all **100 pass**,
+no generator failures and no oracle disagreements. This is the
+**GCC/Clang oracle baseline only**: the present EDG/Cranelift reference
+does not yet compile generic YARPGen generated C; its accepted/passed
+YARPGen count is still unknown/zero, NOT 100.
+
 Date: 2026-10-28.
 Development and CI: `bingordo/edgcpp-rust`, branch `cranelift-codegen`.
 Source mirror: `bingundu/edgcpp-rust`, branch `cranelift-codegen`.
