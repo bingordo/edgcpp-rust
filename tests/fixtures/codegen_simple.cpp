@@ -72,3 +72,21 @@ extern "C" long long edg_while(long long a, long long b) {
     }
     return result + i;
 }
+
+extern "C" long long edg_for(long long a, long long b) {
+    long long i = a;
+    long long sum = 2;
+    for (i = a; i < b; i = i + 1) {
+        sum = sum + i;
+    }
+    return sum + i;
+}
+extern "C" long long edg_do_while(long long a, long long b) {
+    long long total = b;
+    long long i = a;
+    do {
+        total = total + i;
+        i = i + 1;
+    } while (i < b);
+    return total + i;
+}

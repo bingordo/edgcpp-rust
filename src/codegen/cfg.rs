@@ -9,6 +9,10 @@ enum Stmt {
     Return(Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
+    /// Condition is checked before the body; increment runs after the body.
+    For { init: Vec<Stmt>, condition: Expr, increment: Vec<Stmt>, body: Vec<Stmt> },
+    /// Test is at the bottom, so the body runs at least once.
+    DoWhile(Vec<Stmt>, Expr),
 }
 struct Routine { name: String, parameters: usize, locals: usize, body: Vec<Stmt> }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
@@ -90,7 +94,7 @@ fn lower(
             let i = checked_local(il, locals, symbol)?;
             Ok(vec![Stmt::Store(i, expr(op.operands[1])?)])
         }
-        7 => {
+        7 | 8 => {
             let condition = expr(node.expression.ok_or_else(|| invalid("while has no condition"))?)?;
             if node.children.len() != 1 { return Err(invalid("while body not unique")); }
             let child = node.children[0];
@@ -98,7 +102,40 @@ fn lower(
             if !body.data.path.starts_with(&format!("{path}.body.")) {
                 return Err(invalid("unexpected while body"));
             }
-            Ok(vec![Stmt::While(condition, lower(graph, child, params, locals, il)?)])
+            let body = lower(graph, child, params, locals, il)?;
+            Ok(vec![if semantic(1, node.data.kind) == 8 {
+                Stmt::DoWhile(body, condition)
+            } else {
+                Stmt::While(condition, body)
+            }])
+        }
+        9 => {
+            // An increment is emitted as a synthetic stmk_expr child of the
+            // for node, preserving its executable tree (including constants).
+            // The original control-role-1 snapshot is also retained.
+            let condition = expr(node.expression.ok_or_else(|| invalid(
+                "unconditional for loop not yet supported"))?)?;
+            let mut init = None;
+            let mut body = None;
+            let mut increment = None;
+            for &child in &node.children {
+                let child_node = graph.statement(child).ok_or_else(|| invalid("missing for child"))?;
+                let child_path = &child_node.data.path;
+                if child_path.starts_with(&format!("{path}.init.")) {
+                    if init.replace(child).is_some() { return Err(invalid("multiple for init statements")); }
+                } else if child_path.starts_with(&format!("{path}.body.")) {
+                    if body.replace(child).is_some() { return Err(invalid("multiple for bodies")); }
+                } else if child_path == &format!("{path}.increment.0") {
+                    if increment.replace(child).is_some() { return Err(invalid("duplicate for increment")); }
+                } else { return Err(invalid("unexpected for child")); }
+            }
+            let init = match init { Some(id) => lower(graph, id, params, locals, il)?,
+                None => Vec::new() };
+            let body = lower(graph, body.ok_or_else(|| invalid("for body missing"))?,
+                params, locals, il)?;
+            let increment = match increment { Some(id) => lower(graph, id, params, locals, il)?,
+                None => Vec::new() };
+            Ok(vec![Stmt::For { init, condition, increment, body }])
         }
         _ => Err(invalid(format!("unsupported EDG statement {}", node.data.kind))),
     }
@@ -156,6 +193,33 @@ fn check(
                 let mut nested = vars.clone();
                 check(inner, &mut nested, params, locals)?;
                 // Zero iterations are possible: don't propagate loop-only definitions.
+            }
+            Stmt::For { init, condition, increment, body } => {
+                if !check(init, vars, params, locals)? {
+                    live = false;
+                    continue;
+                }
+                check_expr(condition, vars, params)?;
+                let mut body_vars = vars.clone();
+                let body_live = check(body, &mut body_vars, params, locals)?;
+                // Deliberately validate increment against loop-entry values.
+                // A value assigned only by the body is not available if
+                // arbitrary breaks/continues are introduced later.
+                if body_live {
+                    let mut increment_vars = vars.clone();
+                    check(increment, &mut increment_vars, params, locals)?;
+                }
+            }
+            Stmt::DoWhile(body, condition) => {
+                let mut body_vars = vars.clone();
+                let body_live = check(body, &mut body_vars, params, locals)?;
+                if body_live {
+                    check_expr(condition, &body_vars, params)?;
+                    // Propagate only variables already initialized at entry.
+                    // This is conservative until path-based loop exits exist.
+                } else {
+                    live = false;
+                }
             }
         }
     }
@@ -308,6 +372,48 @@ fn emit_body(
                 fb.seal_block(head);
                 fb.switch_to_block(exit);
             }
+            Stmt::For { init, condition, increment, body } => {
+                if !emit_body(init, fb, args, vars)? {
+                    live = false;
+                    continue;
+                }
+                let head = fb.create_block();
+                let body_block = fb.create_block();
+                let exit = fb.create_block();
+                fb.ins().jump(head, &[]);
+                fb.switch_to_block(head);
+                let c = emit_expr(condition, fb, args, vars)?;
+                let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
+                fb.ins().brif(flag, body_block, &[], exit, &[]);
+                fb.seal_block(body_block);
+                fb.seal_block(exit);
+                fb.switch_to_block(body_block);
+                if emit_body(body, fb, args, vars)? {
+                    if emit_body(increment, fb, args, vars)? {
+                        fb.ins().jump(head, &[]);
+                    }
+                }
+                fb.seal_block(head);
+                fb.switch_to_block(exit);
+            }
+            Stmt::DoWhile(body, cond) => {
+                let body_block = fb.create_block();
+                fb.ins().jump(body_block, &[]);
+                fb.switch_to_block(body_block);
+                // The backedge is emitted by the test below.
+                if emit_body(body, fb, args, vars)? {
+                    let test = emit_expr(cond, fb, args, vars)?;
+                    let flag = fb.ins().icmp_imm(IntCC::NotEqual, test, 0);
+                    let exit = fb.create_block();
+                    fb.ins().brif(flag, body_block, &[], exit, &[]);
+                    fb.seal_block(body_block);
+                    fb.seal_block(exit);
+                    fb.switch_to_block(exit);
+                } else {
+                    fb.seal_block(body_block);
+                    live = false;
+                }
+            }
         }
     }
     Ok(live)
@@ -382,6 +488,30 @@ mod tests {
             name: "cfg_unit".into(), parameters: 2, locals: 1, body,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
+    }
+    #[test]
+    fn emits_pre_and_post_test_loops_with_ssa() {
+        let condition = Expr::Compare(
+            CompareOp::Less, Box::new(Expr::Local(0)), Box::new(Expr::Parameter(1)));
+        let increment = vec![Stmt::Store(0, Expr::Add(
+            Box::new(Expr::Local(0)), Box::new(Expr::Constant(1))))];
+        let body = vec![
+            Stmt::Store(0, Expr::Parameter(0)),
+            Stmt::Store(1, Expr::Constant(0)),
+            Stmt::For { init: vec![], condition: condition.clone(),
+                increment: increment.clone(),
+                body: vec![Stmt::Store(1, Expr::Add(
+                    Box::new(Expr::Local(1)), Box::new(Expr::Local(0))))] },
+            Stmt::DoWhile(vec![Stmt::Store(1, Expr::Add(
+                Box::new(Expr::Local(1)), Box::new(Expr::Constant(1))))],
+                Expr::Compare(CompareOp::Less, Box::new(Expr::Local(1)),
+                    Box::new(Expr::Constant(5)))),
+            Stmt::Return(Expr::Local(1)),
+        ];
+        assert!(!check(&body, &mut HashSet::new(), 2, 2).unwrap());
+        assert_eq!(&emit_routines(&[Routine {
+            name: "for_and_do".into(), parameters: 2, locals: 2, body,
+        }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
     fn rejects_nondefinite_local_initialization() {

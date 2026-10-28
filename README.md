@@ -139,3 +139,17 @@ complex C++ expressions, and for/do loops are still unsupported.
 
 CI compares generated ELF with GCC for mutable branches and loop-carried
 variables over the existing signed input grid.
+
+## For / do-while control flow
+
+The constrained signed-i64 CFG emitter now supports source-level `for` (with
+assignment-style initializer/increment and a condition) and `do/while` loops.
+For increments retain both EDG's original control expression and a bounded
+synthetic statement carrying the complete executable expression tree. This is
+needed to preserve numeric constants in increments. Generated basic blocks
+handle forward/backward edges and Cranelift SSA merges. Differential tests
+compare output to GCC across the existing signed input grid. At present,
+source-level `break` / `continue` are represented by EDG goto/label nodes,
+which require a separate, label-aware CFG milestone; they are not silently
+accepted. Other unsupported operators, calls, pointers and non-i64 types
+remain errors.

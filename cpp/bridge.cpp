@@ -848,6 +848,15 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         }
         emit_statements(info->initialization, function, path, "init", depth + 1, true);
         emit_control_expr(info->increment, function, path, 1, "0", "", 0);
+        // The role-1 control snapshot contains no constant values. Retain a
+        // parallel executable expression tree on a synthetic statement,
+        // preserving the original role-1 snapshot and loop edge identity.
+        if (info->increment != nullptr) {
+          const std::string increment_path = path + ".increment.0";
+          emit_record(5, {txt(function), txt(increment_path), txt(path)},
+                      static_cast<uint32_t>(stmk_expr));
+          emit_expr(info->increment, function, increment_path, "0", "", 0);
+        }
       }
       emit_statements(stmt->variant.for_loop.statement,
                       function, path, "body", depth + 1, true);
@@ -1309,6 +1318,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_init)) return 5;
     if (value == static_cast<unsigned>(stmk_expr)) return 6;
     if (value == static_cast<unsigned>(stmk_while)) return 7;
+    if (value == static_cast<unsigned>(stmk_end_test_while)) return 8;
+    if (value == static_cast<unsigned>(stmk_for)) return 9;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;

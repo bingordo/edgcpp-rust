@@ -12,6 +12,8 @@ extern "C" long long edg_locals_choose(long long, long long);
 extern "C" long long edg_mutable_if(long long, long long);
 extern "C" long long edg_no_else(long long, long long);
 extern "C" long long edg_while(long long, long long);
+extern "C" long long edg_for(long long, long long);
+extern "C" long long edg_do_while(long long, long long);
 
 int main() {
     long long checksum = 0;
@@ -50,7 +52,19 @@ int main() {
                 i = i + 1;
             }
             if (edg_while(a, b) != loop_result + i) return 8;
-            checksum += (edg_mutable_if(a, b) + edg_no_else(a, b) + edg_while(a, b) +
+            long long for_i = a, for_sum = 2;
+            for (for_i = a; for_i < b; for_i = for_i + 1) {
+                for_sum = for_sum + for_i;
+            }
+            if (edg_for(a, b) != for_sum + for_i) return 9;
+            long long do_total = b, do_i = a;
+            do {
+                do_total = do_total + do_i;
+                do_i = do_i + 1;
+            } while (do_i < b);
+            if (edg_do_while(a, b) != do_total + do_i) return 10;
+            checksum += (edg_for(a, b) + edg_do_while(a, b) +
+                         edg_mutable_if(a, b) + edg_no_else(a, b) + edg_while(a, b) +
                          add * 3 + affine + choose + abs + cmp + bits +
                          edg_locals(a, b) + edg_locals_choose(a, b)) * (a + 31);
         }
