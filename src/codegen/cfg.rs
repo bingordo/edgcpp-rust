@@ -8,6 +8,7 @@ use cranelift_frontend::Variable;
 #[derive(Debug, Clone)]
 enum Stmt {
     Store(usize, Expr),
+    Eval(Expr),
     Return(Expr),
     ReturnVoid,
     If(Expr, Vec<Stmt>, Vec<Stmt>),
@@ -159,7 +160,9 @@ fn lower(
             let op = graph.expression(root).ok_or_else(|| invalid("missing assignment root"))?;
             if semantic(2, op.data.kind) != 3 ||
                 op.data.operator.map(|o| semantic(3, o)) != Some(18) ||
-                op.operands.len() != 2 { return Err(invalid("only simple local assignment supported")); }
+                op.operands.len() != 2 {
+                return Ok(vec![Stmt::Eval(expr(root)?)]);
+            }
             let lhs = graph.expression(op.operands[0])
                 .ok_or_else(|| invalid("missing assignment destination"))?;
             if semantic(2, lhs.data.kind) != 2 || !lhs.operands.is_empty() {
@@ -232,7 +235,7 @@ fn lower(
         _ => Err(invalid(format!("unsupported EDG statement {}", node.data.kind))),
     }
 }
-fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), CodegenError> {
+fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), CodegenError> {
     match e {
         Expr::Constant(_) => Ok(()),
         Expr::Parameter(i) => if *i < params { Ok(()) } else { Err(invalid("invalid parameter")) },
@@ -250,12 +253,34 @@ fn check_expr(e: &Expr, vars: &HashSet<usize>, params: usize) -> Result<(), Code
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)
         }
-        Expr::Conditional(a,b,c) | Expr::Select(a,b,c) => {
+        Expr::AssignLocal(i,_,e) => {
+            check_expr(e, vars, params)?;
+            vars.insert(*i);
+            Ok(())
+        }
+        Expr::CompoundLocal(i,_,_,e) => {
+            if !vars.contains(i) { return Err(invalid("compound use of uninitialized local")); }
+            check_expr(e, vars, params)
+        }
+        Expr::PostLocal(i,..) => {
+            if vars.contains(i) { Ok(()) }
+            else { Err(invalid("postincrement of uninitialized local")) }
+        }
+        Expr::Conditional(a,b,c) => {
+            check_expr(a, vars, params)?;
+            let mut yes = vars.clone();
+            let mut no = vars.clone();
+            check_expr(b, &mut yes, params)?;
+            check_expr(c, &mut no, params)?;
+            *vars = yes.intersection(&no).copied().collect();
+            Ok(())
+        }
+        Expr::Select(a,b,c) => {
             check_expr(a, vars, params)?;
             check_expr(b, vars, params)?;
             check_expr(c, vars, params)
         }
-        Expr::StoreLocal(..) => Err(invalid("side effects in expression unsupported")),
+        Expr::StoreLocal(..) => Err(invalid("legacy local assignment unsupported in CFG")),
     }
 }
 // Returns true if execution can reach the end of this sequence.
@@ -276,6 +301,7 @@ fn check(
                 check_expr(e, vars, params)?;
                 vars.insert(*i);
             }
+            Stmt::Eval(e) => { check_expr(e, vars, params)?; }
             Stmt::Return(e) => { check_expr(e, vars, params)?; live = false; }
             Stmt::ReturnVoid => { live = false; }
             Stmt::If(e, yes, no) => {
@@ -344,6 +370,20 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
 /// Every EDG operation has a result type, and each operand already carries
 /// explicit integer promotions and usual arithmetic conversions. Track
 /// those conversions rather than evaluating all expressions as signed i64.
+/// Resolve a scalar local lvalue. No address-taken, pointer or field writes.
+fn scalar_lvalue(
+    graph: &Graph, id: ExpressionId, locals: &[&crate::LocalVariable],
+    il: &Il,
+) -> Result<(usize,CAbiInt), CodegenError> {
+    let n = graph.expression(id).ok_or_else(|| invalid("missing local lvalue"))?;
+    if semantic(2,n.data.kind) != 2 || !n.operands.is_empty() {
+        return Err(invalid("assignment target must be direct scalar local"));
+    }
+    let index = cfg_checked_local(il,locals,n.data.symbol_id
+        .ok_or_else(|| invalid("missing assignment symbol"))?)?;
+    let ty = cfg_local_type(il,locals[index])?;
+    Ok((index,ty))
+}
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
@@ -365,10 +405,14 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28) {
+            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30) {
                 if operands.len() != 1 {
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
+                if matches!(op,29|30) {
+                    let (index,ty) = scalar_lvalue(graph,operands[0],locals,il)?;
+                    Expr::PostLocal(index,ty,if op==29 {1} else {-1})
+                } else {
                 let a = lower_c_expression(graph, operands[0], params, locals, il)?;
                 match op {
                     4 => Expr::Neg(Box::new(a)),
@@ -380,6 +424,7 @@ fn lower_c_expression(
                         Box::new(a), Box::new(Expr::Constant(0))),
                     _ => unreachable!(),
                 }
+                }
             } else if op == 25 {
                 if operands.len() != 3 {
                     return Err(invalid("conditional expression needs three operands"));
@@ -389,6 +434,26 @@ fn lower_c_expression(
                     Box::new(lower_c_expression(graph, operands[1], params, locals, il)?),
                     Box::new(lower_c_expression(graph, operands[2], params, locals, il)?),
                 )
+            } else if op == 18 || (31..=40).contains(&op) {
+                if operands.len() != 2 {
+                    return Err(invalid("assignment expression requires 2 operands"));
+                }
+                let (index,ty) = scalar_lvalue(graph,operands[0],locals,il)?;
+                let rhs = Box::new(lower_c_expression(
+                    graph,operands[1],params,locals,il)?);
+                if op==18 {
+                    Expr::AssignLocal(index,ty,rhs)
+                } else {
+                    let kind = match op {
+                        31 => CCompoundOp::Add, 32 => CCompoundOp::Sub,
+                        33 => CCompoundOp::Mul, 34 => CCompoundOp::Div,
+                        35 => CCompoundOp::Rem, 36 => CCompoundOp::Shl,
+                        37 => CCompoundOp::Shr, 38 => CCompoundOp::And,
+                        39 => CCompoundOp::Or, 40 => CCompoundOp::Xor,
+                        _ => unreachable!(),
+                    };
+                    Expr::CompoundLocal(index,ty,kind,rhs)
+                }
             } else if matches!(op, 23 | 24 | 26) {
                 if operands.len() != 2 {
                     return Err(invalid("logical/comma expression needs two operands"));
@@ -535,6 +600,46 @@ fn emit_expr(
             let _ = emit_expr(a, fb, params, vars)?;
             emit_expr(b, fb, params, vars)?
         }
+        Expr::AssignLocal(index,ty,value) => {
+            let raw = emit_expr(value,fb,params,vars)?;
+            let normalized = normalize_c_value(fb,raw,*ty);
+            fb.def_var(*vars.get(*index).ok_or_else(|| invalid("invalid local assignment"))?,normalized);
+            normalized
+        }
+        Expr::PostLocal(index,ty,delta) => {
+            let var = *vars.get(*index).ok_or_else(|| invalid("invalid local increment"))?;
+            let old = fb.use_var(var);
+            let amount = fb.ins().iconst(types::I64,*delta);
+            let next = fb.ins().iadd(old,amount);
+            fb.def_var(var,normalize_c_value(fb,next,*ty));
+            old
+        }
+        Expr::CompoundLocal(index,ty,op,rhs) => {
+            let var = *vars.get(*index).ok_or_else(|| invalid("invalid compound target"))?;
+            let before = fb.use_var(var);
+            let after = emit_expr(rhs,fb,params,vars)?;
+            let result = match op {
+                CCompoundOp::Add => fb.ins().iadd(before,after),
+                CCompoundOp::Sub => fb.ins().isub(before,after),
+                CCompoundOp::Mul => fb.ins().imul(before,after),
+                CCompoundOp::And => fb.ins().band(before,after),
+                CCompoundOp::Or => fb.ins().bor(before,after),
+                CCompoundOp::Xor => fb.ins().bxor(before,after),
+                CCompoundOp::Div => emit_integer_binary(
+                    if ty.signed {CIntBinaryOp::SignedDivide}
+                    else {CIntBinaryOp::UnsignedDivide},fb,before,after),
+                CCompoundOp::Rem => emit_integer_binary(
+                    if ty.signed {CIntBinaryOp::SignedRemainder}
+                    else {CIntBinaryOp::UnsignedRemainder},fb,before,after),
+                CCompoundOp::Shl => fb.ins().ishl(before,after),
+                CCompoundOp::Shr => emit_integer_binary(
+                    if ty.signed {CIntBinaryOp::SignedShiftRight}
+                    else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
+            };
+            let normalized = normalize_c_value(fb,result,*ty);
+            fb.def_var(var,normalized);
+            normalized
+        }
         Expr::Conditional(c,a,b) => {
             let test = emit_expr(c, fb, params, vars)?;
             let flag = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
@@ -634,6 +739,7 @@ fn emit_body(
                 let v = normalize_c_value(fb, v, ty);
                 fb.def_var(*vars.get(*i).ok_or_else(|| invalid("bad local"))?, v);
             }
+            Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars)?; }
             Stmt::Return(e) => {
                 let ty = result.ok_or_else(|| invalid("value returned from void routine"))?;
                 let v = emit_expr(e, fb, args, vars)?;

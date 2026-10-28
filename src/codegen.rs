@@ -32,6 +32,11 @@ pub enum Expr {
     /// be replaced by an eager Cranelift select.
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
     Sequence(Box<Expr>, Box<Expr>),
+    /// C local assignment expression: normalize to the declared scalar type
+    /// before updating SSA, and return that normalized value.
+    AssignLocal(usize, CAbiInt, Box<Expr>),
+    CompoundLocal(usize, CAbiInt, CCompoundOp, Box<Expr>),
+    PostLocal(usize, CAbiInt, i64),
     Neg(Box<Expr>),
     BitAnd(Box<Expr>, Box<Expr>),
     BitOr(Box<Expr>, Box<Expr>),
@@ -53,6 +58,8 @@ pub enum CIntBinaryOp {
     SignedRemainder, UnsignedRemainder,
     ShiftLeft, SignedShiftRight, UnsignedShiftRight,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CCompoundOp { Add, Sub, Mul, Div, Rem, Shl, Shr, And, Or, Xor }
 /// Generic Cranelift instruction selection for integer binary operations.
 /// EDG typed lowering is responsible for promotions, conversion and C UB.
 fn emit_integer_binary(
@@ -127,8 +134,10 @@ fn emit_expr(
             let _ = emit_expr(a, builder, params, locals)?;
             emit_expr(b, builder, params, locals)?
         }
-        Expr::Conditional(..) => return Err(CodegenError::InvalidFunction(
-            "conditional expression needs CFG backend".into())),
+        Expr::Conditional(..) | Expr::AssignLocal(..) |
+        Expr::CompoundLocal(..) | Expr::PostLocal(..) =>
+            return Err(CodegenError::InvalidFunction(
+                "side-effect/conditional expression needs CFG backend".into())),
         Expr::Neg(a) => {
             let a = emit_expr(a, builder, params, locals)?;
             builder.ins().ineg(a)
@@ -370,7 +379,8 @@ fn checked_local(
 /// proper Cranelift blocks, branches and phi handling are implemented.
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
-        Expr::StoreLocal(..) => true,
+        Expr::StoreLocal(..) | Expr::AssignLocal(..) |
+        Expr::CompoundLocal(..) | Expr::PostLocal(..) => true,
         Expr::Select(a, b, c) | Expr::Conditional(a,b,c) =>
             contains_local_write(a) || contains_local_write(b) || contains_local_write(c),
         Expr::Sequence(a,b) => contains_local_write(a) || contains_local_write(b),

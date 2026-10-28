@@ -1418,6 +1418,18 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_comma)) return 26;
     if (value == static_cast<unsigned>(eok_complement)) return 27;
     if (value == static_cast<unsigned>(eok_not)) return 28;
+    if (value == static_cast<unsigned>(eok_post_incr)) return 29;
+    if (value == static_cast<unsigned>(eok_post_decr)) return 30;
+    if (value == static_cast<unsigned>(eok_add_assign)) return 31;
+    if (value == static_cast<unsigned>(eok_subtract_assign)) return 32;
+    if (value == static_cast<unsigned>(eok_multiply_assign)) return 33;
+    if (value == static_cast<unsigned>(eok_divide_assign)) return 34;
+    if (value == static_cast<unsigned>(eok_remainder_assign)) return 35;
+    if (value == static_cast<unsigned>(eok_shiftl_assign)) return 36;
+    if (value == static_cast<unsigned>(eok_shiftr_assign)) return 37;
+    if (value == static_cast<unsigned>(eok_and_assign)) return 38;
+    if (value == static_cast<unsigned>(eok_or_assign)) return 39;
+    if (value == static_cast<unsigned>(eok_xor_assign)) return 40;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
