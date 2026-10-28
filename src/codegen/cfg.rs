@@ -366,6 +366,15 @@ fn lower_c_expression(
                     _ => unreachable!(),
                 }
             } else {
+                // Reject unknown operators before enforcing the usual
+                // arithmetic-conversion rules. Shifts and division do not
+                // necessarily have equal operand types, so applying binary
+                // arithmetic assumptions first gives misleading diagnostics.
+                if !matches!(op, 1 | 2 | 3 | 5..=10 | 13 | 14 | 15) {
+                    return Err(invalid(format!(
+                        "unsupported EDG operation at {}:{}:{}",
+                        node.data.function, node.data.statement_path, node.data.path)));
+                }
                 if operands.len() != 2 {
                     return Err(invalid("binary expression requires two operands"));
                 }
