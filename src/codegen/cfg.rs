@@ -63,7 +63,7 @@ fn cfg_checked_local(
     cfg_local_type(il, locals[index])?;
     Ok(index)
 }
-fn normalize_c_value(
+pub(super) fn normalize_c_value(
     fb: &mut FunctionBuilder<'_>, value: cranelift_codegen::ir::Value, ty: CAbiInt,
 ) -> cranelift_codegen::ir::Value {
     if ty.is_bool {
