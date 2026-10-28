@@ -173,3 +173,12 @@ A path-sensitive precheck rejects jumps outside a loop and conservatively
 disallows reads of variables only initialized on some loop paths. Native
 differential tests cover loop breaks and continues across for, while, and
 do-while.
+
+## YARPGen expansion plan
+
+A staged plan to make the EDG/Cranelift reference backend reasonably complete
+for YARPGen's generated C programs is in
+[docs/YARPGEN_CRANELIFT_MILESTONES.md](docs/YARPGEN_CRANELIFT_MILESTONES.md).
+It covers pinned YARPGen releases, a differential-test harness, scalar
+semantics, C ABI, memory/arrays, calls, control flow, coverage gates and
+CI CPU budgets. The plan is not a claim that these features are implemented.
