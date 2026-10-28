@@ -1,0 +1,81 @@
+name: Pinned YARPGen C baseline smoke
+
+# Separate from expensive EDG + Cranelift CI. Reuse the existing YARPGen
+# Linux binary Release; compile only generated code, never the generator.
+on:
+  push:
+    branches: [cranelift-codegen]
+    paths:
+      - 'tools/yarpgen_smoke.py'
+      - 'tests/test_yarpgen_smoke.py'
+      - '.github/workflows/yarpgen-smoke.yml'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "Number of fixed baseline C seeds (max 100)"
+        required: false
+        default: '10'
+      start_seed:
+        description: "First YARPGen seed"
+        required: false
+        default: '12345'
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      YARPGEN_TAG: yarpgen-binary-20261028-1
+      YARPGEN_ARCHIVE_SHA256: fc3c7c80c10c67782c03f9d8b70c426f942332e78701397a14a5edff81cbc2e8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit test harness without YARPGen
+        run: python3 -m unittest discover -s tests -p test_yarpgen_smoke.py -v
+      - name: Download pinned release artifact (no source build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tools/prebuilt-yarpgen
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --silent --show-error \
+            "https://github.com/bingundu/yarpgen/releases/download/$YARPGEN_TAG/yarpgen-linux-x86_64.tar.gz" \
+            -o tools/prebuilt-yarpgen/archive.tar.gz
+          printf '%s  %s\n' "$YARPGEN_ARCHIVE_SHA256" tools/prebuilt-yarpgen/archive.tar.gz | sha256sum -c -
+          tar -xzf tools/prebuilt-yarpgen/archive.tar.gz -C tools/prebuilt-yarpgen
+          tools/prebuilt-yarpgen/yarpgen-linux-x86_64/yarpgen --version
+      - name: Run deterministic GCC/Clang C reference baseline
+        shell: bash
+        env:
+          REQUESTED_SEEDS: ${{ github.event_name == 'workflow_dispatch' && inputs.seeds || '2' }}
+          REQUESTED_START: ${{ github.event_name == 'workflow_dispatch' && inputs.start_seed || '12345' }}
+        run: |
+          set -euo pipefail
+          count="$REQUESTED_SEEDS"
+          start="$REQUESTED_START"
+          [[ "$count" =~ ^[0-9]+$ && "$count" -ge 1 && "$count" -le 100 ]]
+          [[ "$start" =~ ^[0-9]+$ && "$start" -ge 1 ]]
+          python3 tools/yarpgen_smoke.py \
+            --generator "$PWD/tools/prebuilt-yarpgen/yarpgen-linux-x86_64/yarpgen" \
+            --out "$RUNNER_TEMP/yarpgen-cases" \
+            --start-seed "$start" --count "$count" \
+            --clang clang --timeout 60 --memory-mb 3072 \
+            --generator-option=--inp-as-args=none \
+            --generator-option=--emit-pragmas=none \
+            --generator-option=--emit-align-attr=none \
+            --generator-option=--omp-simd=off \
+            --generator-option=--max-array-dims=2
+      - name: Save baseline report and reproducible failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yarpgen-c-baseline
+          path: |
+            ${{ runner.temp }}/yarpgen-cases/summary.json
+            ${{ runner.temp }}/yarpgen-cases/results.jsonl
+            ${{ runner.temp }}/yarpgen-cases/provenance.json
+            ${{ runner.temp }}/yarpgen-cases/seed-*/
+          if-no-files-found: ignore
+          retention-days: 14

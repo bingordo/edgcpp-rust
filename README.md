@@ -182,3 +182,18 @@ for YARPGen's generated C programs is in
 It covers pinned YARPGen releases, a differential-test harness, scalar
 semantics, C ABI, memory/arrays, calls, control flow, coverage gates and
 CI CPU budgets. The plan is not a claim that these features are implemented.
+
+### YARPGen M0/M1 integration
+
+The Linux x86-64 generator is pinned to the permanent release
+[yarpgen-binary-20261028-1](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1).
+The separate `.github/workflows/yarpgen-smoke.yml` job downloads the
+verified archive by its exact SHA-256 and runs deterministic GCC-O0/GCC-O2
+and Clang-O2 baseline comparisons using `tools/yarpgen_smoke.py`.
+
+The harness also supports an optional EDG/Cranelift codegen binary, which
+compiles `func.c` separately and links it with GCC-built `driver.c`.
+Known unsupported C constructs are reported explicitly and never counted
+as tests passed. Passing test files are removed, but all failures retain
+their generated source, commands, logs and JSON manifest. The M1 baseline
+is deliberately distinct from claiming YARPGen-compatible codegen.

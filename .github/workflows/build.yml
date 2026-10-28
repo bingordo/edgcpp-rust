@@ -10,6 +10,10 @@ on:
       - README.md
       - docs/**
       - '**/*.md'
+      # A separate small workflow validates YARPGen harness edits.
+      - tools/yarpgen_smoke.py
+      - tests/test_yarpgen_smoke.py
+      - .github/workflows/yarpgen-smoke.yml
   pull_request:
     branches: [main]
     paths-ignore:

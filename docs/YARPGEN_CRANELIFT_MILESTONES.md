@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **plan only — implementation milestones not yet complete**.
+Status: **M0 complete; M1 harness implementation in progress**.
 Date: 2026-10-28.
 Development and CI: `bingordo/edgcpp-rust`, branch `cranelift-codegen`.
 Source mirror: `bingundu/edgcpp-rust`, branch `cranelift-codegen`.
