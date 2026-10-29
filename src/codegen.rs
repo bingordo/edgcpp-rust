@@ -650,8 +650,12 @@ fn cfg_routine_abi(
     }
     let type_of = |id: crate::TypeId| -> Result<CAbiInt, CodegenError> {
         let id = canonical_abi_type(il, id)?;
+        if il.types.iter().any(|t| t.id == id && semantic(4,t.kind) == 5) {
+            // Linux x86-64 SysV pointers are one machine register.
+            return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
+        }
         let entry = il.c_integer_types.iter().find(|t| t.id == id)
-            .ok_or_else(|| error("parameter/return ABI must be ordinary 8/16/32/64-bit integer"))?;
+            .ok_or_else(|| error("parameter/return ABI must be integer or data pointer"))?;
         Ok(CAbiInt { bits: entry.bits, signed: entry.signed, is_bool: entry.is_bool })
     };
     let return_ty = canonical_abi_type(il,
