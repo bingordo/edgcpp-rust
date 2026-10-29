@@ -84,6 +84,71 @@ pub(super) fn normalize_c_value(
     else { fb.ins().uextend(types::I64, small) }
 }
 
+fn is_gnu_child(graph:&Graph,id:crate::graph::StatementId,parent:&str) -> bool {
+    graph.statement(id).is_some_and(|n|n.data.path.starts_with(
+        &format!("{parent}.gnu")))
+}
+/// Validate the EDG statement tree belonging to one GNU ({...}) expression.
+/// Only straight-line, scoped scalar statements are accepted here. Branches,
+/// jumps, nontrivial lifetimes and nested control flow are intentionally
+/// rejected, rather than assuming a source macro has no side effects.
+fn lower_gnu_block(
+    graph:&Graph, id:crate::graph::StatementId,
+    params:&[crate::SymbolId], locals:&[&crate::LocalVariable], il:&Il,
+) -> Result<Expr,CodegenError> {
+    let root=graph.statement(id).ok_or_else(||invalid("missing GNU block"))?;
+    if semantic(1,root.data.kind)!=2 {
+        return Err(invalid("GNU expression does not own a statement block"));
+    }
+    let mut effects:Vec<Expr>=Vec::new();
+    let mut result:Option<Expr>=None;
+    for (position,&child) in root.children.iter().enumerate() {
+        let node=graph.statement(child).ok_or_else(||invalid("missing GNU statement"))?;
+        if is_gnu_child(graph,child,&root.data.path) { continue; }
+        if result.is_some() {return Err(invalid("GNU block statements after result"));}
+        match semantic(1,node.data.kind) {
+            4 => {let body=lower(graph,child,params,locals,il)?;
+                if !body.is_empty() {return Err(invalid("executable GNU declaration"));}}
+            5 => {
+                for action in lower(graph,child,params,locals,il)? {
+                    match action {
+                        Stmt::Store(i,e) => {
+                            let ty=if i<locals.len() {cfg_local_type(il,locals[i])?}
+                                else {
+                                    let index=i-locals.len();
+                                    let sym=*params.get(index).ok_or_else(||invalid("GNU param index"))?;
+                                    let declared=il.symbol_types.iter().find(|s|s.symbol==sym)
+                                        .ok_or_else(||invalid("GNU param has no type"))?.ty;
+                                    call_type_abi(il,declared)?
+                                };
+                            effects.push(Expr::AssignLocal(i,ty,Box::new(e)));
+                        }
+                        _ => return Err(invalid("non-scalar GNU initializer")),
+                    }
+                }
+            }
+            6 => {
+                if node.children.iter().any(|&c|!is_gnu_child(graph,c,&node.data.path)) {
+                    return Err(invalid("GNU expression has unexpected children"));
+                }
+                let expr=node.expression.ok_or_else(||invalid("GNU evaluation is missing"))?;
+                effects.push(lower_c_expression(graph,expr,params,locals,il)?);
+            }
+            12 => {
+                let expr=node.expression.ok_or_else(||invalid(
+                    "GNU statement-expression result is not scalar"))?;
+                result=Some(lower_c_expression(graph,expr,params,locals,il)?);
+                if position+1!=root.children.len() {
+                    return Err(invalid("GNU result is not last statement"));
+                }
+            }
+            _ => return Err(invalid(format!(
+                "GNU block has unsupported statement kind {}",node.data.kind))),
+        }
+    }
+    Ok(Expr::BlockValue(effects,Box::new(result.ok_or_else(||
+        invalid("GNU statement-expression missing final value"))?)))
+}
 fn lower(
     graph: &Graph, id: crate::graph::StatementId,
     params: &[crate::SymbolId], locals: &[&crate::LocalVariable], il: &Il,
@@ -94,7 +159,9 @@ fn lower(
     let expr = |id| lower_c_expression(graph, id, params, locals, il);
     match semantic(1, node.data.kind) {
         1 => {
-            if !node.children.is_empty() { return Err(invalid("return with nested statements")); }
+            if node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
+                return Err(invalid("return with nested statements"));
+            }
             if let Some(id) = node.expression {
                 Ok(vec![Stmt::Return(expr(id)?)])
             } else {
@@ -104,7 +171,10 @@ fn lower(
         2 => {
             if node.expression.is_some() { return Err(invalid("block has an expression")); }
             let mut body = Vec::new();
-            for &child in &node.children { body.extend(lower(graph, child, params, locals, il)?); }
+            for &child in &node.children {
+                if is_gnu_child(graph,child,path) {continue;}
+                body.extend(lower(graph, child, params, locals, il)?);
+            }
             Ok(body)
         }
         3 => {
@@ -112,6 +182,7 @@ fn lower(
             let mut yes = None;
             let mut no = None;
             for &child in &node.children {
+                if is_gnu_child(graph,child,path) {continue;}
                 let nested = graph.statement(child).ok_or_else(|| invalid("missing if child"))?;
                 if nested.data.path.starts_with(&format!("{path}.then.")) {
                     if yes.replace(child).is_some() { return Err(invalid("duplicate then")); }
@@ -126,7 +197,8 @@ fn lower(
             Ok(vec![Stmt::If(condition, yes, no)])
         }
         4 => {
-            if node.expression.is_some() || !node.children.is_empty() {
+            if node.expression.is_some() ||
+               node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
                 return Err(invalid("executable declaration unsupported"));
             }
             let mut found = false;
@@ -141,7 +213,8 @@ fn lower(
         5 => {
             let init = graph.statement_initialization(function, path)
                 .ok_or_else(|| invalid("missing local initializer metadata"))?;
-            if init.role != 0 || !node.children.is_empty() {
+            if init.role != 0 ||
+               node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
                 return Err(invalid("unsupported initializer"));
             }
             let symbol = init.symbol.ok_or_else(|| invalid("initializer has no target"))?;
@@ -160,14 +233,18 @@ fn lower(
             Ok(vec![Stmt::Store(cfg_checked_local(il, locals, symbol)?, value)])
         }
         6 => {
-            if !node.children.is_empty() { return Err(invalid("expression statement has children")); }
+            if node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
+                return Err(invalid("expression statement has children"));
+            }
             let root = node.expression.ok_or_else(|| invalid("missing expression"))?;
             Ok(vec![Stmt::Eval(expr(root)?)])
         }
         7 | 8 => {
             let condition = expr(node.expression.ok_or_else(|| invalid("while has no condition"))?)?;
-            if node.children.len() != 1 { return Err(invalid("while body not unique")); }
-            let child = node.children[0];
+            let body_children:Vec<_>=node.children.iter().copied()
+                .filter(|&child|!is_gnu_child(graph,child,path)).collect();
+            if body_children.len()!=1 {return Err(invalid("while body not unique"));}
+            let child=body_children[0];
             let body = graph.statement(child).ok_or_else(|| invalid("missing while body"))?;
             if !body.data.path.starts_with(&format!("{path}.body.")) {
                 return Err(invalid("unexpected while body"));
@@ -189,6 +266,7 @@ fn lower(
             let mut body = None;
             let mut increment = None;
             for &child in &node.children {
+                if is_gnu_child(graph,child,path) {continue;}
                 let child_node = graph.statement(child).ok_or_else(|| invalid("missing for child"))?;
                 let child_path = &child_node.data.path;
                 if child_path.starts_with(&format!("{path}.init.")) {
@@ -234,6 +312,10 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
         Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => Ok(()),
+        Expr::BlockValue(effects,result) => {
+            for effect in effects {check_expr(effect,vars,params)?;}
+            check_expr(result,vars,params)
+        }
         Expr::Call(_,abi,args) => {
             if abi.parameters.len()!=args.len() {return Err(invalid("invalid call arity"));}
             for arg in args {check_expr(arg,vars,params)?;}
@@ -701,7 +783,14 @@ fn lower_c_expression(
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
     let inner = match semantic(2, node.data.kind) {
-        4 => return Err(invalid("GNU statement expression requires block-value semantics (M6)")),
+        4 => {
+            let path=format!("{}.gnu{}.0",node.data.statement_path,
+                             node.data.path.replace('.',"_"));
+            let stmt=graph.statements.iter().position(|entry|
+                entry.data.function==node.data.function && entry.data.path==path)
+                .ok_or_else(||invalid("GNU expression missing native statement block"))?;
+            return lower_gnu_block(graph,crate::graph::StatementId(stmt),params,locals,il);
+        },
         1 => Expr::Constant(node.data.constant_integer
             .ok_or_else(|| invalid("unsupported/non-i64-representable constant"))?),
         2 => {
@@ -1074,6 +1163,10 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
     match expr {
         Expr::AddressLocal(i) => {found.insert(*i);}
         Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
+        Expr::BlockValue(effects,result) => {
+            for effect in effects {addressed_expr(effect,found);}
+            addressed_expr(result,found);
+        },
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
@@ -1184,6 +1277,12 @@ fn emit_expr(
         Expr::Constant(v) => fb.ins().iconst(types::I64, *v),
         Expr::Parameter(i) => *params.get(*i).ok_or_else(|| invalid("invalid parameter"))?,
         Expr::Local(i) => local_read(fb,vars,stack,local_types,*i)?,
+        Expr::BlockValue(effects,result) => {
+            for effect in effects {
+                let _=emit_expr(effect,fb,params,vars,globals,stack,local_types,calls)?;
+            }
+            emit_expr(result,fb,params,vars,globals,stack,local_types,calls)?
+        }
         Expr::Call(symbol,abi,arguments) => {
             let (reference,declared)=calls.get(symbol)
                 .ok_or_else(||invalid("direct call has no declared function"))?;
