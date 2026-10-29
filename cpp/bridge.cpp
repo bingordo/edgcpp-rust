@@ -1455,6 +1455,11 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_indirect)) return 44;
     if (value == static_cast<unsigned>(eok_subscript)) return 45;
     if (value == static_cast<unsigned>(eok_array_to_pointer)) return 46;
+    if (value == static_cast<unsigned>(eok_padd)) return 47;
+    if (value == static_cast<unsigned>(eok_psubtract)) return 48;
+    if (value == static_cast<unsigned>(eok_pdiff)) return 49;
+    if (value == static_cast<unsigned>(eok_padd_assign)) return 50;
+    if (value == static_cast<unsigned>(eok_psubtract_assign)) return 51;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
