@@ -641,24 +641,69 @@ fn lower_c_expression(
                         graph,operands[0],params,locals,il)?,
                     _ => return Err(invalid("invalid pointer expression arity")),
                 }
+            } else if matches!(op,47|48|49|50|51) {
+                if operands.len()!=2 {return Err(invalid("pointer arithmetic arity"));}
+                let a=operands[0];let b=operands[1];
+                if matches!(op,47|48|49) {
+                    let lhs_ptr=is_pointer_like(il,expression_type_id(graph,a)?)?;
+                    let rhs_ptr=is_pointer_like(il,expression_type_id(graph,b)?)?;
+                    if op==49 {
+                        if !lhs_ptr || !rhs_ptr {return Err(invalid("pointer difference types"));}
+                        let stride=pointer_stride(il,expression_type_id(graph,a)?)?;
+                        let left=lower_c_expression(graph,a,params,locals,il)?;
+                        let right=lower_c_expression(graph,b,params,locals,il)?;
+                        Expr::IntegerBinary(CIntBinaryOp::SignedDivide,
+                            Box::new(Expr::Sub(Box::new(left),Box::new(right))),
+                            Box::new(Expr::Constant(stride as i64)))
+                    } else {
+                        let (ptr,idx)=if lhs_ptr {(a,b)}
+                            else if op==47 && rhs_ptr {(b,a)}
+                            else {return Err(invalid("pointer arithmetic pointer missing"));};
+                        let stride=pointer_stride(il,expression_type_id(graph,ptr)?)?;
+                        let base=lower_c_expression(graph,ptr,params,locals,il)?;
+                        let index=lower_c_expression(graph,idx,params,locals,il)?;
+                        let index=if op==48 {Expr::Neg(Box::new(index))} else {index};
+                        Expr::PointerOffset(Box::new(base),Box::new(index),stride)
+                    }
+                } else {
+                    let (place,ty)=scalar_lvalue(graph,a,params,locals,il)?;
+                    if !is_pointer_like(il,expression_type_id(graph,a)?)? {
+                        return Err(invalid("pointer compound assignment on nonpointer"));
+                    }
+                    let stride=pointer_stride(il,expression_type_id(graph,a)?)?;
+                    let base=match place {
+                        ScalarPlace::Ssa(i)=>Expr::Local(i),
+                        ScalarPlace::Memory(s)=>Expr::Global(s),
+                    };
+                    let idx=lower_c_expression(graph,b,params,locals,il)?;
+                    let idx=if op==51 {Expr::Neg(Box::new(idx))} else {idx};
+                    let next=Box::new(Expr::PointerOffset(Box::new(base),Box::new(idx),stride));
+                    match place {
+                        ScalarPlace::Ssa(i)=>Expr::AssignLocal(i,ty,next),
+                        ScalarPlace::Memory(s)=>Expr::AssignGlobal(s,ty,next),
+                    }
+                }
             } else if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30 | 41 | 42) {
                 if operands.len() != 1 {
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
                     let (place,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
+                    let stride=if is_pointer_like(il,expression_type_id(graph,operands[0])?)? {
+                        pointer_stride(il,expression_type_id(graph,operands[0])?)? as i64
+                    } else {1};
                     if matches!(op,29|30) {
                         match place {
-                            ScalarPlace::Ssa(i) => Expr::PostLocal(i,ty,if op==29 {1} else {-1}),
-                            ScalarPlace::Memory(s) => Expr::PostGlobal(s,ty,if op==29 {1} else {-1}),
+                            ScalarPlace::Ssa(i) => Expr::PostLocal(i,ty,if op==29 {stride} else {-stride}),
+                            ScalarPlace::Memory(s) => Expr::PostGlobal(s,ty,if op==29 {stride} else {-stride}),
                         }
                     } else {
                         let op = if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
                         match place {
                             ScalarPlace::Ssa(i) => Expr::CompoundLocal(i,ty,promoted_integer_type(ty),
-                                op,Box::new(Expr::Constant(1))),
+                                op,Box::new(Expr::Constant(stride))),
                             ScalarPlace::Memory(s) => Expr::CompoundGlobal(s,ty,promoted_integer_type(ty),
-                                op,Box::new(Expr::Constant(1))),
+                                op,Box::new(Expr::Constant(stride))),
                         }
                     }
                 } else {
