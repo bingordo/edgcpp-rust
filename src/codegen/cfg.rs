@@ -1039,7 +1039,49 @@ fn emit_body(
     }
     Ok(live)
 }
+#[derive(Clone)]
+struct ScalarGlobal {
+    symbol: crate::SymbolId,
+    name: String,
+    ty: CAbiInt,
+    linkage: Linkage,
+    initializer: Option<Vec<u8>>,
+}
+
+/// Resolve only referenced C globals. Unused declarations of unrelated
+/// C++ types cannot make an otherwise scalar routine un-compilable.
+fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for expr in &il.expressions {
+        if semantic(2, expr.kind) != 2 { continue; }
+        let Some(id) = expr.symbol_id else { continue };
+        if !il.global_variables.iter().any(|g| g.symbol == id) ||
+           !seen.insert(id) { continue; }
+        let (name,ty) = scalar_global(il,id)?;
+        let meta = il.global_variables.iter().find(|g| g.symbol == id)
+            .ok_or_else(|| invalid("missing global metadata"))?;
+        let defined = meta.linkage != 1 || meta.explicit_initializer;
+        let linkage = if !defined { Linkage::Import }
+            else if meta.linkage == 2 { Linkage::Local }
+            else { Linkage::Export };
+        let initializer = if meta.explicit_initializer {
+            let entry = il.initializer_integers.iter().find(|v| v.symbol == id)
+                .ok_or_else(|| invalid(format!(
+                    "global {name} has unsupported non-integer initializer")))?;
+            let bytes = entry.value.to_le_bytes();
+            Some(bytes[..(ty.bits/8) as usize].to_vec())
+        } else { None };
+        result.push(ScalarGlobal { symbol:id,name,ty,linkage,initializer });
+    }
+    Ok(result)
+}
 fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
+    emit_routines_with_globals(functions,&[])
+}
+fn emit_routines_with_globals(
+    functions: &[Routine], globals: &[ScalarGlobal],
+) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     flags.set("opt_level","speed").map_err(|e| CodegenError::Backend(e.to_string()))?;
     let isa = cranelift_codegen::isa::lookup_by_name("x86_64")
@@ -1049,6 +1091,24 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
     let builder = ObjectBuilder::new(isa,"edgcpp",cranelift_module::default_libcall_names())
         .map_err(|e| CodegenError::Backend(e.to_string()))?;
     let mut module = ObjectModule::new(builder);
+    let mut declared = HashMap::new();
+    for g in globals {
+        let id = module.declare_data(&g.name,g.linkage,true,false)
+            .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        if g.linkage != Linkage::Import {
+            let mut data = cranelift_module::DataDescription::new();
+            if let Some(bytes) = &g.initializer {
+                data.define(bytes.clone().into_boxed_slice());
+            } else {
+                data.define_zeroinit((g.ty.bits/8) as usize);
+            }
+            module.define_data(id,&data)
+                .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        }
+        if declared.insert(g.symbol,(id,g.ty)).is_some() {
+            return Err(invalid("duplicate global identity"));
+        }
+    }
     for func in functions {
         if func.name.is_empty() || func.name.as_bytes().contains(&0) {
             return Err(invalid("invalid export name"));
@@ -1069,6 +1129,8 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
         }
         let id = module.declare_function(&func.name,Linkage::Export,&context.func.signature)
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty))|
+            (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty))).collect();
         let mut fb_context = FunctionBuilderContext::new();
         {
             let mut fb = FunctionBuilder::new(&mut context.func,&mut fb_context);
@@ -1101,7 +1163,8 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
                 }
             }
             let body = emit_body(
-                &func.body, &mut fb, &params, &vars, None, &local_types, abi.result)?;
+                &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
+                &global_values)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
@@ -1117,7 +1180,9 @@ fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
     module.finish().emit().map_err(|e| CodegenError::Backend(e.to_string()))
 }
 pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
-    emit_routines(&compile_il(il)?)
+    let routines = compile_il(il)?;
+    let globals = compile_globals(il)?;
+    emit_routines_with_globals(&routines,&globals)
 }
 #[cfg(test)]
 mod tests {
