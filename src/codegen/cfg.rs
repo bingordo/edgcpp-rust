@@ -920,8 +920,8 @@ fn local_read(fb:&mut FunctionBuilder<'_>,vars:&[Variable],
               index:usize) -> Result<cranelift_codegen::ir::Value,CodegenError> {
     if stack.contains_key(&index) {
         let addr=local_address(fb,stack,index)?;
-        super::memory::load_integer(fb,addr,*local_types.get(index)
-            .ok_or_else(||invalid("missing addressable local type"))?)
+        Ok(super::memory::load_integer(fb,addr,*local_types.get(index)
+            .ok_or_else(||invalid("missing addressable local type"))?))
     } else {
         Ok(fb.use_var(*vars.get(index).ok_or_else(||invalid("invalid local index"))?))
     }
@@ -1073,18 +1073,18 @@ fn emit_expr(
             let _ = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
             emit_expr(b,fb,params,vars,globals,stack,local_types)?
         }
-        Expr::AssignLocal(index,ty,value) => {
+        Expr::AssignLocal(index,_ty,value) => {
             let raw = emit_expr(value,fb,params,vars,globals,stack,local_types)?;
             local_write(fb,vars,stack,local_types,*index,raw)?
         }
-        Expr::PostLocal(index,ty,delta) => {
+        Expr::PostLocal(index,_ty,delta) => {
             let old = local_read(fb,vars,stack,local_types,*index)?;
             let amount = fb.ins().iconst(types::I64,*delta);
             let next = fb.ins().iadd(old,amount);
             local_write(fb,vars,stack,local_types,*index,next)?;
             old
         }
-        Expr::CompoundLocal(index,ty,compute_ty,op,rhs) => {
+        Expr::CompoundLocal(index,_ty,compute_ty,op,rhs) => {
             let before = local_read(fb,vars,stack,local_types,*index)?;
             let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types)?;
             let before = normalize_c_value(fb,before,*compute_ty);
