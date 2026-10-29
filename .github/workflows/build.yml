@@ -410,6 +410,7 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -427,6 +428,13 @@ jobs:
               test ! -e rejected.o
               echo "Rejected $variant"
             done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -F 'GNU statement expression requires block-value semantics' rejected.log
+            test ! -e rejected.o
           )
 
       - name: Save incremental Rust cache (successful codegen-branch builds only)

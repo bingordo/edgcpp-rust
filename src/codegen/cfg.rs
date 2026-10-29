@@ -600,6 +600,7 @@ fn lower_c_expression(
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
     let inner = match semantic(2, node.data.kind) {
+        4 => return Err(invalid("GNU statement expression requires block-value semantics (M6)")),
         1 => Expr::Constant(node.data.constant_integer
             .ok_or_else(|| invalid("unsupported/non-i64-representable constant"))?),
         2 => {

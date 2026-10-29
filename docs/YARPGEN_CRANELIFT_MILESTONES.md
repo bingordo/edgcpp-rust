@@ -357,6 +357,25 @@ miscompiles outrank unsupported-but-diagnosed features. Do focused unit
 regressions per change, bounded end-to-end corpus per milestone, and infrequent
 full seeded runs.
 
+## M5 integration checkpoint (2026-10-29, NOT completed)
+
+The EDG pointer/array operator IDs, pointer ABI, typed lvalue memory model,
+scaled pointer arithmetic, 1-D/2-D arrays and address-taken local stack slots
+are implemented. The expanded GCC differential fixture
+`tests/fixtures/m5_pointer_arrays.c` is green in
+[CI #40830228859](https://github.com/bingordo/edgcpp-rust/actions/runs/40830228859).
+The C11 zero-argument `void test()` ABI case used by YARPGen has been
+fixed and is regression-tested.
+
+**The real YARPGen acceptance gate is not yet passed.** Pinned seeds
+12345–12347 have agreeing GCC/Clang baselines, but all reach EDG's
+`enk_statement`: the GNU block-valued `({...})` expression emitted by
+YARPGen's `min`/`max` macros. The bridge deliberately rejects this
+construct instead of silently omitting its declarations, statements or value.
+Correct nested scope, sequencing and value semantics are part of M6.
+Never report zero accepted generated cases as a passing YARPGen milestone.
+CI retains the explicitly triggered `[m5-yarpgen]` probe and its artifact.
+
 ## Immediate next implementation task
 
 **M5: arrays, pointers and indexing**. Start with the minimal source-backed

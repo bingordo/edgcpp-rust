@@ -1406,6 +1406,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
     if (value == static_cast<unsigned>(enk_operation)) return 3;
+    // GNU statement expressions own embedded blocks, not just operands.
+    if (value == static_cast<unsigned>(enk_statement)) return 4;
   } else if (category == 3) {
     if (value == static_cast<unsigned>(eok_add)) return 1;
     if (value == static_cast<unsigned>(eok_subtract)) return 2;
