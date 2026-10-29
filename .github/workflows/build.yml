@@ -414,6 +414,65 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: M6 focused 10-seed YARPGen coverage probe
+        if: ${{ contains(github.event.head_commit.message, '[m6-yarpgen-10]') }}
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          mkdir -p tools/prebuilt-yarpgen
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+            "https://github.com/bingundu/yarpgen/releases/download/yarpgen-binary-20261028-1/yarpgen-linux-x86_64.tar.gz" \
+            -o tools/prebuilt-yarpgen/archive.tar.gz
+          printf '%s  %s\n' \
+            fc3c7c80c10c67782c03f9d8b70c426f942332e78701397a14a5edff81cbc2e8 \
+            tools/prebuilt-yarpgen/archive.tar.gz | sha256sum -c -
+          tar -xzf tools/prebuilt-yarpgen/archive.tar.gz -C tools/prebuilt-yarpgen
+          python3 tools/yarpgen_smoke.py \
+            --generator "$PWD/tools/prebuilt-yarpgen/yarpgen-linux-x86_64/yarpgen" \
+            --codegen "$PWD/target/debug/examples/codegen" \
+            --codegen-cwd "$PWD/../edgcpp/build/gcc-release" \
+            --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" \
+            --edg-option=--c11 \
+            --edg-option=--gcc \
+            --out "$PWD/m6-yarpgen-10-report" \
+            --seeds=12345,12346,12347,12348,12349,12350,12351,12352,12353,12354 \
+            --clang clang --timeout 45 --memory-mb 2048 \
+            --generator-option=--inp-as-args=none \
+            --generator-option=--emit-pragmas=none \
+            --generator-option=--emit-align-attr=none \
+            --generator-option=--omp-simd=off \
+            --generator-option=--max-array-dims=2
+          python3 - <<'PY'
+          import json
+          d=json.load(open('m6-yarpgen-10-report/summary.json'))
+          print("M6 focused 10-seed results:",d)
+          if d["generated"] != 100 or d["oracle_valid"] != 100:
+              raise SystemExit("M6 triage failed to establish 10 valid GCC/Clang oracles")
+          if d["counts"]["wrong_output"] or d["counts"]["link_failure"] or d["counts"]["runtime_failure"]:
+              raise SystemExit("M6 triage detected wrong output/link/runtime failure; inspect artifacts")
+          # Unsupported constructs remain categorized, not counted as passes.
+          if d["backend_accepted"] < 1:
+              raise SystemExit("M6 focused cohort has zero accepted programs")
+          PY
+
+      - name: Upload M6 focused 10-seed triage
+        if: ${{ always() && contains(github.event.head_commit.message, '[m6-yarpgen-10]') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-yarpgen-10-triage
+          path: |
+            edgcpp-rust/m6-yarpgen-10-report/summary.json
+            edgcpp-rust/m6-yarpgen-10-report/results.jsonl
+            edgcpp-rust/m6-yarpgen-10-report/provenance.json
+            edgcpp-rust/m6-yarpgen-10-report/seed-*/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: M6 pinned 100-seed YARPGen triage
         if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[m6-yarpgen]') }}
         working-directory: edgcpp-rust
