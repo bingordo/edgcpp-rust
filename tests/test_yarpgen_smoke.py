@@ -76,6 +76,30 @@ class HarnessTests(unittest.TestCase):
         run = self.invoke("--codegen", str(codegen), "--strict")
         self.assertEqual(run.returncode, 1)
 
+
+    def test_gnu_statement_expression_is_unsupported_not_a_codegen_crash(self):
+        codegen = self.root / "gnu_codegen"
+        codegen.write_text(
+            "#!/bin/sh\necho 'EDG IL lowering failed: GNU statement expression requires block-value semantics (M6)' >&2\nexit 1\n"
+        )
+        codegen.chmod(0o755)
+        run = self.invoke("--codegen", str(codegen))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        summary = json.loads((self.root / "cases" / "summary.json").read_text())
+        self.assertEqual(summary["counts"]["unsupported_construct"], 2)
+        self.assertEqual(summary["counts"]["codegen_failure"], 0)
+        self.assertEqual(summary["backend_accepted"], 0)
+
+    def test_actual_codegen_failure_is_not_treated_as_unsupported(self):
+        codegen = self.root / "broken_codegen"
+        codegen.write_text("#!/bin/sh\necho 'Cranelift unexpected verifier error' >&2\nexit 2\n")
+        codegen.chmod(0o755)
+        run = self.invoke("--codegen", str(codegen))
+        self.assertEqual(run.returncode, 1, run.stderr)
+        summary = json.loads((self.root / "cases" / "summary.json").read_text())
+        self.assertEqual(summary["counts"]["codegen_failure"], 2)
+        self.assertEqual(summary["counts"]["unsupported_construct"], 0)
+
     def test_duplicate_seed_rejected(self):
         self.common += ["--seeds", "7,7"]
         run = self.invoke()

@@ -849,7 +849,15 @@ fn lower_c_expression(
                         Box::new(offset),stride)));
                 }
                 if lhs_ptr || rhs_ptr {
-                    if lhs_ptr && rhs_ptr && matches!(op,5..=10) {
+                    // A null-pointer constant is the only integer we
+                    // accept in an equality comparison with a pointer.
+                    let literal_zero = |id: ExpressionId| graph.expression(id)
+                        .is_some_and(|n| semantic(2,n.data.kind)==1
+                            && n.data.constant_integer == Some(0));
+                    let null_compare = matches!(op,5|6) &&
+                        ((lhs_ptr && literal_zero(operands[1])) ||
+                         (rhs_ptr && literal_zero(operands[0])));
+                    if (lhs_ptr && rhs_ptr && matches!(op,5..=10)) || null_compare {
                         let cmp=match op {
                             5=>CompareOp::Equal,6=>CompareOp::NotEqual,
                             7=>CompareOp::Less,8=>CompareOp::LessEqual,

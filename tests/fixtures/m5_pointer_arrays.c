@@ -33,3 +33,17 @@ int m5_pointer_less(int *p, int *q) { return p < q; }
 
 /* C11 old-style empty parameter list is valid for a zero-argument definition. */
 void m5_legacy_zero_args() { ++m5_vector[3]; }
+
+int m5_null_cmp(int *p) { return p == 0; }
+int m5_nonnull_cmp(int *p) { return 0 != p; }
+unsigned int m5_byte_access(unsigned char *p, int index)
+{
+    unsigned int old = p[index];
+    p[index] = (unsigned char)(old + 7U);
+    return old * 100U + p[index];
+}
+int m5_void_roundtrip(void *p)
+{
+    int *q = (int *)p;
+    return *q;
+}
