@@ -21,6 +21,12 @@ pub enum Expr {
     Parameter(usize),
     /// Read a checked, function-local signed i64 variable.
     Local(usize),
+    /// External or file-scope scalar lvalue. The module owns its storage or
+    /// imports it, and each use is a real typed memory operation.
+    Global(crate::SymbolId),
+    AssignGlobal(crate::SymbolId, CAbiInt, Box<Expr>),
+    CompoundGlobal(crate::SymbolId, CAbiInt, CAbiInt, CCompoundOp, Box<Expr>),
+    PostGlobal(crate::SymbolId, CAbiInt, i64),
     /// Evaluate an assignment before its continuation (in source order).
     StoreLocal(usize, Box<Expr>, Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
