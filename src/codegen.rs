@@ -659,8 +659,12 @@ fn cfg_routine_abi(
     }
     let sig = il.function_signatures.iter().find(|s| s.owner == function_ty)
         .ok_or_else(|| error("missing function signature"))?;
-    if !sig.prototyped || sig.variadic {
-        return Err(error("unprototyped or variadic ABI unsupported"));
+    // C11 permits an old-style no-parameter function definition `void test()`.
+    // It has the same machine ABI as `void test(void)` when the definition
+    // actually has zero parameters. Do not silently accept old-style *typed*
+    // parameter definitions or variadics: their calling semantics differ.
+    if sig.variadic || (!sig.prototyped && !parameters.is_empty()) {
+        return Err(error("unprototyped parameter list or variadic ABI unsupported"));
     }
     let type_of = |id: crate::TypeId| -> Result<CAbiInt, CodegenError> {
         let id = canonical_abi_type(il, id)?;
