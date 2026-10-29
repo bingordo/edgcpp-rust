@@ -236,6 +236,21 @@ jobs:
           cargo test --features codegen --test codegen_native
           cargo test --features codegen --lib codegen::memory::tests::
           bash tools/m4_data_probe.sh
+          # Compile the actual EDG global-lvalue translation unit and link it
+          # against data owned by the GCC-built driver.
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m4_external_globals.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m4_external_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m4.o --c11 m4_external_globals.c
+            gcc -std=c11 -O2 m4_external_globals.c m4_external_driver.c -o gcc_m4
+            gcc -std=c11 -O2 edg_m4.o m4_external_driver.c -o cranelift_m4
+            ./gcc_m4 > gcc_m4.out
+            ./cranelift_m4 > cranelift_m4.out
+            diff -u gcc_m4.out cranelift_m4.out
+          )
 
       - name: EDG to Cranelift vs GCC native execution
         working-directory: edgcpp-rust
@@ -297,7 +312,7 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            for variant in TEST_GLOBAL_READ TEST_CALL TEST_FLOAT_RETURN TEST_POINTER_PARAM; do
+            for variant in TEST_CALL TEST_FLOAT_RETURN TEST_POINTER_PARAM; do
               rm -f rejected.o rejected.log
               if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
                 echo "Unexpectedly accepted unsupported construct: $variant"
