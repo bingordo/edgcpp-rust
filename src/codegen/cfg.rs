@@ -156,25 +156,8 @@ fn lower(
         }
         6 => {
             if !node.children.is_empty() { return Err(invalid("expression statement has children")); }
-            let root = node.expression.ok_or_else(|| invalid("missing assignment"))?;
-            let op = graph.expression(root).ok_or_else(|| invalid("missing assignment root"))?;
-            if semantic(2, op.data.kind) != 3 ||
-                op.data.operator.map(|o| semantic(3, o)) != Some(18) ||
-                op.operands.len() != 2 {
-                return Ok(vec![Stmt::Eval(expr(root)?)]);
-            }
-            let lhs = graph.expression(op.operands[0])
-                .ok_or_else(|| invalid("missing assignment destination"))?;
-            if semantic(2, lhs.data.kind) != 2 || !lhs.operands.is_empty() {
-                return Err(invalid("assignment target must be scalar local"));
-            }
-            let symbol = lhs.data.symbol_id.ok_or_else(|| invalid("unresolved assignment target"))?;
-            let i = if let Some(p) = params.iter().position(|v| *v == symbol) {
-                locals.len()+p
-            } else {
-                cfg_checked_local(il, locals, symbol)?
-            };
-            Ok(vec![Stmt::Store(i, expr(op.operands[1])?)])
+            let root = node.expression.ok_or_else(|| invalid("missing expression"))?;
+            Ok(vec![Stmt::Eval(expr(root)?)])
         }
         7 | 8 => {
             let condition = expr(node.expression.ok_or_else(|| invalid("while has no condition"))?)?;
@@ -245,6 +228,10 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::Parameter(i) => if *i < params { Ok(()) } else { Err(invalid("invalid parameter")) },
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
+        Expr::Global(_) => Ok(()),
+        Expr::AssignGlobal(_,_,e) => check_expr(e,vars,params),
+        Expr::CompoundGlobal(_,_,_,_,e) => check_expr(e,vars,params),
+        Expr::PostGlobal(..) => Ok(()),
         Expr::Neg(a) | Expr::Normalize(_, a) => check_expr(a, vars, params),
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) |
@@ -402,25 +389,69 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
 /// explicit integer promotions and usual arithmetic conversions. Track
 /// those conversions rather than evaluating all expressions as signed i64.
 /// Resolve a scalar local lvalue. No address-taken, pointer or field writes.
+#[derive(Clone, Copy)]
+enum ScalarPlace {
+    Ssa(usize),
+    Memory(crate::SymbolId),
+}
+
+/// Global symbols are resolved by their EDG identities, not guessed from a
+/// variable's spelling. Qualified, thread-local, and function-local static
+/// declarations require a different storage model and are refused.
+fn scalar_global(
+    il: &Il, symbol: crate::SymbolId,
+) -> Result<(String, CAbiInt), CodegenError> {
+    let meta = il.global_variables.iter().find(|g| g.symbol == symbol)
+        .ok_or_else(|| invalid(format!("unresolved/nonlocal variable {}",symbol.0)))?;
+    if meta.thread_local || meta.local_to_function ||
+       il.static_local_owners.iter().any(|o| o.variable == symbol) {
+        return Err(invalid("TLS or function-local static global unsupported"));
+    }
+    let name = il.symbols.iter().find(|s| s.id == symbol && s.kind == 2)
+        .map(|s| s.name.clone())
+        .ok_or_else(|| invalid("global has no variable symbol"))?;
+    if name.is_empty() ||
+       !name.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') ||
+       !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return Err(invalid(format!("non-C or ambiguous global linkage name: {name}")));
+    }
+    let mut ty = il.symbol_types.iter().find(|s| s.symbol == symbol)
+        .ok_or_else(|| invalid("global has no declared type"))?.ty;
+    for _ in 0..=il.types.len() {
+        if let Some(d) = il.type_details.iter().find(|d| d.owner == ty) {
+            if d.is_reference || d.is_rvalue_reference || d.qualifiers.unwrap_or(0) != 0 {
+                return Err(invalid(format!("qualified global {name} needs memory semantics")));
+            }
+        }
+        let def = il.types.iter().find(|d| d.id == ty)
+            .ok_or_else(|| invalid("unresolved global type"))?;
+        if semantic(4, def.kind) != 3 { break; }
+        ty = def.related.ok_or_else(|| invalid("invalid global typedef"))?;
+    }
+    let ty = canonical_abi_type(il,ty)?;
+    let integer = il.c_integer_types.iter().find(|x| x.id == ty)
+        .ok_or_else(|| invalid(format!("unsupported global scalar type: {name}")))?;
+    Ok((name,CAbiInt { bits: integer.bits, signed: integer.signed,
+                       is_bool: integer.is_bool }))
+}
 fn scalar_lvalue(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
-) -> Result<(usize,CAbiInt), CodegenError> {
-    let n = graph.expression(id).ok_or_else(|| invalid("missing local lvalue"))?;
+) -> Result<(ScalarPlace,CAbiInt), CodegenError> {
+    let n = graph.expression(id).ok_or_else(|| invalid("missing scalar lvalue"))?;
     if semantic(2,n.data.kind) != 2 || !n.operands.is_empty() {
-        return Err(invalid("assignment target must be direct scalar local"));
+        return Err(invalid("assignment target must be direct scalar variable"));
     }
-    let symbol = n.data.symbol_id
-        .ok_or_else(|| invalid("missing assignment symbol"))?;
+    let symbol = n.data.symbol_id.ok_or_else(|| invalid("missing assignment symbol"))?;
     if let Some(i) = params.iter().position(|p| *p == symbol) {
-        // Parameter writes share the same SSA slots as locals, immediately
-        // after the declared local slots. All parameters are initialized on entry.
-        let ty = integer_expression_type(il,graph,id)?;
-        return Ok((locals.len()+i,ty));
+        return Ok((ScalarPlace::Ssa(locals.len()+i),integer_expression_type(il,graph,id)?));
     }
-    let index = cfg_checked_local(il,locals,symbol)?;
-    let ty = cfg_local_type(il,locals[index])?;
-    Ok((index,ty))
+    if let Some(index) = locals.iter().position(|v| v.symbol == symbol) {
+        let ty = cfg_local_type(il,locals[index])?;
+        return Ok((ScalarPlace::Ssa(index),ty));
+    }
+    let (_,ty) = scalar_global(il,symbol)?;
+    Ok((ScalarPlace::Memory(symbol),ty))
 }
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
@@ -437,7 +468,13 @@ fn lower_c_expression(
             if let Some(i) = params.iter().position(|p| *p == symbol) {
                 Expr::Local(locals.len()+i)
             } else {
-                Expr::Local(cfg_checked_local(il, locals, symbol)?)
+                if let Some(i) = locals.iter().position(|v| v.symbol == symbol) {
+                    cfg_local_type(il, locals[i])?;
+                    Expr::Local(i)
+                } else {
+                    scalar_global(il,symbol)?;
+                    Expr::Global(symbol)
+                }
             }
         }
         3 => {
@@ -448,13 +485,20 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
-                    let (index,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
+                    let (place,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
                     if matches!(op,29|30) {
-                        Expr::PostLocal(index,ty,if op==29 {1} else {-1})
+                        match place {
+                            ScalarPlace::Ssa(i) => Expr::PostLocal(i,ty,if op==29 {1} else {-1}),
+                            ScalarPlace::Memory(s) => Expr::PostGlobal(s,ty,if op==29 {1} else {-1}),
+                        }
                     } else {
-                        Expr::CompoundLocal(index,ty,promoted_integer_type(ty),
-                            if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub},
-                            Box::new(Expr::Constant(1)))
+                        let op = if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
+                        match place {
+                            ScalarPlace::Ssa(i) => Expr::CompoundLocal(i,ty,promoted_integer_type(ty),
+                                op,Box::new(Expr::Constant(1))),
+                            ScalarPlace::Memory(s) => Expr::CompoundGlobal(s,ty,promoted_integer_type(ty),
+                                op,Box::new(Expr::Constant(1))),
+                        }
                     }
                 } else {
                 let a = lower_c_expression(graph, operands[0], params, locals, il)?;
@@ -482,11 +526,14 @@ fn lower_c_expression(
                 if operands.len() != 2 {
                     return Err(invalid("assignment expression requires 2 operands"));
                 }
-                let (index,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
+                let (place,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
                 let rhs = Box::new(lower_c_expression(
                     graph,operands[1],params,locals,il)?);
                 if op==18 {
-                    Expr::AssignLocal(index,ty,rhs)
+                    match place {
+                        ScalarPlace::Ssa(i) => Expr::AssignLocal(i,ty,rhs),
+                        ScalarPlace::Memory(s) => Expr::AssignGlobal(s,ty,rhs),
+                    }
                 } else {
                     let kind = match op {
                         31 => CCompoundOp::Add, 32 => CCompoundOp::Sub,
@@ -502,7 +549,10 @@ fn lower_c_expression(
                     } else {
                         common_integer_type(ty,rhs_ty)
                     };
-                    Expr::CompoundLocal(index,ty,compute_ty,kind,rhs)
+                    match place {
+                        ScalarPlace::Ssa(i) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
+                        ScalarPlace::Memory(s) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
+                    }
                 }
             } else if matches!(op, 23 | 24 | 26) {
                 if operands.len() != 2 {
