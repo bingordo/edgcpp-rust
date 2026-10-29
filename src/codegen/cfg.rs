@@ -234,6 +234,11 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
         Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => Ok(()),
+        Expr::Call(_,abi,args) => {
+            if abi.parameters.len()!=args.len() {return Err(invalid("invalid call arity"));}
+            for arg in args {check_expr(arg,vars,params)?;}
+            Ok(())
+        },
         Expr::LoadAddress(_,a) => check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
         Expr::PointerOffset(a,b,_) => {
@@ -672,6 +677,27 @@ fn lower_c_expression(
     locals: &[&crate::LocalVariable], il: &Il,
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
+    if let Some(site)=graph.calls.iter().find(|site|
+        site.function==node.data.function &&
+        site.statement_path==node.data.statement_path &&
+        site.path==node.data.path) {
+        if site.first_argument!=1 || node.operands.is_empty() {
+            return Err(invalid("indirect/member call unsupported"));
+        }
+        let callee=graph.expression(node.operands[0])
+            .ok_or_else(||invalid("direct call missing function operand"))?;
+        let symbol=callee.data.symbol_id.ok_or_else(||
+            invalid("function-pointer calls unsupported"))?;
+        let decl=direct_call_decl(il,symbol)?;
+        if decl.abi.parameters.len()!=node.operands.len()-1 {
+            return Err(invalid(format!("{}: direct-call argument count mismatch",decl.name)));
+        }
+        let mut args=Vec::with_capacity(decl.abi.parameters.len());
+        for &operand in &node.operands[1..] {
+            args.push(lower_c_expression(graph,operand,params,locals,il)?);
+        }
+        return Ok(Expr::Call(symbol,decl.abi,args));
+    }
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
     let inner = match semantic(2, node.data.kind) {
@@ -1047,6 +1073,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
 fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
     match expr {
         Expr::AddressLocal(i) => {found.insert(*i);}
+        Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
