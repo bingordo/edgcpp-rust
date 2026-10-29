@@ -10,6 +10,7 @@ extern void m5_add(unsigned short *,unsigned short);
 extern int m5_local(int);
 extern int m5_pointer_offset(int *,int);
 extern int m5_row_sum(unsigned short (*)[4],int);
+extern int m5_stack_array(int);
 int main(void) {
     printf("%d %d %d %d\n",m5_get(2),m5_grid_get(2,3),m5_local(10),
       m5_row_sum(m5_grid,1));
@@ -17,5 +18,6 @@ int main(void) {
     m5_add(&m5_grid[1][2],17);
     printf("%d %d %d\n",m5_get(4),m5_grid_get(1,2),
       m5_pointer_offset(m5_vector,5));
+    printf("%d\n",m5_stack_array(22));
     return 0;
 }
