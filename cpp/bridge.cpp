@@ -450,6 +450,26 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     }
   }
   const uint32_t type_id = emit_type(node->type, 0);
+  if (has_constant &&
+      node->variant.constant.ptr->kind == ck_address &&
+      node->variant.constant.ptr->variant.address.kind == abk_variable) {
+    a_constant_ptr constant = node->variant.constant.ptr;
+    a_variable_ptr variable = constant->variant.address.variant.variable;
+    if (variable != nullptr && !constant->variant.address.is_object_reflection) {
+      const uint32_t target = emit_symbol(variable, 2,
+          declaration_name(variable->source_corresp, false));
+      emit_variable_type(variable);
+      // EDG gives a signed *byte* displacement, not an element index.
+      const auto offset = constant->variant.address.offset;
+      if (offset >= static_cast<decltype(offset)>(
+                        std::numeric_limits<int64_t>::min()) &&
+          offset <= static_cast<decltype(offset)>(
+                        std::numeric_limits<int64_t>::max())) {
+        emit_record(48, {txt(function), txt(stmt_path), txt(path),
+                         num(target), signed_num(static_cast<int64_t>(offset))});
+      }
+    }
+  }
   emit_record(6, {txt(function), txt(stmt_path), txt(path),
                   parent.empty() ? absent() : txt(parent),
                   node->kind == enk_operation ? num(op) : absent(),

@@ -791,10 +791,30 @@ fn lower_c_expression(
                 .ok_or_else(||invalid("GNU expression missing native statement block"))?;
             return lower_gnu_block(graph,crate::graph::StatementId(stmt),params,locals,il);
         },
-        1 => Expr::Constant(node.data.constant_integer.ok_or_else(|| invalid(
-            format!("unsupported/non-i64-representable constant: kind={:?}, type_kind={:?}, type_id={:?} at {}:{}:{}",
-                node.data.constant_kind,node.data.type_kind,node.data.type_id,
-                node.data.function,node.data.statement_path,node.data.path)))?),
+        1 => {
+            if let Some(value)=node.data.constant_integer {
+                Expr::Constant(value)
+            } else if let Some(address)=il.constant_addresses.iter().find(|a|
+                a.function==node.data.function &&
+                a.statement_path==node.data.statement_path && a.path==node.data.path) {
+                let base=if let Some(index)=params.iter().position(|p|*p==address.symbol) {
+                    Expr::AddressLocal(locals.len()+index)
+                } else if let Some(index)=locals.iter().position(|v|v.symbol==address.symbol) {
+                    Expr::AddressLocal(index)
+                } else {
+                    global_value_type(il,address.symbol)?;
+                    Expr::AddressGlobal(address.symbol)
+                };
+                if address.byte_offset==0 {base} else {
+                    Expr::Add(Box::new(base),Box::new(Expr::Constant(address.byte_offset)))
+                }
+            } else {
+                return Err(invalid(format!(
+                    "unsupported/non-i64-representable constant: kind={:?}, type_kind={:?}, type_id={:?} at {}:{}:{}",
+                    node.data.constant_kind,node.data.type_kind,node.data.type_id,
+                    node.data.function,node.data.statement_path,node.data.path)));
+            }
+        },
         2 => {
             let symbol = node.data.symbol_id.ok_or_else(|| invalid("unresolved scalar variable"))?;
             if let Some(i) = params.iter().position(|p| *p == symbol) {
@@ -1670,11 +1690,12 @@ struct ScalarGlobal {
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
-    for expr in &il.expressions {
-        if semantic(2, expr.kind) != 2 { continue; }
-        let Some(id) = expr.symbol_id else { continue };
-        if !il.global_variables.iter().any(|g| g.symbol == id) ||
-           !seen.insert(id) { continue; }
+    let references=il.expressions.iter()
+        .filter(|expr|semantic(2,expr.kind)==2).filter_map(|expr|expr.symbol_id)
+        .chain(il.constant_addresses.iter().map(|a|a.symbol));
+    for id in references {
+        if !il.global_variables.iter().any(|g|g.symbol==id) ||
+           !seen.insert(id) {continue;}
         let (name,scalar) = global_value_type(il,id)?;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
         let storage_bytes=if scalar.is_some() {(ty.bits/8) as usize}
