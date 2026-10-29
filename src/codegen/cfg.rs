@@ -579,7 +579,33 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30 | 41 | 42) {
+            if matches!(op,43|44|45|46) {
+                match op {
+                    43 if operands.len()==1 => lower_address(
+                        graph,operands[0],params,locals,il)?,
+                    44 if operands.len()==1 => {
+                        let address=lower_address(graph,id,params,locals,il)?;
+                        let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+                        if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
+                            address
+                        } else {
+                            Expr::LoadAddress(output,Box::new(address))
+                        }
+                    }
+                    45 if operands.len()==2 => {
+                        let address=lower_address(graph,id,params,locals,il)?;
+                        let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+                        if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
+                            address
+                        } else {
+                            Expr::LoadAddress(output,Box::new(address))
+                        }
+                    }
+                    46 if operands.len()==1 => lower_address(
+                        graph,operands[0],params,locals,il)?,
+                    _ => return Err(invalid("invalid pointer expression arity")),
+                }
+            } else if matches!(op, 4 | 11 | 12 | 16 | 17 | 27 | 28 | 29 | 30 | 41 | 42) {
                 if operands.len() != 1 {
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
@@ -625,13 +651,26 @@ fn lower_c_expression(
                 if operands.len() != 2 {
                     return Err(invalid("assignment expression requires 2 operands"));
                 }
-                let (place,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
-                let rhs = Box::new(lower_c_expression(
-                    graph,operands[1],params,locals,il)?);
+                let direct=scalar_lvalue(graph,operands[0],params,locals,il);
+                let (place,ty) = match direct {
+                    Ok((place,ty)) => (Some(place),ty),
+                    Err(_) => {
+                        let ty=integer_expression_type(il,graph,operands[0])?;
+                        // Require a structurally valid dereference/subscript
+                        // rather than turning arbitrary expressions into lvalues.
+                        let _=lower_address(graph,operands[0],params,locals,il)?;
+                        (None,ty)
+                    }
+                };
+                let rhs = Box::new(lower_c_expression(graph,operands[1],params,locals,il)?);
+                let address=if place.is_none() {
+                    Some(Box::new(lower_address(graph,operands[0],params,locals,il)?))
+                } else {None};
                 if op==18 {
                     match place {
-                        ScalarPlace::Ssa(i) => Expr::AssignLocal(i,ty,rhs),
-                        ScalarPlace::Memory(s) => Expr::AssignGlobal(s,ty,rhs),
+                        Some(ScalarPlace::Ssa(i)) => Expr::AssignLocal(i,ty,rhs),
+                        Some(ScalarPlace::Memory(s)) => Expr::AssignGlobal(s,ty,rhs),
+                        None => Expr::StoreAddress(ty,address.unwrap(),rhs),
                     }
                 } else {
                     let kind = match op {
@@ -642,15 +681,16 @@ fn lower_c_expression(
                         39 => CCompoundOp::Or, 40 => CCompoundOp::Xor,
                         _ => unreachable!(),
                     };
-                    let rhs_ty = integer_expression_type(il,graph,operands[1])?;
-                    let compute_ty = if matches!(kind,CCompoundOp::Shl|CCompoundOp::Shr) {
+                    let rhs_ty=integer_expression_type(il,graph,operands[1])?;
+                    let compute_ty=if matches!(kind,CCompoundOp::Shl|CCompoundOp::Shr) {
                         promoted_integer_type(ty)
                     } else {
                         common_integer_type(ty,rhs_ty)
                     };
                     match place {
-                        ScalarPlace::Ssa(i) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
-                        ScalarPlace::Memory(s) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
+                        Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
+                        Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
+                        None => Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs),
                     }
                 }
             } else if matches!(op, 23 | 24 | 26) {
@@ -685,6 +725,24 @@ fn lower_c_expression(
                 }
                 let lhs_ty = integer_expression_type(il, graph, operands[0])?;
                 let rhs_ty = integer_expression_type(il, graph, operands[1])?;
+                let lhs_ptr=is_pointer_like(il,expression_type_id(graph,operands[0])?)?;
+                let rhs_ptr=is_pointer_like(il,expression_type_id(graph,operands[1])?)?;
+                if matches!(op,1|2) && (lhs_ptr ^ rhs_ptr) {
+                    let (ptr,offset,ptr_ty) = if lhs_ptr {
+                        (operands[0],operands[1],expression_type_id(graph,operands[0])?)
+                    } else if op==1 {
+                        (operands[1],operands[0],expression_type_id(graph,operands[1])?)
+                    } else { return Err(invalid("integer minus pointer unsupported")); };
+                    let stride=pointer_stride(il,ptr_ty)?;
+                    let base=lower_c_expression(graph,ptr,params,locals,il)?;
+                    let offset=lower_c_expression(graph,offset,params,locals,il)?;
+                    let offset=if op==2 {Expr::Neg(Box::new(offset))} else {offset};
+                    return Ok(wrap(Expr::PointerOffset(Box::new(base),
+                        Box::new(offset),stride)));
+                }
+                if lhs_ptr || rhs_ptr {
+                    return Err(invalid("unsupported pointer operation"));
+                }
                 // Arithmetic operations and comparisons are defined over a
                 // common promoted integer type in EDG's typed expression IL.
                 // Refuse missing conversions rather than silently comparing
