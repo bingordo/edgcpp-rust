@@ -99,6 +99,7 @@ pub struct Il {
     pub signed_i64_types: Vec<TypeId>,
     /// Native C integer width and sign, independent of host compiler ABI.
     pub c_integer_types: Vec<CIntegerType>,
+    pub global_variables: Vec<GlobalVariable>,
     /// Ordered parameter edges belonging to routine types.
     pub type_parameters: Vec<TypeParameter>,
     /// Known fixed array bounds (in elements).
@@ -217,6 +218,17 @@ pub struct CIntegerType {
     pub signed: bool,
     /// EDG's native bool_type bit, distinct from an unsigned byte.
     pub is_bool: bool,
+}
+
+/// EDG-native storage classification of a file-scope variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalVariable {
+    pub symbol: SymbolId,
+    /// 1=extern declaration, 2=internal static, 3=other file-scope.
+    pub linkage: u32,
+    pub explicit_initializer: bool,
+    pub thread_local: bool,
+    pub local_to_function: bool,
 }
 
 /// Parameter edge from a routine type, in declaration order.
@@ -745,6 +757,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         44 => Some(il.loop_transfers.len()),
         45 => Some(il.statement_integer_initializers.len()),
         46 => Some(il.c_integer_types.len()),
+        47 => Some(il.global_variables.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -758,7 +771,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -811,6 +824,16 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 (t(0), t(1), n(2)) else { return; };
             if !(1..=4).contains(&kind) { return; }
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
+        }
+        47 => {
+            let (Some(symbol), Some(linkage), Some(init), Some(tls), Some(local)) =
+                (n(0), n(1), n(2), n(3), n(4)) else { return; };
+            if symbol == 0 || !(1..=3).contains(&linkage) || init > 1 || tls > 1 || local > 1 { return; }
+            output.global_variables.push(GlobalVariable {
+                symbol: SymbolId(symbol), linkage,
+                explicit_initializer: init == 1,
+                thread_local: tls == 1, local_to_function: local == 1,
+            });
         }
         46 => {
             let (Some(id), Some(bits), Some(signed), Some(boolean)) =
