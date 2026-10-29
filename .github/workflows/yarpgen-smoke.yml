@@ -8,6 +8,8 @@ on:
     paths:
       - 'tools/yarpgen_smoke.py'
       - 'tests/test_yarpgen_smoke.py'
+      - 'tools/m6_gnu_differential.py'
+      - 'tests/fixtures/m6_gnu_statement_expr.c'
       - '.github/workflows/yarpgen-smoke.yml'
   workflow_dispatch:
     inputs:
