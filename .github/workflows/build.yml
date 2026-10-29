@@ -274,6 +274,32 @@ jobs:
             fi
           )
 
+      - name: M5 pointer/array and address-taken local differential test
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m5_pointer_arrays.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_pointer_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m5.o --c11 m5_pointer_arrays.c
+            gcc -std=c11 -O2 m5_pointer_arrays.c m5_pointer_driver.c -o gcc_m5
+            gcc -std=c11 -O2 edg_m5.o m5_pointer_driver.c -o cranelift_m5
+            reference=$(./gcc_m5)
+            actual=$(./cranelift_m5)
+            if [ "$reference" != "$actual" ]; then
+              echo "M5 pointer/array mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
       - name: EDG to Cranelift vs GCC native execution
         working-directory: edgcpp-rust
         env:
