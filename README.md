@@ -303,3 +303,27 @@ both passed against GCC-built reference executables. See
 (M5), calls (M6), volatile/atomic objects, TLS and dynamic global
 initialization. These are rejected, not accepted as successful compilation.
 Generic YARPGen `func.c` remains a future M5–M7 gate.
+
+## M5 pointer, fixed-array and generated-C validation (2026-10-29)
+
+**M5's scoped pointer/array gate is complete.** The EDG/Cranelift reference
+now lowers pointer parameters/returns, fixed-size local and global arrays,
+1-D/2-D indexing, scaled pointer arithmetic and pointer differences,
+null comparisons, indirect scalar writes, aliases and address-taken
+stack locals. Data-pointer casts, byte stores and C11 zero-argument function
+definitions are covered by the executable GCC differential tests.
+
+[CI #40833609330](https://github.com/bingordo/edgcpp-rust/actions/runs/40833609330)
+passed the complete existing targeted suite and checked eight **genuine**
+pinned YARPGen programs against independent GCC and Clang references.
+Three seeds (**12378, 12383, 12409**) compiled and ran through
+EDG/Cranelift with matching checksums. Five seeds were rejected as
+unsupported; no wrong output was observed. These eight deliberately small
+seeds are an acceptance smoke test, **not** a coverage percentage for
+YARPGen as a whole.
+
+**Next M6** must handle generic GNU `({...})` statement-expression
+blocks, direct calls and broader source semantics. Brace aggregate
+initializers, variable-length arrays, volatile/atomic/TLS storage and
+general C++ are not claimed as M5 support. See the
+[consolidated milestone plan](docs/YARPGEN_CRANELIFT_MILESTONES.md).

@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0–M3 complete; M4 ordinary scalar global-memory/ELF-linkage gate complete and CI-verified (2026-10-29). Next M5 arrays, pointers and addressable locals.**
+Status: **M0–M5 completed with explicit scope limits; M5 pointer/array and first real-YARPGen execution gates CI-verified (2026-10-29). Next M6 calls, GNU block-valued expressions and remaining source semantics.**
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -11,11 +11,11 @@ push CI and manual cohorts up to 100 seeds.
 [100-seed GCC/Clang baseline run](https://github.com/bingordo/edgcpp-rust/actions/runs/40648943692):
 seeds **12345–12444**, GCC -O0, GCC -O2, Clang -O2, all **100 pass**,
 no generator failures and no oracle disagreements. This is the
-**GCC/Clang oracle baseline only**: the present EDG/Cranelift reference
-does not yet compile generic YARPGen generated C; its accepted/passed
-YARPGen count is still unknown/zero, NOT 100.
+**GCC/Clang oracle baseline only**: the M5 reference backend now passes **3 of 8 deliberately small, pinned**
+YARPGen programs, but this 100-seed GCC-only reference result is **not**
+100 EDG/Cranelift passes. Broad generated-C compatibility is still unproven.
 
-Date: 2026-10-28.
+Status updated: 2026-10-29 (original plan 2026-10-28).
 Development and CI: `bingordo/edgcpp-rust`, branch `cranelift-codegen`.
 Source mirror: `bingundu/edgcpp-rust`, branch `cranelift-codegen`.
 Generator: `bingundu/yarpgen`, branch `ci/binary-builds`.
@@ -229,7 +229,7 @@ M4: correct external/global scalar memory and ELF data relocations.
 | **M2 — C scalar types and ABI** | Explicit EDG native metadata: integer rank, width, signedness, qualifiers, typedefs, `_Bool`, `void`; typed Cranelift signatures, C integer promotions/usual conversions, truncation/extension, comparisons and return; preserve correct x86-64 SysV integer parameter classifications. Native C names and a `void test(void)` export. | Direct native tests for 8/16/32/64-bit signed/unsigned, `char`, bool, casts, overflow boundaries where defined; intentionally wrong signatures rejected. | L |
 | **M3 — Complete scalar expressions** | Division/remainder, shifts and signedness, logical `&&`/`||` with short-circuit semantics, unary `!`/`~`, `?:`, comma, assignment expressions, prefix/postfix increment, compound assignments, sequencing and side-effect correctness. Avoid eager selects or reordering for effects. | GCC/Clang differential edge tests; no unmodeled side effects; deterministic generated scalar-expression corpus. | L |
 | **M4 — Scalar memory, objects and linkage** | Addressable locals as stack slots when needed; global and extern scalar declarations; ELF data/bss, external data relocations; loads/stores with alignment/width/extension; correct linkage/visibility, type/layout validation, linker diagnostics. Distinguish SSA scalars from address-taken storage. | Cranelift-generated `void test()` modifies external globals defined by GCC-built `driver.c`, with matching observable state and checksum. | L |
-| **M5 — Arrays, pointers and indexing** | Address-taken local stack slots, pointer types/ABI and decay; address-of/dereference, indexing and pointer arithmetic; multidimensional C arrays and element strides; lvalues, initialization, casts, bounded addressing, aliasing, aligned and unaligned accesses. Don't falsely optimize through potentially aliasing pointers. | Handwritten 1-D/2-D array kernels, parameter arrays and globals, plus a real generated seed with GCC matching output. | XL |
+| **M5 — Arrays, pointers and indexing** | Address-taken local stack slots, pointer types/ABI and decay; address-of/dereference, indexing and pointer arithmetic; multidimensional C arrays and element strides; lvalues, explicit scalar-element initialization and casts, bounded addressing, aliasing, aligned and unaligned accesses. Aggregate brace initializers move to M6 with generic source-value lowering. Don't falsely optimize through potentially aliasing pointers. | Handwritten 1-D/2-D array kernels, parameter arrays and globals, plus a real generated seed with GCC matching output. | XL |
 | **M6 — Calls, full CFG and source semantics** | Direct calls and C ABI interop; multiple functions/translation-unit references, void calls, argument conversions; fix loop/branch corner cases, `switch` if emitted, labels and generated goto shapes as required. Enforce C evaluation order, side effects and definite initialization without overly conservative false rejection. | Representative generated `func.c` cases compile and link; >=100 pinned seeds triaged; no invalid Cranelift verifier or relocation errors. | L–XL |
 | **M7 — Coverage-driven YARPGen completion** | Iterate on ranked failure buckets (not features in arbitrary order); enable wider generator profiles, optional pragmas/alignments if semantically relevant. Build reducer and regressions for each correctness bug. Run both Cranelift `none` and `speed`. | Meet the functional and breadth gates above over pinned 1,000-seed cohorts, including independent GCC/Clang baseline checks. | XL |
 | **M8 — Stabilize and reuse** | Freeze fixed seeds plus minimized regressions; verify reproducibility on clean Linux CI; document unsupported cases and cross-module boundaries; prepare shared front-end lowering for `bingundu/compiler` without coupling its IR to Cranelift. | 10k-seed monitored stress with useful triage; explicit ready/not-ready report and regression corpus; benchmark resource cost. | M–L |
@@ -357,33 +357,54 @@ miscompiles outrank unsupported-but-diagnosed features. Do focused unit
 regressions per change, bounded end-to-end corpus per milestone, and infrequent
 full seeded runs.
 
-## M5 integration checkpoint (2026-10-29, NOT completed)
+## M5 completed — pointer/array memory and initial generated-C acceptance (2026-10-29)
 
-The EDG pointer/array operator IDs, pointer ABI, typed lvalue memory model,
-scaled pointer arithmetic, 1-D/2-D arrays and address-taken local stack slots
-are implemented. The expanded GCC differential fixture
-`tests/fixtures/m5_pointer_arrays.c` is green in
-[CI #40830228859](https://github.com/bingordo/edgcpp-rust/actions/runs/40830228859).
-The C11 zero-argument `void test()` ABI case used by YARPGen has been
-fixed and is regression-tested.
+**Implementation (verified):** Stable, native-derived EDG operator/type IDs;
+SysV x86-64 data-pointer parameters and returns; fixed-dimension arrays,
+1-D/2-D indexing and element strides; signed pointer differences, scaled
+addition/subtraction, pointer comparison and null-pointer constants; typed
+dereference, indirect assignment, compound assignment and prefix/postfix;
+address-taken scalar locals and fixed-size stack arrays with real stack slots;
+alias-safe memory loads/stores and byte-width operations; ordinary pointer
+casts and GCC-owned initialized array data. C11 `void test()` definitions
+with no parameters are also supported.
 
-**The real YARPGen acceptance gate is not yet passed.** Pinned seeds
-12345–12347 have agreeing GCC/Clang baselines, but all reach EDG's
-`enk_statement`: the GNU block-valued `({...})` expression emitted by
-YARPGen's `min`/`max` macros. The bridge deliberately rejects this
-construct instead of silently omitting its declarations, statements or value.
-Correct nested scope, sequencing and value semantics are part of M6.
-Never report zero accepted generated cases as a passing YARPGen milestone.
-CI retains the explicitly triggered `[m5-yarpgen]` probe and its artifact.
+**GCC differential:** `tests/fixtures/m5_pointer_arrays.c` covers a
+GCC-owned global array and grid, pointer parameters, local array storage,
+indirect mutations, aliasing, pointer differences/comparisons, `void*`
+roundtrips and byte loads/stores. The test is a real linked execution, not
+only parsing. The expanded fixture, M0–M4 regressions, 93 bridge tests and
+negative guards passed in
+[CI #40833609330](https://github.com/bingordo/edgcpp-rust/actions/runs/40833609330).
+
+**Real YARPGen acceptance:** The same green run used the pinned YARPGen
+binary and GCC/Clang independent reference. Of eight recorded, intentionally
+small seeds selected by compile cost from the prior 100-seed oracle cohort,
+**12378, 12383 and 12409 passed EDG/Cranelift compile, link and checksum**;
+five were explicitly classified `unsupported_construct`; there were
+**zero wrong outputs, verifier errors, crashes or link failures**. This
+meets M5's acceptance requirement of at least one genuine generated seed.
+It is **not** representative breadth/coverage: M6/M7 must test larger,
+unselected 100-/1,000-seed cohorts.
+
+**Explicit limits:** GNU `enk_statement` block-valued expressions
+(`({...})`, used by YARPGen `min`/`max`), direct calls, field/aggregate
+lvalues, variable-length arrays, dynamic initialization, general brace
+aggregate array initializers, volatile/atomic/TLS semantics and full C++
+ABI remain unsupported. Rejections must occur before an ELF object is
+created. Generic statement-expression and aggregate-initializer semantics
+belong in the generic M6 source/lvalue framework, not special-case macros.
 
 ## Immediate next implementation task
 
-**M5: arrays, pointers and indexing**. Start with the minimal source-backed
-lvalue/address abstraction for address-taken stack locals and external data,
-then implement pointer types and function parameters, address-of/dereference,
-array indexing and strides. Keep differential GCC tests and explicit unsupported
-diagnostics. After a real generated `func.c` seed links, expand the pinned
-YARPGen corpus. Do not count the GCC-only 100-seed baseline as backend support.
+**M6: calls, full CFG and source semantics**. First add a generic block-valued
+expression IR for EDG `enk_statement`, preserving nested scopes, temporaries,
+sequencing, resulting value and control-flow exits. Reuse that framework for
+aggregate/compound initialization rather than adding one-off `min`/`max`
+passes. Then implement direct C calls, function references, ABI argument
+conversion, remaining switch/goto cases, and reduction tests. Run 100 pinned
+YARPGen cases in a manually triggered CI cohort only after the targeted
+regressions are green; keep failures classified by root cause.
 
 Useful references:
 
