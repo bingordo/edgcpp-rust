@@ -1076,6 +1076,7 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     }
     Ok(result)
 }
+#[cfg(test)]
 fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
     emit_routines_with_globals(functions,&[])
 }
