@@ -249,7 +249,12 @@ jobs:
             gcc -std=c11 -O2 edg_m4.o m4_external_driver.c -o cranelift_m4
             ./gcc_m4 > gcc_m4.out
             ./cranelift_m4 > cranelift_m4.out
-            diff -u gcc_m4.out cranelift_m4.out
+            if [ "$(cat gcc_m4.out)" != "$(cat cranelift_m4.out)" ]; then
+              echo "EDG/GCC global-memory mismatch"
+              echo "GCC:"; cat gcc_m4.out
+              echo "EDG:"; cat cranelift_m4.out
+              exit 1
+            fi
           )
 
       - name: EDG to Cranelift vs GCC native execution
