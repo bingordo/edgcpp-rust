@@ -371,6 +371,10 @@ static unsigned call_argument_offset(an_expr_node_ptr node)
   }
 }
 
+// Variable references need their declared type even if the symbol is
+// reached before the file-scope declaration list.
+static uint32_t emit_variable_type(a_variable_ptr var);
+
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
 // Each expression receives a local path and parent path. Operation operands
@@ -390,6 +394,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
     referenced = declaration_name(node->variant.variable.ptr->source_corresp, false);
     symbol = emit_symbol(node->variant.variable.ptr, 2, referenced);
+    emit_variable_type(node->variant.variable.ptr);
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     referenced = declaration_name(node->variant.routine.ptr->source_corresp, true, true);
     symbol = emit_symbol(node->variant.routine.ptr, 1, referenced);
@@ -485,6 +490,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
   if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
     a_variable_ptr var = node->variant.variable.ptr;
     symbol = emit_symbol(var, 2, declaration_name(var->source_corresp, false));
+    emit_variable_type(var);
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     a_routine_ptr routine = node->variant.routine.ptr;
     symbol = emit_symbol(routine, 1, declaration_name(routine->source_corresp, true, true));
@@ -1165,6 +1171,17 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       std::string name = declaration_name(v->source_corresp, false);
       uint32_t symbol_id = emit_symbol(v, 2, name);
       emit_variable_type(v);
+      // 47: file/global storage metadata; keep native classification out
+      // of the Rust codegen. A declaration with an explicit initializer is
+      // a definition even when its storage class says extern.
+      const unsigned linkage = v->storage_class == sc_extern ? 1u :
+                               v->storage_class == sc_static ? 2u : 3u;
+      const bool is_local = v->source_corresp.is_local_to_function ||
+                            name.find(")::") != std::string::npos;
+      emit_record(47, {num(symbol_id), num(linkage),
+                       num(v->has_explicit_initializer ? 1u : 0u),
+                       num(v->is_thread_local ? 1u : 0u),
+                       num(is_local ? 1u : 0u)});
       if ((v->storage_class == sc_static || v->is_thread_local) &&
           v->source_corresp.is_local_to_function) {
         if (v->source_corresp.enclosing_routine != nullptr &&
