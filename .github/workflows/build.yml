@@ -300,6 +300,32 @@ jobs:
             fi
           )
 
+      - name: M6 typed direct-call ELF and GCC interoperability
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
       - name: M5 pinned YARPGen differential coverage probe
         if: ${{ contains(github.event.head_commit.message, '[m5-yarpgen]') }}
         working-directory: edgcpp-rust
@@ -415,13 +441,13 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            for variant in TEST_CALL TEST_FLOAT_RETURN TEST_VOLATILE_GLOBAL; do
+            for variant in TEST_INDIRECT_CALL TEST_FLOAT_RETURN TEST_VOLATILE_GLOBAL; do
               rm -f rejected.o rejected.log
               if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
                 echo "Unexpectedly accepted unsupported construct: $variant"
                 exit 1
               fi
-              grep -Eq 'parameter/return ABI must be|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global' rejected.log || {
+              grep -Eq 'parameter/return ABI must be|call callee is not direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1
