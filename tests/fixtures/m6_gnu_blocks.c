@@ -12,6 +12,7 @@ int m6_gnu_side_effect(int *ptr, int a)
 }
 unsigned long long m6_gnu_unsigned(unsigned int v)
 {
-    return ({ unsigned long long t = (unsigned long long)v + 9ULL;
-              t ^ 0x1234ULL; });
+    return ({ unsigned long long high = 0xfedcba9876543210ULL;
+              unsigned long long t = (unsigned long long)v + 9ULL;
+              high ^ t ^ 0x1234ULL; });
 }

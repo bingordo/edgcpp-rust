@@ -874,10 +874,13 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           } else {
             a_host_large_unsigned unsigned_value =
                 unsigned_value_of_integer_constant(constant, &overflow);
+            // The wire field is an i64 *bit carrier*. C unsigned 64-bit
+            // constants above INT64_MAX are valid and must retain all bits.
             if (!overflow && unsigned_value <=
                 static_cast<a_host_large_unsigned>(
-                    std::numeric_limits<int64_t>::max())) {
-              value = static_cast<int64_t>(unsigned_value);
+                    std::numeric_limits<uint64_t>::max())) {
+              const uint64_t bits = static_cast<uint64_t>(unsigned_value);
+              std::memcpy(&value, &bits, sizeof(bits));
               fits = true;
             }
           }
