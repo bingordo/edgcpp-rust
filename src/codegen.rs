@@ -141,7 +141,9 @@ fn emit_expr(
             emit_expr(b, builder, params, locals)?
         }
         Expr::Conditional(..) | Expr::AssignLocal(..) |
-        Expr::CompoundLocal(..) | Expr::PostLocal(..) =>
+        Expr::CompoundLocal(..) | Expr::PostLocal(..) |
+        Expr::Global(..) | Expr::AssignGlobal(..) |
+        Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
             return Err(CodegenError::InvalidFunction(
                 "side-effect/conditional expression needs CFG backend".into())),
         Expr::Neg(a) => {
@@ -386,7 +388,8 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
-        Expr::CompoundLocal(..) | Expr::PostLocal(..) => true,
+        Expr::CompoundLocal(..) | Expr::PostLocal(..) |
+        Expr::AssignGlobal(..) | Expr::CompoundGlobal(..) | Expr::PostGlobal(..) => true,
         Expr::Select(a, b, c) | Expr::Conditional(a,b,c) =>
             contains_local_write(a) || contains_local_write(b) || contains_local_write(c),
         Expr::Sequence(a,b) => contains_local_write(a) || contains_local_write(b),
@@ -397,7 +400,7 @@ fn contains_local_write(expr: &Expr) -> bool {
             contains_local_write(a) || contains_local_write(b),
         Expr::Normalize(_, a) => contains_local_write(a),
         Expr::Neg(a) => contains_local_write(a),
-        Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) => false,
+        Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) => false,
     }
 }
 
