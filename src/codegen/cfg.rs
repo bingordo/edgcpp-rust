@@ -448,6 +448,34 @@ fn scalar_global(
     Ok((name,CAbiInt { bits: integer.bits, signed: integer.signed,
                        is_bool: integer.is_bool }))
 }
+/// Validate a global's linkage and return either a scalar layout or
+/// the size of a fixed array. Array expressions decay to an address rather
+/// than loading eight bytes of their first element.
+fn global_value_type(il:&Il,symbol:crate::SymbolId)
+    -> Result<(String,Option<CAbiInt>),CodegenError> {
+    let meta=il.global_variables.iter().find(|g|g.symbol==symbol)
+        .ok_or_else(||invalid("unresolved global symbol"))?;
+    if meta.thread_local || meta.local_to_function ||
+       il.static_local_owners.iter().any(|o|o.symbol==symbol) {
+        return Err(invalid("TLS/static function global unsupported"));
+    }
+    let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
+        .map(|s|s.name.clone()).ok_or_else(||invalid("global missing name"))?;
+    if name.is_empty() || !name.bytes().next().is_some_and(|c|c.is_ascii_alphabetic()||c==b'_') ||
+       !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
+        return Err(invalid("global has non-C/ambiguous linkage name"));
+    }
+    let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
+        .ok_or_else(||invalid("global missing declared type"))?.ty;
+    let ty=canonical_abi_type(il,ty)?;
+    if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==6) {
+        byte_size(il,ty)?;
+        Ok((name,None))
+    } else {
+        let (name,scalar)=scalar_global(il,symbol)?;
+        Ok((name,Some(scalar)))
+    }
+}
 fn scalar_lvalue(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
@@ -578,8 +606,9 @@ fn lower_c_expression(
                     cfg_local_type(il, locals[i])?;
                     Expr::Local(i)
                 } else {
-                    scalar_global(il,symbol)?;
-                    Expr::Global(symbol)
+                    let (_,ty)=global_value_type(il,symbol)?;
+                    if ty.is_none() { Expr::AddressGlobal(symbol) }
+                    else { Expr::Global(symbol) }
                 }
             }
         }
@@ -1310,6 +1339,7 @@ struct ScalarGlobal {
     ty: CAbiInt,
     linkage: Linkage,
     initializer: Option<Vec<u8>>,
+    storage_bytes: usize,
 }
 
 /// Resolve only referenced C globals. Unused declarations of unrelated
@@ -1322,7 +1352,14 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
         let Some(id) = expr.symbol_id else { continue };
         if !il.global_variables.iter().any(|g| g.symbol == id) ||
            !seen.insert(id) { continue; }
-        let (name,ty) = scalar_global(il,id)?;
+        let (name,scalar) = global_value_type(il,id)?;
+        let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
+        let storage_bytes=if scalar.is_some() {(ty.bits/8) as usize}
+            else {
+                let declared=il.symbol_types.iter().find(|t|t.symbol==id)
+                    .ok_or_else(||invalid("array without declared type"))?.ty;
+                byte_size(il,declared)? as usize
+            };
         let meta = il.global_variables.iter().find(|g| g.symbol == id)
             .ok_or_else(|| invalid("missing global metadata"))?;
         let defined = meta.linkage != 1 || meta.explicit_initializer;
@@ -1330,13 +1367,14 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             else if meta.linkage == 2 { Linkage::Local }
             else { Linkage::Export };
         let initializer = if meta.explicit_initializer {
+            if scalar.is_none() {return Err(invalid("aggregate array initializer unsupported"));}
             let entry = il.initializer_integers.iter().find(|v| v.symbol == id)
                 .ok_or_else(|| invalid(format!(
                     "global {name} has unsupported non-integer initializer")))?;
             let bytes = entry.value.to_le_bytes();
             Some(bytes[..(ty.bits/8) as usize].to_vec())
         } else { None };
-        result.push(ScalarGlobal { symbol:id,name,ty,linkage,initializer });
+        result.push(ScalarGlobal { symbol:id,name,ty,linkage,initializer,storage_bytes });
     }
     Ok(result)
 }
@@ -1365,7 +1403,7 @@ fn emit_routines_with_globals(
             if let Some(bytes) = &g.initializer {
                 data.define(bytes.clone().into_boxed_slice());
             } else {
-                data.define_zeroinit((g.ty.bits/8) as usize);
+                data.define_zeroinit(g.storage_bytes);
             }
             module.define_data(id,&data)
                 .map_err(|e| CodegenError::Backend(e.to_string()))?;
