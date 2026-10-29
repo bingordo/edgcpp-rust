@@ -363,7 +363,8 @@ jobs:
           set -euo pipefail
           python3 tools/m6_gnu_differential.py \\
             --codegen "$PWD/target/debug/examples/codegen" \\
-            --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh"
+            --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" \\
+            --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
 
       - name: M5 pinned YARPGen differential coverage probe
         if: ${{ contains(github.event.head_commit.message, '[m5-yarpgen]') }}
