@@ -23,6 +23,15 @@ pub enum Expr {
     Local(usize),
     /// External or file-scope scalar lvalue. The module owns its storage or
     /// imports it, and each use is a real typed memory operation.
+    /// Explicit address/lvalue nodes. Memory is read or written at the point
+    /// of evaluation; aliasing pointers must never be cached as SSA values.
+    AddressGlobal(crate::SymbolId),
+    AddressLocal(usize),
+    LoadAddress(CAbiInt, Box<Expr>),
+    StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
+    CompoundAddress(CAbiInt, CAbiInt, CCompoundOp, Box<Expr>, Box<Expr>),
+    PostAddress(CAbiInt, i64, Box<Expr>),
+    PointerOffset(Box<Expr>, Box<Expr>, u64),
     Global(crate::SymbolId),
     AssignGlobal(crate::SymbolId, CAbiInt, Box<Expr>),
     CompoundGlobal(crate::SymbolId, CAbiInt, CAbiInt, CCompoundOp, Box<Expr>),
@@ -142,7 +151,9 @@ fn emit_expr(
         }
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
-        Expr::Global(..) | Expr::AssignGlobal(..) |
+        Expr::Global(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
+        Expr::LoadAddress(..) | Expr::StoreAddress(..) | Expr::CompoundAddress(..) |
+        Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
         Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
             return Err(CodegenError::InvalidFunction(
                 "side-effect/conditional expression needs CFG backend".into())),
@@ -387,6 +398,7 @@ fn checked_local(
 /// proper Cranelift blocks, branches and phi handling are implemented.
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
+        Expr::StoreAddress(..) | Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::AssignGlobal(..) | Expr::CompoundGlobal(..) | Expr::PostGlobal(..) => true,
@@ -398,9 +410,11 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) |
         Expr::IntegerBinary(_, a, b) =>
             contains_local_write(a) || contains_local_write(b),
-        Expr::Normalize(_, a) => contains_local_write(a),
+        Expr::Normalize(_, a) | Expr::LoadAddress(_,a) => contains_local_write(a),
+        Expr::PointerOffset(a,b,_) => contains_local_write(a) || contains_local_write(b),
         Expr::Neg(a) => contains_local_write(a),
-        Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) => false,
+        Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) |
+        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => false,
     }
 }
 
