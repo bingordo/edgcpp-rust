@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::{HashSet,HashMap};
 use std::cell::Cell;
-use cranelift_codegen::ir::Block;
+use cranelift_codegen::ir::{Block,StackSlot,StackSlotData,StackSlotKind};
 use cranelift_frontend::Variable;
 
 #[derive(Debug, Clone)]
@@ -231,7 +231,14 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::Parameter(i) => if *i < params { Ok(()) } else { Err(invalid("invalid parameter")) },
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
-        Expr::Global(_) => Ok(()),
+        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => Ok(()),
+        Expr::LoadAddress(_,a) => check_expr(a,vars,params),
+        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::PointerOffset(a,b,_) => {
+            check_expr(a,vars,params)?;
+            check_expr(b,vars,params)
+        }
+        Expr::PostAddress(_,_,a) => check_expr(a,vars,params),
         Expr::AssignGlobal(_,_,e) => check_expr(e,vars,params),
         Expr::CompoundGlobal(_,_,_,_,e) => check_expr(e,vars,params),
         Expr::PostGlobal(..) => Ok(()),
@@ -834,6 +841,75 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             local_types: Some(local_types) });
     }
     Ok(out)
+}
+/// Gather only variables whose addresses escape into pointer expressions.
+/// SSA locals remain cheap virtual registers; addressed locals use stack slots.
+fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
+    match expr {
+        Expr::AddressLocal(i) => {found.insert(*i);}
+        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
+        Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
+        Expr::BitXor(a,b) | Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
+        Expr::IntegerBinary(_,a,b) | Expr::Sequence(a,b) |
+        Expr::StoreLocal(_,a,b) => {addressed_expr(a,found);addressed_expr(b,found);}
+        Expr::Conditional(a,b,c) | Expr::Select(a,b,c) => {
+            addressed_expr(a,found);addressed_expr(b,found);addressed_expr(c,found);
+        }
+        Expr::Normalize(_,a) | Expr::LoadAddress(_,a) | Expr::Neg(a) |
+        Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
+        Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
+        Expr::PostAddress(_,_,a) => addressed_expr(a,found),
+        Expr::PostLocal(..) | Expr::PostGlobal(..) | Expr::Constant(_) |
+        Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) |
+        Expr::AddressGlobal(_) => {}
+    }
+}
+fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
+    for statement in body {
+        match statement {
+            Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) => addressed_expr(e,found),
+            Stmt::If(c,a,b) => { addressed_expr(c,found);
+                addressed_stmt(a,found); addressed_stmt(b,found); },
+            Stmt::While(c,body) | Stmt::DoWhile(body,c) =>
+                { addressed_expr(c,found); addressed_stmt(body,found); },
+            Stmt::For{init,condition,increment,body} => {
+                addressed_stmt(init,found); addressed_expr(condition,found);
+                addressed_stmt(body,found); addressed_stmt(increment,found);
+            }
+            Stmt::ReturnVoid | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+fn local_address(fb:&mut FunctionBuilder<'_>,stack:&HashMap<usize,StackSlot>,
+                 index:usize) -> Result<cranelift_codegen::ir::Value,CodegenError> {
+    let slot=stack.get(&index).ok_or_else(||invalid("local lacks an addressable stack slot"))?;
+    Ok(fb.ins().stack_addr(types::I64,*slot,0))
+}
+fn local_read(fb:&mut FunctionBuilder<'_>,vars:&[Variable],
+              stack:&HashMap<usize,StackSlot>, local_types:&[CAbiInt],
+              index:usize) -> Result<cranelift_codegen::ir::Value,CodegenError> {
+    if stack.contains_key(&index) {
+        let addr=local_address(fb,stack,index)?;
+        super::memory::load_integer(fb,addr,*local_types.get(index)
+            .ok_or_else(||invalid("missing addressable local type"))?)
+    } else {
+        Ok(fb.use_var(*vars.get(index).ok_or_else(||invalid("invalid local index"))?))
+    }
+}
+fn local_write(fb:&mut FunctionBuilder<'_>,vars:&[Variable],
+               stack:&HashMap<usize,StackSlot>,local_types:&[CAbiInt],
+               index:usize,value:cranelift_codegen::ir::Value
+) -> Result<cranelift_codegen::ir::Value,CodegenError> {
+    let ty=*local_types.get(index).ok_or_else(||invalid("invalid local type"))?;
+    let normalized=normalize_c_value(fb,value,ty);
+    if stack.contains_key(&index) {
+        let addr=local_address(fb,stack,index)?;
+        super::memory::store_integer(fb,addr,normalized,ty);
+    } else {
+        fb.def_var(*vars.get(index).ok_or_else(||invalid("invalid local"))?,normalized);
+    }
+    Ok(normalized)
 }
 type GlobalValues = HashMap<crate::SymbolId,
     (cranelift_codegen::ir::GlobalValue, CAbiInt)>;
