@@ -1634,6 +1634,42 @@ fn emit_routines_with_globals(
             return Err(invalid("duplicate global identity"));
         }
     }
+    // Predeclare defined and external functions before compiling any body:
+    // forward references and mutual recursion use one Module symbol table.
+    let mut by_name: HashMap<String,(cranelift_module::FuncId,CAbi)> = HashMap::new();
+    for func in functions {
+        let abi=func.abi.clone().unwrap_or_else(|| CAbi {
+            parameters: vec![CAbiInt{bits:64,signed:true,is_bool:false};func.parameters],
+            result: Some(CAbiInt{bits:64,signed:true,is_bool:false}),
+        });
+        if abi.parameters.len()!=func.parameters {
+            return Err(invalid("defined function parameter count mismatch"));
+        }
+        let mut signature=module.make_signature();
+        for ty in &abi.parameters {signature.params.push(AbiParam::new(ty.cranelift()));}
+        if let Some(ty)=abi.result {signature.returns.push(AbiParam::new(ty.cranelift()));}
+        let id=module.declare_function(&func.name,Linkage::Export,&signature)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
+        if by_name.insert(func.name.clone(),(id,abi)).is_some() {
+            return Err(invalid("duplicate function export"));
+        }
+    }
+    for callee in calls {
+        if let Some((_,abi))=by_name.get(&callee.name) {
+            if abi!=&callee.abi { return Err(invalid("direct-call declaration ABI mismatch")); }
+            continue;
+        }
+        let mut signature=module.make_signature();
+        for ty in &callee.abi.parameters {
+            signature.params.push(AbiParam::new(ty.cranelift()));
+        }
+        if let Some(ty)=callee.abi.result {
+            signature.returns.push(AbiParam::new(ty.cranelift()));
+        }
+        let id=module.declare_function(&callee.name,Linkage::Import,&signature)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
+        by_name.insert(callee.name.clone(),(id,callee.abi.clone()));
+    }
     for func in functions {
         if func.name.is_empty() || func.name.as_bytes().contains(&0) {
             return Err(invalid("invalid export name"));
@@ -1652,8 +1688,14 @@ fn emit_routines_with_globals(
         if let Some(result) = abi.result {
             context.func.signature.returns.push(AbiParam::new(result.cranelift()));
         }
-        let id = module.declare_function(&func.name,Linkage::Export,&context.func.signature)
-            .map_err(|e| CodegenError::Backend(e.to_string()))?;
+        let id=by_name.get(&func.name)
+            .ok_or_else(||invalid("undeclared function export"))?.0;
+        let call_values: CallValues = calls.iter().map(|call| {
+            let (id,abi)=by_name.get(&call.name)
+                .ok_or_else(||invalid("undeclared direct call target"))?;
+            let reference=module.declare_func_in_func(*id,&mut context.func);
+            Ok((call.symbol,(reference,abi.clone())))
+        }).collect::<Result<HashMap<_,_>,CodegenError>>()?;
         let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty))|
             (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty))).collect();
         let mut fb_context = FunctionBuilderContext::new();
@@ -1704,7 +1746,7 @@ fn emit_routines_with_globals(
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
-                &global_values,&stack)?;
+                &global_values,&stack,&call_values)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
