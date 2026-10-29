@@ -26,6 +26,8 @@ struct Routine {
     abi: Option<CAbi>,
     /// None only for legacy signed-i64 unit-test routines.
     local_types: Option<Vec<CAbiInt>>,
+    /// Exact storage sizes for address-taken locals and local arrays.
+    local_storage: Option<Vec<u32>>,
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
@@ -51,7 +53,7 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
-    if il.types.iter().any(|d| d.id == ty && semantic(4,d.kind) == 5) {
+    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6)) {
         return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
     }
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
@@ -604,7 +606,10 @@ fn lower_c_expression(
             } else {
                 if let Some(i) = locals.iter().position(|v| v.symbol == symbol) {
                     cfg_local_type(il, locals[i])?;
-                    Expr::Local(i)
+                    if il.types.iter().any(|d|d.id==canonical_abi_type(il,locals[i].ty)?
+                           && semantic(4,d.kind)==6) {
+                        Expr::AddressLocal(i)
+                    } else {Expr::Local(i)}
                 } else {
                     let (_,ty)=global_value_type(il,symbol)?;
                     if ty.is_none() { Expr::AddressGlobal(symbol) }
@@ -901,6 +906,11 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
         let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
             .collect::<Result<Vec<_>,_>>()?;
+        let mut local_storage=locals.iter().map(|v| {
+            let bytes=byte_size(il,v.ty)?;
+            u32::try_from(bytes).map_err(|_|invalid("oversized local storage"))
+        }).collect::<Result<Vec<_>,_>>()?;
+        local_storage.extend(abi.parameters.iter().map(|t|u32::from(t.bits/8)));
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
         let initialized: HashSet<usize> =
@@ -912,7 +922,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
             locals: locals.len(), body, abi: Some(abi),
-            local_types: Some(local_types) });
+            local_types: Some(local_types),local_storage:Some(local_storage) });
     }
     Ok(out)
 }
@@ -1507,10 +1517,14 @@ fn emit_routines_with_globals(
             }).collect();
             let mut addressed=HashSet::new();
             addressed_stmt(&func.body,&mut addressed);
+            let storage=func.local_storage.clone().unwrap_or_else(||
+                local_types.iter().map(|t|u32::from(t.bits/8)).collect());
+            if storage.len()!=local_types.len() {
+                return Err(invalid("stack storage/type count mismatch"));
+            }
             let mut stack=HashMap::new();
             for index in addressed {
-                let ty=*local_types.get(index).ok_or_else(||invalid("invalid stack local"))?;
-                let bytes=u32::from(ty.bits/8);
+                let bytes=*storage.get(index).ok_or_else(||invalid("invalid stack local"))?;
                 let slot=fb.create_sized_stack_slot(
                     StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,0));
                 stack.insert(index,slot);
@@ -1565,7 +1579,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -1590,7 +1604,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -1617,7 +1631,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
