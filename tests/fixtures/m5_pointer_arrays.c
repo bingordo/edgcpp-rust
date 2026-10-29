@@ -15,3 +15,11 @@ int m5_pointer_offset(int *p, int i) { return *(p+i); }
 int m5_row_sum(unsigned short (*p)[4], int row) {
     return p[row][0] + p[row][3];
 }
+
+int m5_stack_array(int x) {
+    unsigned short values[3];
+    values[0] = (unsigned short)x;
+    values[1] = (unsigned short)(values[0] + 2);
+    values[2] = (unsigned short)(values[1] + 3);
+    return (int)values[2];
+}
