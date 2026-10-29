@@ -606,7 +606,8 @@ fn lower_c_expression(
             } else {
                 if let Some(i) = locals.iter().position(|v| v.symbol == symbol) {
                     cfg_local_type(il, locals[i])?;
-                    if il.types.iter().any(|d|d.id==canonical_abi_type(il,locals[i].ty)?
+                    let canonical=canonical_abi_type(il,locals[i].ty)?;
+                    if il.types.iter().any(|d|d.id==canonical
                            && semantic(4,d.kind)==6) {
                         Expr::AddressLocal(i)
                     } else {Expr::Local(i)}
