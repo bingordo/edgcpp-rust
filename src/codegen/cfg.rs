@@ -445,6 +445,9 @@ fn scalar_global(
         ty = def.related.ok_or_else(|| invalid("invalid global typedef"))?;
     }
     let ty = canonical_abi_type(il,ty)?;
+    if il.types.iter().any(|d|d.id==ty && semantic(4,d.kind)==5) {
+        return Ok((name,CAbiInt { bits:64,signed:false,is_bool:false }));
+    }
     let integer = il.c_integer_types.iter().find(|x| x.id == ty)
         .ok_or_else(|| invalid(format!("unsupported global scalar type: {name}")))?;
     Ok((name,CAbiInt { bits: integer.bits, signed: integer.signed,
@@ -694,22 +697,39 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
-                    let (place,ty) = scalar_lvalue(graph,operands[0],params,locals,il)?;
+                    let direct=scalar_lvalue(graph,operands[0],params,locals,il).ok();
+                    let (place,ty)=match direct {
+                        Some((place,ty)) => (Some(place),ty),
+                        None => {
+                            let ty=integer_expression_type(il,graph,operands[0])?;
+                            // The expression must designate addressable storage.
+                            let _=lower_address(graph,operands[0],params,locals,il)?;
+                            (None,ty)
+                        }
+                    };
                     let stride=if is_pointer_like(il,expression_type_id(graph,operands[0])?)? {
                         pointer_stride(il,expression_type_id(graph,operands[0])?)? as i64
                     } else {1};
+                    let address=if place.is_none() {
+                        Some(Box::new(lower_address(graph,operands[0],params,locals,il)?))
+                    } else {None};
                     if matches!(op,29|30) {
+                        let delta=if op==29 {stride} else {-stride};
                         match place {
-                            ScalarPlace::Ssa(i) => Expr::PostLocal(i,ty,if op==29 {stride} else {-stride}),
-                            ScalarPlace::Memory(s) => Expr::PostGlobal(s,ty,if op==29 {stride} else {-stride}),
+                            Some(ScalarPlace::Ssa(i)) => Expr::PostLocal(i,ty,delta),
+                            Some(ScalarPlace::Memory(s)) => Expr::PostGlobal(s,ty,delta),
+                            None => Expr::PostAddress(ty,delta,address.unwrap()),
                         }
                     } else {
-                        let op = if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
+                        let op=if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
+                        let amount=Box::new(Expr::Constant(stride));
                         match place {
-                            ScalarPlace::Ssa(i) => Expr::CompoundLocal(i,ty,promoted_integer_type(ty),
-                                op,Box::new(Expr::Constant(stride))),
-                            ScalarPlace::Memory(s) => Expr::CompoundGlobal(s,ty,promoted_integer_type(ty),
-                                op,Box::new(Expr::Constant(stride))),
+                            Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,
+                                promoted_integer_type(ty),op,amount),
+                            Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,
+                                promoted_integer_type(ty),op,amount),
+                            None => Expr::CompoundAddress(ty,promoted_integer_type(ty),
+                                op,address.unwrap(),amount),
                         }
                     }
                 } else {
@@ -828,6 +848,17 @@ fn lower_c_expression(
                         Box::new(offset),stride)));
                 }
                 if lhs_ptr || rhs_ptr {
+                    if lhs_ptr && rhs_ptr && matches!(op,5..=10) {
+                        let cmp=match op {
+                            5=>CompareOp::Equal,6=>CompareOp::NotEqual,
+                            7=>CompareOp::Less,8=>CompareOp::LessEqual,
+                            9=>CompareOp::Greater,10=>CompareOp::GreaterEqual,
+                            _=>unreachable!(),
+                        };
+                        let a=lower_c_expression(graph,operands[0],params,locals,il)?;
+                        let b=lower_c_expression(graph,operands[1],params,locals,il)?;
+                        return Ok(wrap(Expr::UnsignedCompare(cmp,Box::new(a),Box::new(b))));
+                    }
                     return Err(invalid("unsupported pointer operation"));
                 }
                 // Arithmetic operations and comparisons are defined over a
