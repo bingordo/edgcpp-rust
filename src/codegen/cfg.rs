@@ -1,6 +1,6 @@
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashSet,HashMap};
 use std::cell::Cell;
 use cranelift_codegen::ir::Block;
 use cranelift_frontend::Variable;
@@ -404,7 +404,7 @@ fn scalar_global(
     let meta = il.global_variables.iter().find(|g| g.symbol == symbol)
         .ok_or_else(|| invalid(format!("unresolved/nonlocal variable {}",symbol.0)))?;
     if meta.thread_local || meta.local_to_function ||
-       il.static_local_owners.iter().any(|o| o.variable == symbol) {
+       il.static_local_owners.iter().any(|o| o.symbol == symbol) {
         return Err(invalid("TLS or function-local static global unsupported"));
     }
     let name = il.symbols.iter().find(|s| s.id == symbol && s.kind == 2)
@@ -678,34 +678,101 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
     }
     Ok(out)
 }
+type GlobalValues = HashMap<crate::SymbolId,
+    (cranelift_codegen::ir::GlobalValue, CAbiInt)>;
+fn global_address(
+    fb: &mut FunctionBuilder<'_>, globals: &GlobalValues, symbol: crate::SymbolId,
+) -> Result<cranelift_codegen::ir::Value, CodegenError> {
+    let (value, _) = globals.get(&symbol).ok_or_else(|| invalid(
+        format!("unresolved external data symbol {}",symbol.0)))?;
+    Ok(fb.ins().global_value(types::I64, *value))
+}
+
+/// Shared C compound operation semantics for SSA or memory-backed lvalues.
+fn compound_value(
+    fb: &mut FunctionBuilder<'_>, before: cranelift_codegen::ir::Value,
+    after: cranelift_codegen::ir::Value, ty: CAbiInt, op: CCompoundOp,
+) -> cranelift_codegen::ir::Value {
+    match op {
+        CCompoundOp::Add => fb.ins().iadd(before,after),
+        CCompoundOp::Sub => fb.ins().isub(before,after),
+        CCompoundOp::Mul => fb.ins().imul(before,after),
+        CCompoundOp::And => fb.ins().band(before,after),
+        CCompoundOp::Or => fb.ins().bor(before,after),
+        CCompoundOp::Xor => fb.ins().bxor(before,after),
+        CCompoundOp::Div => emit_integer_binary(
+            if ty.signed {CIntBinaryOp::SignedDivide}
+            else {CIntBinaryOp::UnsignedDivide},fb,before,after),
+        CCompoundOp::Rem => emit_integer_binary(
+            if ty.signed {CIntBinaryOp::SignedRemainder}
+            else {CIntBinaryOp::UnsignedRemainder},fb,before,after),
+        CCompoundOp::Shl => fb.ins().ishl(before,after),
+        CCompoundOp::Shr => emit_integer_binary(
+            if ty.signed {CIntBinaryOp::SignedShiftRight}
+            else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
+    }
+}
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value], vars: &[Variable],
+    globals: &GlobalValues,
 ) -> Result<cranelift_codegen::ir::Value, CodegenError> {
     Ok(match e {
         Expr::Constant(v) => fb.ins().iconst(types::I64, *v),
         Expr::Parameter(i) => *params.get(*i).ok_or_else(|| invalid("invalid parameter"))?,
         Expr::Local(i) => fb.use_var(*vars.get(*i).ok_or_else(|| invalid("invalid local"))?),
+        Expr::Global(symbol) => {
+            let (_,ty) = globals.get(symbol).ok_or_else(|| invalid("unknown global"))?;
+            let address = global_address(fb,globals,*symbol)?;
+            super::memory::load_integer(fb,address,*ty)
+        }
+        Expr::AssignGlobal(symbol,ty,rhs) => {
+            let value = emit_expr(rhs,fb,params,vars,globals)?;
+            let address = global_address(fb,globals,*symbol)?;
+            super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::PostGlobal(symbol,ty,delta) => {
+            let address = global_address(fb,globals,*symbol)?;
+            let old = super::memory::load_integer(fb,address,*ty);
+            let delta = fb.ins().iconst(types::I64,*delta);
+            let value = fb.ins().iadd(old,delta);
+            super::memory::store_integer(fb,address,value,*ty);
+            old
+        }
+        Expr::CompoundGlobal(symbol,ty,compute_ty,op,rhs) => {
+            // Evaluate destination once, then RHS, then perform one store.
+            let address = global_address(fb,globals,*symbol)?;
+            let old = super::memory::load_integer(fb,address,*ty);
+            let after = emit_expr(rhs,fb,params,vars,globals)?;
+            let before = normalize_c_value(fb,old,*compute_ty);
+            let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
+                after
+            } else {
+                normalize_c_value(fb,after,*compute_ty)
+            };
+            let result = compound_value(fb,before,after,*compute_ty,*op);
+            super::memory::store_integer(fb,address,result,*ty)
+        },
         Expr::StoreLocal(..) => return Err(invalid("nested assignment unsupported")),
         Expr::Normalize(ty, a) => {
-            let value = emit_expr(a, fb, params, vars)?;
+            let value = emit_expr(a,fb,params,vars,globals)?;
             normalize_c_value(fb, value, *ty)
         }
         Expr::Neg(a) => {
-            let v = emit_expr(a, fb, params, vars)?;
+            let v = emit_expr(a,fb,params,vars,globals)?;
             fb.ins().ineg(v)
         }
         Expr::IntegerBinary(op,a,b) => {
-            let lhs = emit_expr(a, fb, params, vars)?;
-            let rhs = emit_expr(b, fb, params, vars)?;
+            let lhs = emit_expr(a,fb,params,vars,globals)?;
+            let rhs = emit_expr(b,fb,params,vars,globals)?;
             emit_integer_binary(*op, fb, lhs, rhs)
         }
         Expr::Sequence(a,b) => {
-            let _ = emit_expr(a, fb, params, vars)?;
-            emit_expr(b, fb, params, vars)?
+            let _ = emit_expr(a,fb,params,vars,globals)?;
+            emit_expr(b,fb,params,vars,globals)?
         }
         Expr::AssignLocal(index,ty,value) => {
-            let raw = emit_expr(value,fb,params,vars)?;
+            let raw = emit_expr(value,fb,params,vars,globals)?;
             let normalized = normalize_c_value(fb,raw,*ty);
             fb.def_var(*vars.get(*index).ok_or_else(|| invalid("invalid local assignment"))?,normalized);
             normalized
@@ -722,37 +789,20 @@ fn emit_expr(
         Expr::CompoundLocal(index,ty,compute_ty,op,rhs) => {
             let var = *vars.get(*index).ok_or_else(|| invalid("invalid compound target"))?;
             let before = fb.use_var(var);
-            let after = emit_expr(rhs,fb,params,vars)?;
+            let after = emit_expr(rhs,fb,params,vars,globals)?;
             let before = normalize_c_value(fb,before,*compute_ty);
             let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
                 after
             } else {
                 normalize_c_value(fb,after,*compute_ty)
             };
-            let result = match op {
-                CCompoundOp::Add => fb.ins().iadd(before,after),
-                CCompoundOp::Sub => fb.ins().isub(before,after),
-                CCompoundOp::Mul => fb.ins().imul(before,after),
-                CCompoundOp::And => fb.ins().band(before,after),
-                CCompoundOp::Or => fb.ins().bor(before,after),
-                CCompoundOp::Xor => fb.ins().bxor(before,after),
-                CCompoundOp::Div => emit_integer_binary(
-                    if compute_ty.signed {CIntBinaryOp::SignedDivide}
-                    else {CIntBinaryOp::UnsignedDivide},fb,before,after),
-                CCompoundOp::Rem => emit_integer_binary(
-                    if compute_ty.signed {CIntBinaryOp::SignedRemainder}
-                    else {CIntBinaryOp::UnsignedRemainder},fb,before,after),
-                CCompoundOp::Shl => fb.ins().ishl(before,after),
-                CCompoundOp::Shr => emit_integer_binary(
-                    if compute_ty.signed {CIntBinaryOp::SignedShiftRight}
-                    else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
-            };
+            let result = compound_value(fb,before,after,*compute_ty,*op);
             let normalized = normalize_c_value(fb,result,*ty);
             fb.def_var(var,normalized);
             normalized
         }
         Expr::Conditional(c,a,b) => {
-            let test = emit_expr(c, fb, params, vars)?;
+            let test = emit_expr(c,fb,params,vars,globals)?;
             let flag = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
             let yes = fb.create_block();
             let no = fb.create_block();
@@ -762,10 +812,10 @@ fn emit_expr(
             fb.seal_block(yes);
             fb.seal_block(no);
             fb.switch_to_block(yes);
-            let yes_value = emit_expr(a, fb, params, vars)?;
+            let yes_value = emit_expr(a,fb,params,vars,globals)?;
             fb.ins().jump(merge, &[yes_value.into()]);
             fb.switch_to_block(no);
-            let no_value = emit_expr(b, fb, params, vars)?;
+            let no_value = emit_expr(b,fb,params,vars,globals)?;
             fb.ins().jump(merge, &[no_value.into()]);
             fb.seal_block(merge);
             fb.switch_to_block(merge);
@@ -773,8 +823,8 @@ fn emit_expr(
         }
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) => {
-            let a = emit_expr(a, fb, params, vars)?;
-            let b = emit_expr(b, fb, params, vars)?;
+            let a = emit_expr(a,fb,params,vars,globals)?;
+            let b = emit_expr(b,fb,params,vars,globals)?;
             match e {
                 Expr::Add(..) => fb.ins().iadd(a,b),
                 Expr::Sub(..) => fb.ins().isub(a,b),
@@ -787,8 +837,8 @@ fn emit_expr(
         }
         Expr::Compare(op,a,b) | Expr::UnsignedCompare(op,a,b) => {
             let unsigned = matches!(e, Expr::UnsignedCompare(..));
-            let a = emit_expr(a, fb, params, vars)?;
-            let b = emit_expr(b, fb, params, vars)?;
+            let a = emit_expr(a,fb,params,vars,globals)?;
+            let b = emit_expr(b,fb,params,vars,globals)?;
             let cc = match (op, unsigned) {
                 (CompareOp::Equal, _) => IntCC::Equal,
                 (CompareOp::NotEqual, _) => IntCC::NotEqual,
@@ -807,9 +857,9 @@ fn emit_expr(
             fb.ins().select(test,one,zero)
         }
         Expr::Select(c,a,b) => {
-            let test = emit_expr(c, fb, params, vars)?;
-            let a = emit_expr(a, fb, params, vars)?;
-            let b = emit_expr(b, fb, params, vars)?;
+            let test = emit_expr(c,fb,params,vars,globals)?;
+            let a = emit_expr(a,fb,params,vars,globals)?;
+            let b = emit_expr(b,fb,params,vars,globals)?;
             let nonzero = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
             fb.ins().select(nonzero,a,b)
         }
@@ -827,6 +877,7 @@ fn emit_body(
     args: &[cranelift_codegen::ir::Value], vars: &[Variable],
     outer: Option<LoopTargets<'_>>,
     local_types: &[CAbiInt], result: Option<CAbiInt>,
+    globals: &GlobalValues,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
@@ -845,15 +896,15 @@ fn emit_body(
                 live = false;
             }
             Stmt::Store(i,e) => {
-                let v = emit_expr(e, fb, args, vars)?;
+                let v = emit_expr(e,fb,args,vars,globals)?;
                 let ty = *local_types.get(*i).ok_or_else(|| invalid("bad local type"))?;
                 let v = normalize_c_value(fb, v, ty);
                 fb.def_var(*vars.get(*i).ok_or_else(|| invalid("bad local"))?, v);
             }
-            Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars)?; }
+            Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars,globals)?; }
             Stmt::Return(e) => {
                 let ty = result.ok_or_else(|| invalid("value returned from void routine"))?;
-                let v = emit_expr(e, fb, args, vars)?;
+                let v = emit_expr(e,fb,args,vars,globals)?;
                 let v = if ty.bits == 64 { v }
                     else { fb.ins().ireduce(ty.cranelift(), v) };
                 fb.ins().return_(&[v]);
@@ -865,7 +916,7 @@ fn emit_body(
                 live = false;
             }
             Stmt::If(cond, yes, no) => {
-                let c = emit_expr(cond, fb, args, vars)?;
+                let c = emit_expr(cond,fb,args,vars,globals)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual,c,0);
                 let t = fb.create_block();
                 let f = fb.create_block();
@@ -873,7 +924,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes, fb, args, vars, outer, local_types, result)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -881,7 +932,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no, fb, args, vars, outer, local_types, result)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -901,7 +952,7 @@ fn emit_body(
                 let exit = fb.create_block();
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
-                let c = emit_expr(cond, fb, args, vars)?;
+                let c = emit_expr(cond,fb,args,vars,globals)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual,c,0);
                 fb.ins().brif(flag,body_block,&[],exit,&[]);
                 fb.seal_block(body_block);
@@ -912,7 +963,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -921,7 +972,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init, fb, args, vars, outer, local_types, result)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals)? {
                     live = false;
                     continue;
                 }
@@ -931,7 +982,7 @@ fn emit_body(
                 let exit = fb.create_block();
                 fb.ins().jump(head, &[]);
                 fb.switch_to_block(head);
-                let c = emit_expr(condition, fb, args, vars)?;
+                let c = emit_expr(condition,fb,args,vars,globals)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
                 fb.ins().brif(flag, body_block, &[], exit, &[]);
                 fb.seal_block(body_block);
@@ -942,12 +993,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body, fb, args, vars, Some(targets), local_types, result)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment, fb, args, vars, Some(targets), local_types, result)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -967,12 +1018,12 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body, fb, args, vars, Some(targets), local_types, result)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(test_block);
-                    let test = emit_expr(cond, fb, args, vars)?;
+                    let test = emit_expr(cond,fb,args,vars,globals)?;
                     let flag = fb.ins().icmp_imm(IntCC::NotEqual, test, 0);
                     fb.ins().brif(flag, body_block, &[], exit, &[]);
                 }
