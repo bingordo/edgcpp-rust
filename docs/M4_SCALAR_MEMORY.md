@@ -1,71 +1,63 @@
-# M4 implementation checkpoint: scalar memory and external data
+# M4 — scalar global memory, ELF objects and linkage
 
-Status: **test inputs committed; backend support not yet implemented**.
+Status: **Completed for ordinary, nonvolatile scalar C globals** on Linux
+x86-64. Verified in the bingordo CI repository on 2026-10-29.
+Pointer-dependent address-taken local storage is an explicit **M5 prerequisite**,
+not silently claimed as M4 support.
 
-## Acceptance test
+## Implementation
 
-Compile `tests/fixtures/m4_external_globals.c` with the EDG/Cranelift
-reference code generator, compile `m4_external_driver.c` with GCC,
-link the resulting objects via GCC, and compare its output to a wholly
-GCC-built control. The fixtures exercise four external scalar types,
-read/modify/write, narrowing, boolean canonicalization, and both initial
-data and subsequent writes. No call lowering is required because the
-external driver calls the generated function.
+- The EDG bridge exports global declaration storage/linkage as native-derived
+  event 47, and ensures referenced variables have copied symbol/type edges.
+- Rust resolves globals by EDG `SymbolId` and validates exact scalar width
+  (8/16/32/64), signedness and `_Bool`. It refuses ambiguous symbol names,
+  TLS, qualified, address-taken, aggregate and unsupported storage forms.
+- The typed expression IR distinguishes SSA locals/parameters from real global
+  lvalues. Globals support loads, assignment, compound arithmetic/bitwise
+  operations, prefix and postfix increment/decrement, including M3 sequencing
+  and C integer conversions.
+- `src/codegen/memory.rs` handles exact-width loads/stores with sign/zero
+  extension, narrowing and canonical boolean values. Memory operations are
+  not replaced with SSA locals.
+- `ObjectModule` declares imported variables with data relocations and owns
+  local/exported scalar definitions. Constant initializers become data;
+  zero-initialized definitions become BSS. Functions and data are emitted in
+  the same relocatable ELF object and linked with GCC.
 
-Reference commands:
+## Acceptance evidence
+
+- [CI #40794318473](https://github.com/bingordo/edgcpp-rust/actions/runs/40794318473):
+  EDG-compiled `tests/fixtures/m4_external_globals.c` linked with a GCC
+  driver that **owns** four extern globals (u32, i16, bool, u64). Both
+  executions matched, covering reads/writes, narrowing and two mutations.
+  Standalone imported-data relocation probe and M3 regressions also passed.
+- [CI #40794819868](https://github.com/bingordo/edgcpp-rust/actions/runs/40794819868):
+  additional GCC differential program for object-owned initialized data,
+  zero-initialized exported BSS, internal-linkage storage and repeated writes.
+  All other targeted bridge/codegen/native and negative tests passed.
+
+For local execution, run the configured EDG codegen example with C11 input:
 
 ```sh
-gcc -std=c11 -O2 -c tests/fixtures/m4_external_driver.c -o /tmp/m4_driver.o
-gcc -std=c11 -O2 -c tests/fixtures/m4_external_globals.c -o /tmp/m4_gcc.o
-gcc /tmp/m4_driver.o /tmp/m4_gcc.o -o /tmp/m4_gcc
-/tmp/m4_gcc
-# Once supported, generate /tmp/m4_edg.o using examples/codegen:
-gcc /tmp/m4_driver.o /tmp/m4_edg.o -o /tmp/m4_edg
-cmp <(/tmp/m4_gcc) <(/tmp/m4_edg)
+cargo test --features codegen --lib codegen::memory::tests::
+bash tools/m4_data_probe.sh
+# In the pinned EDG build directory, after sourcing environment.sh:
+path/to/codegen m4_external.o --c11 m4_external_globals.c
+gcc -std=c11 -O2 m4_external.o m4_external_driver.c -o m4_check
 ```
 
-## Implementation sequence
+The differential GCC-only and Cranelift paths are both retained in
+`.github/workflows/build.yml` on `bingordo`; no separate heavy job or
+EDG rebuild is needed.
 
-1. Export stable native metadata for global scalar declarations: symbol,
-   C type/qualifiers, storage/linkage and definition versus external reference.
-   Do not invent external names from source spelling for internal-linkage objects.
-2. Add a **typed lvalue** to the shared codegen representation. Reads must
-   lower to loads; writes and compound expressions must lower to stores.
-   Preserve side-effect sequencing introduced in M3.
-3. Declare imported data with `ObjectModule::declare_data` and
-   `Linkage::Import`; obtain a function-relative global value using the
-   module data-reference API and emit appropriately typed loads and stores.
-   Let the object backend own ELF relocation generation.
-4. Handle actual definitions separately: zero-initialized BSS versus
-   initialized data, correct declared linkage/visibility and width.
-5. Address-taken locals require stack slots with explicit escape checks;
-   plain non-address-taken locals should remain SSA values.
-6. Extend GCC differential checks for signed/unsigned narrow globals,
-   `_Bool`, multiple writes, internal versus external linkage, zero
-   initialization, and negative unsupported cases.
+## Scope boundary and next milestone
 
-## Safety gates
-
-Never treat global reads/writes as SSA locals. Reject volatile/atomic objects
-until required ordering and access semantics are modeled. Reject address-taken,
-unknown-width, TLS, aggregate, tentative/common-definition and aliased lvalues
-unless implemented explicitly. Never produce an object file on a rejected
-translation unit. M4 is only complete when the generated ELF links and
-executes with a GCC-owned global-data driver.
-
-## Backend relocation checkpoint (unverified)
-
-The optional codegen module now includes `src/codegen/memory.rs` with a
-standalone ELF object builder that imports one writable `u32` global and emits
-an increment using a Cranelift global-value address, typed load, and store.
-`examples/m4_data_probe.rs` writes the object; `tools/m4_data_probe.sh`
-links it with a GCC-built owner of `m4_counter` and checks wraparound and
-subsequent mutation. This validates the relocation strategy separately from
-EDG IL decoding *once executed*. Neither the new Rust module nor this shell
-probe has been verified by CI in this checkpoint; do not count it as passing.
-
-The main M4 fixture `m4_external_globals.c` remains **unsupported** by
-`emit_edg_object()` until variable references are resolved to typed global
-lvalues and imported data are registered in the same `ObjectModule` that
-emits the routines. At that point, run the full differential harness and
-negative tests before marking M4 complete.
+M4 does **not** implement general pointers, arrays, aliases, field lvalues,
+volatile/atomic semantics, TLS, dynamic global initialization, arbitrary C++
+linkage, or C object models beyond ordinary scalar data. Unsupported forms
+are rejected instead of manufacturing an SSA value or an unsafe relocation.
+Address-taken locals depend on pointer/address operations and stack slots:
+both are now explicit prerequisites of **M5**. In particular this milestone
+does not mean a default YARPGen `func.c` compiles: generated arrays and
+pointer parameters still need M5; calls and remaining control patterns need
+M6. Do not count M1 GCC-only YARPGen baseline seeds as EDG passes.

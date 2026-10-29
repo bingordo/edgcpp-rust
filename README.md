@@ -284,3 +284,22 @@ volatile/qualified locals, external globals, calls, and floating-point
 expressions require M4–M6. Undefined C behavior is not compared.
 This milestone is not a claim of full C or C++ support, nor of passing
 YARPGen-generated `func.c`; that is gated separately.
+
+## M4 scalar global memory and ELF linkage (2026-10-29)
+
+**M4's ordinary scalar global-memory gate is complete.** The EDG bridge now
+exports native global storage/linkage metadata and typed variable references.
+The CFG emitter preserves scalar global lvalues as loads and stores, including
+compound assignments, increments, sign/zero extension and `_Bool`. The
+ELF backend resolves imports and produces initialized data, BSS and
+internal/external definitions.
+
+The [external-global differential CI #40794318473](https://github.com/bingordo/edgcpp-rust/actions/runs/40794318473)
+and [defined-global data/BSS CI #40794819868](https://github.com/bingordo/edgcpp-rust/actions/runs/40794819868)
+both passed against GCC-built reference executables. See
+[implementation details and limits](docs/M4_SCALAR_MEMORY.md).
+
+**Still unsupported:** pointers/arrays and address-taken stack locals
+(M5), calls (M6), volatile/atomic objects, TLS and dynamic global
+initialization. These are rejected, not accepted as successful compilation.
+Generic YARPGen `func.c` remains a future M5–M7 gate.

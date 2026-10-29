@@ -1,6 +1,6 @@
 # Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
 
-Status: **M0/M1 complete; M2 ordinary scalar ABI/type work green (qualified/address-taken cases deferred to M4); M3 scalar expression semantics complete and CI-verified (2026-10-28). Next: M4 memory/linkage.**
+Status: **M0–M3 complete; M4 ordinary scalar global-memory/ELF-linkage gate complete and CI-verified (2026-10-29). Next M5 arrays, pointers and addressable locals.**
 
 M0: [versioned YARPGen binary](https://github.com/bingundu/yarpgen/releases/tag/yarpgen-binary-20261028-1),
 source SHA `251c5a148ade11d039d5bbbb1e5917b89bd5a785`,
@@ -146,6 +146,28 @@ and passed [CI #40654173606](https://github.com/bingordo/edgcpp-rust/actions/run
   Volatile/addressable/qualified object semantics require M4 memory and
   will not be silently emulated as pure SSA scalars.
 
+## M4 completed: scalar global memory and ELF linkage (2026-10-29)
+
+The reference backend now emits typed global scalar loads and stores, linked
+external data relocations, file-scope initialized data and zero-initialized BSS,
+including internal and exported storage. The EDG bridge records native
+storage/linkage metadata and resolves variables by symbol identity. M3
+sequencing, conversions and compound assignments are reused unchanged.
+
+[CI #40794318473](https://github.com/bingordo/edgcpp-rust/actions/runs/40794318473)
+passes GCC differential execution with four globals defined in the C driver.
+[CI #40794819868](https://github.com/bingordo/edgcpp-rust/actions/runs/40794819868)
+passes additional object-owned data/BSS/internal-linkage execution and the
+existing bridge, Cranelift, scalar C11 and negative tests.
+See [M4 implementation and acceptance](M4_SCALAR_MEMORY.md).
+
+**Scope adjustment:** The original M4 plan also proposed address-taken local
+stack storage. Correct observation of address-taking requires the pointer
+lvalue/address semantics introduced in M5; those linked changes move together
+to M5 instead of introducing untestable stack-slot code. M4 completion is
+therefore specifically the independently testable ordinary-scalar
+memory/linkage gate, not full pointer/qualified-object support.
+
 ## M3 complete: ordinary scalar C expressions (2026-10-28)
 
 **Implementation:**
@@ -207,7 +229,7 @@ M4: correct external/global scalar memory and ELF data relocations.
 | **M2 — C scalar types and ABI** | Explicit EDG native metadata: integer rank, width, signedness, qualifiers, typedefs, `_Bool`, `void`; typed Cranelift signatures, C integer promotions/usual conversions, truncation/extension, comparisons and return; preserve correct x86-64 SysV integer parameter classifications. Native C names and a `void test(void)` export. | Direct native tests for 8/16/32/64-bit signed/unsigned, `char`, bool, casts, overflow boundaries where defined; intentionally wrong signatures rejected. | L |
 | **M3 — Complete scalar expressions** | Division/remainder, shifts and signedness, logical `&&`/`||` with short-circuit semantics, unary `!`/`~`, `?:`, comma, assignment expressions, prefix/postfix increment, compound assignments, sequencing and side-effect correctness. Avoid eager selects or reordering for effects. | GCC/Clang differential edge tests; no unmodeled side effects; deterministic generated scalar-expression corpus. | L |
 | **M4 — Scalar memory, objects and linkage** | Addressable locals as stack slots when needed; global and extern scalar declarations; ELF data/bss, external data relocations; loads/stores with alignment/width/extension; correct linkage/visibility, type/layout validation, linker diagnostics. Distinguish SSA scalars from address-taken storage. | Cranelift-generated `void test()` modifies external globals defined by GCC-built `driver.c`, with matching observable state and checksum. | L |
-| **M5 — Arrays, pointers and indexing** | Pointer types/ABI and decay; address-of/dereference, indexing and pointer arithmetic; multidimensional C arrays and element strides; lvalues, initialization, casts, bounded addressing, aliasing, aligned and unaligned accesses. Don't falsely optimize through potentially aliasing pointers. | Handwritten 1-D/2-D array kernels, parameter arrays and globals, plus a real generated seed with GCC matching output. | XL |
+| **M5 — Arrays, pointers and indexing** | Address-taken local stack slots, pointer types/ABI and decay; address-of/dereference, indexing and pointer arithmetic; multidimensional C arrays and element strides; lvalues, initialization, casts, bounded addressing, aliasing, aligned and unaligned accesses. Don't falsely optimize through potentially aliasing pointers. | Handwritten 1-D/2-D array kernels, parameter arrays and globals, plus a real generated seed with GCC matching output. | XL |
 | **M6 — Calls, full CFG and source semantics** | Direct calls and C ABI interop; multiple functions/translation-unit references, void calls, argument conversions; fix loop/branch corner cases, `switch` if emitted, labels and generated goto shapes as required. Enforce C evaluation order, side effects and definite initialization without overly conservative false rejection. | Representative generated `func.c` cases compile and link; >=100 pinned seeds triaged; no invalid Cranelift verifier or relocation errors. | L–XL |
 | **M7 — Coverage-driven YARPGen completion** | Iterate on ranked failure buckets (not features in arbitrary order); enable wider generator profiles, optional pragmas/alignments if semantically relevant. Build reducer and regressions for each correctness bug. Run both Cranelift `none` and `speed`. | Meet the functional and breadth gates above over pinned 1,000-seed cohorts, including independent GCC/Clang baseline checks. | XL |
 | **M8 — Stabilize and reuse** | Freeze fixed seeds plus minimized regressions; verify reproducibility on clean Linux CI; document unsupported cases and cross-module boundaries; prepare shared front-end lowering for `bingundu/compiler` without coupling its IR to Cranelift. | 10k-seed monitored stress with useful triage; explicit ready/not-ready report and regression corpus; benchmark resource cost. | M–L |
@@ -337,12 +359,12 @@ full seeded runs.
 
 ## Immediate next implementation task
 
-**Start M0, then M1**: publish and pin a Linux x86-64 YARPGen release using
-the existing workflow; create a deterministic harness that proves the
-GCC-only baseline for at least 100 seeds and records which EDG/Cranelift
-features prevent compilation. **Do not begin by attempting all generated
-programs in the Cranelift path**: the present signed-i64 ABI is known to
-reject `void test`, and external globals/arrays are not implemented.
+**M5: arrays, pointers and indexing**. Start with the minimal source-backed
+lvalue/address abstraction for address-taken stack locals and external data,
+then implement pointer types and function parameters, address-of/dereference,
+array indexing and strides. Keep differential GCC tests and explicit unsupported
+diagnostics. After a real generated `func.c` seed links, expand the pinned
+YARPGen corpus. Do not count the GCC-only 100-seed baseline as backend support.
 
 Useful references:
 
