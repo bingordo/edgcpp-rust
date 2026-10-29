@@ -35,6 +35,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--codegen", type=Path)
     parser.add_argument("--edg-environment", type=Path)
+    parser.add_argument("--codegen-cwd", type=Path)
     parser.add_argument("--gcc", default="gcc")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="m6-gnu-") as temp:
@@ -47,11 +48,11 @@ def main():
             print(f"GCC baseline OK: {len(FUNCTIONS) * len(VALUES)} cases; Cranelift NOT TESTED")
             return
         codegen = str(args.codegen.resolve())
-        command = [codegen, str(work / "cranelift.o"), str(FIXTURE)]
+        command = [codegen, str(work / "cranelift.o"), "--c11", "--gcc", str(FIXTURE)]
         if args.edg_environment:
             command = ["bash", "-c", 'source "$1"; shift; exec "$@"',
                        "_", str(args.edg_environment.resolve()), *command]
-        run(command, work)
+        run(command, args.codegen_cwd.resolve() if args.codegen_cwd else work)
         run([args.gcc, "-std=gnu11", "-O0", "driver.c",
              "cranelift.o", "-o", "cranelift"], work)
         actual = run(["./cranelift"], work)
