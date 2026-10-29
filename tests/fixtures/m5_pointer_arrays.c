@@ -23,3 +23,10 @@ int m5_stack_array(int x) {
     values[2] = (unsigned short)(values[1] + 3);
     return (int)values[2];
 }
+
+extern int *m5_alias;
+int m5_global_pointer(int index) { return m5_alias[index]; }
+int m5_post_index(int *p, int index) { return p[index]++; }
+int m5_pre_index(int *p, int index) { return ++p[index]; }
+long long m5_pointer_difference(int *p, int *q) { return q - p; }
+int m5_pointer_less(int *p, int *q) { return p < q; }
