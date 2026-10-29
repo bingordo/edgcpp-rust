@@ -791,8 +791,10 @@ fn lower_c_expression(
                 .ok_or_else(||invalid("GNU expression missing native statement block"))?;
             return lower_gnu_block(graph,crate::graph::StatementId(stmt),params,locals,il);
         },
-        1 => Expr::Constant(node.data.constant_integer
-            .ok_or_else(|| invalid("unsupported/non-i64-representable constant"))?),
+        1 => Expr::Constant(node.data.constant_integer.ok_or_else(|| invalid(
+            format!("unsupported/non-i64-representable constant: kind={:?}, type_kind={:?}, type_id={:?} at {}:{}:{}",
+                node.data.constant_kind,node.data.type_kind,node.data.type_id,
+                node.data.function,node.data.statement_path,node.data.path)))?),
         2 => {
             let symbol = node.data.symbol_id.ok_or_else(|| invalid("unresolved scalar variable"))?;
             if let Some(i) = params.iter().position(|p| *p == symbol) {
