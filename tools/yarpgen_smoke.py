@@ -233,11 +233,17 @@ def execute_case(
                       baseline=baseline, reason="EDG/Cranelift could not emit object")
 
     output = case / "cranelift-test"
+    # Only the EDG-generated object is under test. Avoid optimizing the
+    # GCC-owned driver a second time (the independent O2 oracle already did
+    # that), especially for large YARPGen drivers where compilation can
+    # exhaust the per-step time budget. -O0 also prevents redundant CPU use.
     linked = recorded(record, "link-cranelift",
-        [args.gcc, "-std=gnu11", "-O2", "driver.c", str(obj), "-o", str(output)],
+        [args.gcc, "-std=gnu11", "-O0", "driver.c", str(obj), "-o", str(output)],
         cwd=case, seconds=args.timeout, memory_mb=args.memory_mb, case=case)
     if not linked.ok:
-        return finish("link_failure", baseline=baseline, reason="GCC link failed")
+        return finish("link_failure", baseline=baseline,
+                      reason=("GCC driver compile/link timed out"
+                              if linked.timed_out else "GCC link failed"))
     ran = recorded(record, "run-cranelift", [str(output)], cwd=case,
                    seconds=args.timeout, memory_mb=args.memory_mb, case=case)
     generated_value = result_value(ran)
