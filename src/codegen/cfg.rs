@@ -51,6 +51,9 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
+    if il.types.iter().any(|d| d.id == ty && semantic(4,d.kind) == 5) {
+        return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
+    }
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid(format!("local {} has unsupported scalar type",local.symbol.0)))?;
     Ok(CAbiInt { bits: info.bits, signed: info.signed, is_bool: info.is_bool })
@@ -378,6 +381,10 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
         "missing EDG expression type at {}:{}:{}",
         node.data.function, node.data.statement_path, node.data.path)))?;
     let canonical = canonical_abi_type(il, ty)?;
+    if il.types.iter().any(|v| v.id == canonical &&
+                             matches!(semantic(4,v.kind),5|6)) {
+        return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
+    }
     let ty = il.c_integer_types.iter().find(|v| v.id == canonical)
         .ok_or_else(|| invalid(format!(
             "unsupported C expression type at {}:{}:{}",
@@ -452,6 +459,98 @@ fn scalar_lvalue(
     }
     let (_,ty) = scalar_global(il,symbol)?;
     Ok((ScalarPlace::Memory(symbol),ty))
+}
+/// Byte size of a complete EDG C type, bounded before multiplication.
+/// Aggregate record/union/vector types remain unsupported. An array size
+/// must come from the native EDG bound, not inferred from C source tokens.
+fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
+    let ty = canonical_abi_type(il,ty)?;
+    let def = il.types.iter().find(|t| t.id == ty)
+        .ok_or_else(|| invalid("missing memory type"))?;
+    match semantic(4,def.kind) {
+        1 => {
+            let info = il.c_integer_types.iter().find(|t| t.id == ty)
+                .ok_or_else(|| invalid("unsupported integer memory layout"))?;
+            Ok(u64::from(info.bits/8))
+        }
+        5 => Ok(8),
+        6 => {
+            let element = def.related.ok_or_else(|| invalid("array has no element type"))?;
+            let count = il.array_bounds.iter().find(|b| b.array == ty)
+                .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
+            let n = byte_size(il,element)?;
+            n.checked_mul(count).filter(|&n| n > 0 && n <= 16*1024*1024)
+                .ok_or_else(|| invalid("array object too large"))
+        }
+        _ => Err(invalid("unsupported aggregate/element size")),
+    }
+}
+fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
+    let ty = canonical_abi_type(il,ty)?;
+    let def = il.types.iter().find(|t| t.id == ty)
+        .ok_or_else(|| invalid("missing pointer type"))?;
+    match semantic(4,def.kind) {
+        5 | 6 => byte_size(il,def.related.ok_or_else(|| invalid("missing pointed-to type"))?),
+        _ => Err(invalid("expected pointer/array type for subscript")),
+    }
+}
+fn expression_type_id(graph:&Graph,id:ExpressionId) -> Result<crate::TypeId,CodegenError> {
+    graph.expression(id).and_then(|n| n.data.type_id)
+        .ok_or_else(|| invalid("missing typed pointer expression"))
+}
+fn is_pointer_like(il:&Il,ty:crate::TypeId) -> Result<bool,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    Ok(il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),5|6)))
+}
+/// Decode an addressable scalar or array designator; no implicit load.
+/// For subscript, EDG specifies that pointer and index may appear in either
+/// operand position. The stride is the size of the pointer's element type.
+fn lower_address(
+    graph:&Graph,id:ExpressionId,params:&[crate::SymbolId],
+    locals:&[&crate::LocalVariable],il:&Il,
+) -> Result<Expr,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing lvalue"))?;
+    match semantic(2,node.data.kind) {
+        2 => {
+            let sym=node.data.symbol_id.ok_or_else(||invalid("lvalue without symbol"))?;
+            if let Some(i)=params.iter().position(|v|*v==sym) {
+                return Ok(Expr::AddressLocal(locals.len()+i));
+            }
+            if let Some(i)=locals.iter().position(|v|v.symbol==sym) {
+                return Ok(Expr::AddressLocal(i));
+            }
+            // Globals require a validated EDG storage identity.
+            let meta=il.global_variables.iter().find(|g|g.symbol==sym)
+                .ok_or_else(||invalid("address of non-storage symbol"))?;
+            if meta.thread_local || meta.local_to_function {
+                return Err(invalid("unsupported TLS/static-local address"));
+            }
+            Ok(Expr::AddressGlobal(sym))
+        }
+        3 => {
+            let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
+            match op {
+                44 if node.operands.len()==1 =>
+                    lower_c_expression(graph,node.operands[0],params,locals,il),
+                45 if node.operands.len()==2 => {
+                    let a=node.operands[0]; let b=node.operands[1];
+                    let (pointer,index)=if is_pointer_like(il,expression_type_id(graph,a)?)? {(a,b)}
+                        else if is_pointer_like(il,expression_type_id(graph,b)?)? {(b,a)}
+                        else { return Err(invalid("subscript has no pointer operand")); };
+                    let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
+                    let base=lower_c_expression(graph,pointer,params,locals,il)?;
+                    let index=lower_c_expression(graph,index,params,locals,il)?;
+                    Ok(Expr::PointerOffset(Box::new(base),Box::new(index),stride))
+                }
+                46 if node.operands.len()==1 =>
+                    lower_address(graph,node.operands[0],params,locals,il),
+                11 if node.operands.len()==1 =>
+                    lower_address(graph,node.operands[0],params,locals,il),
+                _ => Err(invalid("unsupported addressable expression")),
+            }
+        }
+        _ => Err(invalid("unsupported non-variable lvalue")),
+    }
 }
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
