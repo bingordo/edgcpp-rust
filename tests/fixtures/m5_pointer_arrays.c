@@ -30,3 +30,6 @@ int m5_post_index(int *p, int index) { return p[index]++; }
 int m5_pre_index(int *p, int index) { return ++p[index]; }
 long long m5_pointer_difference(int *p, int *q) { return q - p; }
 int m5_pointer_less(int *p, int *q) { return p < q; }
+
+/* C11 old-style empty parameter list is valid for a zero-argument definition. */
+void m5_legacy_zero_args() { ++m5_vector[3]; }

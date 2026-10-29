@@ -100,6 +100,7 @@ def classify_codegen(step: ProcessResult) -> str:
     if any(msg in log for msg in (
         "abi must be signed 64-bit integer",
         "unsupported edg statement", "unsupported edg expression",
+        "unsupported edg operation", "unsupported C expression type",
         "unsupported non-loop goto", "unsupported target",
         "unsupported local", "not supported", "unsupported construct",
         "initializer has no supported", "only simple local assignment",

@@ -12,6 +12,7 @@ extern int m5_local(int);
 extern int m5_pointer_offset(int *,int);
 extern int m5_row_sum(unsigned short (*)[4],int);
 extern int m5_stack_array(int);
+extern void m5_legacy_zero_args();
 extern int m5_global_pointer(int);
 extern int m5_post_index(int *,int);
 extern int m5_pre_index(int *,int);
@@ -25,6 +26,8 @@ int main(void) {
     printf("%d %d %d\n",m5_get(4),m5_grid_get(1,2),
       m5_pointer_offset(m5_vector,5));
     printf("%d\n",m5_stack_array(22));
+    m5_legacy_zero_args();
+    printf("%d\n",m5_vector[3]);
     printf("%d %d %d %lld %d\n",m5_global_pointer(2),
       m5_post_index(m5_vector,0),m5_pre_index(m5_vector,1),
       m5_pointer_difference(m5_vector,&m5_vector[5]),
