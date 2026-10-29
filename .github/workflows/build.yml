@@ -256,6 +256,23 @@ jobs:
               exit 1
             fi
           )
+          # M4: storage owned by the generated object (data, BSS, local).
+          cp tests/fixtures/m4_defined_globals.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m4_defined_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m4_defined.o --c11 m4_defined_globals.c
+            gcc -std=c11 -O2 m4_defined_globals.c m4_defined_driver.c -o gcc_m4_defined
+            gcc -std=c11 -O2 edg_m4_defined.o m4_defined_driver.c -o cranelift_m4_defined
+            gcc_result=$(./gcc_m4_defined)
+            edg_result=$(./cranelift_m4_defined)
+            if [ "$gcc_result" != "$edg_result" ]; then
+              echo "M4 defined-global data/BSS mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$gcc_result" "$edg_result"
+              exit 1
+            fi
+          )
 
       - name: EDG to Cranelift vs GCC native execution
         working-directory: edgcpp-rust
