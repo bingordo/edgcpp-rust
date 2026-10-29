@@ -24,3 +24,7 @@ cranelift-frontend = { version = "0.121", optional = true }
 [[example]]
 name = "codegen"
 required-features = ["codegen"]
+
+[[example]]
+name = "m4_data_probe"
+required-features = ["codegen"]
