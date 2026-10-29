@@ -144,8 +144,7 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --lib --tests
-          cargo test --lib --features codegen codegen::tests
+          cargo test --lib --tests --features codegen
           cargo build --example parse
           cargo clippy --all-targets -- -D warnings
           cp tests/fixtures/namespaces.cpp ../edgcpp/build/gcc-release/il_fixture.cpp
@@ -232,9 +231,7 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          cargo test --features codegen --lib codegen::tests::
-          cargo test --features codegen --test codegen_native
-          cargo test --features codegen --lib codegen::memory::tests::
+          # Rust unit/integration tests already ran with codegen above.
           bash tools/m4_data_probe.sh
           # Compile the actual EDG global-lvalue translation unit and link it
           # against data owned by the GCC-built driver.
