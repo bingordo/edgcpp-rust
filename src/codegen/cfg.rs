@@ -102,9 +102,12 @@ fn lower_gnu_block(
     }
     let mut effects:Vec<Expr>=Vec::new();
     let mut result:Option<Expr>=None;
-    for (position,&child) in root.children.iter().enumerate() {
+    // EDG may append synthetic .gnu descendants after the result statement.
+    // Only semantic children count when enforcing the final-value position.
+    let semantic_children:Vec<_>=root.children.iter().copied()
+        .filter(|&child|!is_gnu_child(graph,child,&root.data.path)).collect();
+    for (position,&child) in semantic_children.iter().enumerate() {
         let node=graph.statement(child).ok_or_else(||invalid("missing GNU statement"))?;
-        if is_gnu_child(graph,child,&root.data.path) { continue; }
         if result.is_some() {return Err(invalid("GNU block statements after result"));}
         match semantic(1,node.data.kind) {
             4 => {let body=lower(graph,child,params,locals,il)?;
@@ -138,7 +141,7 @@ fn lower_gnu_block(
                 let expr=node.expression.ok_or_else(||invalid(
                     "GNU statement-expression result is not scalar"))?;
                 result=Some(lower_c_expression(graph,expr,params,locals,il)?);
-                if position+1!=root.children.len() {
+                if position+1!=semantic_children.len() {
                     return Err(invalid("GNU result is not last statement"));
                 }
             }
