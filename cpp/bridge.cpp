@@ -1449,11 +1449,19 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_xor_assign)) return 40;
     if (value == static_cast<unsigned>(eok_pre_incr)) return 41;
     if (value == static_cast<unsigned>(eok_pre_decr)) return 42;
+    // Memory/lvalue operators share stable semantic IDs; do not bake EDG
+    // private enum discriminants into Rust.
+    if (value == static_cast<unsigned>(eok_address_of)) return 43;
+    if (value == static_cast<unsigned>(eok_indirect)) return 44;
+    if (value == static_cast<unsigned>(eok_subscript)) return 45;
+    if (value == static_cast<unsigned>(eok_array_to_pointer)) return 46;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
     if (value == static_cast<unsigned>(tk_routine)) return 2;
     if (value == static_cast<unsigned>(tk_typeref)) return 3;
+    if (value == static_cast<unsigned>(tk_pointer)) return 5;
+    if (value == static_cast<unsigned>(tk_array)) return 6;
   }
   return 0;
 }
