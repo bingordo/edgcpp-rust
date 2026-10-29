@@ -35,6 +35,9 @@ pub enum Expr {
     Global(crate::SymbolId),
     /// Direct C function call with EDG-validated SysV scalar/pointer signature.
     Call(crate::SymbolId, CAbi, Vec<Expr>),
+    /// Straight-line GNU statement-expression block: execute all prefix
+    /// expressions exactly once, then evaluate the final block value.
+    BlockValue(Vec<Expr>, Box<Expr>),
     AssignGlobal(crate::SymbolId, CAbiInt, Box<Expr>),
     CompoundGlobal(crate::SymbolId, CAbiInt, CAbiInt, CCompoundOp, Box<Expr>),
     PostGlobal(crate::SymbolId, CAbiInt, i64),
@@ -153,7 +156,7 @@ fn emit_expr(
         }
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
-        Expr::Global(..) | Expr::Call(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
+        Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) | Expr::CompoundAddress(..) |
         Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
         Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
@@ -400,7 +403,7 @@ fn checked_local(
 /// proper Cranelift blocks, branches and phi handling are implemented.
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
-        Expr::Call(..) |
+        Expr::Call(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
