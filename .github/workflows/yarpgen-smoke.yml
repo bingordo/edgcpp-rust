@@ -8,6 +8,8 @@ on:
     paths:
       - 'tools/yarpgen_smoke.py'
       - 'tests/test_yarpgen_smoke.py'
+      - 'tools/m6_gnu_differential.py'
+      - 'tests/fixtures/m6_gnu_statement_expr.c'
       - '.github/workflows/yarpgen-smoke.yml'
   workflow_dispatch:
     inputs:
@@ -34,6 +36,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Unit test harness without YARPGen
         run: python3 -m unittest discover -s tests -p test_yarpgen_smoke.py -v
+      - name: M6 GNU expression GCC oracle (no EDG build)
+        run: python3 tools/m6_gnu_differential.py
       - name: Download pinned release artifact (no source build)
         shell: bash
         run: |
