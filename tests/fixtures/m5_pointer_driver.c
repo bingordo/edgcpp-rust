@@ -37,9 +37,10 @@ int main(void) {
       m5_post_index(m5_vector,0),m5_pre_index(m5_vector,1),
       m5_pointer_difference(m5_vector,&m5_vector[5]),
       m5_pointer_less(m5_vector,&m5_vector[5]));
+    unsigned int byte_result = m5_byte_access(m5_bytes,2);
     printf("%d %d %u %u %d\n",
       m5_null_cmp((int *)0),m5_nonnull_cmp(m5_vector),
-      m5_byte_access(m5_bytes,2),(unsigned int)m5_bytes[2],
+      byte_result,(unsigned int)m5_bytes[2],
       m5_void_roundtrip(&m5_vector[2]));
     return 0;
 }
