@@ -592,6 +592,81 @@ fn lower_address(
         _ => Err(invalid("unsupported non-variable lvalue")),
     }
 }
+#[derive(Debug,Clone)]
+struct CallDeclaration {
+    symbol: crate::SymbolId,
+    name: String,
+    abi: CAbi,
+}
+fn call_type_abi(il:&Il, ty:crate::TypeId) -> Result<CAbiInt,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==5) {
+        // SysV LP64 data pointers (not aggregate/function-pointer ABI).
+        return Ok(CAbiInt {bits:64,signed:false,is_bool:false});
+    }
+    let t=il.c_integer_types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("unsupported C direct-call scalar/pointer type"))?;
+    if !matches!(t.bits,8|16|32|64) {
+        return Err(invalid("unsupported direct-call integer width"));
+    }
+    Ok(CAbiInt {bits:t.bits,signed:t.signed,is_bool:t.is_bool})
+}
+fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
+    let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
+        .ok_or_else(||invalid("call callee is not a direct named routine"))?;
+    let name=sym.name.clone();
+    if name.is_empty() ||
+       !name.bytes().next().is_some_and(|c|c.is_ascii_alphabetic()||c==b'_') ||
+       !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
+        return Err(invalid(format!("non-C/ambiguous direct-call symbol {name}")));
+    }
+    let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
+        .ok_or_else(||invalid("call has no routine type"))?.ty;
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing called function type"))?;
+    if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
+        return Err(invalid("indirect/function-pointer calls not implemented"));
+    }
+    let proto=il.function_signatures.iter().find(|s|s.owner==ty)
+        .ok_or_else(||invalid("called function missing prototype metadata"))?;
+    if proto.variadic { return Err(invalid("variadic direct C calls unsupported")); }
+    let mut declared:Vec<_>=il.type_parameters.iter().filter(|p|p.owner==ty).collect();
+    declared.sort_by_key(|p|p.position);
+    if declared.iter().enumerate().any(|(i,p)|p.position!=i as u32) {
+        return Err(invalid("noncontiguous direct-call parameters"));
+    }
+    if !proto.prototyped && !declared.is_empty() {
+        return Err(invalid("unprototyped direct C calls with arguments unsupported"));
+    }
+    let parameters=declared.iter().map(|p|call_type_abi(il,p.ty))
+        .collect::<Result<Vec<_>,_>>()?;
+    let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
+    let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
+        None
+    } else {Some(call_type_abi(il,ret)?)};
+    Ok(CallDeclaration {symbol,name,abi:CAbi{parameters,result}})
+}
+fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
+    let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
+    for site in &il.calls {
+        if site.first_argument!=1 { return Err(invalid("member/indirect call unsupported")); }
+        let callee=il.expressions.iter().find(|e|
+            e.function==site.function && e.statement_path==site.statement_path &&
+            e.path==format!("{}.0",site.path))
+            .ok_or_else(||invalid("call missing callee expression"))?;
+        let symbol=callee.symbol_id.ok_or_else(||invalid("call callee is not direct routine"))?;
+        let decl=direct_call_decl(il,symbol)?;
+        if let Some(previous)=found.get(&symbol) {
+            if previous.abi!=decl.abi || previous.name!=decl.name {
+                return Err(invalid("inconsistent direct-call type"));
+            }
+        } else {found.insert(symbol,decl);}
+    }
+    let mut result:Vec<CallDeclaration>=found.into_values().collect();
+    result.sort_by(|a,b|a.name.cmp(&b.name));
+    Ok(result)
+}
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
