@@ -1138,6 +1138,8 @@ fn local_write(fb:&mut FunctionBuilder<'_>,vars:&[Variable],
     }
     Ok(normalized)
 }
+type CallValues = HashMap<crate::SymbolId,
+    (cranelift_codegen::ir::FuncRef,CAbi)>;
 type GlobalValues = HashMap<crate::SymbolId,
     (cranelift_codegen::ir::GlobalValue, CAbiInt)>;
 fn global_address(
@@ -1176,27 +1178,48 @@ fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value], vars: &[Variable],
     globals: &GlobalValues, stack: &HashMap<usize,StackSlot>,
-    local_types: &[CAbiInt],
+    local_types: &[CAbiInt], calls: &CallValues,
 ) -> Result<cranelift_codegen::ir::Value, CodegenError> {
     Ok(match e {
         Expr::Constant(v) => fb.ins().iconst(types::I64, *v),
         Expr::Parameter(i) => *params.get(*i).ok_or_else(|| invalid("invalid parameter"))?,
         Expr::Local(i) => local_read(fb,vars,stack,local_types,*i)?,
+        Expr::Call(symbol,abi,arguments) => {
+            let (reference,declared)=calls.get(symbol)
+                .ok_or_else(||invalid("direct call has no declared function"))?;
+            if abi!=declared || arguments.len()!=abi.parameters.len() {
+                return Err(invalid("direct call ABI mismatch"));
+            }
+            let mut values=Vec::with_capacity(arguments.len());
+            for (arg,ty) in arguments.iter().zip(&abi.parameters) {
+                let value=emit_expr(arg,fb,params,vars,globals,stack,local_types,calls)?;
+                values.push(if ty.bits==64 {value}
+                    else {fb.ins().ireduce(ty.cranelift(),value)});
+            }
+            let inst=fb.ins().call(*reference,&values);
+            if let Some(ty)=abi.result {
+                let result=*fb.inst_results(inst).first()
+                    .ok_or_else(||invalid("non-void call has no result"))?;
+                if ty.bits==64 {result}
+                else if ty.signed {fb.ins().sextend(types::I64,result)}
+                else {fb.ins().uextend(types::I64,result)}
+            } else {fb.ins().iconst(types::I64,0)}
+        },
         Expr::AddressLocal(i) => local_address(fb,stack,*i)?,
         Expr::AddressGlobal(symbol) => global_address(fb,globals,*symbol)?,
         Expr::LoadAddress(ty,pointer) => {
-            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types)?;
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer(fb,address,*ty)
         }
         Expr::StoreAddress(ty,pointer,value) => {
-            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types)?;
-            let value=emit_expr(value,fb,params,vars,globals,stack,local_types)?;
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
         }
         Expr::CompoundAddress(ty,compute_ty,op,pointer,rhs) => {
-            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types)?;
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let before=super::memory::load_integer(fb,address,*ty);
-            let after=emit_expr(rhs,fb,params,vars,globals,stack,local_types)?;
+            let after=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let before=normalize_c_value(fb,before,*compute_ty);
             let after=if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
                 after
@@ -1207,7 +1230,7 @@ fn emit_expr(
             super::memory::store_integer(fb,address,result,*ty)
         }
         Expr::PostAddress(ty,delta,pointer) => {
-            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types)?;
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let old=super::memory::load_integer(fb,address,*ty);
             let delta=fb.ins().iconst(types::I64,*delta);
             let value=fb.ins().iadd(old,delta);
@@ -1215,8 +1238,8 @@ fn emit_expr(
             old
         }
         Expr::PointerOffset(base,index,stride) => {
-            let base=emit_expr(base,fb,params,vars,globals,stack,local_types)?;
-            let index=emit_expr(index,fb,params,vars,globals,stack,local_types)?;
+            let base=emit_expr(base,fb,params,vars,globals,stack,local_types,calls)?;
+            let index=emit_expr(index,fb,params,vars,globals,stack,local_types,calls)?;
             let stride=fb.ins().iconst(types::I64,*stride as i64);
             let offset=fb.ins().imul(index,stride);
             fb.ins().iadd(base,offset)
@@ -1227,7 +1250,7 @@ fn emit_expr(
             super::memory::load_integer(fb,address,*ty)
         }
         Expr::AssignGlobal(symbol,ty,rhs) => {
-            let value = emit_expr(rhs,fb,params,vars,globals,stack,local_types)?;
+            let value = emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let address = global_address(fb,globals,*symbol)?;
             super::memory::store_integer(fb,address,value,*ty)
         }
@@ -1243,7 +1266,7 @@ fn emit_expr(
             // Evaluate destination once, then RHS, then perform one store.
             let address = global_address(fb,globals,*symbol)?;
             let old = super::memory::load_integer(fb,address,*ty);
-            let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types)?;
+            let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let before = normalize_c_value(fb,old,*compute_ty);
             let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
                 after
@@ -1255,24 +1278,24 @@ fn emit_expr(
         },
         Expr::StoreLocal(..) => return Err(invalid("nested assignment unsupported")),
         Expr::Normalize(ty, a) => {
-            let value = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
+            let value = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
             normalize_c_value(fb, value, *ty)
         }
         Expr::Neg(a) => {
-            let v = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
+            let v = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
             fb.ins().ineg(v)
         }
         Expr::IntegerBinary(op,a,b) => {
-            let lhs = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
-            let rhs = emit_expr(b,fb,params,vars,globals,stack,local_types)?;
+            let lhs = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
+            let rhs = emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?;
             emit_integer_binary(*op, fb, lhs, rhs)
         }
         Expr::Sequence(a,b) => {
-            let _ = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
-            emit_expr(b,fb,params,vars,globals,stack,local_types)?
+            let _ = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
+            emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?
         }
         Expr::AssignLocal(index,_ty,value) => {
-            let raw = emit_expr(value,fb,params,vars,globals,stack,local_types)?;
+            let raw = emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             local_write(fb,vars,stack,local_types,*index,raw)?
         }
         Expr::PostLocal(index,_ty,delta) => {
@@ -1284,7 +1307,7 @@ fn emit_expr(
         }
         Expr::CompoundLocal(index,_ty,compute_ty,op,rhs) => {
             let before = local_read(fb,vars,stack,local_types,*index)?;
-            let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types)?;
+            let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let before = normalize_c_value(fb,before,*compute_ty);
             let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
                 after
@@ -1295,7 +1318,7 @@ fn emit_expr(
             local_write(fb,vars,stack,local_types,*index,result)?
         }
         Expr::Conditional(c,a,b) => {
-            let test = emit_expr(c,fb,params,vars,globals,stack,local_types)?;
+            let test = emit_expr(c,fb,params,vars,globals,stack,local_types,calls)?;
             let flag = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
             let yes = fb.create_block();
             let no = fb.create_block();
@@ -1305,10 +1328,10 @@ fn emit_expr(
             fb.seal_block(yes);
             fb.seal_block(no);
             fb.switch_to_block(yes);
-            let yes_value = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
+            let yes_value = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
             fb.ins().jump(merge, &[yes_value.into()]);
             fb.switch_to_block(no);
-            let no_value = emit_expr(b,fb,params,vars,globals,stack,local_types)?;
+            let no_value = emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?;
             fb.ins().jump(merge, &[no_value.into()]);
             fb.seal_block(merge);
             fb.switch_to_block(merge);
@@ -1316,8 +1339,8 @@ fn emit_expr(
         }
         Expr::Add(a,b) | Expr::Sub(a,b) | Expr::Mul(a,b) |
         Expr::BitAnd(a,b) | Expr::BitOr(a,b) | Expr::BitXor(a,b) => {
-            let a = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
-            let b = emit_expr(b,fb,params,vars,globals,stack,local_types)?;
+            let a = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
+            let b = emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?;
             match e {
                 Expr::Add(..) => fb.ins().iadd(a,b),
                 Expr::Sub(..) => fb.ins().isub(a,b),
@@ -1330,8 +1353,8 @@ fn emit_expr(
         }
         Expr::Compare(op,a,b) | Expr::UnsignedCompare(op,a,b) => {
             let unsigned = matches!(e, Expr::UnsignedCompare(..));
-            let a = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
-            let b = emit_expr(b,fb,params,vars,globals,stack,local_types)?;
+            let a = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
+            let b = emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?;
             let cc = match (op, unsigned) {
                 (CompareOp::Equal, _) => IntCC::Equal,
                 (CompareOp::NotEqual, _) => IntCC::NotEqual,
@@ -1350,9 +1373,9 @@ fn emit_expr(
             fb.ins().select(test,one,zero)
         }
         Expr::Select(c,a,b) => {
-            let test = emit_expr(c,fb,params,vars,globals,stack,local_types)?;
-            let a = emit_expr(a,fb,params,vars,globals,stack,local_types)?;
-            let b = emit_expr(b,fb,params,vars,globals,stack,local_types)?;
+            let test = emit_expr(c,fb,params,vars,globals,stack,local_types,calls)?;
+            let a = emit_expr(a,fb,params,vars,globals,stack,local_types,calls)?;
+            let b = emit_expr(b,fb,params,vars,globals,stack,local_types,calls)?;
             let nonzero = fb.ins().icmp_imm(IntCC::NotEqual,test,0);
             fb.ins().select(nonzero,a,b)
         }
@@ -1371,6 +1394,7 @@ fn emit_body(
     outer: Option<LoopTargets<'_>>,
     local_types: &[CAbiInt], result: Option<CAbiInt>,
     globals: &GlobalValues,stack:&HashMap<usize,StackSlot>,
+    calls: &CallValues,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
@@ -1389,13 +1413,13 @@ fn emit_body(
                 live = false;
             }
             Stmt::Store(i,e) => {
-                let v = emit_expr(e,fb,args,vars,globals,stack,local_types)?;
+                let v = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?;
                 local_write(fb,vars,stack,local_types,*i,v)?;
             }
-            Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars,globals,stack,local_types)?; }
+            Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?; }
             Stmt::Return(e) => {
                 let ty = result.ok_or_else(|| invalid("value returned from void routine"))?;
-                let v = emit_expr(e,fb,args,vars,globals,stack,local_types)?;
+                let v = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?;
                 let v = if ty.bits == 64 { v }
                     else { fb.ins().ireduce(ty.cranelift(), v) };
                 fb.ins().return_(&[v]);
@@ -1407,7 +1431,7 @@ fn emit_body(
                 live = false;
             }
             Stmt::If(cond, yes, no) => {
-                let c = emit_expr(cond,fb,args,vars,globals,stack,local_types)?;
+                let c = emit_expr(cond,fb,args,vars,globals,stack,local_types,calls)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual,c,0);
                 let t = fb.create_block();
                 let f = fb.create_block();
@@ -1415,7 +1439,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -1423,7 +1447,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -1443,7 +1467,7 @@ fn emit_body(
                 let exit = fb.create_block();
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
-                let c = emit_expr(cond,fb,args,vars,globals,stack,local_types)?;
+                let c = emit_expr(cond,fb,args,vars,globals,stack,local_types,calls)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual,c,0);
                 fb.ins().brif(flag,body_block,&[],exit,&[]);
                 fb.seal_block(body_block);
@@ -1454,7 +1478,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -1463,7 +1487,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls)? {
                     live = false;
                     continue;
                 }
@@ -1473,7 +1497,7 @@ fn emit_body(
                 let exit = fb.create_block();
                 fb.ins().jump(head, &[]);
                 fb.switch_to_block(head);
-                let c = emit_expr(condition,fb,args,vars,globals,stack,local_types)?;
+                let c = emit_expr(condition,fb,args,vars,globals,stack,local_types,calls)?;
                 let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
                 fb.ins().brif(flag, body_block, &[], exit, &[]);
                 fb.seal_block(body_block);
@@ -1484,12 +1508,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -1509,12 +1533,12 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(test_block);
-                    let test = emit_expr(cond,fb,args,vars,globals,stack,local_types)?;
+                    let test = emit_expr(cond,fb,args,vars,globals,stack,local_types,calls)?;
                     let flag = fb.ins().icmp_imm(IntCC::NotEqual, test, 0);
                     fb.ins().brif(flag, body_block, &[], exit, &[]);
                 }
@@ -1578,10 +1602,10 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
 }
 #[cfg(test)]
 fn emit_routines(functions: &[Routine]) -> Result<Vec<u8>, CodegenError> {
-    emit_routines_with_globals(functions,&[])
+    emit_routines_with_globals(functions,&[],&[])
 }
 fn emit_routines_with_globals(
-    functions: &[Routine], globals: &[ScalarGlobal],
+    functions: &[Routine], globals: &[ScalarGlobal], calls: &[CallDeclaration],
 ) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     flags.set("opt_level","speed").map_err(|e| CodegenError::Backend(e.to_string()))?;
@@ -1698,7 +1722,8 @@ fn emit_routines_with_globals(
 pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
     let routines = compile_il(il)?;
     let globals = compile_globals(il)?;
-    emit_routines_with_globals(&routines,&globals)
+    let calls = compile_calls(il)?;
+    emit_routines_with_globals(&routines,&globals,&calls)
 }
 #[cfg(test)]
 mod tests {
