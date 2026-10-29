@@ -15,7 +15,7 @@ on:
       - tests/test_yarpgen_smoke.py
       - .github/workflows/yarpgen-smoke.yml
   pull_request:
-    branches: [main]
+    branches: [cranelift-codegen]
     paths-ignore:
       - README.md
       - docs/**
@@ -351,6 +351,19 @@ jobs:
               exit 1
             fi
           )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py \\
+            --codegen "$PWD/target/debug/examples/codegen" \\
+            --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh"
 
       - name: M5 pinned YARPGen differential coverage probe
         if: ${{ contains(github.event.head_commit.message, '[m5-yarpgen]') }}
