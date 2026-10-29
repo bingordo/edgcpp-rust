@@ -407,7 +407,7 @@ jobs:
           retention-days: 7
 
       - name: M6 pinned 100-seed YARPGen triage
-        if: ${{ contains(github.event.head_commit.message, '[m6-yarpgen]') }}
+        if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[m6-yarpgen]') }}
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
@@ -453,7 +453,7 @@ jobs:
           PY
 
       - name: Upload M6 YARPGen 100-seed triage (only on explicit probe)
-        if: ${{ always() && contains(github.event.head_commit.message, '[m6-yarpgen]') }}
+        if: ${{ always() && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[m6-yarpgen]')) }}
         uses: actions/upload-artifact@v4
         with:
           name: m6-yarpgen-100-triage
