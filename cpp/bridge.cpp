@@ -374,6 +374,9 @@ static unsigned call_argument_offset(an_expr_node_ptr node)
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
 static uint32_t emit_variable_type(a_variable_ptr var);
+static void emit_statements(a_statement_ptr head, const std::string &function,
+                            const std::string &parent, const std::string &edge,
+                            unsigned depth, bool single = false);
 
 // A bounded structural snapshot of function statement trees. The path is
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
@@ -466,6 +469,16 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     // Event 18: call site (function, statement, expression path,
     // first argument operand index). The callee is always operand zero.
     emit_record(18, {txt(function), txt(stmt_path), txt(path), num(call_offset)});
+  }
+  // GNU ({...}) owns a real EDG statement subtree. Give each expression
+  // occurrence a unique child edge under its enclosing statement so the
+  // existing graph can validate and lower declarations in execution order.
+  // Never turn a statement expression into a fake constant/value.
+  if (node->kind == enk_statement && node->variant.statement != nullptr) {
+    std::string edge = "gnu" + path;
+    for (char &c : edge) if (c == '.') c = '_';
+    emit_statements(node->variant.statement, function, stmt_path, edge,
+                    depth + 1, true);
   }
   const auto children = children_of(node);
   unsigned index = 0;
@@ -716,7 +729,7 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
 
 static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
-                            unsigned depth, bool single = false)
+                            unsigned depth, bool single)
 {
   if (head == nullptr || depth > 64 || current_callback == nullptr) return;
   unsigned index = 0;
@@ -860,7 +873,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         // The existing control snapshot does not include constant payloads.
         // Also retain a primary expression for plain initializer statements,
         // enabling checked i64 local initialization in the reference backend.
-        if (stmt->kind == stmk_init && stmt->expr == nullptr)
+        if ((stmt->kind == stmk_init ||
+             stmt->kind == stmk_stmt_expr_result) && stmt->expr == nullptr)
           emit_expr(init->variant.expression, function, path, "0", "", 0);
       }
     }
@@ -1402,6 +1416,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_for)) return 9;
     if (value == static_cast<unsigned>(stmk_goto)) return 10;
     if (value == static_cast<unsigned>(stmk_label)) return 11;
+    if (value == static_cast<unsigned>(stmk_stmt_expr_result)) return 12;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
