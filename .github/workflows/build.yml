@@ -324,6 +324,7 @@ jobs:
             --codegen-cwd "$PWD/../edgcpp/build/gcc-release" \
             --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" \
             --edg-option=--c11 \
+            --edg-option=--gcc \
             --out "$PWD/m5-yarpgen-report" --start-seed 12345 --count 3 \
             --clang clang --timeout 45 --memory-mb 2048 \
             --generator-option=--inp-as-args=none \
