@@ -118,13 +118,13 @@ def classify_codegen(step: ProcessResult) -> str:
 
 def failure_signature(step: ProcessResult) -> str:
     """Stable, bounded diagnostic for grouping unsupported generated programs."""
-    lines = (step.stderr + "\\n" + step.stdout).splitlines()
+    lines = (step.stderr + "\n" + step.stdout).splitlines()
     for line in reversed(lines):
         line = line.strip()
         if not line or line.startswith(("note:", "warning:")):
             continue
-        line = re.sub(r"(?:/[^\\s:]+)+", "<path>", line)
-        line = re.sub(r"\\b(?:0x[0-9a-fA-F]+|[0-9]{3,})\\b", "<number>", line)
+        line = re.sub(r"(?:/[^\s:]+)+", "<path>", line)
+        line = re.sub(r"\b(?:0x[0-9a-fA-F]+|[0-9]{3,})\b", "<number>", line)
         return line[:240]
     return "timeout" if step.timed_out else "no diagnostic"
 
