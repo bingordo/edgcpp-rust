@@ -117,16 +117,22 @@ def classify_codegen(step: ProcessResult) -> str:
 
 
 def failure_signature(step: ProcessResult) -> str:
-    """Stable, bounded diagnostic for grouping unsupported generated programs."""
-    lines = (step.stderr + "\n" + step.stdout).splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line or line.startswith(("note:", "warning:")):
-            continue
-        line = re.sub(r"(?:/[^\s:]+)+", "<path>", line)
-        line = re.sub(r"\b(?:0x[0-9a-fA-F]+|[0-9]{3,})\b", "<number>", line)
-        return line[:240]
-    return "timeout" if step.timed_out else "no diagnostic"
+    """Group failures by actionable compiler diagnostic, not per-seed paths."""
+    lines = (step.stderr + "\\n" + step.stdout).splitlines()
+    # Compiler output may end in a generic traceback or wrapper failure;
+    # prefer the first explicit unsupported/EDG error when available.
+    diagnostic = next((line.strip() for line in lines
+                       if any(term in line.lower() for term in
+                              ("unsupported", "not supported", "edg il lowering failed",
+                               "edg compilation failed", "verifier error"))), None)
+    if diagnostic is None:
+        diagnostic = next((line.strip() for line in reversed(lines)
+                           if line.strip() and not line.lstrip().startswith(("note:", "warning:"))), None)
+    if diagnostic is None:
+        return "timeout" if step.timed_out else "no diagnostic"
+    diagnostic = re.sub(r"(?:/[^\\s:]+)+", "<path>", diagnostic)
+    diagnostic = re.sub(r"\\b(?:0x[0-9a-fA-F]+|[0-9]{3,})\\b", "<number>", diagnostic)
+    return diagnostic[:240]
 
 
 def seeds_from_args(args: argparse.Namespace) -> list[int]:

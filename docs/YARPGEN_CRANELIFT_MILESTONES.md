@@ -416,3 +416,28 @@ Useful references:
 * `bingordu/edgcpp-rust/examples/codegen.rs` and
   `.github/workflows/build.yml` — current ELF frontend CLI and pinned EDG
   build/test mechanism.
+
+## M7 progress — failure-driven generated-C coverage (2026-10-30)
+
+The M7 harness now records normalized per-seed EDG/Cranelift diagnostics and
+aggregates nonpassing outcomes by classification and diagnostic. The separate
+`bingordo/compiler-ci` workflow publishes the most frequent failures and
+coverage counts in its Actions summary, with a 15-minute change-detection
+schedule. A green workflow proves only the configured cohort and acceptance
+threshold; it is not evidence that the unsupported-language backlog is done.
+
+**Implementation check:** Current `src/codegen/cfg.rs` already contains
+straight-line GNU block-value expression lowering and direct-call lowering.
+The earlier M5 section above is historical, not a current inventory; do not
+reimplement those capabilities without first identifying a failing case.
+Arbitrary non-loop goto/labels and non-straight-line GNU statement expressions
+still have explicit guards. Their frequency in unselected YARPGen cohorts
+has not yet been established.
+
+**Next codegen gate:** inspect the ranked diagnostic groups from a completed
+unselected cohort, select the most frequent *supported-oracle* unsupported
+construct, add a reduced C differential fixture, then extend generic EDG
+lowering and rerun the same pinned seeds. Record generated/oracle-valid,
+accepted, passing, unsupported and severe-failure counts before and after.
+Do not increase the automatic cohort size until this produces measurable
+acceptance improvement.
