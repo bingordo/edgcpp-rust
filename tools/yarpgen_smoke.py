@@ -116,6 +116,19 @@ def classify_codegen(step: ProcessResult) -> str:
     return "codegen_failure"
 
 
+def failure_signature(step: ProcessResult) -> str:
+    """Stable, bounded diagnostic for grouping unsupported generated programs."""
+    lines = (step.stderr + "\n" + step.stdout).splitlines()
+    for line in reversed(lines):
+        line = line.strip()
+        if not line or line.startswith(("note:", "warning:")):
+            continue
+        line = re.sub(r"(?:/[^\s:]+)+", "<path>", line)
+        line = re.sub(r"\b(?:0x[0-9a-fA-F]+|[0-9]{3,})\b", "<number>", line)
+        return line[:240]
+    return "timeout" if step.timed_out else "no diagnostic"
+
+
 def seeds_from_args(args: argparse.Namespace) -> list[int]:
     if args.seeds:
         seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
@@ -230,7 +243,7 @@ def execute_case(
         cwd=codegen_cwd, seconds=args.timeout, memory_mb=args.memory_mb, case=case)
     if not compiled.ok or not obj.exists():
         return finish(classify_codegen(compiled) if not compiled.ok else "codegen_failure",
-                      baseline=baseline, reason="EDG/Cranelift could not emit object")
+                      baseline=baseline, reason=f"EDG/Cranelift: {failure_signature(compiled)}")
 
     output = case / "cranelift-test"
     # Only the EDG-generated object is under test. Avoid optimizing the
@@ -323,11 +336,14 @@ def main(argv: list[str] | None = None) -> int:
     }
     (args.out / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     counts = Counter()
+    failure_signatures = Counter()
     records = args.out / "results.jsonl"
     with records.open("w") as output:
         for seed in seeds:
             record = execute_case(seed, args, args.out, provenance)
             counts[record["status"]] += 1
+            if record["status"] != "pass":
+                failure_signatures[(record["status"], record.get("reason") or "unknown")] += 1
             output.write(json.dumps(record, sort_keys=True) + "\n")
             output.flush()
             print(f"seed {seed}: {record['status']}", flush=True)
@@ -341,6 +357,11 @@ def main(argv: list[str] | None = None) -> int:
                              counts["runtime_failure"] + counts["link_failure"])
                             if args.codegen else 0,
         "mode": "comparison" if args.codegen else "baseline",
+        "failure_signatures": [
+            {"status": status, "reason": reason, "count": count}
+            for (status, reason), count in sorted(failure_signatures.items(),
+                key=lambda item: (-item[1], item[0]))
+        ],
     }
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, sort_keys=True))
