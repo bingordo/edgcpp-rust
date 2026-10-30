@@ -102,6 +102,25 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["unsupported_construct"], 0)
         self.assertEqual(summary["failure_signatures"], [{"status": "codegen_failure", "reason": "EDG/Cranelift: Cranelift unexpected verifier error", "count": 2}])
 
+    def test_failure_signature_prefers_actionable_diagnostic(self):
+        codegen = self.root / "noisy_codegen"
+        codegen.write_text(
+            "#!/bin/sh\\n"
+            "echo 'EDG IL lowering failed: unsupported EDG statement 42' >&2\\n"
+            "echo 'wrapper failed for /tmp/build-12345/func.c' >&2\\n"
+            "exit 1\\n"
+        )
+        codegen.chmod(0o755)
+        run = self.invoke("--codegen", str(codegen))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        summary = json.loads((self.root / "cases" / "summary.json").read_text())
+        self.assertEqual(summary["counts"]["unsupported_construct"], 2)
+        self.assertEqual(summary["failure_signatures"], [{
+            "status": "unsupported_construct",
+            "reason": "EDG/Cranelift: EDG IL lowering failed: unsupported EDG statement 42",
+            "count": 2,
+        }])
+
     def test_duplicate_seed_rejected(self):
         self.common += ["--seeds", "7,7"]
         run = self.invoke()
