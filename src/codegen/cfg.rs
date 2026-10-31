@@ -601,7 +601,10 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         1 => {
             let info = il.c_integer_types.iter().find(|t| t.id == ty)
                 .ok_or_else(|| invalid("unsupported integer memory layout"))?;
-            Ok(u64::from(info.bits/8))
+            if info.bits == 0 || info.bits % 8 != 0 {
+                return Err(invalid("integer memory layout must be nonzero and byte-aligned"));
+            }
+            Ok(u64::from(info.bits / 8))
         }
         5 => Ok(8),
         6 => {
