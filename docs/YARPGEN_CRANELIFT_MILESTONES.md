@@ -526,3 +526,19 @@ gaps, not measured YARPGen failure frequencies.
 initializer rejection and storage-size invariants before supporting
 aggregate data; then inspect EDG initializer metadata and add a
 reduced constant-array differential fixture. No aggregate ABI guesses.
+
+### M8.1 layout audit checkpoint
+
+The existing `byte_size` handles canonical integer, pointer and fixed-array
+storage, but explicitly rejects record/union/vector layouts. Integer storage
+must have nonzero, byte-aligned width; fixed arrays require a known bound and
+checked multiplication with a 16 MiB object cap. The existing scalar-global
+initializer only encodes integer bytes and rejects aggregate initializers.
+
+Before enabling records/unions, inspect native EDG IL metadata for size,
+alignment, field offsets, bitfields, packing and union layout. Do not infer
+record offsets from declaration order or assume C ABI padding. First target
+fixed-size non-bitfield fields and independently compare `sizeof`, `_Alignof`
+and `offsetof` against GCC. Defer unknown/packed/bitfield layouts until
+explicitly represented. These remain *planned*; the first code change only
+strengthens size validation.
