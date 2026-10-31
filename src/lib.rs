@@ -107,6 +107,8 @@ pub struct Il {
     /// Known fixed array bounds (in elements).
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
+    /// Native EDG object sizes for complete types; not inferred from fields.
+    pub type_object_sizes: Vec<TypeObjectSize>,
     /// Direct class bases in declaration order.
     pub base_classes: Vec<BaseClass>,
     /// Direct-base access specifiers keyed by derived type and position.
@@ -268,6 +270,13 @@ pub struct RecordField {
     pub bit_offset: u32,
     /// Zero for ordinary fields; nonzero for bit-fields.
     pub bit_width: u32,
+}
+
+/// Native byte size of a complete EDG type. Alignment is not included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeObjectSize {
+    pub owner: TypeId,
+    pub bytes: u64,
 }
 
 /// A direct C++ base class, in declaration order.
@@ -771,6 +780,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         46 => Some(il.c_integer_types.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
+        49 => Some(il.type_object_sizes.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -784,7 +794,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 2, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -837,6 +847,11 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 (t(0), t(1), n(2)) else { return; };
             if !(1..=4).contains(&kind) { return; }
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
+        }
+        49 => {
+            let (Some(owner), Some(bytes)) = (n(0), fields[1].unsigned()) else { return; };
+            if owner == 0 || bytes == 0 { return; }
+            output.type_object_sizes.push(TypeObjectSize { owner: TypeId(owner), bytes });
         }
         48 => {
             let (Some(function),Some(statement_path),Some(path),
