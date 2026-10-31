@@ -620,6 +620,7 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
 }
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
+#[allow(dead_code)] // M8: wired into field lvalue lowering in the next slice.
 fn checked_record_fields<'a>(
     il: &'a Il, owner: crate::TypeId,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
