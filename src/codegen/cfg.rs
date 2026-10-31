@@ -601,7 +601,10 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         1 => {
             let info = il.c_integer_types.iter().find(|t| t.id == ty)
                 .ok_or_else(|| invalid("unsupported integer memory layout"))?;
-            Ok(u64::from(info.bits/8))
+            if info.bits == 0 || info.bits % 8 != 0 {
+                return Err(invalid("integer memory layout must be nonzero and byte-aligned"));
+            }
+            Ok(u64::from(info.bits / 8))
         }
         5 => Ok(8),
         6 => {
@@ -1701,8 +1704,13 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
            !seen.insert(id) {continue;}
         let (name,scalar) = global_value_type(il,id)?;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
-        let storage_bytes=if scalar.is_some() {(ty.bits/8) as usize}
-            else {
+        let storage_bytes=if scalar.is_some() {
+            let bytes = usize::from(ty.bits / 8);
+            if bytes == 0 || ty.bits % 8 != 0 {
+                return Err(invalid("global scalar has invalid storage width"));
+            }
+            bytes
+        } else {
                 let declared=il.symbol_types.iter().find(|t|t.symbol==id)
                     .ok_or_else(||invalid("array without declared type"))?.ty;
                 byte_size(il,declared)? as usize
