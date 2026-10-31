@@ -618,6 +618,28 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         _ => Err(invalid("unsupported aggregate/element size")),
     }
 }
+/// Validate the EDG field offsets before any record lvalue is emitted.
+/// This deliberately does not infer padding, total size, or union layout.
+#[allow(dead_code)] // M8: wired into field lvalue lowering in the next slice.
+fn checked_record_fields<'a>(
+    il: &'a Il, owner: crate::TypeId,
+) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
+    let mut fields:Vec<_> = il.record_fields.iter()
+        .filter(|field| field.owner == owner).collect();
+    fields.sort_by_key(|field| field.position);
+    for (index, field) in fields.iter().enumerate() {
+        if field.position != index as u32 {
+            return Err(invalid("record field positions are not contiguous"));
+        }
+        if field.bit_width != 0 || field.bit_offset != 0 {
+            return Err(invalid("record bitfield layout unsupported"));
+        }
+        let width = byte_size(il, field.ty)?;
+        field.byte_offset.checked_add(width)
+            .ok_or_else(|| invalid("record field offset overflows"))?;
+    }
+    Ok(fields)
+}
 fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
     let ty = canonical_abi_type(il,ty)?;
     let def = il.types.iter().find(|t| t.id == ty)
