@@ -627,6 +627,7 @@ fn checked_record_fields<'a>(
     let mut fields:Vec<_> = il.record_fields.iter()
         .filter(|field| field.owner == owner).collect();
     fields.sort_by_key(|field| field.position);
+    let mut previous_end = 0u64;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
             return Err(invalid("record field positions are not contiguous"));
@@ -637,6 +638,10 @@ fn checked_record_fields<'a>(
         let width = byte_size(il, field.ty)?;
         let end = field.byte_offset.checked_add(width)
             .ok_or_else(|| invalid("record field offset overflows"))?;
+        if field.byte_offset < previous_end {
+            return Err(invalid("record fields overlap; union or overlapping layout unsupported"));
+        }
+        previous_end = end;
         if end > 16 * 1024 * 1024 {
             return Err(invalid("record field exceeds maximum supported object size"));
         }
