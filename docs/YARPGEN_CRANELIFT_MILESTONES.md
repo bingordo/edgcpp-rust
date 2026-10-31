@@ -441,3 +441,88 @@ lowering and rerun the same pinned seeds. Record generated/oracle-valid,
 accepted, passing, unsupported and severe-failure counts before and after.
 Do not increase the automatic cohort size until this produces measurable
 acceptance improvement.
+
+
+## M8–M13 — C coverage roadmap (planned, 2026-10-30)
+
+**Scope and sequencing.** Defer any further GNU statement-expression work:
+the existing straight-line scalar support remains, but general nested
+control flow, nontrivial lifetimes and GNU block-value extensions are
+explicitly *out of scope* until this roadmap is complete. Do not regress
+existing M6 behavior. Use a small typed/lvalue framework and EDG metadata
+rather than adding source-pattern-specific rewrites to `cfg.rs`.
+
+### M8 — aggregate objects and initializers (start here)
+
+* M8.1: inventory EDG record/union/field and initializer metadata; document
+  size, alignment, layout, bitfield and relocation requirements; add negative
+  tests proving unknown layouts are rejected before ELF emission.
+* M8.2: add fixed-size record/union storage and field lvalues, including
+  address-of, loads/stores and nested member/array access; support only
+  layouts independently validated against the native EDG/GCC ABI.
+* M8.3: support zero-filled and constant brace initializers for fixed arrays
+  and records, including padding and relocatable references when representable.
+* M8.4: implement local aggregate copy/initialization with correct ordering
+  and alias behavior; extend SysV aggregate ABI only in a separately tested
+  step. **Gate:** GCC differential fixtures (nested records, arrays, unions,
+  alignment, global and local initialization) and explicit rejection tests.
+
+### M9 — general statement CFG
+
+* Introduce per-function label/block discovery, branch target validation and
+  reachability; lower `switch`/case/default, fallthrough and arbitrary
+  non-loop goto/labels without abusing break/continue recognition.
+* Reject illegal jumps into scopes with unsupported initialization/lifetime
+  constraints. **Gate:** GCC differential fixtures with loops, fallthrough,
+  forward/backward jumps, nested scopes and unreachable blocks.
+
+### M10 — call and ABI completeness
+
+* Extend typed function references to indirect calls through function
+  pointers, preserving prototypes, return conversions and symbol linkage.
+* Support unprototyped and variadic C calls only with verified SysV x86-64
+  default promotions and register/stack rules; handle aggregate arguments
+  after M8's ABI representation is validated.
+* **Gate:** separate C caller/callee compilation, GCC interop in both
+  directions, negative mismatched-prototype tests.
+
+### M11 — VLAs and dynamic automatic storage
+
+* Model runtime dimensions, checked size calculations, dynamic stack
+  allocation, nested-scope lifetimes and early exits. Preserve `sizeof`
+  semantics and reject unsupported dynamic initializers explicitly.
+* **Gate:** GCC differential for VLA indexing, nested scopes, bounds-related
+  size expressions and control-flow exits; stack-stress cases.
+
+### M12 — volatile and atomics
+
+* Track volatile qualifiers in EDG memory operations; ensure observable
+  accesses are not eliminated, combined or reordered across sequencing.
+* Treat C11 atomics as a separate subphase with explicit ordering,
+  alignment, target instruction selection and fallback semantics. Do not
+  silently lower atomics to ordinary loads/stores.
+* **Gate:** IR/assembly assertions plus differential single-thread tests;
+  targeted concurrency litmus tests only after a sound memory model.
+
+### M13 — semantic correctness audit and broader coverage
+
+* Target integer promotions/narrowing, signed/unsigned operations, pointer
+  provenance and aliasing, evaluation sequencing, casts and ABI boundaries.
+* Add focused GCC/Clang differential regressions and property-based
+  generation. Keep 10-seed automatic YARPGen and manually run unselected
+  100/1000-seed cohorts after targeted checks pass; record accepted/passed,
+  unsupported and severe failures separately. No performance benchmarking
+  gate yet.
+
+**Current implementation checkpoint:** `compile_globals` in
+`src/codegen/cfg.rs` supports scalar constant integer global
+initializers but explicitly rejects aggregate array initializers.
+`lower_c_expression` rejects indirect/member calls; the direct-call
+ABI rejects variadic prototypes. General goto/labels, VLAs and several
+declaration forms also have explicit guards. These are implementation
+gaps, not measured YARPGen failure frequencies.
+
+**M8 first implementation slice:** strengthen the existing global
+initializer rejection and storage-size invariants before supporting
+aggregate data; then inspect EDG initializer metadata and add a
+reduced constant-array differential fixture. No aggregate ABI guesses.
