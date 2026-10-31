@@ -635,8 +635,14 @@ fn checked_record_fields<'a>(
             return Err(invalid("record bitfield layout unsupported"));
         }
         let width = byte_size(il, field.ty)?;
-        field.byte_offset.checked_add(width)
+        let end = field.byte_offset.checked_add(width)
             .ok_or_else(|| invalid("record field offset overflows"))?;
+        if end > 16 * 1024 * 1024 {
+            return Err(invalid("record field exceeds maximum supported object size"));
+        }
+        if field.name.is_empty() {
+            return Err(invalid("unnamed record field requires explicit layout handling"));
+        }
     }
     Ok(fields)
 }
