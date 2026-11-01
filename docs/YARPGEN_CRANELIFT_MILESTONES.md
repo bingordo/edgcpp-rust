@@ -514,31 +514,56 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   unsupported and severe failures separately. No performance benchmarking
   gate yet.
 
-**Current implementation checkpoint:** `compile_globals` in
-`src/codegen/cfg.rs` supports scalar constant integer global
-initializers but explicitly rejects aggregate array initializers.
-`lower_c_expression` rejects indirect/member calls; the direct-call
-ABI rejects variadic prototypes. General goto/labels, VLAs and several
-declaration forms also have explicit guards. These are implementation
-gaps, not measured YARPGen failure frequencies.
+### M8 implementation checkpoint (2026-11-01)
 
-**M8 first implementation slice:** strengthen the existing global
-initializer rejection and storage-size invariants before supporting
-aggregate data; then inspect EDG initializer metadata and add a
-reduced constant-array differential fixture. No aggregate ABI guesses.
+**Implemented and GCC-differential-tested (PRs #5–#24):**
 
-### M8.1 layout audit checkpoint
+* Native EDG object size and alignment, field identities and offsets, and
+  recursive bounded layout validation for C structs, nested structs, fixed
+  scalar arrays and ordinary unions. Exact layouts come from EDG; no guessed
+  field positions or ABI padding.
+* Aligned local/global storage, scalar `.` and `->` member access, array
+  members, aggregate copies (fieldwise for structs; bounded bytewise for
+  unions), and zero-initialization for explicitly represented full-zero
+  aggregate objects.
+* Bounded local and global constant aggregate object images from EDG's
+  `ck_aggregate`/`ck_designator` tree, including partially initialized
+  and designated arrays, records and unions. Some native repeated constants
+  are supported; unsupported dynamic entries fail closed.
+* Runtime nonconstant braced initialization *as lowered by EDG* for the
+  tested scalar leaf expressions, arrays, nested records and unions. The
+  GCC differential fixture also verifies a side-effectful call occurs once,
+  unspecified fields read as zero, and nested/multidimensional designated
+  initialization works; this is not a claim of full C99 initializer coverage.
+* Standalone aggregate copies are bounded and reject unsupported aggregate
+  value uses. Existing codegen and regression tests stay enabled.
 
-The existing `byte_size` handles canonical integer, pointer and fixed-array
-storage, but explicitly rejects record/union/vector layouts. Integer storage
-must have nonzero, byte-aligned width; fixed arrays require a known bound and
-checked multiplication with a 16 MiB object cap. The existing scalar-global
-initializer only encodes integer bytes and rejects aggregate initializers.
+**Validation:** `tests/fixtures/m8_struct_fields.c` and
+`m8_struct_driver.c` compile through both EDG/Cranelift and GCC with
+matching results. The pinned EDG archive and matching source are also
+tested by `bingordo/compiler-ci`'s
+`.github/workflows/test-edgcpp-m8.yml`. In particular, run
+`41326462848` passed the side-effect, nested, union and designated
+initializer differential tests on the `feature/m8-init-semantics-regressions`
+commit, subsequently merged as PR #24. This supplementary CI workflow
+is a verification route, not a separate compiler implementation.
 
-Before enabling records/unions, inspect native EDG IL metadata for size,
-alignment, field offsets, bitfields, packing and union layout. Do not infer
-record offsets from declaration order or assume C ABI padding. First target
-fixed-size non-bitfield fields and independently compare `sizeof`, `_Alignof`
-and `offsetof` against GCC. Defer unknown/packed/bitfield layouts until
-explicitly represented. These remain *planned*; the first code change only
-strengthens size validation.
+**Remaining before declaring M8 complete:**
+
+1. Relocatable static pointer/address initializers for aggregates and
+   validation of ELF relocations against GCC (not merely integer images).
+2. Bitfield layout, read/modify/write and constant initialization, using
+   native EDG bit offsets/widths with packed/union/overlap diagnostics.
+3. General nonconstant aggregate initializer trees and source-order
+   evaluation in cases where EDG does not already lower them into supported
+   executable statements. Add negative controls and dynamic-call cases.
+4. SysV x86-64 aggregate parameter/return classification, register/stack
+   passing, hidden-result storage and interoperability tests with GCC.
+5. Coverage expansion for flexible members, packed/overaligned layouts,
+   qualifiers, unsupported pointer/union corner cases, compound literals,
+   and aggregate-as-expression uses.
+
+**Boundaries:** GNU statement expressions remain deferred as agreed. The
+current bitfield, aggregate ABI, relocatable initializer and extended
+lifetime cases must continue to reject unsupported semantics rather than
+silently emitting scalar or incorrectly aligned code.
