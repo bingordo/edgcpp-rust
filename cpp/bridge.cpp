@@ -13,7 +13,6 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
-#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -481,6 +480,25 @@ static bool constant_initializer_image(
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
     while (current != nullptr && visits++ < 4096) {
+      if (current->kind == ck_init_repeat) {
+        // EDG compresses repeated array constants (often implicit zeros).
+        // Do not implement multidimensional designated range tails by guess.
+        const auto &repeat=current->variant.init_repeat;
+        if (repeat.count==0 || repeat.count>count-index ||
+            repeat.multidimensional_aggr_tail_not_repeated ||
+            repeat.constant==nullptr) return false;
+        for (uint64_t r=0; r<repeat.count; ++r) {
+          const uint64_t element_index=index+r;
+          if (element_index >= count ||
+              element_index > (bytes.size()-offset)/element->size) return false;
+          if (!constant_initializer_image(repeat.constant,element,
+                 offset+static_cast<size_t>(element_index*element->size),
+                 bytes,depth+1)) return false;
+        }
+        index+=repeat.count;
+        current=current->next;
+        continue;
+      }
       if (current->kind == ck_designator) {
         if (current->variant.designator.is_generic ||
             current->variant.designator.is_field_designator) return false;
@@ -1075,22 +1093,6 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           if (aggregate_initializer_image(init->variant.constant.ptr, ty, hex)) {
             emit_record(50, {txt(function), txt(path), num(variable_symbol),
                              num(emit_type(ty, 0)), txt(hex)});
-          } else if (function == "m8_initialized_local_array") {
-            a_constant_ptr root = init->variant.constant.ptr;
-            std::fprintf(stderr, "M8 inspect root=%u type=%u size=%llu\\n",
-                static_cast<unsigned>(root->kind),
-                static_cast<unsigned>(ty->kind),
-                static_cast<unsigned long long>(ty->size));
-            if (root->kind == ck_aggregate) {
-              a_constant_ptr child=root->variant.aggregate.first_constant;
-              for (unsigned k=0; child!=nullptr && k<30; child=child->next,++k) {
-                std::fprintf(stderr,"M8 inspect child=%u kind=%u type=%u repeats=%llu\\n",
-                    k,static_cast<unsigned>(child->kind),
-                    static_cast<unsigned>(child->type!=nullptr?child->type->kind:0),
-                    static_cast<unsigned long long>(child->kind==ck_init_repeat?
-                        child->variant.init_repeat.count:0));
-              }
-            }
           }
         }
       }
