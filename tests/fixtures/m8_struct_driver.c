@@ -54,6 +54,11 @@ extern long m8_dynamic_array(long);
 extern long m8_dynamic_struct(long);
 extern long m8_dynamic_nested(long);
 extern long m8_dynamic_union(long);
+extern long m8_dynamic_once_array(long);
+extern long m8_dynamic_once_struct(long);
+extern long m8_dynamic_once_nested(long);
+extern long m8_dynamic_once_union(long);
+extern long m8_dynamic_multidimensional(long);
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -129,5 +134,13 @@ int main(void)
     printf("%ld %ld %ld %ld\\n",
            m8_dynamic_array(-2), m8_dynamic_struct(21),
            m8_dynamic_nested(0), m8_dynamic_union(-3));
+    printf("%ld %ld %ld %ld %ld\\n",
+           m8_dynamic_once_array(7), m8_dynamic_once_struct(-3),
+           m8_dynamic_once_nested(11), m8_dynamic_once_union(2),
+           m8_dynamic_multidimensional(13));
+    printf("%ld %ld %ld %ld %ld\\n",
+           m8_dynamic_once_array(-8), m8_dynamic_once_struct(21),
+           m8_dynamic_once_nested(0), m8_dynamic_once_union(-17),
+           m8_dynamic_multidimensional(-5));
     return 0;
 }
