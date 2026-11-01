@@ -372,13 +372,15 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) =>
             check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
         }
-        Expr::PostAddress(_,_,a) => check_expr(a,vars,params),
+        Expr::PostAddress(_,_,a) | Expr::PostBitField(_,_,a) =>
+            check_expr(a,vars,params),
         Expr::AssignGlobal(_,_,e) => check_expr(e,vars,params),
         Expr::CompoundGlobal(_,_,_,_,e) => check_expr(e,vars,params),
         Expr::PostGlobal(..) => Ok(()),
@@ -976,6 +978,14 @@ fn selected_bitfield(
         signed:info.signed,
     }))
 }
+/// Narrow unsigned bitfields promote to signed int when the value range
+/// fits in int. Using the underlying unsigned C type would give the wrong
+/// division/remainder and signed shifts for expressions such as b /= -2.
+fn bitfield_promoted_type(layout:BitFieldLayout,base:CAbiInt)->CAbiInt {
+    if layout.width<32 {
+        CAbiInt {bits:32,signed:true,is_bool:false}
+    } else {promoted_integer_type(base)}
+}
 /// Decode an addressable scalar or array designator; no implicit load.
 /// For subscript, EDG specifies that pointer and index may appear in either
 /// operand position. The stride is the size of the pointer's element type.
@@ -1205,6 +1215,45 @@ fn lower_c_expression(
     }
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
+    // Intercept bitfield ++/-- and compound writes before generic lvalue
+    // lowering. A bitfield is not a separately addressable C scalar.
+    if semantic(2,node.data.kind)==3 {
+        let op=node.data.operator.map(|v|semantic(3,v)).unwrap_or(0);
+        let unary=matches!(op,29|30|41|42) && node.operands.len()==1;
+        let compound=(31..=40).contains(&op) && node.operands.len()==2;
+        if unary || compound {
+            let left=node.operands[0];
+            if let Some(layout)=selected_bitfield(graph,left,il)? {
+                let address=Box::new(lower_address(graph,left,params,locals,il)?);
+                let ty=integer_expression_type(il,graph,left)?;
+                let promotion=bitfield_promoted_type(layout,ty);
+                let updated=if op==29 || op==30 {
+                    Expr::PostBitField(layout,if op==29 {1} else {-1},address)
+                } else {
+                    let kind=match op {
+                        31|41=>CCompoundOp::Add,32|42=>CCompoundOp::Sub,
+                        33=>CCompoundOp::Mul,34=>CCompoundOp::Div,
+                        35=>CCompoundOp::Rem,36=>CCompoundOp::Shl,
+                        37=>CCompoundOp::Shr,38=>CCompoundOp::And,
+                        39=>CCompoundOp::Or,40=>CCompoundOp::Xor,
+                        _=>return Err(invalid("unsupported native bitfield operator")),
+                    };
+                    let (compute_ty,amount)=if unary {
+                        (promotion,Box::new(Expr::Constant(1)))
+                    } else {
+                        let rhs=node.operands[1];
+                        let rhs_ty=integer_expression_type(il,graph,rhs)?;
+                        let compute_ty=if matches!(kind,CCompoundOp::Shl|CCompoundOp::Shr) {
+                            promotion
+                        } else {common_integer_type(promotion,rhs_ty)};
+                        (compute_ty,Box::new(lower_c_expression(graph,rhs,params,locals,il)?))
+                    };
+                    Expr::CompoundBitField(layout,compute_ty,kind,address,amount)
+                };
+                return Ok(wrap(updated));
+            }
+        }
+    }
     let inner = match semantic(2, node.data.kind) {
         4 => {
             let path=format!("{}.gnu{}.0",node.data.statement_path,
@@ -1350,9 +1399,6 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
-                    if selected_bitfield(graph,operands[0],il)?.is_some() {
-                        return Err(invalid("bitfield increment/decrement not yet supported"));
-                    }
                     let direct=scalar_lvalue(graph,operands[0],params,locals,il).ok();
                     let (place,ty)=match direct {
                         Some((place,ty)) => (Some(place),ty),
@@ -1442,9 +1488,6 @@ fn lower_c_expression(
                         }
                     }
                 } else {
-                    if selected_bitfield(graph,operands[0],il)?.is_some() {
-                        return Err(invalid("compound bitfield assignment not yet supported"));
-                    }
                     let kind = match op {
                         31 => CCompoundOp::Add, 32 => CCompoundOp::Sub,
                         33 => CCompoundOp::Mul, 34 => CCompoundOp::Div,
@@ -1648,6 +1691,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(result,found);
         },
         Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
@@ -1662,7 +1706,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
         Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
         Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
-        Expr::PostAddress(_,_,a) => addressed_expr(a,found),
+        Expr::PostAddress(_,_,a) | Expr::PostBitField(_,_,a) =>
+            addressed_expr(a,found),
         Expr::PostLocal(..) | Expr::PostGlobal(..) | Expr::Constant(_) |
         Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) |
         Expr::AddressGlobal(_) => {}
@@ -1808,6 +1853,25 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_bitfield(fb,address,value,*layout)
+        }
+        Expr::CompoundBitField(layout,compute_ty,op,pointer,rhs) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let before=super::memory::load_bitfield(fb,address,*layout);
+            let after=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+            let before=normalize_c_value(fb,before,*compute_ty);
+            let after=if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
+                after
+            } else {normalize_c_value(fb,after,*compute_ty)};
+            let computed=compound_value(fb,before,after,*compute_ty,*op);
+            super::memory::store_bitfield(fb,address,computed,*layout)
+        }
+        Expr::PostBitField(layout,delta,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let before=super::memory::load_bitfield(fb,address,*layout);
+            let delta=fb.ins().iconst(types::I64,*delta);
+            let next=fb.ins().iadd(before,delta);
+            super::memory::store_bitfield(fb,address,next,*layout);
+            before
         }
         Expr::CopyStruct(fields,destination,source) => {
             let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
