@@ -516,7 +516,7 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
 
 ### M8 implementation checkpoint (2026-11-01)
 
-**Implemented and GCC-differential-tested (through PR #30):**
+**Implemented and GCC-differential-tested (through PR #33):**
 
 * Native EDG object size and alignment, field identities and offsets, and
   recursive bounded layout validation for C structs, nested structs, fixed
@@ -543,6 +543,18 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   Static and automatic constant bitfield initializers pack only their
   designated bits, preserving neighbors and zero-filled omitted fields
   (PR #30).
+* **SysV AMD64 small INTEGER-class C structs** (PRs #32–#33): plain,
+  naturally aligned named-field records of 1–8 bytes containing integer or
+  data-pointer fields use one 64-bit argument or return register. Formal
+  parameters are materialized as native-sized addressable objects, while
+  returns are packed byte-by-byte without reading beyond small objects.
+  Direct calls can pass these struct values to GCC or generated functions
+  and directly forward matching aggregate return values. The GCC driver
+  checks parameter passing, returns, round trips, callbacks and mixed-width
+  fields. This is deliberately **not** full SysV aggregate classification:
+  two-eightbyte structs, SSE/SSEUP, MEMORY, packed/unaligned, nested,
+  bitfield, union, variadic and general aggregate-temporary cases remain
+  unsupported.
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -561,13 +573,19 @@ initializer differential tests on the `feature/m8-init-semantics-regressions`
 commit, subsequently merged as PR #24. Runs `41336539443`,
 `41336975276` and `41337534247` passed the native bitfield read/write,
 compound and initializer GCC differentials, respectively, on the PR #28–#30
-branches. This supplementary CI workflow is a verification route, not a
-separate compiler implementation.
+branches. Runs `41347792728` and `41348116296` passed the
+one-register aggregate parameter/return and direct-call GCC interoperability
+tests, respectively (PRs #32–#33). This supplementary CI workflow is a
+verification route, not a separate compiler implementation.
 
 **Remaining before declaring M8 complete:**
 
-1. SysV x86-64 aggregate parameter/return classification, register/stack
-   passing, hidden-result storage and interoperability tests with GCC.
+1. Complete SysV x86-64 aggregate parameter/return classification: two
+   INTEGER eightbytes (register-pair args/results), SSE/SSEUP cases,
+   MEMORY-class stack argument passing and hidden-result storage; handle
+   register exhaustion, mixed scalar/aggregate calls, packed/unaligned
+   layouts and direct-call aggregate temporaries. The supported one-GPR
+   subset must remain distinct from these unimplemented cases.
 2. General nonconstant aggregate initializer trees and source-order
    evaluation in cases where EDG does not already lower them into supported
    executable statements. Add negative controls and dynamic-call cases.
@@ -582,6 +600,7 @@ separate compiler implementation.
    compound literals and aggregate-as-expression uses.
 
 **Boundaries:** GNU statement expressions remain deferred as agreed. The
-unsupported bitfield cases, aggregate ABI, unsupported relocation categories
-and extended lifetime cases must continue to reject unsupported semantics rather than
+unsupported bitfield cases, non-one-GPR aggregate ABI cases, unsupported
+relocation categories and extended lifetime cases must continue to reject
+unsupported semantics rather than
 silently emitting scalar or incorrectly aligned code.
