@@ -50,6 +50,10 @@ extern struct M8WithArray m8_static_nested;
 extern union M8Union m8_static_union;
 
 extern long m8_runtime_braced(long);
+extern long m8_dynamic_array(long);
+extern long m8_dynamic_struct(long);
+extern long m8_dynamic_nested(long);
+extern long m8_dynamic_union(long);
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -119,5 +123,11 @@ int main(void)
            m8_static_nested.values[0], m8_static_nested.values[2],
            m8_static_nested.marker, m8_static_union.second);
     printf("%ld %ld %ld\\n", m8_runtime_braced(11), m8_runtime_braced(-7), m8_runtime_braced(0));
+    printf("%ld %ld %ld %ld\\n",
+           m8_dynamic_array(7), m8_dynamic_struct(-9),
+           m8_dynamic_nested(4), m8_dynamic_union(11));
+    printf("%ld %ld %ld %ld\\n",
+           m8_dynamic_array(-2), m8_dynamic_struct(21),
+           m8_dynamic_nested(0), m8_dynamic_union(-3));
     return 0;
 }
