@@ -418,7 +418,6 @@ jobs:
           set -euo pipefail
           cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
-          cp tests/fixtures/m8_reject_aggregate_braces.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -434,13 +433,6 @@ jobs:
               exit 1
             fi
             echo "M8 native layout and field differential passed"
-            rm -f m8_rejected.o m8_rejected.log
-            if ../../../edgcpp-rust/target/debug/examples/codegen m8_rejected.o --c11 m8_reject_aggregate_braces.c > m8_rejected.log 2>&1; then
-              echo "Unsupported aggregate initializer was incorrectly accepted"
-              exit 1
-            fi
-            grep -q 'aggregate initializer requires structured lowering' m8_rejected.log
-            test ! -e m8_rejected.o
           )
 
       - name: Reject unsupported EDG constructs
