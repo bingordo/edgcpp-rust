@@ -258,7 +258,7 @@ fn lower(
                 // full-object zero-init kind is safe without an initializer
                 // tree. Partial/braced constant aggregates remain rejected.
                 if semantic(5,init.kind)!=1 || node.expression.is_some() {
-                    return Err(invalid("aggregate initializer requires structured lowering"));
+                    return Err(invalid(format!("{function}:{path}: aggregate initializer requires structured lowering (native kind={}, braced={}, image_present={})", init.kind, init.braced, !matching.is_empty())));
                 }
                 let bytes=byte_size(il,local_ty)?;
                 if bytes==0 || bytes>4096 {
