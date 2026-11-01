@@ -2463,6 +2463,7 @@ fn emit_routines_with_globals(
     for func in functions {
         let abi=func.abi.clone().unwrap_or_else(|| CAbi {
             parameters: vec![CAbiInt{bits:64,signed:true,is_bool:false};func.parameters],
+            aggregate_parameters:vec![None;func.parameters],aggregate_result:None,
             result: Some(CAbiInt{bits:64,signed:true,is_bool:false}),
         });
         if abi.parameters.len()!=func.parameters {
