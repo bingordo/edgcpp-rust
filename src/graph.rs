@@ -3113,9 +3113,9 @@ mod tests {
         });
         graph.array_bounds.push(ArrayBound { array: TypeId(1), elements: 17 });
         graph.record_fields.extend([
-            RecordField { owner: TypeId(1), position: 0, ty: TypeId(2),
+            RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 0, ty: TypeId(2),
                 name: "first".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 },
-            RecordField { owner: TypeId(1), position: 1, ty: TypeId(2),
+            RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 1, ty: TypeId(2),
                 name: "second".into(), byte_offset: 8, bit_offset: 0, bit_width: 0 },
         ]);
         graph.base_classes.push(BaseClass {
@@ -3201,7 +3201,7 @@ mod tests {
             derived: TypeId(1), position: 0, base: TypeId(2), is_virtual: false,
         });
         graph.record_fields.push(RecordField {
-            owner: TypeId(1), position: 0, ty: TypeId(3),
+            symbol: SymbolId(0), owner: TypeId(1), position: 0, ty: TypeId(3),
             name: "x".into(), byte_offset: 0, bit_offset: 0, bit_width: 0,
         });
         let mut kinds = Vec::new();
@@ -3236,7 +3236,7 @@ mod tests {
             derived: TypeId(1), position: 0, base: TypeId(3), is_virtual: false,
         });
         graph.record_fields.push(RecordField {
-            owner: TypeId(1), position: 0, ty: TypeId(4),
+            symbol: SymbolId(0), owner: TypeId(1), position: 0, ty: TypeId(4),
             name: "missing".into(), byte_offset: 0, bit_offset: 0, bit_width: 0,
         });
         graph.type_parameters.push(TypeParameter {
@@ -3642,7 +3642,7 @@ mod tests {
                 base: TypeId(((i + 1) % 32) + 1), is_virtual: false,
             });
             graph.record_fields.push(RecordField {
-                owner: TypeId(i), position: 0, ty: TypeId(99),
+                symbol: SymbolId(0), owner: TypeId(i), position: 0, ty: TypeId(99),
                 name: format!("field_{i}"),
                 byte_offset: 0, bit_offset: 0, bit_width: 0,
             });
@@ -3682,7 +3682,7 @@ mod tests {
             });
             if i > 3 {
                 graph.record_fields.push(RecordField {
-                    owner: TypeId(i), position: 0,
+                    symbol: SymbolId(0), owner: TypeId(i), position: 0,
                     ty: TypeId(i - 3), name: String::new(),
                     byte_offset: 0, bit_offset: 0, bit_width: 0,
                 });
@@ -4866,8 +4866,8 @@ mod tests {
         let mut il = Il::default();
         il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
         il.types.push(TypeDef { id: TypeId(2), kind: 0, related_role: None, related: None });
-        il.record_fields.push(RecordField { owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into(), byte_offset: 4, bit_offset: 0, bit_width: 0 });
-        il.record_fields.push(RecordField { owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
+        il.record_fields.push(RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into(), byte_offset: 4, bit_offset: 0, bit_width: 0 });
+        il.record_fields.push(RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.fields(TypeId(1)).map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }

@@ -28,6 +28,8 @@ struct Routine {
     local_types: Option<Vec<CAbiInt>>,
     /// Exact storage sizes for address-taken locals and local arrays.
     local_storage: Option<Vec<u32>>,
+    /// Cranelift stack-slot alignment shifts, one per local/parameter.
+    local_alignments: Option<Vec<u8>>,
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
@@ -53,7 +55,12 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
-    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6)) {
+    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7)) {
+        // Records are stack-addressed aggregates, never scalar SSA values.
+        // Keep the placeholder ABI type solely for local slot bookkeeping.
+        if il.types.iter().any(|d| d.id == ty && semantic(4,d.kind)==7) {
+            byte_size(il,ty)?;
+        }
         return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
     }
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
@@ -563,7 +570,7 @@ fn global_value_type(il:&Il,symbol:crate::SymbolId)
     let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("global missing declared type"))?.ty;
     let ty=canonical_abi_type(il,ty)?;
-    if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==6) {
+    if il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),6|7)) {
         byte_size(il,ty)?;
         Ok((name,None))
     } else {
@@ -619,7 +626,7 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         // exact EDG allocation size, including trailing ABI padding.
         // Unions (overlapping fields), bitfields and nested aggregates
         // remain rejected by checked_record_fields.
-        _ if il.record_fields.iter().any(|f| f.owner == ty) => {
+        7 if il.record_fields.iter().any(|f| f.owner == ty) => {
             checked_record_fields(il, ty)?;
             let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
                 .ok_or_else(|| invalid("record missing native object layout"))?;
@@ -627,6 +634,20 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         }
         _ => Err(invalid("unsupported aggregate/element size")),
     }
+}
+/// Resolve an object's native EDG alignment before exposing its address to
+/// Cranelift or the ELF linker. Under-aligned storage is not a valid C object.
+fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    let size=byte_size(il,ty)?;
+    let layout=il.type_object_sizes.iter().find(|item|item.owner==ty)
+        .ok_or_else(||invalid("object missing native EDG size/alignment"))?;
+    if layout.bytes!=size || layout.alignment==0 ||
+        !layout.alignment.is_power_of_two() ||
+        layout.alignment>16*1024*1024 || size%layout.alignment!=0 {
+        return Err(invalid("object size/alignment disagrees with native EDG layout"));
+    }
+    Ok(layout.alignment)
 }
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
@@ -746,6 +767,47 @@ fn lower_address(
                 }
                 46 if node.operands.len()==1 =>
                     lower_address(graph,node.operands[0],params,locals,il),
+                52 | 53 if node.operands.len()==2 => {
+                    // EDG: dot_field(base, enk_field) or
+                    // points_to_field(pointer, enk_field). The field identity
+                    // is native and never reconstructed from its spelling.
+                    let field_node=graph.expression(node.operands[1])
+                        .ok_or_else(||invalid("missing field selection operand"))?;
+                    if semantic(2,field_node.data.kind)!=5 || !field_node.operands.is_empty() {
+                        return Err(invalid("field selection requires an EDG field reference"));
+                    }
+                    let symbol=field_node.data.symbol_id
+                        .ok_or_else(||invalid("field reference missing native symbol"))?;
+                    let base_type=canonical_abi_type(il,
+                        expression_type_id(graph,node.operands[0])?)?;
+                    let owner=if op==52 {base_type} else {
+                        let pointer=il.types.iter().find(|t|t.id==base_type
+                            && semantic(4,t.kind)==5)
+                            .ok_or_else(||invalid("arrow selection requires struct pointer"))?;
+                        canonical_abi_type(il,pointer.related
+                            .ok_or_else(||invalid("arrow pointer has no target type"))?)?
+                    };
+                    if !il.types.iter().any(|t|t.id==owner && semantic(4,t.kind)==7) {
+                        return Err(invalid("only plain C struct field selection supported"));
+                    }
+                    let fields=checked_record_fields(il,owner)?;
+                    let field=fields.into_iter().find(|f|f.symbol==symbol)
+                        .ok_or_else(||invalid("field does not belong to selected struct"))?;
+                    if canonical_abi_type(il,field.ty)? !=
+                        canonical_abi_type(il,expression_type_id(graph,id)?)? {
+                        return Err(invalid("field reference type disagrees with EDG record layout"));
+                    }
+                    let offset=i64::try_from(field.byte_offset)
+                        .map_err(|_|invalid("field offset exceeds address range"))?;
+                    let base=if op==52 {
+                        lower_address(graph,node.operands[0],params,locals,il)?
+                    } else {
+                        lower_c_expression(graph,node.operands[0],params,locals,il)?
+                    };
+                    Ok(if offset==0 {base} else {
+                        Expr::Add(Box::new(base),Box::new(Expr::Constant(offset)))
+                    })
+                }
                 11 if node.operands.len()==1 =>
                     lower_address(graph,node.operands[0],params,locals,il),
                 _ => Err(invalid("unsupported addressable expression")),
@@ -912,8 +974,12 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op,43|44|45|46) {
+            if matches!(op,43|44|45|46|52|53) {
                 match op {
+                    52 | 53 if operands.len()==2 => {
+                        let address=lower_address(graph,id,params,locals,il)?;
+                        Expr::LoadAddress(output,Box::new(address))
+                    }
                     43 if operands.len()==1 => lower_address(
                         graph,operands[0],params,locals,il)?,
                     44 if operands.len()==1 => {
@@ -1239,6 +1305,11 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             u32::try_from(bytes).map_err(|_|invalid("oversized local storage"))
         }).collect::<Result<Vec<_>,_>>()?;
         local_storage.extend(abi.parameters.iter().map(|t|u32::from(t.bits/8)));
+        let mut local_alignments=locals.iter().map(|v|
+            storage_alignment(il,v.ty).map(|a|a.trailing_zeros() as u8))
+            .collect::<Result<Vec<_>,_>>()?;
+        local_alignments.extend(abi.parameters.iter()
+            .map(|ty| u32::from(ty.bits/8).trailing_zeros() as u8));
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
         let initialized: HashSet<usize> =
@@ -1250,7 +1321,8 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
             locals: locals.len(), body, abi: Some(abi),
-            local_types: Some(local_types),local_storage:Some(local_storage) });
+            local_types: Some(local_types),local_storage:Some(local_storage),
+            local_alignments:Some(local_alignments) });
     }
     Ok(out)
 }
@@ -1758,6 +1830,7 @@ struct ScalarGlobal {
     linkage: Linkage,
     initializer: Option<Vec<u8>>,
     storage_bytes: usize,
+    alignment: u64,
 }
 
 /// Resolve only referenced C globals. Unused declarations of unrelated
@@ -1772,6 +1845,9 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
         if !il.global_variables.iter().any(|g|g.symbol==id) ||
            !seen.insert(id) {continue;}
         let (name,scalar) = global_value_type(il,id)?;
+        let declared=il.symbol_types.iter().find(|t|t.symbol==id)
+            .ok_or_else(||invalid("global missing declared type"))?.ty;
+        let alignment=storage_alignment(il,declared)?;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
         let storage_bytes=if scalar.is_some() {
             let bytes = usize::from(ty.bits / 8);
@@ -1798,7 +1874,9 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             let bytes = entry.value.to_le_bytes();
             Some(bytes[..(ty.bits/8) as usize].to_vec())
         } else { None };
-        result.push(ScalarGlobal { symbol:id,name,ty,linkage,initializer,storage_bytes });
+        result.push(ScalarGlobal {
+            symbol:id,name,ty,linkage,initializer,storage_bytes,alignment
+        });
     }
     Ok(result)
 }
@@ -1824,6 +1902,7 @@ fn emit_routines_with_globals(
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
         if g.linkage != Linkage::Import {
             let mut data = cranelift_module::DataDescription::new();
+            data.set_align(g.alignment);
             if let Some(bytes) = &g.initializer {
                 data.define(bytes.clone().into_boxed_slice());
             } else {
@@ -1933,11 +2012,16 @@ fn emit_routines_with_globals(
             if storage.len()!=local_types.len() {
                 return Err(invalid("stack storage/type count mismatch"));
             }
+            let alignments=func.local_alignments.clone()
+                .unwrap_or_else(||vec![0;local_types.len()]);
+            if alignments.len()!=storage.len() {
+                return Err(invalid("stack alignment/type count mismatch"));
+            }
             let mut stack=HashMap::new();
             for index in addressed {
                 let bytes=*storage.get(index).ok_or_else(||invalid("invalid stack local"))?;
                 let slot=fb.create_sized_stack_slot(
-                    StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,0));
+                    StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,alignments[index]));
                 stack.insert(index,slot);
             }
             if func.abi.is_some() {
@@ -1991,7 +2075,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -2016,7 +2100,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -2043,7 +2127,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
