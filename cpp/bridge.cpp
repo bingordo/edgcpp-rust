@@ -228,9 +228,13 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       uint32_t field_type = emit_type(field->type, depth + 1);
       const char *field_name = source_name(field->source_corresp);
       std::string field_text = field_name == nullptr ? "" : field_name;
+      // Preserve the field's native identity. Matching by name or
+      // declaration position alone is ambiguous for anonymous members.
+      const uint32_t field_symbol = emit_symbol(field, 3, field_text);
       emit_record(10, {num(id), num(index), num(field_type), txt(field_text),
                        num(field->offset), num(field->offset_bit_remainder),
-                       num(field->is_bit_field ? field->bit_size : 0)});
+                       num(field->is_bit_field ? field->bit_size : 0),
+                       num(field_symbol)});
     }
   }
   // Direct base classes are linked in source declaration order, unlike
@@ -1451,6 +1455,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(enk_operation)) return 3;
     // GNU statement expressions own embedded blocks, not just operands.
     if (value == static_cast<unsigned>(enk_statement)) return 4;
+    if (value == static_cast<unsigned>(enk_field)) return 5;
   } else if (category == 3) {
     if (value == static_cast<unsigned>(eok_add)) return 1;
     if (value == static_cast<unsigned>(eok_subtract)) return 2;
@@ -1505,6 +1510,10 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_pdiff)) return 49;
     if (value == static_cast<unsigned>(eok_padd_assign)) return 50;
     if (value == static_cast<unsigned>(eok_psubtract_assign)) return 51;
+    // The right operand of either field operation is an enk_field
+    // carrying an identity exported in the record-field table.
+    if (value == static_cast<unsigned>(eok_dot_field)) return 52;
+    if (value == static_cast<unsigned>(eok_points_to_field)) return 53;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
