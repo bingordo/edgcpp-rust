@@ -1521,6 +1521,11 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(tk_typeref)) return 3;
     if (value == static_cast<unsigned>(tk_pointer)) return 5;
     if (value == static_cast<unsigned>(tk_array)) return 6;
+    // Keep records distinct from unions and C++ classes; neither may be
+    // accepted by the conservative C-struct storage path by accident.
+    if (value == static_cast<unsigned>(tk_struct)) return 7;
+    if (value == static_cast<unsigned>(tk_class)) return 8;
+    if (value == static_cast<unsigned>(tk_union)) return 9;
   }
   return 0;
 }
