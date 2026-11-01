@@ -2328,7 +2328,7 @@ mod tests {
             abi:None,local_types:None,local_storage:Some(vec![14]),
             local_alignments:Some(vec![1]),
         }]).unwrap();
-        assert_eq!(&obj[..4],b"\\x7fELF");
+        assert_eq!(&obj[..4],b"\x7fELF");
         assert!(check(&[Stmt::ZeroAggregate(0,4097)],
             &mut HashSet::new(),0,1,0).is_err());
     }
