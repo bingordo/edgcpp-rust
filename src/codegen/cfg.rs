@@ -615,12 +615,21 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
             n.checked_mul(count).filter(|&n| n > 0 && n <= 16*1024*1024)
                 .ok_or_else(|| invalid("array object too large"))
         }
+        // An explicitly enumerated record with scalar fields can use the
+        // exact EDG allocation size, including trailing ABI padding.
+        // Unions (overlapping fields), bitfields and nested aggregates
+        // remain rejected by checked_record_fields.
+        _ if il.record_fields.iter().any(|f| f.owner == ty) => {
+            checked_record_fields(il, ty)?;
+            let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
+                .ok_or_else(|| invalid("record missing native object layout"))?;
+            Ok(layout.bytes)
+        }
         _ => Err(invalid("unsupported aggregate/element size")),
     }
 }
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
-#[allow(dead_code)] // M8: wired into field lvalue lowering in the next slice.
 fn checked_record_fields<'a>(
     il: &'a Il, owner: crate::TypeId,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
