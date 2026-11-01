@@ -633,6 +633,16 @@ fn checked_record_fields<'a>(
     if native_size == 0 || native_size > 16 * 1024 * 1024 {
         return Err(invalid("record has invalid native EDG object size"));
     }
+    let native_alignment = il.type_object_sizes.iter()
+        .find(|layout| layout.owner == owner)
+        .ok_or_else(|| invalid("record has no native EDG alignment"))?.alignment;
+    if native_alignment == 0 || !native_alignment.is_power_of_two()
+        || native_alignment > 16 * 1024 * 1024 {
+        return Err(invalid("record has invalid native EDG alignment"));
+    }
+    if native_size % native_alignment != 0 {
+        return Err(invalid("record size is not a multiple of native alignment"));
+    }
     let mut previous_end = 0u64;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
