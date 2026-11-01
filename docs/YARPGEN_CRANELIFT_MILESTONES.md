@@ -516,7 +516,7 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
 
 ### M8 implementation checkpoint (2026-11-01)
 
-**Implemented and GCC-differential-tested (PRs #5–#24):**
+**Implemented and GCC-differential-tested (through PR #30):**
 
 * Native EDG object size and alignment, field identities and offsets, and
   recursive bounded layout validation for C structs, nested structs, fixed
@@ -534,6 +534,15 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   pointers (`abk_variable`), using actual ELF data references with signed
   addends. GCC differential tests cover a forward target, an array-element
   pointer addend and multiple pointers within one aggregate (PR #26).
+* **Native named integer bitfields:** EDG's byte offsets, bit remainders,
+  declared signedness and widths drive exact byte-span loads, sign extension
+  and masked read-modify-write stores (PR #28). Compound operations,
+  prefix/postfix ++/-- and bitfield-sensitive promotions match GCC on the
+  targeted test cases (PR #29). Copying a record containing bitfields uses
+  bounded bytewise copying rather than overreading declared integer fields.
+  Static and automatic constant bitfield initializers pack only their
+  designated bits, preserving neighbors and zero-filled omitted fields
+  (PR #30).
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -549,24 +558,30 @@ tested by `bingordo/compiler-ci`'s
 `.github/workflows/test-edgcpp-m8.yml`. In particular, run
 `41326462848` passed the side-effect, nested, union and designated
 initializer differential tests on the `feature/m8-init-semantics-regressions`
-commit, subsequently merged as PR #24. This supplementary CI workflow
-is a verification route, not a separate compiler implementation.
+commit, subsequently merged as PR #24. Runs `41336539443`,
+`41336975276` and `41337534247` passed the native bitfield read/write,
+compound and initializer GCC differentials, respectively, on the PR #28–#30
+branches. This supplementary CI workflow is a verification route, not a
+separate compiler implementation.
 
 **Remaining before declaring M8 complete:**
 
-1. Bitfield layout, read/modify/write and constant initialization, using
-   native EDG bit offsets/widths with packed/union/overlap diagnostics.
+1. SysV x86-64 aggregate parameter/return classification, register/stack
+   passing, hidden-result storage and interoperability tests with GCC.
 2. General nonconstant aggregate initializer trees and source-order
    evaluation in cases where EDG does not already lower them into supported
    executable statements. Add negative controls and dynamic-call cases.
-3. SysV x86-64 aggregate parameter/return classification, register/stack
-   passing, hidden-result storage and interoperability tests with GCC.
+3. **Bitfield remaining cases:** anonymous/zero-width layout barriers,
+   overlong or exotic packed bitfields, bitfields crossing a supported
+   eight-byte access window, volatile/atomic bitfields and nonstandard
+   integer/boolean types. These remain guarded and are *not* solved by
+   the named integer-bitfield subset.
 4. Remaining initializer relocation categories (function addresses, TLS,
    aggregate locals, pointer constants other than supported data variables),
    plus flexible members, packed/overaligned layouts, qualifiers,
    compound literals and aggregate-as-expression uses.
 
 **Boundaries:** GNU statement expressions remain deferred as agreed. The
-current bitfield, aggregate ABI, unsupported relocation categories and extended
-lifetime cases must continue to reject unsupported semantics rather than
+unsupported bitfield cases, aggregate ABI, unsupported relocation categories
+and extended lifetime cases must continue to reject unsupported semantics rather than
 silently emitting scalar or incorrectly aligned code.
