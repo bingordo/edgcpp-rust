@@ -1,8 +1,8 @@
-/* M8: braced aggregate constants require a structured initializer tree.
- * The backend must reject these rather than writing one scalar word. */
+/* Dynamic C11 braced aggregate initializers still require executable
+ * expression-tree lowering. They must not become zero or stale bytes. */
 struct M8NotYetInitialized { int first; long second; };
-long m8_braced_initializer(void)
+long m8_braced_initializer(long input)
 {
-    struct M8NotYetInitialized value = {0};
+    struct M8NotYetInitialized value = { (int)input, input + 9 };
     return value.first + value.second;
 }
