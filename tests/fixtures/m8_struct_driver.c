@@ -49,6 +49,7 @@ extern unsigned short m8_static_vector[5];
 extern struct M8WithArray m8_static_nested;
 extern union M8Union m8_static_union;
 
+extern long m8_runtime_braced(long);
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -117,5 +118,6 @@ int main(void)
            m8_static_vector[0], m8_static_vector[3],
            m8_static_nested.values[0], m8_static_nested.values[2],
            m8_static_nested.marker, m8_static_union.second);
+    printf("%ld %ld %ld\\n", m8_runtime_braced(11), m8_runtime_braced(-7), m8_runtime_braced(0));
     return 0;
 }
