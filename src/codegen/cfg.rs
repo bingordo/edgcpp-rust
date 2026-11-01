@@ -369,8 +369,10 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             for arg in args {check_expr(arg,vars,params)?;}
             Ok(())
         },
-        Expr::LoadAddress(_,a) => check_expr(a,vars,params),
-        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) =>
+            check_expr(a,vars,params),
+        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
@@ -1603,7 +1605,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
         },
-        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
@@ -1613,7 +1616,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
         Expr::Conditional(a,b,c) | Expr::Select(a,b,c) => {
             addressed_expr(a,found);addressed_expr(b,found);addressed_expr(c,found);
         }
-        Expr::Normalize(_,a) | Expr::LoadAddress(_,a) | Expr::Neg(a) |
+        Expr::Normalize(_,a) | Expr::LoadAddress(_,a) |
+        Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
         Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
         Expr::PostAddress(_,_,a) => addressed_expr(a,found),
@@ -1749,10 +1753,19 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer(fb,address,*ty)
         }
+        Expr::LoadBitField(layout,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::load_bitfield(fb,address,*layout)
+        }
         Expr::StoreAddress(ty,pointer,value) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::StoreBitField(layout,pointer,value) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::store_bitfield(fb,address,value,*layout)
         }
         Expr::CopyStruct(fields,destination,source) => {
             let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
