@@ -369,8 +369,10 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             for arg in args {check_expr(arg,vars,params)?;}
             Ok(())
         },
-        Expr::LoadAddress(_,a) => check_expr(a,vars,params),
-        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) =>
+            check_expr(a,vars,params),
+        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
@@ -755,51 +757,95 @@ fn checked_record_fields_depth<'a>(
     if native_size % native_alignment != 0 {
         return Err(invalid("record size is not a multiple of native alignment"));
     }
-    let mut previous_end = 0u64;
+    let mut previous_end_bit = 0u64;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
             return Err(invalid("record field positions are not contiguous"));
         }
-        if field.bit_width != 0 || field.bit_offset != 0 {
-            return Err(invalid("record bitfield layout unsupported"));
-        }
         check_plain_storage_type(il,field.ty)?;
-        let width = byte_size_depth(il, field.ty, depth+1)?;
-        // Fixed-size arrays and ordinary nested C structs use native EDG
-        // layout, with recursive validation before field offsets are trusted.
-        // Unions, classes, bitfields and incomplete arrays remain unsupported.
-        let field_type = canonical_abi_type(il, field.ty)?;
-        let def = il.types.iter().find(|t| t.id == field_type)
-            .ok_or_else(|| invalid("record field type missing"))?;
-        let field_kind = semantic(4, def.kind);
-        if !matches!(field_kind,1|5|6|7|9) {
-            return Err(invalid("unsupported record field kind"));
-        }
-        let end = field.byte_offset.checked_add(width)
-            .ok_or_else(|| invalid("record field offset overflows"))?;
+        let field_type=canonical_abi_type(il,field.ty)?;
+        let def=il.types.iter().find(|t|t.id==field_type)
+            .ok_or_else(||invalid("record field type missing"))?;
+        let field_kind=semantic(4,def.kind);
+        let is_bitfield=field.bit_width!=0 || field.bit_offset!=0;
+        let (end,bit_start,bit_end)=if is_bitfield {
+            if field_kind!=1 {
+                return Err(invalid("bitfield must have an integer type"));
+            }
+            let info=il.c_integer_types.iter().find(|t|t.id==field_type)
+                .ok_or_else(||invalid("bitfield lacks EDG integer type"))?;
+            if !matches!(info.bits,8|16|32|64) ||
+                field.bit_width==0 || field.bit_width>u32::from(info.bits) ||
+                field.bit_offset>=8 || field.bit_offset+field.bit_width>64 {
+                return Err(invalid("unsupported native bitfield width/position"));
+            }
+            let byte_count=u64::from((field.bit_offset+field.bit_width).div_ceil(8));
+            let end=field.byte_offset.checked_add(byte_count)
+                .ok_or_else(||invalid("bitfield byte range overflows"))?;
+            let bit_start=field.byte_offset.checked_mul(8)
+                .and_then(|n|n.checked_add(u64::from(field.bit_offset)))
+                .ok_or_else(||invalid("bitfield bit offset overflows"))?;
+            let bit_end=bit_start.checked_add(u64::from(field.bit_width))
+                .ok_or_else(||invalid("bitfield bit extent overflows"))?;
+            (end,bit_start,bit_end)
+        } else {
+            if !matches!(field_kind,1|5|6|7|9) {
+                return Err(invalid("unsupported record field kind"));
+            }
+            let width=byte_size_depth(il,field.ty,depth+1)?;
+            let end=field.byte_offset.checked_add(width)
+                .ok_or_else(||invalid("record field offset overflows"))?;
+            let start_bit=field.byte_offset.checked_mul(8)
+                .ok_or_else(||invalid("record bit position overflows"))?;
+            let end_bit=end.checked_mul(8)
+                .ok_or_else(||invalid("record bit extent overflows"))?;
+            (end,start_bit,end_bit)
+        };
         if is_union {
-            // C unions overlay members at offset zero, unlike structs.
-            // Reject exotic union layouts until explicitly modeled.
+            // C unions share offset zero, including native bitfield members.
             if field.byte_offset!=0 {
                 return Err(invalid("nonzero union member offset unsupported"));
             }
         } else {
-            if field.byte_offset < previous_end {
+            if bit_start<previous_end_bit {
                 return Err(invalid("record fields overlap outside union"));
             }
-            previous_end = end;
+            previous_end_bit=bit_end;
         }
-        if end > native_size {
+        if end>native_size || end>16*1024*1024 {
             return Err(invalid("record field exceeds native EDG object size"));
         }
-        if end > 16 * 1024 * 1024 {
-            return Err(invalid("record field exceeds maximum supported object size"));
-        }
         if field.name.is_empty() {
-            return Err(invalid("unnamed record field requires explicit layout handling"));
+            // Anonymous and zero-width barriers need an explicit wire marker.
+            // Keep them unsupported instead of guessing which layout was used.
+            return Err(invalid("anonymous/unnamed bitfield layout unsupported"));
         }
     }
     Ok(fields)
+}
+/// C aggregate assignment may copy padding and bitfield storage units as
+/// bytes. Never copy a bitfield by reloading its *declared* integer type:
+/// that would clobber adjacent fields and could overread a packed record.
+fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
+    ->Result<bool,CodegenError> {
+    if depth>32 {return Err(invalid("recursive native bitfield layout"));}
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing aggregate type"))?;
+    match semantic(4,def.kind) {
+        6 => has_native_bitfield(il,def.related
+            .ok_or_else(||invalid("aggregate array missing element"))?,depth+1),
+        7|9 => {
+            for field in checked_record_fields_depth(il,ty,depth+1)? {
+                if field.bit_width!=0 || field.bit_offset!=0 ||
+                    has_native_bitfield(il,field.ty,depth+1)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
 }
 /// Expand a supported value-semantic aggregate into scalar fields at native
 /// byte offsets. This copies array elements and nested records without
@@ -879,6 +925,56 @@ fn expression_type_id(graph:&Graph,id:ExpressionId) -> Result<crate::TypeId,Code
 fn is_pointer_like(il:&Il,ty:crate::TypeId) -> Result<bool,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     Ok(il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),5|6)))
+}
+/// Resolve a native named bitfield by field symbol identity. The address
+/// used by the resulting IR is the first occupied byte, not a C address-of
+/// operation (C prohibits taking the address of a bitfield).
+fn selected_bitfield(
+    graph:&Graph,id:ExpressionId,il:&Il,
+)->Result<Option<BitFieldLayout>,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing bitfield expression"))?;
+    if semantic(2,node.data.kind)!=3 {return Ok(None);}
+    let op=node.data.operator.map(|v|semantic(3,v)).unwrap_or(0);
+    if !matches!(op,52|53) || node.operands.len()!=2 {return Ok(None);}
+    let field_node=graph.expression(node.operands[1])
+        .ok_or_else(||invalid("missing EDG bitfield identity"))?;
+    if semantic(2,field_node.data.kind)!=5 || !field_node.operands.is_empty() {
+        return Err(invalid("invalid EDG field designator"));
+    }
+    let symbol=field_node.data.symbol_id
+        .ok_or_else(||invalid("missing EDG bitfield symbol"))?;
+    let base_type=canonical_abi_type(il,expression_type_id(graph,node.operands[0])?)?;
+    let owner=if op==52 {base_type} else {
+        let pointer=il.types.iter().find(|t|t.id==base_type &&
+            semantic(4,t.kind)==5).ok_or_else(||invalid("bitfield arrow needs pointer"))?;
+        canonical_abi_type(il,pointer.related
+            .ok_or_else(||invalid("bitfield pointer missing target"))?)?
+    };
+    if !il.types.iter().any(|t|t.id==owner &&
+        matches!(semantic(4,t.kind),7|9)) {
+        return Err(invalid("bitfield owner is not a record/union"));
+    }
+    let fields=checked_record_fields(il,owner)?;
+    let field=fields.into_iter().find(|f|f.symbol==symbol)
+        .ok_or_else(||invalid("unknown EDG record field identity"))?;
+    if field.bit_width==0 && field.bit_offset==0 {return Ok(None);}
+    let ty=canonical_abi_type(il,field.ty)?;
+    if ty!=canonical_abi_type(il,expression_type_id(graph,id)?)? {
+        return Err(invalid("bitfield expression/field types disagree"));
+    }
+    let info=il.c_integer_types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("bitfield integer type is missing"))?;
+    if info.is_bool {return Err(invalid("boolean bitfield unsupported"));}
+    let total=field.bit_offset+field.bit_width;
+    if total==0 || total>64 || field.bit_width>64 {
+        return Err(invalid("native bitfield exceeds supported width"));
+    }
+    Ok(Some(BitFieldLayout {
+        shift:field.bit_offset as u8,
+        width:field.bit_width as u8,
+        bytes:total.div_ceil(8) as u8,
+        signed:info.signed,
+    }))
 }
 /// Decode an addressable scalar or array designator; no implicit load.
 /// For subscript, EDG specifies that pointer and index may appear in either
@@ -1096,10 +1192,10 @@ fn lower_c_expression(
                     invalid("missing aggregate assignment type"))?;
             let dst=lower_address(graph,node.operands[0],params,locals,il)?;
             let src=lower_address(graph,node.operands[1],params,locals,il)?;
-            if kind==9 {
+            if kind==9 || has_native_bitfield(il,ty,0)? {
                 let bytes=byte_size(il,ty)?;
                 if bytes==0 || bytes>512 {
-                    return Err(invalid("union copy exceeds 512-byte limit"));
+                    return Err(invalid("bitfield/union byte copy exceeds 512-byte limit"));
                 }
                 return Ok(Expr::CopyBytes(bytes as u32,Box::new(dst),Box::new(src)));
             }
@@ -1169,7 +1265,9 @@ fn lower_c_expression(
                     52 | 53 if operands.len()==2 => {
                         let address=lower_address(graph,id,params,locals,il)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
-                        if il.types.iter().any(|d|d.id==canonical &&
+                        if let Some(layout)=selected_bitfield(graph,id,il)? {
+                            Expr::LoadBitField(layout,Box::new(address))
+                        } else if il.types.iter().any(|d|d.id==canonical &&
                                 semantic(4,d.kind)==6) {
                             // C array member designators decay to an address.
                             address
@@ -1177,8 +1275,12 @@ fn lower_c_expression(
                             Expr::LoadAddress(output,Box::new(address))
                         }
                     }
-                    43 if operands.len()==1 => lower_address(
-                        graph,operands[0],params,locals,il)?,
+                    43 if operands.len()==1 => {
+                        if selected_bitfield(graph,operands[0],il)?.is_some() {
+                            return Err(invalid("C bitfield address-of is forbidden"));
+                        }
+                        lower_address(graph,operands[0],params,locals,il)?
+                    },
                     44 if operands.len()==1 => {
                         let address=lower_address(graph,id,params,locals,il)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
@@ -1248,6 +1350,9 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
+                    if selected_bitfield(graph,operands[0],il)?.is_some() {
+                        return Err(invalid("bitfield increment/decrement not yet supported"));
+                    }
                     let direct=scalar_lvalue(graph,operands[0],params,locals,il).ok();
                     let (place,ty)=match direct {
                         Some((place,ty)) => (Some(place),ty),
@@ -1328,9 +1433,18 @@ fn lower_c_expression(
                     match place {
                         Some(ScalarPlace::Ssa(i)) => Expr::AssignLocal(i,ty,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::AssignGlobal(s,ty,rhs),
-                        None => Expr::StoreAddress(ty,address.unwrap(),rhs),
+                        None => {
+                            if let Some(layout)=selected_bitfield(graph,operands[0],il)? {
+                                Expr::StoreBitField(layout,address.unwrap(),rhs)
+                            } else {
+                                Expr::StoreAddress(ty,address.unwrap(),rhs)
+                            }
+                        }
                     }
                 } else {
+                    if selected_bitfield(graph,operands[0],il)?.is_some() {
+                        return Err(invalid("compound bitfield assignment not yet supported"));
+                    }
                     let kind = match op {
                         31 => CCompoundOp::Add, 32 => CCompoundOp::Sub,
                         33 => CCompoundOp::Mul, 34 => CCompoundOp::Div,
@@ -1533,7 +1647,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
         },
-        Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
@@ -1543,7 +1658,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
         Expr::Conditional(a,b,c) | Expr::Select(a,b,c) => {
             addressed_expr(a,found);addressed_expr(b,found);addressed_expr(c,found);
         }
-        Expr::Normalize(_,a) | Expr::LoadAddress(_,a) | Expr::Neg(a) |
+        Expr::Normalize(_,a) | Expr::LoadAddress(_,a) |
+        Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
         Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
         Expr::PostAddress(_,_,a) => addressed_expr(a,found),
@@ -1679,10 +1795,19 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer(fb,address,*ty)
         }
+        Expr::LoadBitField(layout,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::load_bitfield(fb,address,*layout)
+        }
         Expr::StoreAddress(ty,pointer,value) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::StoreBitField(layout,pointer,value) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::store_bitfield(fb,address,value,*layout)
         }
         Expr::CopyStruct(fields,destination,source) => {
             let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;

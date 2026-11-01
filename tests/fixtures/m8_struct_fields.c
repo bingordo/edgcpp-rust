@@ -371,3 +371,86 @@ long m8_static_pointer_relocs(void)
            m8_pointer_array.padding + *m8_pointer_array.refs[0] +
            *m8_pointer_array.refs[1];
 }
+
+/* M8 native bitfield offsets, cross-byte field ranges and RMW semantics.
+ * Assign values within signed range so the oracle is independent of
+ * implementation-defined signed-overflow truncation. */
+struct M8BitFields {
+    unsigned int first : 3;
+    unsigned int second : 5;
+    signed int negative : 6;
+    unsigned int fourth : 9;
+    unsigned int fifth : 5;
+    unsigned char sentinel;
+};
+struct M8BitFields m8_bits_global;
+struct M8BitFields m8_bits_array[2];
+
+long m8_bitfields_local(long n)
+{
+    struct M8BitFields obj;
+    obj.first = 5;
+    obj.second = 27;
+    obj.negative = -13;
+    obj.fourth = (unsigned int)n & 255u;
+    obj.fifth = 21;
+    obj.sentinel = 77;
+    return obj.first + obj.second * 2 + obj.negative * 3 +
+           obj.fourth + obj.fifth * 4 + obj.sentinel * 5;
+}
+
+long m8_bitfields_global(long n)
+{
+    m8_bits_global.first = 3;
+    m8_bits_global.second = 19;
+    m8_bits_global.negative = -9;
+    m8_bits_global.fourth = (unsigned int)n & 255u;
+    m8_bits_global.fifth = 13;
+    m8_bits_global.sentinel = 101;
+    return m8_bits_global.first + m8_bits_global.second +
+           m8_bits_global.negative + m8_bits_global.fourth +
+           m8_bits_global.fifth + m8_bits_global.sentinel;
+}
+
+long m8_bitfields_array(long n)
+{
+    m8_bits_array[0].first = 6;
+    m8_bits_array[0].second = 12;
+    m8_bits_array[1].negative = -6;
+    m8_bits_array[1].fourth = (unsigned int)n & 127u;
+    m8_bits_array[1].fifth = 11;
+    return m8_bits_array[0].first + m8_bits_array[0].second +
+           m8_bits_array[1].negative + m8_bits_array[1].fourth +
+           m8_bits_array[1].fifth;
+}
+
+long m8_bitfields_copy(long n)
+{
+    struct M8BitFields src, dst;
+    src.first = 2;
+    src.second = 18;
+    src.negative = -7;
+    src.fourth = (unsigned int)n & 127u;
+    src.fifth = 9;
+    src.sentinel = 59;
+    dst = src;
+    src.first = 0;
+    src.second = 0;
+    src.negative = 0;
+    src.fourth = 0;
+    src.fifth = 0;
+    src.sentinel = 0;
+    return dst.first + dst.second + dst.negative +
+           dst.fourth + dst.fifth + dst.sentinel;
+}
+
+union M8BitUnion {
+    unsigned int active : 7;
+    unsigned int raw;
+};
+long m8_bitunion(long n)
+{
+    union M8BitUnion value;
+    value.active = (unsigned int)n & 63u;
+    return value.active;
+}
