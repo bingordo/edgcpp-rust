@@ -497,3 +497,40 @@ long m8_bitfield_compound_global(long n)
     return old + m8_compound_global.a + m8_compound_global.b +
            m8_compound_global.c + m8_compound_global.d;
 }
+
+/* Native constant images with signed and unsigned bitfields, including
+ * designated/partial initialization and zero-filled omitted members. */
+struct M8BitFields m8_bits_constant = {
+    .first = 4, .second = 19, .negative = -11,
+    .fourth = 257, .fifth = 17, .sentinel = 83
+};
+struct M8BitFields m8_bits_partial = {
+    .negative = -5, .fifth = 7
+};
+union M8BitUnion m8_bitunion_constant = { .active = 53 };
+
+long m8_bitfields_constant_local(void)
+{
+    struct M8BitFields v = {
+        .first = 7, .second = 24, .negative = -13,
+        .fourth = 261, .fifth = 26, .sentinel = 91
+    };
+    return v.first + 2*v.second + 3*v.negative + 4*v.fourth +
+           5*v.fifth + 6*v.sentinel;
+}
+long m8_bitfields_partial_local(void)
+{
+    struct M8BitFields v = { .fourth = 143, .negative = -7 };
+    return v.first + v.second + v.negative + v.fourth +
+           v.fifth + v.sentinel;
+}
+long m8_bitfields_constant_global(void)
+{
+    return m8_bits_constant.first + m8_bits_constant.second +
+           m8_bits_constant.negative + m8_bits_constant.fourth +
+           m8_bits_constant.fifth + m8_bits_constant.sentinel +
+           m8_bits_partial.first + m8_bits_partial.second +
+           m8_bits_partial.negative + m8_bits_partial.fourth +
+           m8_bits_partial.fifth + m8_bits_partial.sentinel +
+           m8_bitunion_constant.active;
+}

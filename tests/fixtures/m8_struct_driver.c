@@ -91,6 +91,14 @@ struct M8CompoundBits {
 };
 extern struct M8CompoundBits m8_compound_global;
 
+extern long m8_bitfields_constant_local(void);
+extern long m8_bitfields_partial_local(void);
+extern long m8_bitfields_constant_global(void);
+extern struct M8BitFields m8_bits_constant;
+extern struct M8BitFields m8_bits_partial;
+union M8BitUnion { unsigned int active : 7; unsigned int raw; };
+extern union M8BitUnion m8_bitunion_constant;
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -201,5 +209,17 @@ int main(void)
     printf("%u %u %d %u\\n",
            m8_compound_global.a, m8_compound_global.b,
            m8_compound_global.c, m8_compound_global.d);
+    printf("%ld %ld %ld %zu\\n",
+           m8_bitfields_constant_local(), m8_bitfields_partial_local(),
+           m8_bitfields_constant_global(), sizeof(struct M8BitFields));
+    printf("%u %u %d %u %u %u %u\\n",
+           m8_bits_constant.first, m8_bits_constant.second,
+           m8_bits_constant.negative, m8_bits_constant.fourth,
+           m8_bits_constant.fifth, m8_bits_constant.sentinel,
+           m8_bitunion_constant.active);
+    printf("%u %u %d %u %u %u\\n",
+           m8_bits_partial.first, m8_bits_partial.second,
+           m8_bits_partial.negative, m8_bits_partial.fourth,
+           m8_bits_partial.fifth, m8_bits_partial.sentinel);
     return 0;
 }

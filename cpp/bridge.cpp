@@ -401,6 +401,49 @@ static bool constant_initializer_image(
     a_constant_ptr value, a_type_ptr original_type, size_t offset,
     std::vector<uint8_t> &bytes, unsigned depth,
     std::vector<NativeAggregateReloc> *relocations);
+// The existing object image is zero-filled. Apply only the bits of an EDG
+// constant bitfield; adjacent members and padding are never overwritten.
+// This uses native *byte* offset and offset_bit_remainder on little-endian
+// x86-64, without assuming the declared int is an addressable storage unit.
+static bool pack_constant_bitfield(
+    a_constant_ptr value, a_field_ptr field, size_t object_base,
+    std::vector<uint8_t> &bytes) {
+  if (value == nullptr || value->kind != ck_integer || field == nullptr ||
+      !field->is_bit_field || field->bit_size == 0 ||
+      field->bit_size > 64 || field->offset_bit_remainder >= 8 ||
+      field->offset_bit_remainder + field->bit_size > 64 ||
+      object_base > bytes.size()) return false;
+  a_type_ptr type = object_initializer_type(field->type);
+  if (type == nullptr || type->kind != tk_integer ||
+      type->size == 0 || type->size > 8 ||
+      field->bit_size > type->size * 8) return false;
+  const size_t byte_offset=object_base + field->offset;
+  const size_t count=(field->offset_bit_remainder + field->bit_size + 7)/8;
+  if (byte_offset<object_base || byte_offset>bytes.size() ||
+      count>bytes.size()-byte_offset) return false;
+  a_boolean overflow=FALSE;
+  uint64_t bits=0;
+  if (int_constant_is_signed(value)) {
+    const a_host_large_integer signed_value =
+        value_of_integer_constant(value,&overflow);
+    if (overflow || sizeof(signed_value)>sizeof(int64_t)) return false;
+    bits=static_cast<uint64_t>(static_cast<int64_t>(signed_value));
+  } else {
+    const a_host_large_unsigned unsigned_value =
+        unsigned_value_of_integer_constant(value,&overflow);
+    if (overflow || unsigned_value>std::numeric_limits<uint64_t>::max())
+      return false;
+    bits=static_cast<uint64_t>(unsigned_value);
+  }
+  for (unsigned i=0;i<field->bit_size;++i) {
+    const size_t bit=static_cast<size_t>(field->offset_bit_remainder)+i;
+    const size_t byte_index=byte_offset+bit/8;
+    const uint8_t bit_mask=static_cast<uint8_t>(1u<<(bit%8));
+    if ((bits>>i)&1u) bytes[byte_index]|=bit_mask;
+    else bytes[byte_index]&=static_cast<uint8_t>(~bit_mask);
+  }
+  return true;
+}
 static bool constant_designated_value(
     a_constant_ptr &current, a_type_ptr original_type, size_t offset,
     std::vector<uint8_t> &bytes, unsigned depth,
@@ -425,8 +468,15 @@ static bool constant_designated_value(
          f != nullptr; f = f->next) {
       if (f == selected) { found = true; break; }
     }
-    if (!found || selected->is_bit_field ||
-        selected->offset_bit_remainder != 0) return false;
+    if (!found) return false;
+    if (selected->is_bit_field) {
+      current=current->next;
+      if (!pack_constant_bitfield(current,selected,offset,bytes))
+        return false;
+      current=current->next;
+      return true;
+    }
+    if (selected->offset_bit_remainder != 0) return false;
     element = selected->type;
     child_offset += selected->offset;
   } else {
@@ -562,11 +612,18 @@ static bool constant_initializer_image(
         if (!constant_designated_value(current, type, offset, bytes,
                                        depth + 1, relocations)) return false;
       } else {
-        if (field == nullptr || field->is_bit_field ||
-            field->offset_bit_remainder != 0) return false;
-        if (!constant_designated_value(current, field->type,
-                                       offset + field->offset,
-                                       bytes, depth + 1, relocations)) return false;
+        if (field == nullptr) return false;
+        if (field->is_bit_field) {
+          if (!pack_constant_bitfield(current,field,offset,bytes))
+            return false;
+          current=current->next;
+        } else {
+          if (field->offset_bit_remainder != 0) return false;
+          if (!constant_designated_value(current, field->type,
+                                         offset + field->offset,
+                                         bytes, depth + 1, relocations))
+            return false;
+        }
       }
       if (type->kind == tk_union) {
         // One active member, except explicit designators with their own
