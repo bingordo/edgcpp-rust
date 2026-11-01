@@ -216,6 +216,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   uint32_t child = emit_type(related, depth + 1);
   if (child == 0) relation = 0; // Never export a relationship without a target.
+  // Native EDG object size; alignment is intentionally not inferred here.
+  // Incomplete types have no usable object layout.
+  if (!type->incomplete && type->size > 0) {
+    emit_record(49, {num(id), num(type->size)});
+  }
   if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
     unsigned index = 0;
     for (a_field_ptr field = type->variant.class_struct_union.field_list;
