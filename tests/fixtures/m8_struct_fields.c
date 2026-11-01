@@ -295,3 +295,56 @@ long m8_dynamic_union(long n)
     union M8Union u = { .second = n * 7 };
     return u.second;
 }
+
+/* M8 initializer execution: dynamic values must evaluate exactly once,
+ * omitted members must be zero, and nested designated paths must survive
+ * the EDG-to-Cranelift lowering. Use one side-effectful expression per
+ * initializer so C's unspecified element evaluation order is irrelevant. */
+static long m8_initializer_call_count;
+static long m8_initializer_value(long n)
+{
+    m8_initializer_call_count += 1;
+    return n + 4 * m8_initializer_call_count;
+}
+
+long m8_dynamic_once_array(long n)
+{
+    m8_initializer_call_count = 0;
+    long values[4] = { [2] = m8_initializer_value(n) };
+    return values[0] + values[1] + values[2] + values[3] +
+           100 * m8_initializer_call_count;
+}
+
+long m8_dynamic_once_struct(long n)
+{
+    m8_initializer_call_count = 0;
+    struct M8Pair value = { .second = m8_initializer_value(n) };
+    return value.first + value.second + 100 * m8_initializer_call_count;
+}
+
+long m8_dynamic_once_nested(long n)
+{
+    m8_initializer_call_count = 0;
+    struct M8Nested value = {
+        .inner = { .second = m8_initializer_value(n) },
+        .values = { [2] = (unsigned short)(n + 3) },
+        .tail = 13
+    };
+    return value.inner.first + value.inner.second +
+           value.values[0] + value.values[1] + value.values[2] +
+           value.tail + 100 * m8_initializer_call_count;
+}
+
+long m8_dynamic_once_union(long n)
+{
+    m8_initializer_call_count = 0;
+    union M8Union value = { .second = m8_initializer_value(n) };
+    return value.second + 100 * m8_initializer_call_count;
+}
+
+long m8_dynamic_multidimensional(long n)
+{
+    long items[2][3] = { [1] = { [2] = n + 9, [0] = n - 2 } };
+    return items[0][0] + items[0][1] + items[0][2] +
+           items[1][0] + items[1][1] + items[1][2];
+}
