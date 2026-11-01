@@ -68,3 +68,77 @@ long m8_array_member_global_update(int n)
     m8_array_member_global.marker = (long)m8_array_member_global.values[1] * 5;
     return m8_array_member_global.marker + m8_array_member_global.values[2];
 }
+
+/* M8: recursive record validation and value-semantic scalar copy of nested
+ * structs, including array members and intentional trailing ABI padding. */
+struct M8Nested {
+    struct M8Pair inner;
+    unsigned short values[3];
+    long tail;
+};
+struct M8Nested m8_nested_global;
+
+long m8_nested_fields(long n)
+{
+    struct M8Nested node;
+    node.inner.first = (int)n;
+    node.inner.second = n + 19;
+    node.values[0] = (unsigned short)(n + 1);
+    node.values[1] = (unsigned short)(n + 2);
+    node.values[2] = (unsigned short)(n + 3);
+    node.tail = n * 4;
+    struct M8Nested *ptr = &node;
+    ptr->inner.second += ptr->values[1];
+    return node.inner.second + node.inner.first + ptr->tail;
+}
+
+long m8_nested_copy(long n)
+{
+    struct M8Nested src, dst;
+    src.inner.first = (int)n;
+    src.inner.second = n + 21;
+    src.values[0] = (unsigned short)(n + 1);
+    src.values[1] = (unsigned short)(n + 2);
+    src.values[2] = (unsigned short)(n + 3);
+    src.tail = n * 3;
+    dst = src;
+    src.inner.first = 0;
+    src.inner.second = 0;
+    src.values[1] = 0;
+    src.tail = 0;
+    return dst.inner.first + dst.inner.second + dst.values[0] +
+           dst.values[1] + dst.values[2] + dst.tail;
+}
+
+long m8_nested_self_copy(struct M8Nested *value)
+{
+    *value = *value;
+    return value->inner.first + value->inner.second +
+           value->values[0] + value->values[1] + value->values[2] +
+           value->tail;
+}
+
+long m8_nested_global_update(long n)
+{
+    m8_nested_global.inner.first = (int)n;
+    m8_nested_global.inner.second = n + 6;
+    m8_nested_global.values[0] = (unsigned short)(n + 3);
+    m8_nested_global.values[1] = (unsigned short)(n + 4);
+    m8_nested_global.values[2] = (unsigned short)(n + 5);
+    m8_nested_global.tail = n * 2;
+    return m8_nested_global.inner.second + m8_nested_global.values[2] +
+           m8_nested_global.tail;
+}
+
+long m8_array_field_copy(long n)
+{
+    struct M8WithArray src, dst;
+    src.values[0] = (unsigned short)n;
+    src.values[1] = (unsigned short)(n + 2);
+    src.values[2] = (unsigned short)(n + 5);
+    src.marker = n + 100;
+    dst = src;
+    src.values[0] = 0;
+    src.marker = 0;
+    return dst.values[0] + dst.values[1] + dst.values[2] + dst.marker;
+}

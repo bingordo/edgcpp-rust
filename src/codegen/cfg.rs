@@ -601,6 +601,10 @@ fn scalar_lvalue(
 /// Aggregate record/union/vector types remain unsupported. An array size
 /// must come from the native EDG bound, not inferred from C source tokens.
 fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
+    byte_size_depth(il,ty,0)
+}
+fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,CodegenError> {
+    if depth > 32 { return Err(invalid("nested aggregate layout exceeds depth limit")); }
     let ty = canonical_abi_type(il,ty)?;
     let def = il.types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid("missing memory type"))?;
@@ -618,16 +622,15 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
             let element = def.related.ok_or_else(|| invalid("array has no element type"))?;
             let count = il.array_bounds.iter().find(|b| b.array == ty)
                 .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
-            let n = byte_size(il,element)?;
+            let n = byte_size_depth(il,element,depth+1)?;
             n.checked_mul(count).filter(|&n| n > 0 && n <= 16*1024*1024)
                 .ok_or_else(|| invalid("array object too large"))
         }
-        // An explicitly enumerated record with scalar fields can use the
-        // exact EDG allocation size, including trailing ABI padding.
-        // Unions (overlapping fields), bitfields and nested aggregates
-        // remain rejected by checked_record_fields.
+        // Native EDG size includes the record's internal and trailing padding.
+        // Recursive validation rejects unsupported nested layouts, cycles and
+        // overlapping/union fields before the allocation is accepted.
         7 if il.record_fields.iter().any(|f| f.owner == ty) => {
-            checked_record_fields(il, ty)?;
+            checked_record_fields_depth(il, ty, depth+1)?;
             let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
                 .ok_or_else(|| invalid("record missing native object layout"))?;
             Ok(layout.bytes)
@@ -672,6 +675,12 @@ fn check_plain_storage_type(il:&Il,ty:crate::TypeId)->Result<(),CodegenError> {
 fn checked_record_fields<'a>(
     il: &'a Il, owner: crate::TypeId,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
+    checked_record_fields_depth(il, owner, 0)
+}
+fn checked_record_fields_depth<'a>(
+    il: &'a Il, owner: crate::TypeId, depth: usize,
+) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
+    if depth > 32 { return Err(invalid("nested record layout exceeds depth limit")); }
     let mut fields:Vec<_> = il.record_fields.iter()
         .filter(|field| field.owner == owner).collect();
     fields.sort_by_key(|field| field.position);
@@ -700,25 +709,16 @@ fn checked_record_fields<'a>(
             return Err(invalid("record bitfield layout unsupported"));
         }
         check_plain_storage_type(il,field.ty)?;
-        let width = byte_size(il, field.ty)?;
-        // Fixed one-dimensional arrays of scalar fields have a native bound
-        // and a known scalar element stride. Do not recursively guess nested
-        // arrays, nested records or flexible-array-member sizes.
+        let width = byte_size_depth(il, field.ty, depth+1)?;
+        // Fixed-size arrays and ordinary nested C structs use native EDG
+        // layout, with recursive validation before field offsets are trusted.
+        // Unions, classes, bitfields and incomplete arrays remain unsupported.
         let field_type = canonical_abi_type(il, field.ty)?;
         let def = il.types.iter().find(|t| t.id == field_type)
             .ok_or_else(|| invalid("record field type missing"))?;
         let field_kind = semantic(4, def.kind);
-        if field_kind == 6 {
-            let element = def.related
-                .ok_or_else(|| invalid("array field missing element type"))?;
-            check_plain_storage_type(il, element)?;
-            let element = canonical_abi_type(il, element)?;
-            if !il.types.iter().any(|t| t.id == element &&
-                    matches!(semantic(4,t.kind),1|5)) {
-                return Err(invalid("nested aggregate array field unsupported"));
-            }
-        } else if !matches!(field_kind, 1 | 5) {
-            return Err(invalid("nested aggregate record field layout unsupported"));
+        if !matches!(field_kind,1|5|6|7) {
+            return Err(invalid("unsupported record field kind"));
         }
         let end = field.byte_offset.checked_add(width)
             .ok_or_else(|| invalid("record field offset overflows"))?;
@@ -737,6 +737,68 @@ fn checked_record_fields<'a>(
         }
     }
     Ok(fields)
+}
+/// Expand a supported value-semantic aggregate into scalar fields at native
+/// byte offsets. This copies array elements and nested records without
+/// touching indeterminate C struct padding. The bound also keeps generated
+/// machine code and Cranelift SSA temporaries predictable.
+fn flattened_copy_fields(il:&Il,ty:crate::TypeId)
+    ->Result<Vec<(CAbiInt,i64)>,CodegenError> {
+    byte_size(il,ty)?;
+    let mut out=Vec::new();
+    flatten_copy_type(il,ty,0,0,&mut out)?;
+    if out.is_empty() {return Err(invalid("aggregate has no copyable fields"));}
+    Ok(out)
+}
+fn flatten_copy_type(
+    il:&Il,ty:crate::TypeId,offset:u64,depth:usize,
+    out:&mut Vec<(CAbiInt,i64)>,
+) -> Result<(),CodegenError> {
+    if depth>32 {return Err(invalid("aggregate copy nesting exceeds depth limit"));}
+    check_plain_storage_type(il,ty)?;
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|d|d.id==ty)
+        .ok_or_else(||invalid("missing aggregate copy type"))?;
+    match semantic(4,def.kind) {
+        1|5 => {
+            if out.len()>=256 {
+                return Err(invalid("aggregate copy has over 256 scalar elements"));
+            }
+            let field_offset=i64::try_from(offset)
+                .map_err(|_|invalid("aggregate copy offset overflow"))?;
+            let abi=call_type_abi(il,ty)?;
+            if !matches!(abi.bits,8|16|32|64) {
+                return Err(invalid("unsupported aggregate copy element width"));
+            }
+            out.push((abi,field_offset));
+        }
+        6 => {
+            let element=def.related
+                .ok_or_else(||invalid("aggregate array has no element type"))?;
+            let count=il.array_bounds.iter().find(|b|b.array==ty)
+                .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
+            if count==0 || count>256 {
+                return Err(invalid("aggregate copy array bound unsupported"));
+            }
+            let stride=byte_size(il,element)?;
+            for i in 0..count {
+                let delta=i.checked_mul(stride)
+                    .ok_or_else(||invalid("aggregate copy stride overflow"))?;
+                let member=offset.checked_add(delta)
+                    .ok_or_else(||invalid("aggregate copy address overflow"))?;
+                flatten_copy_type(il,element,member,depth+1,out)?;
+            }
+        }
+        7 => {
+            for field in checked_record_fields(il,ty)? {
+                let member=offset.checked_add(field.byte_offset)
+                    .ok_or_else(||invalid("nested record field offset overflow"))?;
+                flatten_copy_type(il,field.ty,member,depth+1,out)?;
+            }
+        }
+        _ => return Err(invalid("unsupported aggregate copy element type")),
+    }
+    Ok(())
 }
 fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
     let ty = canonical_abi_type(il,ty)?;
@@ -965,12 +1027,7 @@ fn lower_c_expression(
                 }
             }
             check_plain_storage_type(il,expression_type_id(graph,id)?)?;
-            let mut layout=Vec::new();
-            for field in checked_record_fields(il,ty)? {
-                let offset=i64::try_from(field.byte_offset)
-                    .map_err(|_|invalid("struct copy field offset overflow"))?;
-                layout.push((call_type_abi(il,field.ty)?,offset));
-            }
+            let layout=flattened_copy_fields(il,ty)?;
             let dst=lower_address(graph,node.operands[0],params,locals,il)?;
             let src=lower_address(graph,node.operands[1],params,locals,il)?;
             return Ok(Expr::CopyStruct(layout,Box::new(dst),Box::new(src)));
