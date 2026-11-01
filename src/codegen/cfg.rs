@@ -10,6 +10,8 @@ enum Stmt {
     Store(usize, Expr),
     /// EDG-confirmed complete zero initialization of a fixed-size aggregate.
     ZeroAggregate(usize, u32),
+    /// Complete native byte image of a constant local aggregate.
+    InitializeAggregate(usize, Vec<u8>),
     Eval(Expr),
     Return(Expr),
     ReturnVoid,
@@ -236,12 +238,27 @@ fn lower(
                 .find(|t|t.id==local_ty).ok_or_else(||
                     invalid("initializer has no local type definition"))?.kind);
             if matches!(local_kind,6|7|9) {
+                let matching=il.statement_aggregate_initializers.iter()
+                    .filter(|v|v.function==*function &&
+                        v.statement_path==*path && v.symbol==symbol)
+                    .collect::<Vec<_>>();
+                if matching.len()>1 {
+                    return Err(invalid("duplicate native aggregate initializer"));
+                }
+                if let Some(image)=matching.first() {
+                    if canonical_abi_type(il,image.ty)?!=local_ty ||
+                       image.bytes.len()!=byte_size(il,local_ty)? as usize ||
+                       image.bytes.is_empty() || image.bytes.len()>4096 {
+                        return Err(invalid("aggregate native image/type size mismatch"));
+                    }
+                    return Ok(vec![Stmt::InitializeAggregate(index,image.bytes.clone())]);
+                }
                 // The scalar initialization path must never write just one
                 // word into a larger array/struct. Only the exact native
                 // full-object zero-init kind is safe without an initializer
                 // tree. Partial/braced constant aggregates remain rejected.
                 if semantic(5,init.kind)!=1 || node.expression.is_some() {
-                    return Err(invalid("aggregate initializer requires structured lowering"));
+                    return Err(invalid(format!("{function}:{path}: aggregate initializer requires structured lowering (native kind={}, braced={}, image_present={})", init.kind, init.braced, !matching.is_empty())));
                 }
                 let bytes=byte_size(il,local_ty)?;
                 if bytes==0 || bytes>4096 {
@@ -417,6 +434,12 @@ fn check(
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
                 live = false;
+            }
+            Stmt::InitializeAggregate(index,bytes) => {
+                if *index>=locals || bytes.is_empty() || bytes.len()>4096 {
+                    return Err(invalid("invalid aggregate initializer image"));
+                }
+                vars.insert(*index);
             }
             Stmt::ZeroAggregate(i,bytes) => {
                 if *i >= locals || *bytes==0 || *bytes>4096 {
@@ -1532,7 +1555,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
 fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
     for statement in body {
         match statement {
-            Stmt::ZeroAggregate(index,_) => {found.insert(*index);}
+            Stmt::ZeroAggregate(index,_) |
+            Stmt::InitializeAggregate(index,_) => {found.insert(*index);}
             Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) => addressed_expr(e,found),
             Stmt::If(c,a,b) => { addressed_expr(c,found);
                 addressed_stmt(a,found); addressed_stmt(b,found); },
@@ -1897,6 +1921,27 @@ fn emit_body(
                 dest.saw_continue.set(true);
                 live = false;
             }
+            Stmt::InitializeAggregate(index,bytes) => {
+                if bytes.is_empty() || bytes.len()>4096 {
+                    return Err(invalid("aggregate native image exceeds 4 KiB limit"));
+                }
+                let base=local_address(fb,stack,*index)?;
+                let mut offset=0usize;
+                while offset<bytes.len() {
+                    let remaining=bytes.len()-offset;
+                    let width=if remaining>=8 {8} else if remaining>=4 {4}
+                        else if remaining>=2 {2} else {1};
+                    let mut raw=[0u8;8];
+                    raw[..width].copy_from_slice(&bytes[offset..offset+width]);
+                    let value=fb.ins().iconst(types::I64,u64::from_le_bytes(raw) as i64);
+                    let address=if offset==0 {base} else {
+                        fb.ins().iadd_imm(base,offset as i64)
+                    };
+                    let ty=CAbiInt{bits:(width*8) as u8,signed:false,is_bool:false};
+                    super::memory::store_integer(fb,address,value,ty);
+                    offset+=width;
+                }
+            }
             Stmt::ZeroAggregate(index,bytes) => {
                 if *bytes==0 || *bytes>4096 {
                     return Err(invalid("aggregate zero initialization too large"));
@@ -2103,12 +2148,27 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             else if meta.linkage == 2 { Linkage::Local }
             else { Linkage::Export };
         let initializer = if meta.explicit_initializer {
-            if scalar.is_none() {return Err(invalid("aggregate array initializer unsupported"));}
-            let entry = il.initializer_integers.iter().find(|v| v.symbol == id)
-                .ok_or_else(|| invalid(format!(
-                    "global {name} has unsupported non-integer initializer")))?;
-            let bytes = entry.value.to_le_bytes();
-            Some(bytes[..(ty.bits/8) as usize].to_vec())
+            if scalar.is_none() {
+                let matches=il.global_aggregate_initializers.iter()
+                    .filter(|image|image.symbol==id).collect::<Vec<_>>();
+                if matches.len()!=1 {
+                    return Err(invalid(format!(
+                        "global {name} has no single supported aggregate initializer")));
+                }
+                let image=matches[0];
+                if canonical_abi_type(il,image.ty)?!=
+                    canonical_abi_type(il,declared)? ||
+                    image.bytes.len()!=storage_bytes {
+                    return Err(invalid("global native aggregate image/type size mismatch"));
+                }
+                Some(image.bytes.clone())
+            } else {
+                let entry = il.initializer_integers.iter().find(|v| v.symbol == id)
+                    .ok_or_else(|| invalid(format!(
+                        "global {name} has unsupported non-integer initializer")))?;
+                let bytes = entry.value.to_le_bytes();
+                Some(bytes[..(ty.bits/8) as usize].to_vec())
+            }
         } else { None };
         result.push(ScalarGlobal {
             symbol:id,name,ty,linkage,initializer,storage_bytes,alignment

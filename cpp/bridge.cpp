@@ -380,6 +380,195 @@ static unsigned call_argument_offset(an_expr_node_ptr node)
   }
 }
 
+// M8: turn native constant aggregate trees into a fully sized, x86-64
+// object image. Walk typed subobjects, not source-text initializer spelling.
+// Incomplete, dynamic, bitfield or unrecognized entries are rejected rather
+// than silently treating an unknown initializer as zero.
+static a_type_ptr object_initializer_type(a_type_ptr type) {
+  for (unsigned n = 0; n < 64 && type != nullptr &&
+       type->kind == tk_typeref; ++n) {
+    type = type->variant.typeref.type;
+  }
+  return type;
+}
+static bool constant_initializer_image(
+    a_constant_ptr value, a_type_ptr original_type, size_t offset,
+    std::vector<uint8_t> &bytes, unsigned depth);
+static bool constant_designated_value(
+    a_constant_ptr &current, a_type_ptr original_type, size_t offset,
+    std::vector<uint8_t> &bytes, unsigned depth) {
+  if (current == nullptr || depth > 32) return false;
+  if (current->kind != ck_designator) {
+    if (!constant_initializer_image(current, original_type, offset,
+                                    bytes, depth + 1)) return false;
+    current = current->next;
+    return true;
+  }
+  a_type_ptr type = object_initializer_type(original_type);
+  if (type == nullptr || current->variant.designator.is_generic)
+    return false;
+  a_type_ptr element = nullptr;
+  size_t child_offset = offset;
+  if (current->variant.designator.is_field_designator) {
+    if (type->kind != tk_struct && type->kind != tk_union) return false;
+    a_field_ptr selected = current->variant.designator.variant.field;
+    bool found = false;
+    for (a_field_ptr f = type->variant.class_struct_union.field_list;
+         f != nullptr; f = f->next) {
+      if (f == selected) { found = true; break; }
+    }
+    if (!found || selected->is_bit_field ||
+        selected->offset_bit_remainder != 0) return false;
+    element = selected->type;
+    child_offset += selected->offset;
+  } else {
+    if (type->kind != tk_array || type->incomplete ||
+        type->variant.array.is_variable_size_array ||
+        type->variant.array.is_template_dependent_size_array) return false;
+    const uint64_t index = current->variant.designator.variant.array_element;
+    if (index >= type->variant.array.variant.number_of_elements) return false;
+    element = type->variant.array.element_type;
+    if (element == nullptr || element->size == 0 ||
+        index > (bytes.size() - offset) / element->size) return false;
+    child_offset += static_cast<size_t>(index * element->size);
+  }
+  current = current->next;
+  return constant_designated_value(current, element, child_offset, bytes,
+                                   depth + 1);
+}
+static bool constant_initializer_image(
+    a_constant_ptr value, a_type_ptr original_type, size_t offset,
+    std::vector<uint8_t> &bytes, unsigned depth) {
+  a_type_ptr type = object_initializer_type(original_type);
+  if (value == nullptr || type == nullptr || type->incomplete ||
+      type->size == 0 || depth > 32 || offset > bytes.size() ||
+      type->size > bytes.size() - offset) return false;
+  if (value->kind == ck_integer &&
+      type->kind == tk_integer && type->size <= 8) {
+    a_boolean overflow = FALSE;
+    uint64_t bits = 0;
+    if (int_constant_is_signed(value)) {
+      a_host_large_integer v = value_of_integer_constant(value, &overflow);
+      if (overflow || sizeof(v) > sizeof(int64_t)) return false;
+      bits = static_cast<uint64_t>(static_cast<int64_t>(v));
+    } else {
+      a_host_large_unsigned v =
+          unsigned_value_of_integer_constant(value, &overflow);
+      if (overflow || v > std::numeric_limits<uint64_t>::max()) return false;
+      bits = static_cast<uint64_t>(v);
+    }
+    for (size_t i = 0; i < type->size; ++i)
+      bytes[offset + i] = static_cast<uint8_t>(bits >> (8 * i));
+    return true;
+  }
+  if (value->kind == ck_string && type->kind == tk_array &&
+      type->variant.array.element_type != nullptr &&
+      type->variant.array.element_type->size == 1) {
+    const size_t n = value->variant.string.length;
+    if (n > type->size || value->variant.string.value == nullptr) return false;
+    std::memcpy(bytes.data() + offset, value->variant.string.value, n);
+    return true;
+  }
+  if (value->kind != ck_aggregate) return false;
+  a_constant_ptr current = value->variant.aggregate.first_constant;
+  if (type->kind == tk_array) {
+    if (type->variant.array.is_variable_size_array ||
+        type->variant.array.is_template_dependent_size_array) return false;
+    a_type_ptr element = type->variant.array.element_type;
+    if (element == nullptr || element->size == 0) return false;
+    uint64_t index = 0;
+    const uint64_t count = type->variant.array.variant.number_of_elements;
+    unsigned visits = 0;
+    while (current != nullptr && visits++ < 4096) {
+      if (current->kind == ck_init_repeat) {
+        // EDG compresses repeated array constants (often implicit zeros).
+        // Do not implement multidimensional designated range tails by guess.
+        const auto &repeat=current->variant.init_repeat;
+        if (repeat.count==0 || repeat.count>count-index ||
+            repeat.multidimensional_aggr_tail_not_repeated ||
+            repeat.constant==nullptr) return false;
+        for (uint64_t r=0; r<repeat.count; ++r) {
+          const uint64_t element_index=index+r;
+          if (element_index >= count ||
+              element_index > (bytes.size()-offset)/element->size) return false;
+          if (!constant_initializer_image(repeat.constant,element,
+                 offset+static_cast<size_t>(element_index*element->size),
+                 bytes,depth+1)) return false;
+        }
+        index+=repeat.count;
+        current=current->next;
+        continue;
+      }
+      if (current->kind == ck_designator) {
+        if (current->variant.designator.is_generic ||
+            current->variant.designator.is_field_designator) return false;
+        index = current->variant.designator.variant.array_element;
+        if (index >= count) return false;
+        if (!constant_designated_value(current, type, offset, bytes,
+                                       depth + 1)) return false;
+      } else {
+        if (index >= count || index > (bytes.size() - offset) / element->size)
+          return false;
+        if (!constant_designated_value(current, element,
+                         offset + static_cast<size_t>(index * element->size),
+                         bytes, depth + 1)) return false;
+      }
+      ++index;
+    }
+    return current == nullptr;
+  }
+  if (type->kind == tk_struct || type->kind == tk_union) {
+    a_field_ptr field = type->variant.class_struct_union.field_list;
+    unsigned visits = 0;
+    while (current != nullptr && visits++ < 4096) {
+      if (current->kind == ck_designator) {
+        if (current->variant.designator.is_generic ||
+            !current->variant.designator.is_field_designator) return false;
+        field = current->variant.designator.variant.field;
+        bool valid = false;
+        for (a_field_ptr f = type->variant.class_struct_union.field_list;
+             f != nullptr; f = f->next)
+          if (field == f) {valid = true; break;}
+        if (!valid) return false;
+        if (!constant_designated_value(current, type, offset, bytes,
+                                       depth + 1)) return false;
+      } else {
+        if (field == nullptr || field->is_bit_field ||
+            field->offset_bit_remainder != 0) return false;
+        if (!constant_designated_value(current, field->type,
+                                       offset + field->offset,
+                                       bytes, depth + 1)) return false;
+      }
+      if (type->kind == tk_union) {
+        // One active member, except explicit designators with their own
+        // native subobject identity. Do not infer union member overlap.
+        if (current != nullptr && current->kind != ck_designator) return false;
+      }
+      field = field != nullptr ? field->next : nullptr;
+    }
+    return current == nullptr;
+  }
+  return false;
+}
+static bool aggregate_initializer_image(
+    a_constant_ptr root, a_type_ptr type, std::string &encoded) {
+  type = object_initializer_type(type);
+  if (root == nullptr || type == nullptr || type->incomplete ||
+      (type->kind != tk_array && type->kind != tk_struct &&
+       type->kind != tk_union) || type->size == 0 ||
+      type->size > 4096) return false;
+  std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
+  if (!constant_initializer_image(root, type, 0, bytes, 0)) return false;
+  static constexpr char digits[] = "0123456789abcdef";
+  encoded.clear();
+  encoded.reserve(bytes.size() * 2);
+  for (uint8_t b : bytes) {
+    encoded.push_back(digits[b >> 4]);
+    encoded.push_back(digits[b & 15]);
+  }
+  return true;
+}
+
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
 static uint32_t emit_variable_type(a_variable_ptr var);
@@ -895,6 +1084,17 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           }
           if (fits) emit_record(45, {txt(function), txt(path), signed_num(value)});
         }
+        // Preserve exact constant aggregate values with their native type,
+        // even for partially initialized or designated subobjects.
+        if (variable_symbol != 0 && init->variable != nullptr &&
+            init->kind == dik_constant && init->variant.constant.ptr != nullptr) {
+          std::string hex;
+          a_type_ptr ty = init->variable->type;
+          if (aggregate_initializer_image(init->variant.constant.ptr, ty, hex)) {
+            emit_record(50, {txt(function), txt(path), num(variable_symbol),
+                             num(emit_type(ty, 0)), txt(hex)});
+          }
+        }
       }
       if ((init->kind == dik_expression ||
            init->kind == dik_class_result_via_ctor) &&
@@ -1269,6 +1469,12 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           }
         }
         if (have_value) emit_record(15, {num(symbol_id), signed_num(value)});
+      }
+      if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
+        std::string hex;
+        if (aggregate_initializer_image(v->initializer.constant, v->type, hex)) {
+          emit_record(51, {num(symbol_id), num(emit_type(v->type, 0)), txt(hex)});
+        }
       }
       if (v->init_kind == initk_dynamic && v->initializer.dynamic != nullptr) {
         a_dynamic_init_ptr dyn = v->initializer.dynamic;

@@ -204,3 +204,65 @@ long m8_union_nested(long n)
     m8_tagged_union.data.second = n + 9;
     return m8_tagged_union.data.second + m8_tagged_union.tag;
 }
+
+/* Constant C11 aggregate initialization (including partial and designated).
+ * EDG supplies the subobject type/identity; Cranelift must preserve values,
+ * padding, zero fill, order and native record/union layout. */
+struct M8Pair m8_static_pair = { .second = 127, .first = -11 };
+unsigned short m8_static_vector[5] = { [3] = 31, [0] = 7 };
+struct M8WithArray m8_static_nested = {
+    .marker = 91, .values = { [2] = 19, [0] = 4 }
+};
+union M8Union m8_static_union = { .second = 103 };
+
+long m8_initialized_local_pair(void)
+{
+    struct M8Pair p = { -5, 37 };
+    return p.first + p.second;
+}
+long m8_initialized_partial_pair(void)
+{
+    struct M8Pair p = { 11 };
+    return p.first + p.second;
+}
+long m8_initialized_designated_pair(void)
+{
+    struct M8Pair p = { .second = 49, .first = 6 };
+    return p.first + p.second;
+}
+long m8_initialized_local_array(void)
+{
+    unsigned short a[5] = { [4] = 13, [1] = 8 };
+    return a[0] + a[1] + a[2] + a[3] + a[4];
+}
+long m8_initialized_nested(void)
+{
+    struct M8Nested p = {
+        .inner = { .second = 45, .first = 2 },
+        .values = { [2] = 3, [0] = 7 },
+        .tail = 12
+    };
+    return p.inner.first + p.inner.second + p.values[0] +
+           p.values[1] + p.values[2] + p.tail;
+}
+long m8_initialized_union(void)
+{
+    union M8Union u = { .second = 33 };
+    return u.second;
+}
+long m8_initialized_global_sum(void)
+{
+    return m8_static_pair.first + m8_static_pair.second +
+           m8_static_vector[0] + m8_static_vector[3] +
+           m8_static_nested.values[0] + m8_static_nested.values[2] +
+           m8_static_nested.marker + m8_static_union.second;
+}
+
+/* Nonconstant braced initialization is accepted only if EDG has already
+ * lowered it into ordinary executable initialization operations. */
+struct M8RuntimePair { int first; long second; };
+long m8_runtime_braced(long input)
+{
+    struct M8RuntimePair value = { (int)input, input + 9 };
+    return value.first + value.second;
+}
