@@ -391,16 +391,24 @@ static a_type_ptr object_initializer_type(a_type_ptr type) {
   }
   return type;
 }
+// Store linker references separately from integer object bytes.
+struct NativeAggregateReloc {
+  size_t byte_offset;
+  a_variable_ptr target;
+  int64_t addend;
+};
 static bool constant_initializer_image(
     a_constant_ptr value, a_type_ptr original_type, size_t offset,
-    std::vector<uint8_t> &bytes, unsigned depth);
+    std::vector<uint8_t> &bytes, unsigned depth,
+    std::vector<NativeAggregateReloc> *relocations);
 static bool constant_designated_value(
     a_constant_ptr &current, a_type_ptr original_type, size_t offset,
-    std::vector<uint8_t> &bytes, unsigned depth) {
+    std::vector<uint8_t> &bytes, unsigned depth,
+    std::vector<NativeAggregateReloc> *relocations) {
   if (current == nullptr || depth > 32) return false;
   if (current->kind != ck_designator) {
     if (!constant_initializer_image(current, original_type, offset,
-                                    bytes, depth + 1)) return false;
+                                    bytes, depth + 1, relocations)) return false;
     current = current->next;
     return true;
   }
@@ -434,15 +442,36 @@ static bool constant_designated_value(
   }
   current = current->next;
   return constant_designated_value(current, element, child_offset, bytes,
-                                   depth + 1);
+                                   depth + 1, relocations);
 }
 static bool constant_initializer_image(
     a_constant_ptr value, a_type_ptr original_type, size_t offset,
-    std::vector<uint8_t> &bytes, unsigned depth) {
+    std::vector<uint8_t> &bytes, unsigned depth,
+    std::vector<NativeAggregateReloc> *relocations) {
   a_type_ptr type = object_initializer_type(original_type);
   if (value == nullptr || type == nullptr || type->incomplete ||
       type->size == 0 || depth > 32 || offset > bytes.size() ||
       type->size > bytes.size() - offset) return false;
+  // Resolve data variable addresses only through ELF relocations.
+  if (value->kind == ck_address && type->kind == tk_pointer) {
+    const auto &address = value->variant.address;
+    if (type->size != 8 || relocations == nullptr ||
+        address.kind != abk_variable || address.variant.variable == nullptr ||
+        address.is_object_reflection || relocations->size() >= 256)
+      return false;
+    const auto delta = address.offset;
+    if (delta < static_cast<decltype(delta)>(
+                    std::numeric_limits<int64_t>::min()) ||
+        delta > static_cast<decltype(delta)>(
+                    std::numeric_limits<int64_t>::max()))
+      return false;
+    for (const auto &prior : *relocations) {
+      if (prior.byte_offset == offset) return false;
+    }
+    relocations->push_back({offset, address.variant.variable,
+                            static_cast<int64_t>(delta)});
+    return true;
+  }
   if (value->kind == ck_integer &&
       type->kind == tk_integer && type->size <= 8) {
     a_boolean overflow = FALSE;
@@ -493,7 +522,7 @@ static bool constant_initializer_image(
               element_index > (bytes.size()-offset)/element->size) return false;
           if (!constant_initializer_image(repeat.constant,element,
                  offset+static_cast<size_t>(element_index*element->size),
-                 bytes,depth+1)) return false;
+                 bytes,depth+1,relocations)) return false;
         }
         index+=repeat.count;
         current=current->next;
@@ -505,13 +534,13 @@ static bool constant_initializer_image(
         index = current->variant.designator.variant.array_element;
         if (index >= count) return false;
         if (!constant_designated_value(current, type, offset, bytes,
-                                       depth + 1)) return false;
+                                       depth + 1, relocations)) return false;
       } else {
         if (index >= count || index > (bytes.size() - offset) / element->size)
           return false;
         if (!constant_designated_value(current, element,
                          offset + static_cast<size_t>(index * element->size),
-                         bytes, depth + 1)) return false;
+                         bytes, depth + 1, relocations)) return false;
       }
       ++index;
     }
@@ -531,13 +560,13 @@ static bool constant_initializer_image(
           if (field == f) {valid = true; break;}
         if (!valid) return false;
         if (!constant_designated_value(current, type, offset, bytes,
-                                       depth + 1)) return false;
+                                       depth + 1, relocations)) return false;
       } else {
         if (field == nullptr || field->is_bit_field ||
             field->offset_bit_remainder != 0) return false;
         if (!constant_designated_value(current, field->type,
                                        offset + field->offset,
-                                       bytes, depth + 1)) return false;
+                                       bytes, depth + 1, relocations)) return false;
       }
       if (type->kind == tk_union) {
         // One active member, except explicit designators with their own
@@ -551,14 +580,16 @@ static bool constant_initializer_image(
   return false;
 }
 static bool aggregate_initializer_image(
-    a_constant_ptr root, a_type_ptr type, std::string &encoded) {
+    a_constant_ptr root, a_type_ptr type, std::string &encoded,
+    std::vector<NativeAggregateReloc> *relocations = nullptr) {
   type = object_initializer_type(type);
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
       type->size > 4096) return false;
   std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
-  if (!constant_initializer_image(root, type, 0, bytes, 0)) return false;
+  if (!constant_initializer_image(root, type, 0, bytes, 0,
+                                  relocations)) return false;
   static constexpr char digits[] = "0123456789abcdef";
   encoded.clear();
   encoded.reserve(bytes.size() * 2);
@@ -1472,8 +1503,20 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       }
       if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
         std::string hex;
-        if (aggregate_initializer_image(v->initializer.constant, v->type, hex)) {
+        std::vector<NativeAggregateReloc> relocations;
+        if (aggregate_initializer_image(v->initializer.constant, v->type,
+                                        hex, &relocations)) {
           emit_record(51, {num(symbol_id), num(emit_type(v->type, 0)), txt(hex)});
+          for (const auto &reloc : relocations) {
+            if (reloc.byte_offset > std::numeric_limits<uint32_t>::max())
+              continue;
+            const auto target = emit_symbol(
+                reloc.target, 2,
+                declaration_name(reloc.target->source_corresp, false));
+            emit_variable_type(reloc.target);
+            emit_record(52, {num(symbol_id), num(reloc.byte_offset),
+                             num(target), signed_num(reloc.addend)});
+          }
         }
       }
       if (v->init_kind == initk_dynamic && v->initializer.dynamic != nullptr) {
