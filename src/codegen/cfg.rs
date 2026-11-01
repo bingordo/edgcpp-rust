@@ -8,6 +8,8 @@ use cranelift_frontend::Variable;
 #[derive(Debug, Clone)]
 enum Stmt {
     Store(usize, Expr),
+    /// EDG-confirmed complete zero initialization of a fixed-size aggregate.
+    ZeroAggregate(usize, u32),
     Eval(Expr),
     Return(Expr),
     ReturnVoid,
@@ -228,6 +230,25 @@ fn lower(
                 return Err(invalid("unsupported initializer"));
             }
             let symbol = init.symbol.ok_or_else(|| invalid("initializer has no target"))?;
+            let index=cfg_checked_local(il,locals,symbol)?;
+            let local_ty=canonical_abi_type(il,locals[index].ty)?;
+            let local_kind=semantic(4,il.types.iter()
+                .find(|t|t.id==local_ty).ok_or_else(||
+                    invalid("initializer has no local type definition"))?.kind);
+            if matches!(local_kind,6|7) {
+                // The scalar initialization path must never write just one
+                // word into a larger array/struct. Only the exact native
+                // full-object zero-init kind is safe without an initializer
+                // tree. Partial/braced constant aggregates remain rejected.
+                if semantic(5,init.kind)!=1 || node.expression.is_some() {
+                    return Err(invalid("aggregate initializer requires structured lowering"));
+                }
+                let bytes=byte_size(il,local_ty)?;
+                if bytes==0 || bytes>4096 {
+                    return Err(invalid("aggregate zero initializer exceeds 4 KiB limit"));
+                }
+                return Ok(vec![Stmt::ZeroAggregate(index,bytes as u32)]);
+            }
             let value = if let Some(id) = node.expression {
                 expr(id)?
             } else {
@@ -240,7 +261,7 @@ fn lower(
                 }
                 Expr::Constant(scalars[0].value)
             };
-            Ok(vec![Stmt::Store(cfg_checked_local(il, locals, symbol)?, value)])
+            Ok(vec![Stmt::Store(index, value)])
         }
         6 => {
             if node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
@@ -395,6 +416,12 @@ fn check(
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
                 live = false;
+            }
+            Stmt::ZeroAggregate(i,bytes) => {
+                if *i >= locals || *bytes==0 || *bytes>4096 {
+                    return Err(invalid("invalid aggregate zero initialization"));
+                }
+                vars.insert(*i);
             }
             Stmt::Store(i,e) => {
                 if *i >= locals { return Err(invalid("invalid local index")); }
@@ -1481,6 +1508,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
 fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
     for statement in body {
         match statement {
+            Stmt::ZeroAggregate(index,_) => {found.insert(*index);}
             Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) => addressed_expr(e,found),
             Stmt::If(c,a,b) => { addressed_expr(c,found);
                 addressed_stmt(a,found); addressed_stmt(b,found); },
@@ -1820,6 +1848,25 @@ fn emit_body(
                 fb.ins().jump(dest.continue_to, &[]);
                 dest.saw_continue.set(true);
                 live = false;
+            }
+            Stmt::ZeroAggregate(index,bytes) => {
+                if *bytes==0 || *bytes>4096 {
+                    return Err(invalid("aggregate zero initialization too large"));
+                }
+                let base=local_address(fb,stack,*index)?;
+                let zero=fb.ins().iconst(types::I64,0);
+                let mut offset=0u32;
+                while offset<*bytes {
+                    let remaining=*bytes-offset;
+                    let width=if remaining>=8 {8} else if remaining>=4 {4}
+                        else if remaining>=2 {2} else {1};
+                    let address=if offset==0 {base} else {
+                        fb.ins().iadd_imm(base,i64::from(offset))
+                    };
+                    let ty=CAbiInt{bits:(width*8) as u8,signed:false,is_bool:false};
+                    super::memory::store_integer(fb,address,zero,ty);
+                    offset+=width;
+                }
             }
             Stmt::Store(i,e) => {
                 let v = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?;
@@ -2270,6 +2317,20 @@ mod tests {
         assert_eq!(&emit_routines(&[Routine {
             name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
+    }
+
+    #[test]
+    fn emits_complete_zero_initialized_aggregate_slot() {
+        let body=vec![Stmt::ZeroAggregate(0,14),Stmt::Return(Expr::Constant(3))];
+        assert!(!check(&body,&mut HashSet::new(),0,1,0).unwrap());
+        let obj=emit_routines(&[Routine {
+            name:"zero_aggregate_unit".into(),parameters:0,locals:1,body,
+            abi:None,local_types:None,local_storage:Some(vec![14]),
+            local_alignments:Some(vec![1]),
+        }]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        assert!(check(&[Stmt::ZeroAggregate(0,4097)],
+            &mut HashSet::new(),0,1,0).is_err());
     }
     #[test]
     fn rejects_nondefinite_local_initialization() {
