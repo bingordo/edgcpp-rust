@@ -76,6 +76,10 @@ pub struct Il {
     pub statement_initializations: Vec<StatementInitialization>,
     /// Exact scalar i64 dynamic initializer constants at execution sites.
     pub statement_integer_initializers: Vec<StatementIntegerInitializer>,
+    /// Constant EDG aggregate images at local initialization statements.
+    pub statement_aggregate_initializers: Vec<StatementAggregateInitializer>,
+    /// Constant EDG aggregate images for statically defined globals.
+    pub global_aggregate_initializers: Vec<GlobalAggregateInitializer>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
@@ -451,6 +455,23 @@ pub struct StatementIntegerInitializer {
     pub value: i64,
 }
 
+/// Native constant aggregate data, captured while EDG IL pointers are valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementAggregateInitializer {
+    pub function: String,
+    pub statement_path: String,
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub bytes: Vec<u8>,
+}
+/// Fully sized, native constant object representation of a defined global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalAggregateInitializer {
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub bytes: Vec<u8>,
+}
+
 /// Physical/diagnostic source location resolved from EDG's sequence table.
 /// Sequence and column are compilation-local; file and line reflect
 /// EDG's #line/include mapping. Generated locations are omitted.
@@ -785,9 +806,30 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
+        50 => Some(il.statement_aggregate_initializers.len()),
+        51 => Some(il.global_aggregate_initializers.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
+}
+
+/// Decode a bounded native byte image. Reject arbitrary strings and odd
+/// lengths; a malformed wire event must not become a partial initializer.
+fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
+    let raw=input.as_bytes();
+    if raw.is_empty() || raw.len()>8192 || raw.len()%2!=0 {return None;}
+    let hex=|b:u8| ->Option<u8> {
+        match b {
+            b'0'..=b'9'=>Some(b-b'0'),
+            b'a'..=b'f'=>Some(b-b'a'+10),
+            _=>None,
+        }
+    };
+    let mut out=Vec::with_capacity(raw.len()/2);
+    for pair in raw.chunks_exact(2) {
+        out.push((hex(pair[0])? << 4) | hex(pair[1])?);
+    }
+    Some(out)
 }
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
@@ -798,7 +840,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -851,6 +893,25 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 (t(0), t(1), n(2)) else { return; };
             if !(1..=4).contains(&kind) { return; }
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
+        }
+        50 => {
+            let (Some(function),Some(statement_path),Some(symbol),Some(ty),Some(hex)) =
+                (t(0),t(1),n(2),n(3),t(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+               symbol==0 || ty==0 {return;}
+            let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            output.statement_aggregate_initializers.push(StatementAggregateInitializer {
+                function,statement_path,symbol:SymbolId(symbol),ty:TypeId(ty),bytes
+            });
+        }
+        51 => {
+            let (Some(symbol),Some(ty),Some(hex))=(n(0),n(1),t(2))
+                else {return;};
+            if symbol==0 || ty==0 {return;}
+            let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            output.global_aggregate_initializers.push(GlobalAggregateInitializer {
+                symbol:SymbolId(symbol),ty:TypeId(ty),bytes
+            });
         }
         49 => {
             let (Some(owner), Some(bytes), Some(alignment)) =
