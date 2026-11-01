@@ -649,6 +649,24 @@ fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
     }
     Ok(layout.alignment)
 }
+/// Reject qualified and reference types until volatile/atomic/reference
+/// memory semantics are implemented (M12). Qualifiers may hide in typerefs.
+fn check_plain_storage_type(il:&Il,ty:crate::TypeId)->Result<(),CodegenError> {
+    let mut current=ty;
+    for _ in 0..=il.types.len() {
+        if let Some(detail)=il.type_details.iter().find(|d|d.owner==current) {
+            if detail.is_reference || detail.is_rvalue_reference ||
+                detail.qualifiers.unwrap_or(0)!=0 {
+                return Err(invalid("qualified/reference aggregate field unsupported"));
+            }
+        }
+        let def=il.types.iter().find(|t|t.id==current)
+            .ok_or_else(||invalid("missing aggregate field type"))?;
+        if semantic(4,def.kind)!=3 {return Ok(());}
+        current=def.related.ok_or_else(||invalid("unresolved aggregate field typeref"))?;
+    }
+    Err(invalid("cyclic aggregate field typeref"))
+}
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
 fn checked_record_fields<'a>(
@@ -681,6 +699,7 @@ fn checked_record_fields<'a>(
         if field.bit_width != 0 || field.bit_offset != 0 {
             return Err(invalid("record bitfield layout unsupported"));
         }
+        check_plain_storage_type(il,field.ty)?;
         let width = byte_size(il, field.ty)?;
         // A record containing a nested aggregate cannot be validated by this
         // scalar-field-only inventory until its complete native layout is known.
@@ -793,6 +812,7 @@ fn lower_address(
                     let fields=checked_record_fields(il,owner)?;
                     let field=fields.into_iter().find(|f|f.symbol==symbol)
                         .ok_or_else(||invalid("field does not belong to selected struct"))?;
+                    check_plain_storage_type(il,expression_type_id(graph,id)?)?;
                     if canonical_abi_type(il,field.ty)? !=
                         canonical_abi_type(il,expression_type_id(graph,id)?)? {
                         return Err(invalid("field reference type disagrees with EDG record layout"));
@@ -916,6 +936,34 @@ fn lower_c_expression(
             args.push(lower_c_expression(graph,operand,params,locals,il)?);
         }
         return Ok(Expr::Call(symbol,decl.abi,args));
+    }
+    // C struct assignment is an aggregate operation, not an I64 expression.
+    // Only a standalone assignment statement is supported at this stage:
+    // using its aggregate value in another expression needs value-category IR.
+    if semantic(2,node.data.kind)==3 &&
+        node.data.operator.is_some_and(|op|semantic(3,op)==18) &&
+        node.operands.len()==2 {
+        let ty=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+        if il.types.iter().any(|def|def.id==ty && semantic(4,def.kind)==7) {
+            if node.data.parent.is_some() {
+                return Err(invalid("aggregate assignment value use unsupported"));
+            }
+            for &operand in &node.operands {
+                if canonical_abi_type(il,expression_type_id(graph,operand)?)?!=ty {
+                    return Err(invalid("struct copy operands have different types"));
+                }
+            }
+            check_plain_storage_type(il,expression_type_id(graph,id)?)?;
+            let mut layout=Vec::new();
+            for field in checked_record_fields(il,ty)? {
+                let offset=i64::try_from(field.byte_offset)
+                    .map_err(|_|invalid("struct copy field offset overflow"))?;
+                layout.push((call_type_abi(il,field.ty)?,offset));
+            }
+            let dst=lower_address(graph,node.operands[0],params,locals,il)?;
+            let src=lower_address(graph,node.operands[1],params,locals,il)?;
+            return Ok(Expr::CopyStruct(layout,Box::new(dst),Box::new(src)));
+        }
     }
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
