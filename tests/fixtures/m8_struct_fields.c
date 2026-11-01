@@ -257,3 +257,12 @@ long m8_initialized_global_sum(void)
            m8_static_nested.values[0] + m8_static_nested.values[2] +
            m8_static_nested.marker + m8_static_union.second;
 }
+
+/* Nonconstant braced initialization is accepted only if EDG has already
+ * lowered it into ordinary executable initialization operations. */
+struct M8RuntimePair { int first; long second; };
+long m8_runtime_braced(long input)
+{
+    struct M8RuntimePair value = { (int)input, input + 9 };
+    return value.first + value.second;
+}
