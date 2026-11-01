@@ -277,6 +277,8 @@ pub struct RecordField {
 pub struct TypeObjectSize {
     pub owner: TypeId,
     pub bytes: u64,
+    /// Native EDG object alignment in bytes.
+    pub alignment: u64,
 }
 
 /// A direct C++ base class, in declaration order.
@@ -794,7 +796,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 2, _ => return,
+        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -849,9 +851,10 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
         }
         49 => {
-            let (Some(owner), Some(bytes)) = (n(0), fields[1].unsigned()) else { return; };
-            if owner == 0 || bytes == 0 { return; }
-            output.type_object_sizes.push(TypeObjectSize { owner: TypeId(owner), bytes });
+            let (Some(owner), Some(bytes), Some(alignment)) =
+                (n(0), fields[1].unsigned(), fields[2].unsigned()) else { return; };
+            if owner == 0 || bytes == 0 || alignment == 0 { return; }
+            output.type_object_sizes.push(TypeObjectSize { owner: TypeId(owner), bytes, alignment });
         }
         48 => {
             let (Some(function),Some(statement_path),Some(path),
