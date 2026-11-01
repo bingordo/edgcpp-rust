@@ -1241,7 +1241,9 @@ fn lower_c_expression(
                     52 | 53 if operands.len()==2 => {
                         let address=lower_address(graph,id,params,locals,il)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
-                        if il.types.iter().any(|d|d.id==canonical &&
+                        if let Some(layout)=selected_bitfield(graph,id,il)? {
+                            Expr::LoadBitField(layout,Box::new(address))
+                        } else if il.types.iter().any(|d|d.id==canonical &&
                                 semantic(4,d.kind)==6) {
                             // C array member designators decay to an address.
                             address
@@ -1249,8 +1251,12 @@ fn lower_c_expression(
                             Expr::LoadAddress(output,Box::new(address))
                         }
                     }
-                    43 if operands.len()==1 => lower_address(
-                        graph,operands[0],params,locals,il)?,
+                    43 if operands.len()==1 => {
+                        if selected_bitfield(graph,operands[0],il)?.is_some() {
+                            return Err(invalid("C bitfield address-of is forbidden"));
+                        }
+                        lower_address(graph,operands[0],params,locals,il)?
+                    },
                     44 if operands.len()==1 => {
                         let address=lower_address(graph,id,params,locals,il)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
@@ -1320,6 +1326,9 @@ fn lower_c_expression(
                     return Err(invalid("unary expression requires exactly one operand"));
                 }
                 if matches!(op,29|30|41|42) {
+                    if selected_bitfield(graph,operands[0],il)?.is_some() {
+                        return Err(invalid("bitfield increment/decrement not yet supported"));
+                    }
                     let direct=scalar_lvalue(graph,operands[0],params,locals,il).ok();
                     let (place,ty)=match direct {
                         Some((place,ty)) => (Some(place),ty),
@@ -1400,9 +1409,18 @@ fn lower_c_expression(
                     match place {
                         Some(ScalarPlace::Ssa(i)) => Expr::AssignLocal(i,ty,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::AssignGlobal(s,ty,rhs),
-                        None => Expr::StoreAddress(ty,address.unwrap(),rhs),
+                        None => {
+                            if let Some(layout)=selected_bitfield(graph,operands[0],il)? {
+                                Expr::StoreBitField(layout,address.unwrap(),rhs)
+                            } else {
+                                Expr::StoreAddress(ty,address.unwrap(),rhs)
+                            }
+                        }
                     }
                 } else {
+                    if selected_bitfield(graph,operands[0],il)?.is_some() {
+                        return Err(invalid("compound bitfield assignment not yet supported"));
+                    }
                     let kind = match op {
                         31 => CCompoundOp::Add, 32 => CCompoundOp::Sub,
                         33 => CCompoundOp::Mul, 34 => CCompoundOp::Div,
