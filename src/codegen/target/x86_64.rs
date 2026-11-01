@@ -2,6 +2,27 @@
 use super::*;
 pub(super) struct SysV;
 
+type Value = cranelift_codegen::ir::Value;
+
+/// Little-endian SysV integer-eightbyte packing. Never touch object padding
+/// beyond the native size, and evaluate the operand address only once.
+fn pack_bytes(fb:&mut FunctionBuilder<'_>, address:Value,
+              start:u8, count:u8) -> Value {
+    let mut packed=fb.ins().iconst(types::I64,0);
+    for i in 0..count {
+        let offset=i64::from(start)+i64::from(i);
+        let loc=if offset==0 {address} else {fb.ins().iadd_imm(address,offset)};
+        let byte=fb.ins().load(types::I8,cranelift_codegen::ir::MemFlags::new(),loc,0);
+        let wide=fb.ins().uextend(types::I64,byte);
+        let shifted=if i==0 {wide} else {
+            let shift=fb.ins().iconst(types::I64,i64::from(i)*8);
+            fb.ins().ishl(wide,shift)
+        };
+        packed=fb.ins().bor(packed,shifted);
+    }
+    packed
+}
+
 impl TargetAbi for SysV {
     fn isa_name(&self) -> &'static str { "x86_64" }
 
@@ -104,6 +125,82 @@ impl TargetAbi for SysV {
         if aggregate.is_some_and(|bytes| bytes > 8) {
             return Err(CodegenError::InvalidFunction(
                 "two-GPR aggregate returns not yet supported".into()));
+        }
+        Ok(())
+    }
+
+    fn lower_aggregate_argument(&self, size:u8, address:Expr) -> Expr {
+        if size > 8 {address} else {Expr::PackAggregate(size,Box::new(address))}
+    }
+
+    fn pack_argument(
+        &self, fb:&mut FunctionBuilder<'_>, address:Value, size:u8,
+    ) -> Result<Vec<Value>,CodegenError> {
+        if size==0 || size>16 {
+            return Err(CodegenError::InvalidFunction(
+                "invalid SysV aggregate argument width".into()));
+        }
+        let mut values=vec![pack_bytes(fb,address,0,size.min(8))];
+        if size>8 {values.push(pack_bytes(fb,address,8,size-8));}
+        Ok(values)
+    }
+
+    fn pack_result(
+        &self, fb:&mut FunctionBuilder<'_>, address:Value, size:u8,
+    ) -> Result<Value,CodegenError> {
+        if size==0 || size>8 {
+            return Err(CodegenError::InvalidFunction(
+                "invalid one-register aggregate return width".into()));
+        }
+        Ok(pack_bytes(fb,address,0,size))
+    }
+
+    fn decode_parameters(
+        &self, fb:&mut FunctionBuilder<'_>, abi:&CAbi, machine_values:&[Value],
+    ) -> Result<(Vec<Value>,Vec<Option<Value>>),CodegenError> {
+        let mut physical=machine_values.iter().copied();
+        let mut params=Vec::with_capacity(abi.parameters.len());
+        let mut second_parts=Vec::with_capacity(abi.parameters.len());
+        for (ty,aggregate) in abi.parameters.iter().zip(&abi.aggregate_parameters) {
+            let value=physical.next().ok_or_else(||
+                CodegenError::InvalidFunction("missing machine argument".into()))?;
+            params.push(if ty.bits==64 {value}
+                else if ty.signed {fb.ins().sextend(types::I64,value)}
+                else {fb.ins().uextend(types::I64,value)});
+            second_parts.push(if aggregate.is_some_and(|bytes|bytes>8) {
+                Some(physical.next().ok_or_else(||
+                    CodegenError::InvalidFunction("missing second aggregate GPR".into()))?)
+            } else {None});
+        }
+        if physical.next().is_some() {
+            return Err(CodegenError::InvalidFunction("extra machine arguments".into()));
+        }
+        Ok((params,second_parts))
+    }
+
+    fn materialize_aggregate(
+        &self, fb:&mut FunctionBuilder<'_>, address:Value, size:u8,
+        first:Value, second:Option<Value>,
+    ) -> Result<(),CodegenError> {
+        if size==0 || size>16 {
+            return Err(CodegenError::InvalidFunction(
+                "invalid SysV aggregate parameter width".into()));
+        }
+        for offset in 0..size {
+            let register=if offset<8 {first} else {
+                second.ok_or_else(||CodegenError::InvalidFunction(
+                    "missing second aggregate GPR".into()))?
+            };
+            let shift_bytes=offset%8;
+            let part=if shift_bytes==0 {register} else {
+                let shift=fb.ins().iconst(types::I64,i64::from(shift_bytes)*8);
+                fb.ins().ushr(register,shift)
+            };
+            let byte=fb.ins().ireduce(types::I8,part);
+            let loc=if offset==0 {address} else {
+                fb.ins().iadd_imm(address,i64::from(offset))
+            };
+            fb.ins().store(cranelift_codegen::ir::MemFlags::new(),byte,loc,0);
         }
         Ok(())
     }
