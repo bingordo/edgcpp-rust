@@ -47,3 +47,24 @@ long m8_copy_pointer(struct M8Pair *dst, struct M8Pair *src)
     *dst = *src;
     return dst->second - dst->first;
 }
+
+/* Native array-member offset and bounded element strides. */
+struct M8WithArray { unsigned short values[3]; long marker; };
+struct M8WithArray m8_array_member_global;
+long m8_array_member_local(int n)
+{
+    struct M8WithArray obj;
+    obj.values[0] = (unsigned short)n;
+    obj.values[1] = (unsigned short)(obj.values[0] + 3);
+    obj.values[2] = (unsigned short)(obj.values[1] + 7);
+    obj.marker = (long)obj.values[2] + 9;
+    return obj.marker + obj.values[0];
+}
+long m8_array_member_global_update(int n)
+{
+    m8_array_member_global.values[0] = (unsigned short)n;
+    m8_array_member_global.values[1] = (unsigned short)(n + 1);
+    m8_array_member_global.values[2] = (unsigned short)(n + 2);
+    m8_array_member_global.marker = (long)m8_array_member_global.values[1] * 5;
+    return m8_array_member_global.marker + m8_array_member_global.values[2];
+}
