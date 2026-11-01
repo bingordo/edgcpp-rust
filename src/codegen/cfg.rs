@@ -177,7 +177,7 @@ fn lower(
                 return Err(invalid("return with nested statements"));
             }
             if let Some(id) = node.expression {
-                if let Some(size)=sysv_integer_aggregate(il,expression_type_id(graph,id)?)? {
+                if let Some(size)=target::ABI.classify_aggregate(il,expression_type_id(graph,id)?)? {
                     let expression=graph.expression(id)
                         .ok_or_else(||invalid("missing returned aggregate expression"))?;
                     let direct_call=graph.calls.iter().any(|site|
@@ -1148,17 +1148,15 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     let mut parameters=Vec::with_capacity(declared.len());
     let mut aggregate_parameters=Vec::with_capacity(declared.len());
     for p in declared {
-        let aggregate=sysv_integer_aggregate(il,p.ty)?;
+        let aggregate=target::ABI.classify_aggregate(il,p.ty)?;
         parameters.push(if aggregate.is_some() {
             CAbiInt{bits:64,signed:false,is_bool:false}
         } else {call_type_abi(il,p.ty)?});
         aggregate_parameters.push(aggregate);
     }
     let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
-    let aggregate_result=sysv_integer_aggregate(il,ret)?;
-    if aggregate_result.is_some_and(|bytes| bytes > 8) {
-        return Err(invalid("two-GPR aggregate returns not yet supported"));
-    }
+    let aggregate_result=target::ABI.classify_aggregate(il,ret)?;
+    target::ABI.validate_aggregate_return(aggregate_result)?;
     let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
         None
     } else if aggregate_result.is_some() {
@@ -1212,7 +1210,7 @@ fn lower_c_expression(
         for (&operand,aggregate) in node.operands[1..].iter()
             .zip(&decl.abi.aggregate_parameters) {
             if let Some(size)=aggregate {
-                let actual=sysv_integer_aggregate(il,expression_type_id(graph,operand)?)?;
+                let actual=target::ABI.classify_aggregate(il,expression_type_id(graph,operand)?)?;
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
@@ -2471,7 +2469,7 @@ fn emit_routines_with_globals(
 ) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     flags.set("opt_level","speed").map_err(|e| CodegenError::Backend(e.to_string()))?;
-    let isa = cranelift_codegen::isa::lookup_by_name("x86_64")
+    let isa = cranelift_codegen::isa::lookup_by_name(target::ABI.isa_name())
         .map_err(|e| CodegenError::UnsupportedTarget(e.to_string()))?
         .finish(settings::Flags::new(flags))
         .map_err(|e| CodegenError::UnsupportedTarget(e.to_string()))?;
