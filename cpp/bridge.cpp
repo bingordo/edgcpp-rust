@@ -1526,6 +1526,10 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(tk_struct)) return 7;
     if (value == static_cast<unsigned>(tk_class)) return 8;
     if (value == static_cast<unsigned>(tk_union)) return 9;
+  } else if (category == 5) {
+    // Dynamic-initializer kinds, normalized for the reference backend.
+    // Only native dik_zero promises full-object zero initialization.
+    if (value == static_cast<unsigned>(dik_zero)) return 1;
   }
   return 0;
 }
