@@ -29,6 +29,10 @@ pub enum Expr {
     AddressLocal(usize),
     LoadAddress(CAbiInt, Box<Expr>),
     StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
+    /// Copy all supported C struct scalar fields after reading every source
+    /// field, preserving observable value semantics even under aliasing.
+    /// Offsets come directly from validated native EDG field layouts.
+    CopyStruct(Vec<(CAbiInt,i64)>, Box<Expr>, Box<Expr>),
     CompoundAddress(CAbiInt, CAbiInt, CCompoundOp, Box<Expr>, Box<Expr>),
     PostAddress(CAbiInt, i64, Box<Expr>),
     PointerOffset(Box<Expr>, Box<Expr>, u64),
@@ -157,7 +161,8 @@ fn emit_expr(
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
-        Expr::LoadAddress(..) | Expr::StoreAddress(..) | Expr::CompoundAddress(..) |
+        Expr::LoadAddress(..) | Expr::StoreAddress(..) | Expr::CopyStruct(..) |
+        Expr::CompoundAddress(..) |
         Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
         Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
             return Err(CodegenError::InvalidFunction(
@@ -404,7 +409,8 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::BlockValue(..) |
-        Expr::StoreAddress(..) | Expr::CompoundAddress(..) | Expr::PostAddress(..) |
+        Expr::StoreAddress(..) | Expr::CopyStruct(..) |
+        Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::AssignGlobal(..) | Expr::CompoundGlobal(..) | Expr::PostGlobal(..) => true,
