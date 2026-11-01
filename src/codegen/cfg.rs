@@ -178,8 +178,21 @@ fn lower(
             }
             if let Some(id) = node.expression {
                 if let Some(size)=sysv_one_integer_aggregate(il,expression_type_id(graph,id)?)? {
-                    let address=lower_address(graph,id,params,locals,il)?;
-                    Ok(vec![Stmt::Return(Expr::PackAggregate(size,Box::new(address)))])
+                    let expression=graph.expression(id)
+                        .ok_or_else(||invalid("missing returned aggregate expression"))?;
+                    let direct_call=graph.calls.iter().any(|site|
+                        site.function==expression.data.function &&
+                        site.statement_path==expression.data.statement_path &&
+                        site.path==expression.data.path);
+                    if direct_call {
+                        // A one-register aggregate call already produces the
+                        // packed SysV INTEGER result in RAX.
+                        let returned=expr(id)?;
+                        Ok(vec![Stmt::Return(returned)])
+                    } else {
+                        let address=lower_address(graph,id,params,locals,il)?;
+                        Ok(vec![Stmt::Return(Expr::PackAggregate(size,Box::new(address)))])
+                    }
                 } else {
                     Ok(vec![Stmt::Return(expr(id)?)])
                 }
@@ -1132,14 +1145,24 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     if !proto.prototyped && !declared.is_empty() {
         return Err(invalid("unprototyped direct C calls with arguments unsupported"));
     }
-    let parameters=declared.iter().map(|p|call_type_abi(il,p.ty))
-        .collect::<Result<Vec<_>,_>>()?;
+    let mut parameters=Vec::with_capacity(declared.len());
+    let mut aggregate_parameters=Vec::with_capacity(declared.len());
+    for p in declared {
+        let aggregate=sysv_one_integer_aggregate(il,p.ty)?;
+        parameters.push(if aggregate.is_some() {
+            CAbiInt{bits:64,signed:false,is_bool:false}
+        } else {call_type_abi(il,p.ty)?});
+        aggregate_parameters.push(aggregate);
+    }
     let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
+    let aggregate_result=sysv_one_integer_aggregate(il,ret)?;
     let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
         None
+    } else if aggregate_result.is_some() {
+        Some(CAbiInt{bits:64,signed:false,is_bool:false})
     } else {Some(call_type_abi(il,ret)?)};
     Ok(CallDeclaration {symbol,name,abi:CAbi{
-        aggregate_parameters:vec![None;parameters.len()], aggregate_result:None,
+        aggregate_parameters, aggregate_result,
         parameters,result}})
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
@@ -1183,8 +1206,18 @@ fn lower_c_expression(
             return Err(invalid(format!("{}: direct-call argument count mismatch",decl.name)));
         }
         let mut args=Vec::with_capacity(decl.abi.parameters.len());
-        for &operand in &node.operands[1..] {
-            args.push(lower_c_expression(graph,operand,params,locals,il)?);
+        for (&operand,aggregate) in node.operands[1..].iter()
+            .zip(&decl.abi.aggregate_parameters) {
+            if let Some(size)=aggregate {
+                let actual=sysv_one_integer_aggregate(il,expression_type_id(graph,operand)?)?;
+                if actual!=Some(*size) {
+                    return Err(invalid("aggregate call argument ABI type/size mismatch"));
+                }
+                let address=lower_address(graph,operand,params,locals,il)?;
+                args.push(Expr::PackAggregate(*size,Box::new(address)));
+            } else {
+                args.push(lower_c_expression(graph,operand,params,locals,il)?);
+            }
         }
         return Ok(Expr::Call(symbol,decl.abi,args));
     }
