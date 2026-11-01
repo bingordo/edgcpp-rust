@@ -65,6 +65,22 @@ extern struct M8PointerHolder m8_pointer_to_forward;
 extern struct M8PointerHolder m8_pointer_to_element;
 extern int m8_reloc_target;
 
+extern long m8_bitfields_local(long);
+extern long m8_bitfields_global(long);
+extern long m8_bitfields_array(long);
+extern long m8_bitfields_copy(long);
+extern long m8_bitunion(long);
+struct M8BitFields {
+    unsigned int first : 3;
+    unsigned int second : 5;
+    signed int negative : 6;
+    unsigned int fourth : 9;
+    unsigned int fifth : 5;
+    unsigned char sentinel;
+};
+extern struct M8BitFields m8_bits_global;
+extern struct M8BitFields m8_bits_array[2];
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -155,5 +171,18 @@ int main(void)
            *m8_pointer_to_forward.pointer,
            *m8_pointer_to_element.pointer,
            m8_reloc_target);
+    printf("%zu %zu %ld %ld %ld %ld %ld\\n",
+           sizeof(struct M8BitFields), _Alignof(struct M8BitFields),
+           m8_bitfields_local(77), m8_bitfields_local(-12),
+           m8_bitfields_global(31), m8_bitfields_array(75),
+           m8_bitfields_copy(17));
+    printf("%u %u %d %u %u %u %ld %ld\\n",
+           m8_bits_global.first, m8_bits_global.second,
+           m8_bits_global.negative, m8_bits_global.fourth,
+           m8_bits_global.fifth, m8_bits_global.sentinel,
+           m8_bitunion(47), m8_bitunion(3));
+    printf("%ld %ld %ld\\n",
+           m8_bitfields_global(-9), m8_bitfields_copy(-3),
+           m8_bitfields_array(22));
     return 0;
 }
