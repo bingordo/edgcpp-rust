@@ -751,6 +751,47 @@ fn lower_address(
                 }
                 46 if node.operands.len()==1 =>
                     lower_address(graph,node.operands[0],params,locals,il),
+                52 | 53 if node.operands.len()==2 => {
+                    // EDG: dot_field(base, enk_field) or
+                    // points_to_field(pointer, enk_field). The field identity
+                    // is native and never reconstructed from its spelling.
+                    let field_node=graph.expression(node.operands[1])
+                        .ok_or_else(||invalid("missing field selection operand"))?;
+                    if semantic(2,field_node.data.kind)!=5 || !field_node.operands.is_empty() {
+                        return Err(invalid("field selection requires an EDG field reference"));
+                    }
+                    let symbol=field_node.data.symbol_id
+                        .ok_or_else(||invalid("field reference missing native symbol"))?;
+                    let base_type=canonical_abi_type(il,
+                        expression_type_id(graph,node.operands[0])?)?;
+                    let owner=if op==52 {base_type} else {
+                        let pointer=il.types.iter().find(|t|t.id==base_type
+                            && semantic(4,t.kind)==5)
+                            .ok_or_else(||invalid("arrow selection requires struct pointer"))?;
+                        canonical_abi_type(il,pointer.related
+                            .ok_or_else(||invalid("arrow pointer has no target type"))?)?
+                    };
+                    if !il.types.iter().any(|t|t.id==owner && semantic(4,t.kind)==7) {
+                        return Err(invalid("only plain C struct field selection supported"));
+                    }
+                    let fields=checked_record_fields(il,owner)?;
+                    let field=fields.into_iter().find(|f|f.symbol==symbol)
+                        .ok_or_else(||invalid("field does not belong to selected struct"))?;
+                    if canonical_abi_type(il,field.ty)? !=
+                        canonical_abi_type(il,expression_type_id(graph,id)?)? {
+                        return Err(invalid("field reference type disagrees with EDG record layout"));
+                    }
+                    let offset=i64::try_from(field.byte_offset)
+                        .map_err(|_|invalid("field offset exceeds address range"))?;
+                    let base=if op==52 {
+                        lower_address(graph,node.operands[0],params,locals,il)?
+                    } else {
+                        lower_c_expression(graph,node.operands[0],params,locals,il)?
+                    };
+                    Ok(if offset==0 {base} else {
+                        Expr::Add(Box::new(base),Box::new(Expr::Constant(offset)))
+                    })
+                }
                 11 if node.operands.len()==1 =>
                     lower_address(graph,node.operands[0],params,locals,il),
                 _ => Err(invalid("unsupported addressable expression")),
@@ -917,8 +958,12 @@ fn lower_c_expression(
         3 => {
             let op = node.data.operator.map(|v| semantic(3, v)).unwrap_or(0);
             let operands = &node.operands;
-            if matches!(op,43|44|45|46) {
+            if matches!(op,43|44|45|46|52|53) {
                 match op {
+                    52 | 53 if operands.len()==2 => {
+                        let address=lower_address(graph,id,params,locals,il)?;
+                        Expr::LoadAddress(output,Box::new(address))
+                    }
                     43 if operands.len()==1 => lower_address(
                         graph,operands[0],params,locals,il)?,
                     44 if operands.len()==1 => {
