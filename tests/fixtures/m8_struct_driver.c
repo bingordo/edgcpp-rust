@@ -82,12 +82,12 @@ int main(void)
     printf("%ld %ld %ld %ld\\n",
            m8_union_local(5), m8_union_local(-4),
            m8_union_copy(17), m8_union_array(12));
-    union M8Union src, dst;
-    src.second = 127;
-    dst.first = -1;
+    union M8Union union_src, union_dst;
+    union_src.second = 127;
+    union_dst.first = -1;
     printf("%ld %ld %ld\\n",
-           m8_union_pointer_copy(&dst, &src),
-           m8_union_self_copy(&src), dst.second);
+           m8_union_pointer_copy(&union_dst, &union_src),
+           m8_union_self_copy(&union_src), union_dst.second);
     printf("%ld %ld %ld %ld\\n",
            m8_union_global_update(11), m8_union_global.second,
            m8_union_nested(13), m8_tagged_union.data.second);
