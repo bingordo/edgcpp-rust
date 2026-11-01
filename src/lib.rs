@@ -817,7 +817,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
 /// lengths; a malformed wire event must not become a partial initializer.
 fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
     let raw=input.as_bytes();
-    if raw.is_empty() || raw.len()>8192 || raw.len()%2!=0 {return None;}
+    if raw.is_empty() || raw.len()>8192 || !raw.len().is_multiple_of(2) {return None;}
     let hex=|b:u8| ->Option<u8> {
         match b {
             b'0'..=b'9'=>Some(b-b'0'),
@@ -826,7 +826,7 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
         }
     };
     let mut out=Vec::with_capacity(raw.len()/2);
-    for pair in raw.chunks_exact(2) {
+    for pair in raw.as_chunks::<2>().0 {
         out.push((hex(pair[0])? << 4) | hex(pair[1])?);
     }
     Some(out)
