@@ -53,7 +53,12 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
-    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6)) {
+    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7)) {
+        // Records are stack-addressed aggregates, never scalar SSA values.
+        // Keep the placeholder ABI type solely for local slot bookkeeping.
+        if il.types.iter().any(|d| d.id == ty && semantic(4,d.kind)==7) {
+            byte_size(il,ty)?;
+        }
         return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
     }
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
@@ -563,7 +568,7 @@ fn global_value_type(il:&Il,symbol:crate::SymbolId)
     let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("global missing declared type"))?.ty;
     let ty=canonical_abi_type(il,ty)?;
-    if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==6) {
+    if il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),6|7)) {
         byte_size(il,ty)?;
         Ok((name,None))
     } else {
@@ -619,7 +624,7 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         // exact EDG allocation size, including trailing ABI padding.
         // Unions (overlapping fields), bitfields and nested aggregates
         // remain rejected by checked_record_fields.
-        _ if il.record_fields.iter().any(|f| f.owner == ty) => {
+        7 if il.record_fields.iter().any(|f| f.owner == ty) => {
             checked_record_fields(il, ty)?;
             let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
                 .ok_or_else(|| invalid("record missing native object layout"))?;
