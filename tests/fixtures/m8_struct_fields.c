@@ -583,3 +583,24 @@ struct M8AbiPair m8_abi_roundtrip_pair(struct M8AbiPair input)
 {
     return input;
 }
+
+/* M8 SysV one-GPR aggregate calls: test both generated->generated and
+ * generated->GCC calls with native struct values, not pointer substitutions. */
+extern long gcc_m8_abi_sum_pair(struct M8AbiPair);
+extern struct M8AbiPair gcc_m8_abi_transform_pair(struct M8AbiPair);
+long m8_abi_internal_call_pair(struct M8AbiPair pair)
+{
+    return m8_abi_take_pair(pair);
+}
+long m8_abi_external_call_pair(struct M8AbiPair pair)
+{
+    return gcc_m8_abi_sum_pair(pair);
+}
+struct M8AbiPair m8_abi_external_return_pair(struct M8AbiPair pair)
+{
+    return gcc_m8_abi_transform_pair(pair);
+}
+long m8_abi_mixed_call(int n, struct M8AbiMixed value)
+{
+    return m8_abi_take_mixed(93, value, n);
+}
