@@ -33,6 +33,10 @@ pub enum Expr {
     /// modified, and no adjacent byte outside the field is touched.
     LoadBitField(BitFieldLayout, Box<Expr>),
     StoreBitField(BitFieldLayout, Box<Expr>, Box<Expr>),
+    /// Evaluate one bitfield RMW expression, return the converted new value.
+    CompoundBitField(BitFieldLayout, CAbiInt, CCompoundOp, Box<Expr>, Box<Expr>),
+    /// C postfix ++/--: return the old narrow bitfield value.
+    PostBitField(BitFieldLayout, i64, Box<Expr>),
     /// Copy all supported C struct scalar fields after reading every source
     /// field, preserving observable value semantics even under aliasing.
     /// Offsets come directly from validated native EDG field layouts.
@@ -180,6 +184,7 @@ fn emit_expr(
         Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
+        Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) |
         Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
@@ -429,6 +434,7 @@ fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::StoreBitField(..) |
+        Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
