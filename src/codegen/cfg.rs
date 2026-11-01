@@ -2318,6 +2318,20 @@ mod tests {
             name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
+
+    #[test]
+    fn emits_complete_zero_initialized_aggregate_slot() {
+        let body=vec![Stmt::ZeroAggregate(0,14),Stmt::Return(Expr::Constant(3))];
+        assert!(!check(&body,&mut HashSet::new(),0,1,0).unwrap());
+        let obj=emit_routines(&[Routine {
+            name:"zero_aggregate_unit".into(),parameters:0,locals:1,body,
+            abi:None,local_types:None,local_storage:Some(vec![14]),
+            local_alignments:Some(vec![1]),
+        }]).unwrap();
+        assert_eq!(&obj[..4],b"\\x7fELF");
+        assert!(check(&[Stmt::ZeroAggregate(0,4097)],
+            &mut HashSet::new(),0,1,0).is_err());
+    }
     #[test]
     fn rejects_nondefinite_local_initialization() {
         let mut vars = HashSet::new();
