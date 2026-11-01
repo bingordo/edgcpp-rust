@@ -823,6 +823,30 @@ fn checked_record_fields_depth<'a>(
     }
     Ok(fields)
 }
+/// C aggregate assignment may copy padding and bitfield storage units as
+/// bytes. Never copy a bitfield by reloading its *declared* integer type:
+/// that would clobber adjacent fields and could overread a packed record.
+fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
+    ->Result<bool,CodegenError> {
+    if depth>32 {return Err(invalid("recursive native bitfield layout"));}
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing aggregate type"))?;
+    match semantic(4,def.kind) {
+        6 => has_native_bitfield(il,def.related
+            .ok_or_else(||invalid("aggregate array missing element"))?,depth+1),
+        7|9 => {
+            for field in checked_record_fields_depth(il,ty,depth+1)? {
+                if field.bit_width!=0 || field.bit_offset!=0 ||
+                    has_native_bitfield(il,field.ty,depth+1)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
 /// Expand a supported value-semantic aggregate into scalar fields at native
 /// byte offsets. This copies array elements and nested records without
 /// touching indeterminate C struct padding. The bound also keeps generated
@@ -1168,10 +1192,10 @@ fn lower_c_expression(
                     invalid("missing aggregate assignment type"))?;
             let dst=lower_address(graph,node.operands[0],params,locals,il)?;
             let src=lower_address(graph,node.operands[1],params,locals,il)?;
-            if kind==9 {
+            if kind==9 || has_native_bitfield(il,ty,0)? {
                 let bytes=byte_size(il,ty)?;
                 if bytes==0 || bytes>512 {
-                    return Err(invalid("union copy exceeds 512-byte limit"));
+                    return Err(invalid("bitfield/union byte copy exceeds 512-byte limit"));
                 }
                 return Ok(Expr::CopyBytes(bytes as u32,Box::new(dst),Box::new(src)));
             }
