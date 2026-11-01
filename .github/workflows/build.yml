@@ -407,6 +407,34 @@ jobs:
             printf '%s\n' "$generated"
           )
 
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+          )
+
       - name: Reject unsupported EDG constructs
         working-directory: edgcpp-rust
         env:
