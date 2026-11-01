@@ -604,3 +604,34 @@ long m8_abi_mixed_call(int n, struct M8AbiMixed value)
 {
     return m8_abi_take_mixed(93, value, n);
 }
+
+
+/* M8: first two-GPR SysV aggregate argument subset. Return values remain
+ * scalar until the separate two-register result implementation lands. */
+struct M8AbiWide { long first; int second; };
+struct M8AbiWideMixed { int first; int second; long third; };
+
+long m8_abi_take_wide(struct M8AbiWide value, long extra)
+{
+    return value.first * 7 + (long)value.second * 11 + extra;
+}
+long m8_abi_take_wide_mixed(struct M8AbiWideMixed value)
+{
+    return (long)value.first * 3 + (long)value.second * 5 +
+           value.third * 13;
+}
+long m8_abi_wide_at_limit(long a, long b, long c, long d,
+                          struct M8AbiWide value)
+{
+    return a + b * 2 + c * 3 + d * 5 + value.first * 7 +
+           value.second * 11;
+}
+long m8_abi_internal_wide(struct M8AbiWide value)
+{
+    return m8_abi_take_wide(value, -17);
+}
+extern long gcc_m8_abi_sum_wide(struct M8AbiWide);
+long m8_abi_external_wide(struct M8AbiWide value)
+{
+    return gcc_m8_abi_sum_wide(value);
+}

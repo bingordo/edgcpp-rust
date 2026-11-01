@@ -555,6 +555,18 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   two-eightbyte structs, SSE/SSEUP, MEMORY, packed/unaligned, nested,
   bitfield, union, variadic and general aggregate-temporary cases remain
   unsupported.
+* **SysV AMD64 two-INTEGER-eightbyte C struct arguments** (PR #35):
+  naturally aligned, plain integer/data-pointer records of 9–16 bytes are
+  classified into two GPR arguments for generated definitions and direct
+  calls. Source-level struct arguments are packed from a single evaluated
+  lvalue address, and parameters are materialized bytewise into exact native
+  storage, without overreads. The supported subset requires both GPRs to
+  remain available; register exhaustion never silently splits a struct
+  across a GPR and the stack. Struct results still support only one GPR.
+  GCC differential tests exercise native two-register calls, mixed fields,
+  generated-to-generated calls, generated-to-GCC callbacks, and the six-GPR
+  boundary. [Bridge CI #41358472051](https://github.com/bingordo/edgcpp-rust/actions/runs/41358472051)
+  passed these alongside existing regressions.
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -580,11 +592,13 @@ verification route, not a separate compiler implementation.
 
 **Remaining before declaring M8 complete:**
 
-1. Complete SysV x86-64 aggregate parameter/return classification: two
-   INTEGER eightbytes (register-pair args/results), SSE/SSEUP cases,
-   MEMORY-class stack argument passing and hidden-result storage; handle
-   register exhaustion, mixed scalar/aggregate calls, packed/unaligned
-   layouts and direct-call aggregate temporaries. The supported one-GPR
+1. Complete SysV x86-64 aggregate parameter/return classification:
+   two-INTEGER-eightbyte register-pair *returns*, SSE/SSEUP cases,
+   MEMORY-class stack arguments and hidden-result storage; handle register
+   exhaustion/whole-aggregate stack placement, mixed scalar/aggregate calls,
+   packed/unaligned layouts and direct-call aggregate temporaries. Two-GPR
+   INTEGER arguments with sufficient free registers are implemented in PR #35;
+   this is not complete SysV aggregate classification. The supported one-GPR
    subset must remain distinct from these unimplemented cases.
 2. General nonconstant aggregate initializer trees and source-order
    evaluation in cases where EDG does not already lower them into supported

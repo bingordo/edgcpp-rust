@@ -129,6 +129,20 @@ extern long m8_abi_external_call_pair(struct M8AbiPair);
 extern struct M8AbiPair m8_abi_external_return_pair(struct M8AbiPair);
 extern long m8_abi_mixed_call(int,struct M8AbiMixed);
 
+
+/* Independently compiled GCC callback validates the two-register caller ABI. */
+struct M8AbiWide { long first; int second; };
+struct M8AbiWideMixed { int first; int second; long third; };
+long gcc_m8_abi_sum_wide(struct M8AbiWide value)
+{
+    return value.first * 23 + (long)value.second * 31;
+}
+extern long m8_abi_take_wide(struct M8AbiWide, long);
+extern long m8_abi_take_wide_mixed(struct M8AbiWideMixed);
+extern long m8_abi_wide_at_limit(long, long, long, long, struct M8AbiWide);
+extern long m8_abi_internal_wide(struct M8AbiWide);
+extern long m8_abi_external_wide(struct M8AbiWide);
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -278,5 +292,21 @@ int main(void)
            m8_abi_external_call_pair(small_pair),
            m8_abi_mixed_call(7, small_mixed),
            callback_result.first, callback_result.second);
+    struct M8AbiWide wide_one = { 0x123456789abL, -93 };
+    struct M8AbiWide wide_two = { -0x123456789abL, 257 };
+    struct M8AbiWideMixed wide_mixed = { -12, 47, 0x123456789abL };
+    printf("%zu %zu %zu %zu\\n",
+           sizeof(struct M8AbiWide), _Alignof(struct M8AbiWide),
+           sizeof(struct M8AbiWideMixed), _Alignof(struct M8AbiWideMixed));
+    printf("%ld %ld %ld %ld %ld %ld\\n",
+           m8_abi_take_wide(wide_one, 37),
+           m8_abi_take_wide(wide_two, -123),
+           m8_abi_take_wide_mixed(wide_mixed),
+           m8_abi_wide_at_limit(11,-7,33,9,wide_one),
+           m8_abi_internal_wide(wide_two),
+           m8_abi_external_wide(wide_one));
+    printf("%ld %ld\\n",
+           m8_abi_internal_wide(wide_one),
+           m8_abi_external_wide(wide_two));
     return 0;
 }
