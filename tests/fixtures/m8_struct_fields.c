@@ -348,3 +348,26 @@ long m8_dynamic_multidimensional(long n)
     return items[0][0] + items[0][1] + items[0][2] +
            items[1][0] + items[1][1] + items[1][2];
 }
+
+/* M8: static aggregate pointer fields require real ELF data relocations.
+ * Exercise forward references, pointer addends and two relocations within
+ * the same object. The referenced data is owned by the generated TU. */
+struct M8PointerHolder { int tag; int *pointer; };
+extern int m8_reloc_target;
+struct M8PointerHolder m8_pointer_to_forward = { .tag = 5, .pointer = &m8_reloc_target };
+int m8_reloc_target = 37;
+static int m8_reloc_values[3] = { 3, 7, 11 };
+struct M8PointerHolder m8_pointer_to_element = {
+    .tag = 9, .pointer = &m8_reloc_values[1]
+};
+struct M8PointerArray { int padding; int *refs[2]; };
+struct M8PointerArray m8_pointer_array = {
+    .padding = 6, .refs = { &m8_reloc_target, &m8_reloc_values[2] }
+};
+long m8_static_pointer_relocs(void)
+{
+    return m8_pointer_to_forward.tag + *m8_pointer_to_forward.pointer +
+           m8_pointer_to_element.tag + *m8_pointer_to_element.pointer +
+           m8_pointer_array.padding + *m8_pointer_array.refs[0] +
+           *m8_pointer_array.refs[1];
+}

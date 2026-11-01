@@ -59,6 +59,12 @@ extern long m8_dynamic_once_struct(long);
 extern long m8_dynamic_once_nested(long);
 extern long m8_dynamic_once_union(long);
 extern long m8_dynamic_multidimensional(long);
+extern long m8_static_pointer_relocs(void);
+struct M8PointerHolder { int tag; int *pointer; };
+extern struct M8PointerHolder m8_pointer_to_forward;
+extern struct M8PointerHolder m8_pointer_to_element;
+extern int m8_reloc_target;
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -142,5 +148,12 @@ int main(void)
            m8_dynamic_once_array(-8), m8_dynamic_once_struct(21),
            m8_dynamic_once_nested(0), m8_dynamic_once_union(-17),
            m8_dynamic_multidimensional(-5));
+    printf("%ld %zu %zu %d %d %d\\n",
+           m8_static_pointer_relocs(),
+           sizeof(struct M8PointerHolder),
+           offsetof(struct M8PointerHolder, pointer),
+           *m8_pointer_to_forward.pointer,
+           *m8_pointer_to_element.pointer,
+           m8_reloc_target);
     return 0;
 }

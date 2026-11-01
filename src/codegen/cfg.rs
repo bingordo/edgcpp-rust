@@ -2110,6 +2110,7 @@ struct ScalarGlobal {
     ty: CAbiInt,
     linkage: Linkage,
     initializer: Option<Vec<u8>>,
+    relocations: Vec<(usize,crate::SymbolId,i64)>,
     storage_bytes: usize,
     alignment: u64,
 }
@@ -2121,7 +2122,8 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     let mut result = Vec::new();
     let references=il.expressions.iter()
         .filter(|expr|semantic(2,expr.kind)==2).filter_map(|expr|expr.symbol_id)
-        .chain(il.constant_addresses.iter().map(|a|a.symbol));
+        .chain(il.constant_addresses.iter().map(|a|a.symbol))
+        .chain(il.global_aggregate_relocations.iter().flat_map(|r|[r.symbol,r.target]));
     for id in references {
         if !il.global_variables.iter().any(|g|g.symbol==id) ||
            !seen.insert(id) {continue;}
@@ -2170,8 +2172,19 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
                 Some(bytes[..(ty.bits/8) as usize].to_vec())
             }
         } else { None };
+        let mut relocations=Vec::new();
+        for reloc in il.global_aggregate_relocations.iter().filter(|r|r.symbol==id) {
+            let start=usize::try_from(reloc.offset)
+                .map_err(|_|invalid("aggregate relocation offset out of range"))?;
+            if scalar.is_some() || !meta.explicit_initializer ||
+                start.checked_add(8).is_none_or(|end|end>storage_bytes) ||
+                relocations.iter().any(|(offset,_,_)|*offset==start) {
+                return Err(invalid("unsupported/overlapping aggregate pointer relocation"));
+            }
+            relocations.push((start,reloc.target,reloc.addend));
+        }
         result.push(ScalarGlobal {
-            symbol:id,name,ty,linkage,initializer,storage_bytes,alignment
+            symbol:id,name,ty,linkage,initializer,relocations,storage_bytes,alignment
         });
     }
     Ok(result)
@@ -2192,24 +2205,37 @@ fn emit_routines_with_globals(
     let builder = ObjectBuilder::new(isa,"edgcpp",cranelift_module::default_libcall_names())
         .map_err(|e| CodegenError::Backend(e.to_string()))?;
     let mut module = ObjectModule::new(builder);
+    // Declare every global before defining any initializer, since data
+    // relocations may reference a later-defined variable.
     let mut declared = HashMap::new();
     for g in globals {
         let id = module.declare_data(&g.name,g.linkage,true,false)
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
-        if g.linkage != Linkage::Import {
-            let mut data = cranelift_module::DataDescription::new();
-            data.set_align(g.alignment);
-            if let Some(bytes) = &g.initializer {
-                data.define(bytes.clone().into_boxed_slice());
-            } else {
-                data.define_zeroinit(g.storage_bytes);
-            }
-            module.define_data(id,&data)
-                .map_err(|e| CodegenError::Backend(e.to_string()))?;
-        }
         if declared.insert(g.symbol,(id,g.ty)).is_some() {
             return Err(invalid("duplicate global identity"));
         }
+    }
+    for g in globals {
+        if g.linkage == Linkage::Import {continue;}
+        let id = declared.get(&g.symbol).ok_or_else(||invalid("missing global identity"))?.0;
+        let mut data = cranelift_module::DataDescription::new();
+        data.set_align(g.alignment);
+        if let Some(bytes) = &g.initializer {
+            data.define(bytes.clone().into_boxed_slice());
+        } else {
+            data.define_zeroinit(g.storage_bytes);
+        }
+        for &(offset,target,addend) in &g.relocations {
+            if offset>u32::MAX as usize {
+                return Err(invalid("aggregate relocation offset exceeds ELF bound"));
+            }
+            let target_id=declared.get(&target)
+                .ok_or_else(||invalid("aggregate relocation target not declared"))?.0;
+            let global=module.declare_data_in_data(target_id,&mut data);
+            data.write_data_addr(offset as u32,global,addend);
+        }
+        module.define_data(id,&data)
+            .map_err(|e| CodegenError::Backend(e.to_string()))?;
     }
     // Predeclare defined and external functions before compiling any body:
     // forward references and mutual recursion use one Module symbol table.
