@@ -636,6 +636,14 @@ fn checked_record_fields<'a>(
             return Err(invalid("record bitfield layout unsupported"));
         }
         let width = byte_size(il, field.ty)?;
+        // A record containing a nested aggregate cannot be validated by this
+        // scalar-field-only inventory until its complete native layout is known.
+        let field_type = canonical_abi_type(il, field.ty)?;
+        let kind = il.types.iter().find(|t| t.id == field_type)
+            .ok_or_else(|| invalid("record field type missing"))?.kind;
+        if !matches!(semantic(4, kind), 1 | 5) {
+            return Err(invalid("nested aggregate record field layout unsupported"));
+        }
         let end = field.byte_offset.checked_add(width)
             .ok_or_else(|| invalid("record field offset overflows"))?;
         if field.byte_offset < previous_end {
