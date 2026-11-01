@@ -1,6 +1,6 @@
 //! System V AMD64 C ABI subset. No AArch64 ABI rules belong here.
 use super::*;
-pub(super) struct SysV;
+pub(in crate::codegen) struct SysV;
 
 type Value = cranelift_codegen::ir::Value;
 
