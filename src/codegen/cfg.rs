@@ -333,7 +333,7 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         },
         Expr::LoadAddress(_,a) => check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::PointerOffset(a,b,_) => {
+        Expr::CopyStruct(_,a,b) | Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
         }
@@ -649,6 +649,24 @@ fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
     }
     Ok(layout.alignment)
 }
+/// Reject qualified and reference types until volatile/atomic/reference
+/// memory semantics are implemented (M12). Qualifiers may hide in typerefs.
+fn check_plain_storage_type(il:&Il,ty:crate::TypeId)->Result<(),CodegenError> {
+    let mut current=ty;
+    for _ in 0..=il.types.len() {
+        if let Some(detail)=il.type_details.iter().find(|d|d.owner==current) {
+            if detail.is_reference || detail.is_rvalue_reference ||
+                detail.qualifiers.unwrap_or(0)!=0 {
+                return Err(invalid("qualified/reference aggregate field unsupported"));
+            }
+        }
+        let def=il.types.iter().find(|t|t.id==current)
+            .ok_or_else(||invalid("missing aggregate field type"))?;
+        if semantic(4,def.kind)!=3 {return Ok(());}
+        current=def.related.ok_or_else(||invalid("unresolved aggregate field typeref"))?;
+    }
+    Err(invalid("cyclic aggregate field typeref"))
+}
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
 fn checked_record_fields<'a>(
@@ -681,6 +699,7 @@ fn checked_record_fields<'a>(
         if field.bit_width != 0 || field.bit_offset != 0 {
             return Err(invalid("record bitfield layout unsupported"));
         }
+        check_plain_storage_type(il,field.ty)?;
         let width = byte_size(il, field.ty)?;
         // A record containing a nested aggregate cannot be validated by this
         // scalar-field-only inventory until its complete native layout is known.
@@ -793,6 +812,7 @@ fn lower_address(
                     let fields=checked_record_fields(il,owner)?;
                     let field=fields.into_iter().find(|f|f.symbol==symbol)
                         .ok_or_else(||invalid("field does not belong to selected struct"))?;
+                    check_plain_storage_type(il,expression_type_id(graph,id)?)?;
                     if canonical_abi_type(il,field.ty)? !=
                         canonical_abi_type(il,expression_type_id(graph,id)?)? {
                         return Err(invalid("field reference type disagrees with EDG record layout"));
@@ -916,6 +936,34 @@ fn lower_c_expression(
             args.push(lower_c_expression(graph,operand,params,locals,il)?);
         }
         return Ok(Expr::Call(symbol,decl.abi,args));
+    }
+    // C struct assignment is an aggregate operation, not an I64 expression.
+    // Only a standalone assignment statement is supported at this stage:
+    // using its aggregate value in another expression needs value-category IR.
+    if semantic(2,node.data.kind)==3 &&
+        node.data.operator.is_some_and(|op|semantic(3,op)==18) &&
+        node.operands.len()==2 {
+        let ty=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+        if il.types.iter().any(|def|def.id==ty && semantic(4,def.kind)==7) {
+            if node.data.parent.is_some() {
+                return Err(invalid("aggregate assignment value use unsupported"));
+            }
+            for &operand in &node.operands {
+                if canonical_abi_type(il,expression_type_id(graph,operand)?)?!=ty {
+                    return Err(invalid("struct copy operands have different types"));
+                }
+            }
+            check_plain_storage_type(il,expression_type_id(graph,id)?)?;
+            let mut layout=Vec::new();
+            for field in checked_record_fields(il,ty)? {
+                let offset=i64::try_from(field.byte_offset)
+                    .map_err(|_|invalid("struct copy field offset overflow"))?;
+                layout.push((call_type_abi(il,field.ty)?,offset));
+            }
+            let dst=lower_address(graph,node.operands[0],params,locals,il)?;
+            let src=lower_address(graph,node.operands[1],params,locals,il)?;
+            return Ok(Expr::CopyStruct(layout,Box::new(dst),Box::new(src)));
+        }
     }
     let output = integer_expression_type(il, graph, id)?;
     let wrap = |e| Expr::Normalize(output, Box::new(e));
@@ -1337,6 +1385,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(result,found);
         },
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::CopyStruct(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
         Expr::BitXor(a,b) | Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
@@ -1483,6 +1532,23 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::CopyStruct(fields,destination,source) => {
+            let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
+            let src=emit_expr(source,fb,params,vars,globals,stack,local_types,calls)?;
+            // Materialize all source field values before writing anything.
+            // This also handles identical or overlapping source/destination
+            // without assuming C struct padding bytes are observable values.
+            let mut values=Vec::with_capacity(fields.len());
+            for &(ty,offset) in fields {
+                let addr=if offset==0 {src} else {fb.ins().iadd_imm(src,offset)};
+                values.push(super::memory::load_integer(fb,addr,ty));
+            }
+            for (&(ty,offset),value) in fields.iter().zip(values) {
+                let addr=if offset==0 {dst} else {fb.ins().iadd_imm(dst,offset)};
+                super::memory::store_integer(fb,addr,value,ty);
+            }
+            dst
         }
         Expr::CompoundAddress(ty,compute_ty,op,pointer,rhs) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
