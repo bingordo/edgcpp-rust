@@ -266,3 +266,32 @@ long m8_runtime_braced(long input)
     struct M8RuntimePair value = { (int)input, input + 9 };
     return value.first + value.second;
 }
+
+/* Nonconstant C aggregate initializers: side effects and element order must
+ * match GCC, not a precomputed constant image. */
+long m8_dynamic_array(long n)
+{
+    long values[4] = { [0] = n, [2] = n + 3, [3] = n * 2 };
+    return values[0] + values[1] + values[2] + values[3];
+}
+long m8_dynamic_struct(long n)
+{
+    struct M8Pair value = { .second = n + 3, .first = (int)(n - 2) };
+    return value.first + value.second;
+}
+long m8_dynamic_nested(long n)
+{
+    struct M8Nested value = {
+        .inner = { .first = (int)n, .second = n + 1 },
+        .values = { [2] = (unsigned short)(n + 4) },
+        .tail = n * 5
+    };
+    return value.inner.first + value.inner.second +
+           value.values[0] + value.values[1] + value.values[2] +
+           value.tail;
+}
+long m8_dynamic_union(long n)
+{
+    union M8Union u = { .second = n * 7 };
+    return u.second;
+}
