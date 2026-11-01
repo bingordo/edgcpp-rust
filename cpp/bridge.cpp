@@ -13,6 +13,7 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1074,6 +1075,22 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           if (aggregate_initializer_image(init->variant.constant.ptr, ty, hex)) {
             emit_record(50, {txt(function), txt(path), num(variable_symbol),
                              num(emit_type(ty, 0)), txt(hex)});
+          } else if (function == "m8_initialized_local_array") {
+            a_constant_ptr root = init->variant.constant.ptr;
+            std::fprintf(stderr, "M8 inspect root=%u type=%u size=%llu\\n",
+                static_cast<unsigned>(root->kind),
+                static_cast<unsigned>(ty->kind),
+                static_cast<unsigned long long>(ty->size));
+            if (root->kind == ck_aggregate) {
+              a_constant_ptr child=root->variant.aggregate.first_constant;
+              for (unsigned k=0; child!=nullptr && k<30; child=child->next,++k) {
+                std::fprintf(stderr,"M8 inspect child=%u kind=%u type=%u repeats=%llu\\n",
+                    k,static_cast<unsigned>(child->kind),
+                    static_cast<unsigned>(child->type!=nullptr?child->type->kind:0),
+                    static_cast<unsigned long long>(child->kind==ck_init_repeat?
+                        child->variant.init_repeat.count:0));
+              }
+            }
           }
         }
       }
