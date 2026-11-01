@@ -273,7 +273,7 @@ fn emit_expr(
 pub fn emit_object(functions: &[Function]) -> Result<Vec<u8>, CodegenError> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| CodegenError::Backend(e.to_string()))?;
-    let isa_builder = cranelift_codegen::isa::lookup_by_name("x86_64")
+    let isa_builder = cranelift_codegen::isa::lookup_by_name(target::ABI.isa_name())
         .map_err(|e| CodegenError::UnsupportedTarget(e.to_string()))?;
     let isa = isa_builder.finish(settings::Flags::new(flags))
         .map_err(|e| CodegenError::UnsupportedTarget(e.to_string()))?;
@@ -691,103 +691,14 @@ struct CAbi {
     aggregate_result: Option<u8>,
 }
 impl CAbi {
-    /// Cranelift needs one formal parameter per physical SysV GPR, not per
-    /// source-level aggregate parameter.
+    // Temporary forwarding wrappers keep the existing lowering stable while
+    // all physical calling-convention rules move into a target implementation.
     fn machine_parameters(&self) -> Vec<CAbiInt> {
-        let mut params = Vec::new();
-        for (ty, aggregate) in self.parameters.iter().zip(&self.aggregate_parameters) {
-            params.push(*ty);
-            if aggregate.is_some_and(|bytes| bytes > 8) {
-                params.push(CAbiInt { bits:64, signed:false, is_bool:false });
-            }
-        }
-        params
+        target::ABI.machine_parameters(self)
     }
-    /// SysV sends a whole two-eightbyte argument to the stack if fewer than
-    /// two GPRs remain. Do not let Cranelift split the halves between a GPR
-    /// and stack, or reinterpret whole-object stack argument layouts.
     fn validate_register_budget(&self) -> Result<(), CodegenError> {
-        let mut consumed = 0usize;
-        for aggregate in &self.aggregate_parameters {
-            let registers = if aggregate.is_some_and(|bytes| bytes > 8) {2} else {1};
-            if registers == 2 && consumed > 4 {
-                return Err(CodegenError::InvalidFunction(
-                    "two-GPR aggregate with exhausted SysV registers unsupported".into()));
-            }
-            consumed += registers;
-        }
-        Ok(())
+        target::ABI.validate_register_budget(self)
     }
-}
-/// Conservative SysV AMD64 INTEGER-class classification. Plain, naturally
-/// aligned C structs of at most two eightbytes can use GPR arguments.
-/// Floating, packed, nested, bitfield, union and MEMORY cases fail closed.
-/// Two-GPR results remain deliberately unsupported until multi-value return
-/// lowering is implemented and GCC-differential-tested.
-fn sysv_integer_aggregate(
-    il:&Il, ty:crate::TypeId,
-) ->Result<Option<u8>,CodegenError> {
-    let ty=canonical_abi_type(il,ty)?;
-    let Some(def)=il.types.iter().find(|t|t.id==ty) else {
-        return Err(CodegenError::InvalidFunction("missing aggregate ABI type".into()));
-    };
-    if semantic(4,def.kind)!=7 {return Ok(None);}
-    let Some(size)=il.type_object_sizes.iter().find(|t|t.owner==ty) else {
-        return Err(CodegenError::InvalidFunction("missing native aggregate size/alignment".into()));
-    };
-    if size.bytes==0 || size.bytes>16 || size.alignment==0 ||
-       !size.alignment.is_power_of_two() || size.alignment>8 {
-        return Err(CodegenError::InvalidFunction(
-            "unsupported SysV aggregate width/alignment".into()));
-    }
-    let mut fields:Vec<_>=il.record_fields.iter().filter(|f|f.owner==ty).collect();
-    fields.sort_by_key(|f|f.position);
-    if fields.is_empty(){return Err(CodegenError::InvalidFunction(
-        "empty aggregate ABI unsupported".into()));}
-    let mut end=0u64;
-    let mut max_align=1u64;
-    for (i,field) in fields.iter().enumerate() {
-        if field.position!=i as u32 || field.name.is_empty() ||
-            field.bit_width!=0 || field.bit_offset!=0 {
-            return Err(CodegenError::InvalidFunction(
-                "bitfield/anonymous aggregate ABI unsupported".into()));
-        }
-        let ty=canonical_abi_type(il,field.ty)?;
-        let def=il.types.iter().find(|t|t.id==ty).ok_or_else(||
-            CodegenError::InvalidFunction("aggregate field missing type".into()))?;
-        let width=match semantic(4,def.kind) {
-            1 => {
-                let info=il.c_integer_types.iter().find(|t|t.id==ty)
-                    .ok_or_else(||CodegenError::InvalidFunction(
-                        "aggregate integer field lacks width".into()))?;
-                if !matches!(info.bits,8|16|32|64) {
-                    return Err(CodegenError::InvalidFunction(
-                        "unsupported aggregate integer width".into()));
-                }
-                u64::from(info.bits/8)
-            }
-            5 => 8,
-            _ => return Err(CodegenError::InvalidFunction(
-                "non-INTEGER SysV aggregate member unsupported".into())),
-        };
-        if field.byte_offset%width!=0 || field.byte_offset<end {
-            return Err(CodegenError::InvalidFunction(
-                "unaligned/overlapping aggregate ABI member".into()));
-        }
-        max_align=max_align.max(width);
-        end=field.byte_offset.checked_add(width)
-            .ok_or_else(||CodegenError::InvalidFunction(
-                "aggregate field offset overflow".into()))?;
-        if end>size.bytes {
-            return Err(CodegenError::InvalidFunction(
-                "aggregate member exceeds native size".into()));
-        }
-    }
-    if size.alignment!=max_align || size.bytes%size.alignment!=0 {
-        return Err(CodegenError::InvalidFunction(
-            "aggregate ABI native alignment mismatch".into()));
-    }
-    Ok(Some(size.bytes as u8))
 }
 fn cfg_routine_abi(
     il: &Il, name: &str, routine: crate::SymbolId,
@@ -823,10 +734,8 @@ fn cfg_routine_abi(
     };
     let return_ty = canonical_abi_type(il,
         def.related.ok_or_else(|| error("missing return type"))?)?;
-    let aggregate_result=sysv_integer_aggregate(il,return_ty)?;
-    if aggregate_result.is_some_and(|bytes| bytes > 8) {
-        return Err(error("two-GPR aggregate returns not yet supported"));
-    }
+    let aggregate_result=target::ABI.classify_aggregate(il,return_ty)?;
+    target::ABI.validate_aggregate_return(aggregate_result)?;
     let result = if il.types.iter().any(|t|
         t.id == return_ty && semantic(4, t.kind) == 4) {
         None
@@ -851,7 +760,7 @@ fn cfg_routine_abi(
         let a = canonical_abi_type(il, decl.ty)?;
         let b = canonical_abi_type(il, param.ty)?;
         if a != b { return Err(error("declared/defined parameter types disagree")); }
-        let aggregate=sysv_integer_aggregate(il,a)?;
+        let aggregate=target::ABI.classify_aggregate(il,a)?;
         args.push(if aggregate.is_some() {
             CAbiInt{bits:64,signed:false,is_bool:false}
         } else {type_of(a)?});
@@ -1084,6 +993,8 @@ mod tests {
 }
 
 // Structured blocks/loops use their own SSA-generating backend.
+mod target;
+use target::TargetAbi;
 mod cfg;
 mod memory;
 pub use memory::external_u32_increment_object;
