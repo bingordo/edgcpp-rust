@@ -29,6 +29,8 @@ pub enum Expr {
     AddressLocal(usize),
     LoadAddress(CAbiInt, Box<Expr>),
     StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
+    /// Pack up to eight native bytes into one SysV INTEGER-class GPR.
+    PackAggregate(u8, Box<Expr>),
     /// Typed native C bitfield access. Only exact overlapping bits are
     /// modified, and no adjacent byte outside the field is touched.
     LoadBitField(BitFieldLayout, Box<Expr>),
@@ -183,6 +185,7 @@ fn emit_expr(
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
+        Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
@@ -449,7 +452,7 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::IntegerBinary(_, a, b) =>
             contains_local_write(a) || contains_local_write(b),
         Expr::Normalize(_, a) | Expr::LoadAddress(_,a) |
-        Expr::LoadBitField(_,a) => contains_local_write(a),
+        Expr::PackAggregate(_,a) | Expr::LoadBitField(_,a) => contains_local_write(a),
         Expr::PointerOffset(a,b,_) => contains_local_write(a) || contains_local_write(b),
         Expr::Neg(a) => contains_local_write(a),
         Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) |
