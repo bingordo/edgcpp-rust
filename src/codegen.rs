@@ -685,17 +685,46 @@ impl CAbiInt {
 struct CAbi {
     parameters: Vec<CAbiInt>,
     result: Option<CAbiInt>,
-    /// One INTEGER-class SysV eightbyte per supported plain C struct.
-    /// None means the corresponding slot is an ordinary scalar.
+    /// Native object byte lengths for INTEGER-class struct arguments.
+    /// A 9–16 byte struct occupies two GPRs; returns still require one.
     aggregate_parameters: Vec<Option<u8>>,
     aggregate_result: Option<u8>,
 }
-/// Conservative SysV AMD64 INTEGER-class classification. A plain struct
-/// occupying a single eightbyte is passed/returned in one GPR, provided
-/// every field is naturally aligned and itself an integer or data pointer.
-/// Reject floating-point, two-eightbyte, packed, nested, bitfield, union,
-/// and memory-class aggregates rather than guessing their ABI.
-fn sysv_one_integer_aggregate(
+impl CAbi {
+    /// Cranelift needs one formal parameter per physical SysV GPR, not per
+    /// source-level aggregate parameter.
+    fn machine_parameters(&self) -> Vec<CAbiInt> {
+        let mut params = Vec::new();
+        for (ty, aggregate) in self.parameters.iter().zip(&self.aggregate_parameters) {
+            params.push(*ty);
+            if aggregate.is_some_and(|bytes| bytes > 8) {
+                params.push(CAbiInt { bits:64, signed:false, is_bool:false });
+            }
+        }
+        params
+    }
+    /// SysV sends a whole two-eightbyte argument to the stack if fewer than
+    /// two GPRs remain. Do not let Cranelift split the halves between a GPR
+    /// and stack, or reinterpret whole-object stack argument layouts.
+    fn validate_register_budget(&self) -> Result<(), CodegenError> {
+        let mut consumed = 0usize;
+        for aggregate in &self.aggregate_parameters {
+            let registers = if aggregate.is_some_and(|bytes| bytes > 8) {2} else {1};
+            if registers == 2 && consumed > 4 {
+                return Err(CodegenError::InvalidFunction(
+                    "two-GPR aggregate with exhausted SysV registers unsupported".into()));
+            }
+            consumed += registers;
+        }
+        Ok(())
+    }
+}
+/// Conservative SysV AMD64 INTEGER-class classification. Plain, naturally
+/// aligned C structs of at most two eightbytes can use GPR arguments.
+/// Floating, packed, nested, bitfield, union and MEMORY cases fail closed.
+/// Two-GPR results remain deliberately unsupported until multi-value return
+/// lowering is implemented and GCC-differential-tested.
+fn sysv_integer_aggregate(
     il:&Il, ty:crate::TypeId,
 ) ->Result<Option<u8>,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
@@ -706,7 +735,7 @@ fn sysv_one_integer_aggregate(
     let Some(size)=il.type_object_sizes.iter().find(|t|t.owner==ty) else {
         return Err(CodegenError::InvalidFunction("missing native aggregate size/alignment".into()));
     };
-    if size.bytes==0 || size.bytes>8 || size.alignment==0 ||
+    if size.bytes==0 || size.bytes>16 || size.alignment==0 ||
        !size.alignment.is_power_of_two() || size.alignment>8 {
         return Err(CodegenError::InvalidFunction(
             "unsupported SysV aggregate width/alignment".into()));
@@ -794,7 +823,10 @@ fn cfg_routine_abi(
     };
     let return_ty = canonical_abi_type(il,
         def.related.ok_or_else(|| error("missing return type"))?)?;
-    let aggregate_result=sysv_one_integer_aggregate(il,return_ty)?;
+    let aggregate_result=sysv_integer_aggregate(il,return_ty)?;
+    if aggregate_result.is_some_and(|bytes| bytes > 8) {
+        return Err(error("two-GPR aggregate returns not yet supported"));
+    }
     let result = if il.types.iter().any(|t|
         t.id == return_ty && semantic(4, t.kind) == 4) {
         None
@@ -819,13 +851,15 @@ fn cfg_routine_abi(
         let a = canonical_abi_type(il, decl.ty)?;
         let b = canonical_abi_type(il, param.ty)?;
         if a != b { return Err(error("declared/defined parameter types disagree")); }
-        let aggregate=sysv_one_integer_aggregate(il,a)?;
+        let aggregate=sysv_integer_aggregate(il,a)?;
         args.push(if aggregate.is_some() {
             CAbiInt{bits:64,signed:false,is_bool:false}
         } else {type_of(a)?});
         aggregate_parameters.push(aggregate);
     }
-    Ok(CAbi { parameters: args, result,aggregate_parameters,aggregate_result })
+    let abi=CAbi { parameters: args, result,aggregate_parameters,aggregate_result };
+    abi.validate_register_budget()?;
+    Ok(abi)
 }
 
 /// All accepted functions must have an exact, nonvariadic signed-i64 signature.
