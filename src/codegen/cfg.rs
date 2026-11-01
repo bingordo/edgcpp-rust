@@ -755,48 +755,68 @@ fn checked_record_fields_depth<'a>(
     if native_size % native_alignment != 0 {
         return Err(invalid("record size is not a multiple of native alignment"));
     }
-    let mut previous_end = 0u64;
+    let mut previous_end_bit = 0u64;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
             return Err(invalid("record field positions are not contiguous"));
         }
-        if field.bit_width != 0 || field.bit_offset != 0 {
-            return Err(invalid("record bitfield layout unsupported"));
-        }
         check_plain_storage_type(il,field.ty)?;
-        let width = byte_size_depth(il, field.ty, depth+1)?;
-        // Fixed-size arrays and ordinary nested C structs use native EDG
-        // layout, with recursive validation before field offsets are trusted.
-        // Unions, classes, bitfields and incomplete arrays remain unsupported.
-        let field_type = canonical_abi_type(il, field.ty)?;
-        let def = il.types.iter().find(|t| t.id == field_type)
-            .ok_or_else(|| invalid("record field type missing"))?;
-        let field_kind = semantic(4, def.kind);
-        if !matches!(field_kind,1|5|6|7|9) {
-            return Err(invalid("unsupported record field kind"));
-        }
-        let end = field.byte_offset.checked_add(width)
-            .ok_or_else(|| invalid("record field offset overflows"))?;
+        let field_type=canonical_abi_type(il,field.ty)?;
+        let def=il.types.iter().find(|t|t.id==field_type)
+            .ok_or_else(||invalid("record field type missing"))?;
+        let field_kind=semantic(4,def.kind);
+        let is_bitfield=field.bit_width!=0 || field.bit_offset!=0;
+        let (end,bit_start,bit_end)=if is_bitfield {
+            if field_kind!=1 {
+                return Err(invalid("bitfield must have an integer type"));
+            }
+            let info=il.c_integer_types.iter().find(|t|t.id==field_type)
+                .ok_or_else(||invalid("bitfield lacks EDG integer type"))?;
+            if !matches!(info.bits,8|16|32|64) ||
+                field.bit_width==0 || field.bit_width>u32::from(info.bits) ||
+                field.bit_offset>=8 || field.bit_offset+field.bit_width>64 {
+                return Err(invalid("unsupported native bitfield width/position"));
+            }
+            let byte_count=u64::from((field.bit_offset+field.bit_width).div_ceil(8));
+            let end=field.byte_offset.checked_add(byte_count)
+                .ok_or_else(||invalid("bitfield byte range overflows"))?;
+            let bit_start=field.byte_offset.checked_mul(8)
+                .and_then(|n|n.checked_add(u64::from(field.bit_offset)))
+                .ok_or_else(||invalid("bitfield bit offset overflows"))?;
+            let bit_end=bit_start.checked_add(u64::from(field.bit_width))
+                .ok_or_else(||invalid("bitfield bit extent overflows"))?;
+            (end,bit_start,bit_end)
+        } else {
+            if !matches!(field_kind,1|5|6|7|9) {
+                return Err(invalid("unsupported record field kind"));
+            }
+            let width=byte_size_depth(il,field.ty,depth+1)?;
+            let end=field.byte_offset.checked_add(width)
+                .ok_or_else(||invalid("record field offset overflows"))?;
+            let start_bit=field.byte_offset.checked_mul(8)
+                .ok_or_else(||invalid("record bit position overflows"))?;
+            let end_bit=end.checked_mul(8)
+                .ok_or_else(||invalid("record bit extent overflows"))?;
+            (end,start_bit,end_bit)
+        };
         if is_union {
-            // C unions overlay members at offset zero, unlike structs.
-            // Reject exotic union layouts until explicitly modeled.
+            // C unions share offset zero, including native bitfield members.
             if field.byte_offset!=0 {
                 return Err(invalid("nonzero union member offset unsupported"));
             }
         } else {
-            if field.byte_offset < previous_end {
+            if bit_start<previous_end_bit {
                 return Err(invalid("record fields overlap outside union"));
             }
-            previous_end = end;
+            previous_end_bit=bit_end;
         }
-        if end > native_size {
+        if end>native_size || end>16*1024*1024 {
             return Err(invalid("record field exceeds native EDG object size"));
         }
-        if end > 16 * 1024 * 1024 {
-            return Err(invalid("record field exceeds maximum supported object size"));
-        }
         if field.name.is_empty() {
-            return Err(invalid("unnamed record field requires explicit layout handling"));
+            // Anonymous and zero-width barriers need an explicit wire marker.
+            // Keep them unsupported instead of guessing which layout was used.
+            return Err(invalid("anonymous/unnamed bitfield layout unsupported"));
         }
     }
     Ok(fields)
