@@ -37,6 +37,18 @@ struct M8TaggedUnion { int tag; union M8Union data; };
 extern struct M8TaggedUnion m8_tagged_union;
 extern long m8_union_nested(long);
 
+extern long m8_initialized_local_pair(void);
+extern long m8_initialized_partial_pair(void);
+extern long m8_initialized_designated_pair(void);
+extern long m8_initialized_local_array(void);
+extern long m8_initialized_nested(void);
+extern long m8_initialized_union(void);
+extern long m8_initialized_global_sum(void);
+extern struct M8Pair m8_static_pair;
+extern unsigned short m8_static_vector[5];
+extern struct M8WithArray m8_static_nested;
+extern union M8Union m8_static_union;
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -95,5 +107,15 @@ int main(void)
            sizeof(struct M8TaggedUnion),
            _Alignof(struct M8TaggedUnion),
            offsetof(struct M8TaggedUnion, data));
+    printf("%ld %ld %ld %ld %ld %ld %ld\\n",
+           m8_initialized_local_pair(), m8_initialized_partial_pair(),
+           m8_initialized_designated_pair(), m8_initialized_local_array(),
+           m8_initialized_nested(), m8_initialized_union(),
+           m8_initialized_global_sum());
+    printf("%d %ld %hu %hu %hu %hu %ld %ld\\n",
+           m8_static_pair.first, m8_static_pair.second,
+           m8_static_vector[0], m8_static_vector[3],
+           m8_static_nested.values[0], m8_static_nested.values[2],
+           m8_static_nested.marker, m8_static_union.second);
     return 0;
 }
