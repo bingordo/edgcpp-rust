@@ -28,6 +28,8 @@ struct Routine {
     local_types: Option<Vec<CAbiInt>>,
     /// Exact storage sizes for address-taken locals and local arrays.
     local_storage: Option<Vec<u32>>,
+    /// Cranelift stack-slot alignment shifts, one per local/parameter.
+    local_alignments: Option<Vec<u8>>,
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
@@ -632,6 +634,20 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
         }
         _ => Err(invalid("unsupported aggregate/element size")),
     }
+}
+/// Resolve an object's native EDG alignment before exposing its address to
+/// Cranelift or the ELF linker. Under-aligned storage is not a valid C object.
+fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    let size=byte_size(il,ty)?;
+    let layout=il.type_object_sizes.iter().find(|item|item.owner==ty)
+        .ok_or_else(||invalid("object missing native EDG size/alignment"))?;
+    if layout.bytes!=size || layout.alignment==0 ||
+        !layout.alignment.is_power_of_two() ||
+        layout.alignment>16*1024*1024 || size%layout.alignment!=0 {
+        return Err(invalid("object size/alignment disagrees with native EDG layout"));
+    }
+    Ok(layout.alignment)
 }
 /// Validate the EDG field offsets before any record lvalue is emitted.
 /// This deliberately does not infer padding, total size, or union layout.
@@ -1289,6 +1305,11 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             u32::try_from(bytes).map_err(|_|invalid("oversized local storage"))
         }).collect::<Result<Vec<_>,_>>()?;
         local_storage.extend(abi.parameters.iter().map(|t|u32::from(t.bits/8)));
+        let mut local_alignments=locals.iter().map(|v|
+            storage_alignment(il,v.ty).map(|a|a.trailing_zeros() as u8))
+            .collect::<Result<Vec<_>,_>>()?;
+        local_alignments.extend(abi.parameters.iter()
+            .map(|ty| u32::from(ty.bits/8).trailing_zeros() as u8));
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
         let initialized: HashSet<usize> =
@@ -1300,7 +1321,8 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         }
         out.push(Routine { name: name.clone(), parameters: ids.len(),
             locals: locals.len(), body, abi: Some(abi),
-            local_types: Some(local_types),local_storage:Some(local_storage) });
+            local_types: Some(local_types),local_storage:Some(local_storage),
+            local_alignments:Some(local_alignments) });
     }
     Ok(out)
 }
@@ -1808,6 +1830,7 @@ struct ScalarGlobal {
     linkage: Linkage,
     initializer: Option<Vec<u8>>,
     storage_bytes: usize,
+    alignment: u64,
 }
 
 /// Resolve only referenced C globals. Unused declarations of unrelated
@@ -1822,6 +1845,9 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
         if !il.global_variables.iter().any(|g|g.symbol==id) ||
            !seen.insert(id) {continue;}
         let (name,scalar) = global_value_type(il,id)?;
+        let declared=il.symbol_types.iter().find(|t|t.symbol==id)
+            .ok_or_else(||invalid("global missing declared type"))?.ty;
+        let alignment=storage_alignment(il,declared)?;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
         let storage_bytes=if scalar.is_some() {
             let bytes = usize::from(ty.bits / 8);
@@ -1848,7 +1874,9 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             let bytes = entry.value.to_le_bytes();
             Some(bytes[..(ty.bits/8) as usize].to_vec())
         } else { None };
-        result.push(ScalarGlobal { symbol:id,name,ty,linkage,initializer,storage_bytes });
+        result.push(ScalarGlobal {
+            symbol:id,name,ty,linkage,initializer,storage_bytes,alignment
+        });
     }
     Ok(result)
 }
@@ -1874,6 +1902,7 @@ fn emit_routines_with_globals(
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
         if g.linkage != Linkage::Import {
             let mut data = cranelift_module::DataDescription::new();
+            data.set_align(g.alignment);
             if let Some(bytes) = &g.initializer {
                 data.define(bytes.clone().into_boxed_slice());
             } else {
@@ -1983,11 +2012,16 @@ fn emit_routines_with_globals(
             if storage.len()!=local_types.len() {
                 return Err(invalid("stack storage/type count mismatch"));
             }
+            let alignments=func.local_alignments.clone()
+                .unwrap_or_else(||vec![0;local_types.len()]);
+            if alignments.len()!=storage.len() {
+                return Err(invalid("stack alignment/type count mismatch"));
+            }
             let mut stack=HashMap::new();
             for index in addressed {
                 let bytes=*storage.get(index).ok_or_else(||invalid("invalid stack local"))?;
                 let slot=fb.create_sized_stack_slot(
-                    StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,0));
+                    StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,alignments[index]));
                 stack.insert(index,slot);
             }
             if func.abi.is_some() {
@@ -2041,7 +2075,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -2066,7 +2100,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -2093,7 +2127,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
