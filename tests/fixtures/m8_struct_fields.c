@@ -29,3 +29,21 @@ long m8_global_update(long n)
     m8_global.second = n + 10;
     return m8_global.first + m8_global.second;
 }
+
+/* C struct assignments copy values, including when accessed by pointers. */
+long m8_copy_local(long n)
+{
+    struct M8Pair original, duplicate;
+    original.first = (int)n;
+    original.second = n + 25;
+    duplicate = original;
+    original.first = 0;
+    original.second = 0;
+    return duplicate.second + duplicate.first;
+}
+
+long m8_copy_pointer(struct M8Pair *dst, struct M8Pair *src)
+{
+    *dst = *src;
+    return dst->second - dst->first;
+}
