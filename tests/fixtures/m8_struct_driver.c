@@ -112,6 +112,23 @@ extern struct M8AbiMixed m8_abi_return_mixed(unsigned char,int);
 extern struct M8AbiTiny m8_abi_return_tiny(unsigned char);
 extern struct M8AbiPair m8_abi_roundtrip_pair(struct M8AbiPair);
 
+/* GCC-side callbacks make the generated object a genuine ABI caller. */
+long gcc_m8_abi_sum_pair(struct M8AbiPair value)
+{
+    return value.first * 29L - value.second * 13L;
+}
+struct M8AbiPair gcc_m8_abi_transform_pair(struct M8AbiPair value)
+{
+    struct M8AbiPair result;
+    result.first = value.second + 12;
+    result.second = value.first - 19;
+    return result;
+}
+extern long m8_abi_internal_call_pair(struct M8AbiPair);
+extern long m8_abi_external_call_pair(struct M8AbiPair);
+extern struct M8AbiPair m8_abi_external_return_pair(struct M8AbiPair);
+extern long m8_abi_mixed_call(int,struct M8AbiMixed);
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -254,5 +271,12 @@ int main(void)
            returned_mixed.tag, returned_mixed.amount,
            returned_tiny.value,
            roundtrip.first, roundtrip.second);
+    struct M8AbiPair callback_result =
+        m8_abi_external_return_pair(small_pair);
+    printf("%ld %ld %ld %d %d\\n",
+           m8_abi_internal_call_pair(small_pair),
+           m8_abi_external_call_pair(small_pair),
+           m8_abi_mixed_call(7, small_mixed),
+           callback_result.first, callback_result.second);
     return 0;
 }
