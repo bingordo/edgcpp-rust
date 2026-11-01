@@ -1217,8 +1217,7 @@ fn lower_c_expression(
                 let address=lower_address(graph,operand,params,locals,il)?;
                 // A two-register argument is packed from this address once
                 // in emit_expr::Call, preserving side effects in the lvalue.
-                args.push(if *size > 8 { address }
-                    else { Expr::PackAggregate(*size,Box::new(address)) });
+                args.push(target::ABI.lower_aggregate_argument(*size,address));
             } else {
                 args.push(lower_c_expression(graph,operand,params,locals,il)?);
             }
@@ -1845,26 +1844,6 @@ fn compound_value(
             else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
     }
 }
-/// Read no byte beyond the native object size. Each eightbyte is packed
-/// little-endian for the SysV INTEGER-class argument registers.
-fn pack_native_bytes(
-    fb: &mut FunctionBuilder<'_>, address: cranelift_codegen::ir::Value,
-    start: u8, count: u8,
-) -> cranelift_codegen::ir::Value {
-    let mut packed=fb.ins().iconst(types::I64,0);
-    for i in 0..count {
-        let offset=i64::from(start)+i64::from(i);
-        let loc=if offset==0 {address} else {fb.ins().iadd_imm(address,offset)};
-        let byte=fb.ins().load(types::I8,MemFlags::new(),loc,0);
-        let wide=fb.ins().uextend(types::I64,byte);
-        let shifted=if i==0 {wide} else {
-            let shift=fb.ins().iconst(types::I64,i64::from(i)*8);
-            fb.ins().ishl(wide,shift)
-        };
-        packed=fb.ins().bor(packed,shifted);
-    }
-    packed
-}
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value], vars: &[Variable],
@@ -1893,8 +1872,7 @@ fn emit_expr(
                 let value=emit_expr(arg,fb,params,vars,globals,stack,local_types,calls)?;
                 if let Some(bytes)=aggregate.filter(|bytes| *bytes>8) {
                     // The operand is a single evaluated lvalue address.
-                    values.push(pack_native_bytes(fb,value,0,8));
-                    values.push(pack_native_bytes(fb,value,8,bytes-8));
+                    values.extend(target::ABI.pack_argument(fb,value,bytes)?);
                 } else {
                     values.push(if ty.bits==64 {value}
                         else {fb.ins().ireduce(ty.cranelift(),value)});
@@ -1916,11 +1894,8 @@ fn emit_expr(
             super::memory::load_integer(fb,address,*ty)
         }
         Expr::PackAggregate(bytes,pointer) => {
-            if *bytes==0 || *bytes>8 {
-                return Err(invalid("invalid one-register aggregate return width"));
-            }
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
-            pack_native_bytes(fb,address,0,*bytes)
+            target::ABI.pack_result(fb,address,*bytes)?
         }
         Expr::LoadBitField(layout,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
@@ -2582,21 +2557,8 @@ fn emit_routines_with_globals(
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let machine_values=fb.block_params(entry).to_vec();
-            let mut physical=machine_values.into_iter();
-            let mut params=Vec::with_capacity(abi.parameters.len());
-            let mut second_parts=Vec::with_capacity(abi.parameters.len());
-            for (ty,aggregate) in abi.parameters.iter().zip(&abi.aggregate_parameters) {
-                let value=physical.next().ok_or_else(||invalid("missing machine argument"))?;
-                params.push(if ty.bits==64 {value}
-                    else if ty.signed {fb.ins().sextend(types::I64,value)}
-                    else {fb.ins().uextend(types::I64,value)});
-                second_parts.push(if aggregate.is_some_and(|bytes|bytes>8) {
-                    Some(physical.next().ok_or_else(||invalid("missing second aggregate GPR"))?)
-                } else {None});
-            }
-            if physical.next().is_some() {
-                return Err(invalid("extra machine arguments"));
-            }
+            let (params,second_parts)=
+                target::ABI.decode_parameters(&mut fb,&abi,&machine_values)?;
             let local_types = func.local_types.clone().unwrap_or_else(|| {
                 vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
             });
@@ -2638,25 +2600,9 @@ fn emit_routines_with_globals(
             if func.abi.is_some() {
                 for (i,value) in params.iter().enumerate() {
                     if let Some(bytes)=abi.aggregate_parameters[i] {
-                        if bytes==0 || bytes>16 {
-                            return Err(invalid("invalid SysV aggregate parameter width"));
-                        }
                         let address=local_address(&mut fb,&stack,func.locals+i)?;
-                        for offset in 0..bytes {
-                            let register=if offset < 8 {*value} else {
-                                second_parts[i].ok_or_else(||invalid("missing second aggregate GPR"))?
-                            };
-                            let shift_bytes=offset%8;
-                            let part=if shift_bytes==0 {register} else {
-                                let shift=fb.ins().iconst(types::I64,i64::from(shift_bytes)*8);
-                                fb.ins().ushr(register,shift)
-                            };
-                            let byte=fb.ins().ireduce(types::I8,part);
-                            let loc=if offset==0 {address} else {
-                                fb.ins().iadd_imm(address,i64::from(offset))
-                            };
-                            fb.ins().store(MemFlags::new(),byte,loc,0);
-                        }
+                        target::ABI.materialize_aggregate(
+                            &mut fb,address,bytes,*value,second_parts[i])?;
                     } else {
                         local_write(&mut fb,&vars,&stack,&local_types,
                             func.locals+i,*value)?;
