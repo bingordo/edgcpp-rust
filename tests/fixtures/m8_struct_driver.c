@@ -81,6 +81,16 @@ struct M8BitFields {
 extern struct M8BitFields m8_bits_global;
 extern struct M8BitFields m8_bits_array[2];
 
+extern long m8_bitfield_compound(long);
+extern long m8_bitfield_compound_global(long);
+struct M8CompoundBits {
+    unsigned int a : 4;
+    unsigned int b : 5;
+    signed int c : 6;
+    unsigned int d : 9;
+};
+extern struct M8CompoundBits m8_compound_global;
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -184,5 +194,12 @@ int main(void)
     printf("%ld %ld %ld\\n",
            m8_bitfields_global(-9), m8_bitfields_copy(-3),
            m8_bitfields_array(22));
+    printf("%ld %ld %ld %ld\\n",
+           m8_bitfield_compound(23), m8_bitfield_compound(-17),
+           m8_bitfield_compound_global(52),
+           m8_bitfield_compound_global(-9));
+    printf("%u %u %d %u\\n",
+           m8_compound_global.a, m8_compound_global.b,
+           m8_compound_global.c, m8_compound_global.d);
     return 0;
 }
