@@ -454,3 +454,46 @@ long m8_bitunion(long n)
     value.active = (unsigned int)n & 63u;
     return value.active;
 }
+
+/* Compound and prefix/postfix updates: ensure the result value, narrow
+ * signed conversion, neighboring bits and single evaluation agree with GCC. */
+struct M8CompoundBits {
+    unsigned int a : 4;
+    unsigned int b : 5;
+    signed int c : 6;
+    unsigned int d : 9;
+};
+struct M8CompoundBits m8_compound_global;
+
+long m8_bitfield_compound(long n)
+{
+    struct M8CompoundBits v;
+    v.a = 3;
+    v.b = 11;
+    v.c = -12;
+    v.d = (unsigned int)n & 127u;
+    int old_a = v.a++;
+    int new_b = ++v.b;
+    int old_c = v.c--;
+    int new_c = --v.c;
+    v.a += 4;
+    v.b /= -2; /* Narrow unsigned bitfield promotes to signed int. */
+    v.c *= 2;
+    v.d ^= 35u;
+    v.d >>= 1;
+    return old_a + new_b * 3 + old_c * 5 + new_c * 7 +
+           v.a * 11 + v.b * 13 + v.c * 17 + v.d;
+}
+long m8_bitfield_compound_global(long n)
+{
+    m8_compound_global.a = 6;
+    m8_compound_global.b = 25;
+    m8_compound_global.c = -7;
+    m8_compound_global.d = (unsigned int)n & 255u;
+    int old = m8_compound_global.b--;
+    m8_compound_global.a |= 8;
+    m8_compound_global.c += 2;
+    m8_compound_global.d &= 127u;
+    return old + m8_compound_global.a + m8_compound_global.b +
+           m8_compound_global.c + m8_compound_global.d;
+}
