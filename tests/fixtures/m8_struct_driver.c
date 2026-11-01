@@ -25,6 +25,18 @@ extern long m8_nested_self_copy(struct M8Nested *);
 extern long m8_nested_global_update(long);
 extern long m8_array_field_copy(long);
 
+union M8Union { int first; long second; unsigned short values[4]; };
+extern union M8Union m8_union_global;
+extern long m8_union_local(long);
+extern long m8_union_copy(long);
+extern long m8_union_pointer_copy(union M8Union *, union M8Union *);
+extern long m8_union_self_copy(union M8Union *);
+extern long m8_union_array(long);
+extern long m8_union_global_update(long);
+struct M8TaggedUnion { int tag; union M8Union data; };
+extern struct M8TaggedUnion m8_tagged_union;
+extern long m8_union_nested(long);
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -64,5 +76,24 @@ int main(void)
     struct M8Nested value = {{3,17}, {4,9,10}, 21};
     printf("%ld %ld %hu\\n", m8_nested_self_copy(&value),
            value.inner.second, value.values[1]);
+    printf("%zu %zu %zu %zu\\n",
+           sizeof(union M8Union), _Alignof(union M8Union),
+           offsetof(union M8Union, first), offsetof(union M8Union, second));
+    printf("%ld %ld %ld %ld\\n",
+           m8_union_local(5), m8_union_local(-4),
+           m8_union_copy(17), m8_union_array(12));
+    union M8Union src, dst;
+    src.second = 127;
+    dst.first = -1;
+    printf("%ld %ld %ld\\n",
+           m8_union_pointer_copy(&dst, &src),
+           m8_union_self_copy(&src), dst.second);
+    printf("%ld %ld %ld %ld\\n",
+           m8_union_global_update(11), m8_union_global.second,
+           m8_union_nested(13), m8_tagged_union.data.second);
+    printf("%zu %zu %zu\\n",
+           sizeof(struct M8TaggedUnion),
+           _Alignof(struct M8TaggedUnion),
+           offsetof(struct M8TaggedUnion, data));
     return 0;
 }
