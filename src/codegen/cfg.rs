@@ -333,7 +333,7 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         },
         Expr::LoadAddress(_,a) => check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::PointerOffset(a,b,_) => {
+        Expr::CopyStruct(_,a,b) | Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
         }
@@ -1385,6 +1385,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(result,found);
         },
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
+        Expr::CopyStruct(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
         Expr::BitXor(a,b) | Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
@@ -1531,6 +1532,23 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::CopyStruct(fields,destination,source) => {
+            let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
+            let src=emit_expr(source,fb,params,vars,globals,stack,local_types,calls)?;
+            // Materialize all source field values before writing anything.
+            // This also handles identical or overlapping source/destination
+            // without assuming C struct padding bytes are observable values.
+            let mut values=Vec::with_capacity(fields.len());
+            for &(ty,offset) in fields {
+                let addr=if offset==0 {src} else {fb.ins().iadd_imm(src,offset)};
+                values.push(super::memory::load_integer(fb,addr,ty));
+            }
+            for (&(ty,offset),value) in fields.iter().zip(values) {
+                let addr=if offset==0 {dst} else {fb.ins().iadd_imm(dst,offset)};
+                super::memory::store_integer(fb,addr,value,ty);
+            }
+            dst
         }
         Expr::CompoundAddress(ty,compute_ty,op,pointer,rhs) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
