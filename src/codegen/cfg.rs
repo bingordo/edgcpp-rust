@@ -177,7 +177,7 @@ fn lower(
                 return Err(invalid("return with nested statements"));
             }
             if let Some(id) = node.expression {
-                if let Some(size)=sysv_one_integer_aggregate(il,expression_type_id(graph,id)?)? {
+                if let Some(size)=sysv_integer_aggregate(il,expression_type_id(graph,id)?)? {
                     let expression=graph.expression(id)
                         .ok_or_else(||invalid("missing returned aggregate expression"))?;
                     let direct_call=graph.calls.iter().any(|site|
@@ -1148,22 +1148,25 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     let mut parameters=Vec::with_capacity(declared.len());
     let mut aggregate_parameters=Vec::with_capacity(declared.len());
     for p in declared {
-        let aggregate=sysv_one_integer_aggregate(il,p.ty)?;
+        let aggregate=sysv_integer_aggregate(il,p.ty)?;
         parameters.push(if aggregate.is_some() {
             CAbiInt{bits:64,signed:false,is_bool:false}
         } else {call_type_abi(il,p.ty)?});
         aggregate_parameters.push(aggregate);
     }
     let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
-    let aggregate_result=sysv_one_integer_aggregate(il,ret)?;
+    let aggregate_result=sysv_integer_aggregate(il,ret)?;
+    if aggregate_result.is_some_and(|bytes| bytes > 8) {
+        return Err(invalid("two-GPR aggregate returns not yet supported"));
+    }
     let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
         None
     } else if aggregate_result.is_some() {
         Some(CAbiInt{bits:64,signed:false,is_bool:false})
     } else {Some(call_type_abi(il,ret)?)};
-    Ok(CallDeclaration {symbol,name,abi:CAbi{
-        aggregate_parameters, aggregate_result,
-        parameters,result}})
+    let abi=CAbi{aggregate_parameters,aggregate_result,parameters,result};
+    abi.validate_register_budget()?;
+    Ok(CallDeclaration {symbol,name,abi})
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
@@ -1209,12 +1212,15 @@ fn lower_c_expression(
         for (&operand,aggregate) in node.operands[1..].iter()
             .zip(&decl.abi.aggregate_parameters) {
             if let Some(size)=aggregate {
-                let actual=sysv_one_integer_aggregate(il,expression_type_id(graph,operand)?)?;
+                let actual=sysv_integer_aggregate(il,expression_type_id(graph,operand)?)?;
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
                 let address=lower_address(graph,operand,params,locals,il)?;
-                args.push(Expr::PackAggregate(*size,Box::new(address)));
+                // A two-register argument is packed from this address once
+                // in emit_expr::Call, preserving side effects in the lvalue.
+                args.push(if *size > 8 { address }
+                    else { Expr::PackAggregate(*size,Box::new(address)) });
             } else {
                 args.push(lower_c_expression(graph,operand,params,locals,il)?);
             }
@@ -1841,6 +1847,26 @@ fn compound_value(
             else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
     }
 }
+/// Read no byte beyond the native object size. Each eightbyte is packed
+/// little-endian for the SysV INTEGER-class argument registers.
+fn pack_native_bytes(
+    fb: &mut FunctionBuilder<'_>, address: cranelift_codegen::ir::Value,
+    start: u8, count: u8,
+) -> cranelift_codegen::ir::Value {
+    let mut packed=fb.ins().iconst(types::I64,0);
+    for i in 0..count {
+        let offset=i64::from(start)+i64::from(i);
+        let loc=if offset==0 {address} else {fb.ins().iadd_imm(address,offset)};
+        let byte=fb.ins().load(types::I8,MemFlags::new(),loc,0);
+        let wide=fb.ins().uextend(types::I64,byte);
+        let shifted=if i==0 {wide} else {
+            let shift=fb.ins().iconst(types::I64,i64::from(i)*8);
+            fb.ins().ishl(wide,shift)
+        };
+        packed=fb.ins().bor(packed,shifted);
+    }
+    packed
+}
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value], vars: &[Variable],
@@ -1863,11 +1889,18 @@ fn emit_expr(
             if abi!=declared || arguments.len()!=abi.parameters.len() {
                 return Err(invalid("direct call ABI mismatch"));
             }
-            let mut values=Vec::with_capacity(arguments.len());
-            for (arg,ty) in arguments.iter().zip(&abi.parameters) {
+            let mut values=Vec::with_capacity(abi.machine_parameters().len());
+            for ((arg,ty),aggregate) in arguments.iter().zip(&abi.parameters)
+                .zip(&abi.aggregate_parameters) {
                 let value=emit_expr(arg,fb,params,vars,globals,stack,local_types,calls)?;
-                values.push(if ty.bits==64 {value}
-                    else {fb.ins().ireduce(ty.cranelift(),value)});
+                if let Some(bytes)=aggregate.filter(|bytes| *bytes>8) {
+                    // The operand is a single evaluated lvalue address.
+                    values.push(pack_native_bytes(fb,value,0,8));
+                    values.push(pack_native_bytes(fb,value,8,bytes-8));
+                } else {
+                    values.push(if ty.bits==64 {value}
+                        else {fb.ins().ireduce(ty.cranelift(),value)});
+                }
             }
             let inst=fb.ins().call(*reference,&values);
             if let Some(ty)=abi.result {
@@ -1889,20 +1922,7 @@ fn emit_expr(
                 return Err(invalid("invalid one-register aggregate return width"));
             }
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
-            let mut packed=fb.ins().iconst(types::I64,0);
-            for i in 0..*bytes {
-                let address=if i==0 {address} else {
-                    fb.ins().iadd_imm(address,i64::from(i))
-                };
-                let byte=fb.ins().load(types::I8,MemFlags::new(),address,0);
-                let wide=fb.ins().uextend(types::I64,byte);
-                let shifted=if i==0 {wide} else {
-                    let amount=fb.ins().iconst(types::I64,i64::from(i)*8);
-                    fb.ins().ishl(wide,amount)
-                };
-                packed=fb.ins().bor(packed,shifted);
-            }
-            packed
+            pack_native_bytes(fb,address,0,*bytes)
         }
         Expr::LoadBitField(layout,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
@@ -2503,7 +2523,7 @@ fn emit_routines_with_globals(
             return Err(invalid("defined function parameter count mismatch"));
         }
         let mut signature=module.make_signature();
-        for ty in &abi.parameters {signature.params.push(AbiParam::new(ty.cranelift()));}
+        for ty in abi.machine_parameters() {signature.params.push(AbiParam::new(ty.cranelift()));}
         if let Some(ty)=abi.result {signature.returns.push(AbiParam::new(ty.cranelift()));}
         let id=module.declare_function(&func.name,Linkage::Export,&signature)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
@@ -2517,7 +2537,7 @@ fn emit_routines_with_globals(
             continue;
         }
         let mut signature=module.make_signature();
-        for ty in &callee.abi.parameters {
+        for ty in callee.abi.machine_parameters() {
             signature.params.push(AbiParam::new(ty.cranelift()));
         }
         if let Some(ty)=callee.abi.result {
@@ -2540,7 +2560,7 @@ fn emit_routines_with_globals(
         if abi.parameters.len() != func.parameters {
             return Err(invalid("ABI parameter count mismatch"));
         }
-        for param in &abi.parameters {
+        for param in abi.machine_parameters() {
             context.func.signature.params.push(AbiParam::new(param.cranelift()));
         }
         if let Some(result) = abi.result {
@@ -2563,12 +2583,22 @@ fn emit_routines_with_globals(
             fb.append_block_params_for_function_params(entry);
             fb.switch_to_block(entry);
             fb.seal_block(entry);
-            let params: Vec<_> = fb.block_params(entry).to_vec().into_iter()
-                .zip(&abi.parameters).map(|(value, ty)| {
-                    if ty.bits == 64 { value }
-                    else if ty.signed { fb.ins().sextend(types::I64, value) }
-                    else { fb.ins().uextend(types::I64, value) }
-                }).collect();
+            let machine_values=fb.block_params(entry).to_vec();
+            let mut physical=machine_values.into_iter();
+            let mut params=Vec::with_capacity(abi.parameters.len());
+            let mut second_parts=Vec::with_capacity(abi.parameters.len());
+            for (ty,aggregate) in abi.parameters.iter().zip(&abi.aggregate_parameters) {
+                let value=physical.next().ok_or_else(||invalid("missing machine argument"))?;
+                params.push(if ty.bits==64 {value}
+                    else if ty.signed {fb.ins().sextend(types::I64,value)}
+                    else {fb.ins().uextend(types::I64,value)});
+                second_parts.push(if aggregate.is_some_and(|bytes|bytes>8) {
+                    Some(physical.next().ok_or_else(||invalid("missing second aggregate GPR"))?)
+                } else {None});
+            }
+            if physical.next().is_some() {
+                return Err(invalid("extra machine arguments"));
+            }
             let local_types = func.local_types.clone().unwrap_or_else(|| {
                 vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
             });
@@ -2610,14 +2640,18 @@ fn emit_routines_with_globals(
             if func.abi.is_some() {
                 for (i,value) in params.iter().enumerate() {
                     if let Some(bytes)=abi.aggregate_parameters[i] {
-                        if bytes==0 || bytes>8 {
+                        if bytes==0 || bytes>16 {
                             return Err(invalid("invalid SysV aggregate parameter width"));
                         }
                         let address=local_address(&mut fb,&stack,func.locals+i)?;
                         for offset in 0..bytes {
-                            let part=if offset==0 {*value} else {
-                                let shift=fb.ins().iconst(types::I64,i64::from(offset)*8);
-                                fb.ins().ushr(*value,shift)
+                            let register=if offset < 8 {*value} else {
+                                second_parts[i].ok_or_else(||invalid("missing second aggregate GPR"))?
+                            };
+                            let shift_bytes=offset%8;
+                            let part=if shift_bytes==0 {register} else {
+                                let shift=fb.ins().iconst(types::I64,i64::from(shift_bytes)*8);
+                                fb.ins().ushr(register,shift)
                             };
                             let byte=fb.ins().ireduce(types::I8,part);
                             let loc=if offset==0 {address} else {
