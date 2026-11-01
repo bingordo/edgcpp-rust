@@ -1666,12 +1666,14 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             let bytes=byte_size(il,v.ty)?;
             u32::try_from(bytes).map_err(|_|invalid("oversized local storage"))
         }).collect::<Result<Vec<_>,_>>()?;
-        local_storage.extend(abi.parameters.iter().map(|t|u32::from(t.bits/8)));
+        local_storage.extend(abi.parameters.iter().zip(&abi.aggregate_parameters)
+            .map(|(t,aggregate)|u32::from(aggregate.unwrap_or(t.bits/8))));
         let mut local_alignments=locals.iter().map(|v|
             storage_alignment(il,v.ty).map(|a|a.trailing_zeros() as u8))
             .collect::<Result<Vec<_>,_>>()?;
-        local_alignments.extend(abi.parameters.iter()
-            .map(|ty| u32::from(ty.bits/8).trailing_zeros() as u8));
+        local_alignments.extend(args.iter().map(|arg|
+            storage_alignment(il,arg.ty).map(|a|a.trailing_zeros() as u8))
+            .collect::<Result<Vec<_>,_>>()?);
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
         let initialized: HashSet<usize> =
@@ -2548,6 +2550,12 @@ fn emit_routines_with_globals(
             }).collect();
             let mut addressed=HashSet::new();
             addressed_stmt(&func.body,&mut addressed);
+            // Aggregate formal parameters are addressable C objects,
+            // not SSA scalar values. Materialize exactly the native object
+            // width from the incoming INTEGER-class register.
+            for (index,aggregate) in abi.aggregate_parameters.iter().enumerate() {
+                if aggregate.is_some() {addressed.insert(func.locals+index);}
+            }
             let storage=func.local_storage.clone().unwrap_or_else(||
                 local_types.iter().map(|t|u32::from(t.bits/8)).collect());
             if storage.len()!=local_types.len() {
@@ -2567,8 +2575,26 @@ fn emit_routines_with_globals(
             }
             if func.abi.is_some() {
                 for (i,value) in params.iter().enumerate() {
-                    local_write(&mut fb,&vars,&stack,&local_types,
-                        func.locals+i,*value)?;
+                    if let Some(bytes)=abi.aggregate_parameters[i] {
+                        if bytes==0 || bytes>8 {
+                            return Err(invalid("invalid SysV aggregate parameter width"));
+                        }
+                        let address=local_address(&mut fb,&stack,func.locals+i)?;
+                        for offset in 0..bytes {
+                            let part=if offset==0 {*value} else {
+                                let shift=fb.ins().iconst(types::I64,i64::from(offset)*8);
+                                fb.ins().ushr(*value,shift)
+                            };
+                            let byte=fb.ins().ireduce(types::I8,part);
+                            let loc=if offset==0 {address} else {
+                                fb.ins().iadd_imm(address,i64::from(offset))
+                            };
+                            fb.ins().store(MemFlags::new(),byte,loc,0);
+                        }
+                    } else {
+                        local_write(&mut fb,&vars,&stack,&local_types,
+                            func.locals+i,*value)?;
+                    }
                 }
             }
             let body = emit_body(
