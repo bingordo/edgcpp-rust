@@ -29,6 +29,10 @@ pub enum Expr {
     AddressLocal(usize),
     LoadAddress(CAbiInt, Box<Expr>),
     StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
+    /// Typed native C bitfield access. Only exact overlapping bits are
+    /// modified, and no adjacent byte outside the field is touched.
+    LoadBitField(BitFieldLayout, Box<Expr>),
+    StoreBitField(BitFieldLayout, Box<Expr>, Box<Expr>),
     /// Copy all supported C struct scalar fields after reading every source
     /// field, preserving observable value semantics even under aliasing.
     /// Offsets come directly from validated native EDG field layouts.
@@ -74,6 +78,16 @@ pub enum Expr {
     /// Normalize the represented C integer value to its declared width/sign.
     Normalize(CAbiInt, Box<Expr>),
     Select(Box<Expr>, Box<Expr>, Box<Expr>),
+}
+
+/// Native EDG bitfield position relative to the first addressed byte.
+/// Width/byte range are verified against the complete record layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BitFieldLayout {
+    pub shift: u8,
+    pub width: u8,
+    pub bytes: u8,
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +178,9 @@ fn emit_expr(
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
-        Expr::LoadAddress(..) | Expr::StoreAddress(..) | Expr::CopyStruct(..) | Expr::CopyBytes(..) |
+        Expr::LoadAddress(..) | Expr::StoreAddress(..) |
+        Expr::LoadBitField(..) | Expr::StoreBitField(..) |
+        Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) |
         Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
         Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
@@ -412,7 +428,8 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::BlockValue(..) |
-        Expr::StoreAddress(..) | Expr::CopyStruct(..) | Expr::CopyBytes(..) |
+        Expr::StoreAddress(..) | Expr::StoreBitField(..) |
+        Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
@@ -425,7 +442,8 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::Compare(_, a, b) | Expr::UnsignedCompare(_, a, b) |
         Expr::IntegerBinary(_, a, b) =>
             contains_local_write(a) || contains_local_write(b),
-        Expr::Normalize(_, a) | Expr::LoadAddress(_,a) => contains_local_write(a),
+        Expr::Normalize(_, a) | Expr::LoadAddress(_,a) |
+        Expr::LoadBitField(_,a) => contains_local_write(a),
         Expr::PointerOffset(a,b,_) => contains_local_write(a) || contains_local_write(b),
         Expr::Neg(a) => contains_local_write(a),
         Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) |
