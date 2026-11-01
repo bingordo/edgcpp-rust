@@ -627,6 +627,12 @@ fn checked_record_fields<'a>(
     let mut fields:Vec<_> = il.record_fields.iter()
         .filter(|field| field.owner == owner).collect();
     fields.sort_by_key(|field| field.position);
+    let native_size = il.type_object_sizes.iter()
+        .find(|layout| layout.owner == owner)
+        .ok_or_else(|| invalid("record has no native EDG object size"))?.bytes;
+    if native_size == 0 || native_size > 16 * 1024 * 1024 {
+        return Err(invalid("record has invalid native EDG object size"));
+    }
     let mut previous_end = 0u64;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
@@ -650,6 +656,9 @@ fn checked_record_fields<'a>(
             return Err(invalid("record fields overlap; union or overlapping layout unsupported"));
         }
         previous_end = end;
+        if end > native_size {
+            return Err(invalid("record field exceeds native EDG object size"));
+        }
         if end > 16 * 1024 * 1024 {
             return Err(invalid("record field exceeds maximum supported object size"));
         }
