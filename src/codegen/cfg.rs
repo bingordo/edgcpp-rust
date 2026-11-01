@@ -701,12 +701,23 @@ fn checked_record_fields<'a>(
         }
         check_plain_storage_type(il,field.ty)?;
         let width = byte_size(il, field.ty)?;
-        // A record containing a nested aggregate cannot be validated by this
-        // scalar-field-only inventory until its complete native layout is known.
+        // Fixed one-dimensional arrays of scalar fields have a native bound
+        // and a known scalar element stride. Do not recursively guess nested
+        // arrays, nested records or flexible-array-member sizes.
         let field_type = canonical_abi_type(il, field.ty)?;
-        let kind = il.types.iter().find(|t| t.id == field_type)
-            .ok_or_else(|| invalid("record field type missing"))?.kind;
-        if !matches!(semantic(4, kind), 1 | 5) {
+        let def = il.types.iter().find(|t| t.id == field_type)
+            .ok_or_else(|| invalid("record field type missing"))?;
+        let field_kind = semantic(4, def.kind);
+        if field_kind == 6 {
+            let element = def.related
+                .ok_or_else(|| invalid("array field missing element type"))?;
+            check_plain_storage_type(il, element)?;
+            let element = canonical_abi_type(il, element)?;
+            if !il.types.iter().any(|t| t.id == element &&
+                    matches!(semantic(4,t.kind),1|5)) {
+                return Err(invalid("nested aggregate array field unsupported"));
+            }
+        } else if !matches!(field_kind, 1 | 5) {
             return Err(invalid("nested aggregate record field layout unsupported"));
         }
         let end = field.byte_offset.checked_add(width)
@@ -1026,7 +1037,14 @@ fn lower_c_expression(
                 match op {
                     52 | 53 if operands.len()==2 => {
                         let address=lower_address(graph,id,params,locals,il)?;
-                        Expr::LoadAddress(output,Box::new(address))
+                        let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+                        if il.types.iter().any(|d|d.id==canonical &&
+                                semantic(4,d.kind)==6) {
+                            // C array member designators decay to an address.
+                            address
+                        } else {
+                            Expr::LoadAddress(output,Box::new(address))
+                        }
                     }
                     43 if operands.len()==1 => lower_address(
                         graph,operands[0],params,locals,il)?,

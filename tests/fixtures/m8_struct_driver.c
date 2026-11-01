@@ -8,6 +8,10 @@ extern long m8_array(long);
 extern long m8_global_update(long);
 extern long m8_copy_local(long);
 extern long m8_copy_pointer(struct M8Pair *, struct M8Pair *);
+struct M8WithArray { unsigned short values[3]; long marker; };
+extern struct M8WithArray m8_array_member_global;
+extern long m8_array_member_local(int);
+extern long m8_array_member_global_update(int);
 
 int main(void)
 {
@@ -24,5 +28,12 @@ int main(void)
     printf("%ld %ld\n", m8_copy_local(8), m8_copy_local(-6));
     long copied = m8_copy_pointer(&dst, &src);
     printf("%ld %d %ld\n", copied, dst.first, dst.second);
+    printf("%zu %zu %zu\n", sizeof(struct M8WithArray),
+           _Alignof(struct M8WithArray), offsetof(struct M8WithArray, marker));
+    printf("%ld %ld\n", m8_array_member_local(15),
+           m8_array_member_global_update(21));
+    printf("%hu %hu %hu %ld\n", m8_array_member_global.values[0],
+           m8_array_member_global.values[1],
+           m8_array_member_global.values[2], m8_array_member_global.marker);
     return 0;
 }
