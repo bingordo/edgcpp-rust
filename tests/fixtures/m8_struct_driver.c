@@ -96,6 +96,7 @@ extern long m8_bitfields_partial_local(void);
 extern long m8_bitfields_constant_global(void);
 extern struct M8BitFields m8_bits_constant;
 extern struct M8BitFields m8_bits_partial;
+union M8BitUnion { unsigned int active : 7; unsigned int raw; };
 extern union M8BitUnion m8_bitunion_constant;
 
 int main(void)
