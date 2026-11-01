@@ -1049,6 +1049,26 @@ mod tests {
     }
 
     #[test]
+    fn sysv_two_integer_struct_arguments_require_two_available_registers() {
+        let ty = CAbiInt { bits:64, signed:false, is_bool:false };
+        let signature = |aggregate_parameters: Vec<Option<u8>>| CAbi {
+            parameters: vec![ty; aggregate_parameters.len()],
+            aggregate_parameters,
+            aggregate_result: None,
+            result: Some(ty),
+        };
+        let ok = signature(vec![None,None,None,None,Some(16),None]);
+        assert!(ok.validate_register_budget().is_ok());
+        assert_eq!(ok.machine_parameters().len(), 7);
+        let narrow = signature(vec![None,Some(8),None]);
+        assert_eq!(narrow.machine_parameters().len(), 3);
+        let split = signature(vec![None,None,None,None,None,Some(16)]);
+        assert!(split.validate_register_budget().is_err());
+        let stack = signature(vec![None,None,None,None,None,None,Some(12)]);
+        assert!(stack.validate_register_budget().is_err());
+    }
+
+    #[test]
     fn rejects_cycle_in_typedef_abi() {
         use crate::{TypeDef, TypeId};
         let alias_kind = (0..128).find(|&kind| semantic(4, kind) == 3)
