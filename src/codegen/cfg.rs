@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::{HashSet,HashMap};
 use std::cell::Cell;
-use cranelift_codegen::ir::{Block,StackSlot,StackSlotData,StackSlotKind};
+use cranelift_codegen::ir::{Block,StackSlot,StackSlotData,StackSlotKind,MemFlags};
 use cranelift_frontend::Variable;
 
 #[derive(Debug, Clone)]
@@ -57,10 +57,10 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
-    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7)) {
+    if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7|9)) {
         // Records are stack-addressed aggregates, never scalar SSA values.
         // Keep the placeholder ABI type solely for local slot bookkeeping.
-        if il.types.iter().any(|d| d.id == ty && semantic(4,d.kind)==7) {
+        if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),7|9)) {
             byte_size(il,ty)?;
         }
         return Ok(CAbiInt { bits:64, signed:false, is_bool:false });
@@ -235,7 +235,7 @@ fn lower(
             let local_kind=semantic(4,il.types.iter()
                 .find(|t|t.id==local_ty).ok_or_else(||
                     invalid("initializer has no local type definition"))?.kind);
-            if matches!(local_kind,6|7) {
+            if matches!(local_kind,6|7|9) {
                 // The scalar initialization path must never write just one
                 // word into a larger array/struct. Only the exact native
                 // full-object zero-init kind is safe without an initializer
@@ -354,7 +354,8 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         },
         Expr::LoadAddress(_,a) => check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::CopyStruct(_,a,b) | Expr::PointerOffset(a,b,_) => {
+        Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
+        Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
         }
@@ -597,7 +598,7 @@ fn global_value_type(il:&Il,symbol:crate::SymbolId)
     let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("global missing declared type"))?.ty;
     let ty=canonical_abi_type(il,ty)?;
-    if il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),6|7)) {
+    if il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),6|7|9)) {
         byte_size(il,ty)?;
         Ok((name,None))
     } else {
@@ -656,7 +657,7 @@ fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,Codeg
         // Native EDG size includes the record's internal and trailing padding.
         // Recursive validation rejects unsupported nested layouts, cycles and
         // overlapping/union fields before the allocation is accepted.
-        7 if il.record_fields.iter().any(|f| f.owner == ty) => {
+        7 | 9 if il.record_fields.iter().any(|f| f.owner == ty) => {
             checked_record_fields_depth(il, ty, depth+1)?;
             let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
                 .ok_or_else(|| invalid("record missing native object layout"))?;
@@ -708,6 +709,10 @@ fn checked_record_fields_depth<'a>(
     il: &'a Il, owner: crate::TypeId, depth: usize,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
     if depth > 32 { return Err(invalid("nested record layout exceeds depth limit")); }
+    let kind=il.types.iter().find(|t|t.id==owner)
+        .map(|t|semantic(4,t.kind)).ok_or_else(||invalid("missing record type"))?;
+    if !matches!(kind,7|9) {return Err(invalid("unsupported record/union type"));}
+    let is_union=kind==9;
     let mut fields:Vec<_> = il.record_fields.iter()
         .filter(|field| field.owner == owner).collect();
     fields.sort_by_key(|field| field.position);
@@ -744,15 +749,23 @@ fn checked_record_fields_depth<'a>(
         let def = il.types.iter().find(|t| t.id == field_type)
             .ok_or_else(|| invalid("record field type missing"))?;
         let field_kind = semantic(4, def.kind);
-        if !matches!(field_kind,1|5|6|7) {
+        if !matches!(field_kind,1|5|6|7|9) {
             return Err(invalid("unsupported record field kind"));
         }
         let end = field.byte_offset.checked_add(width)
             .ok_or_else(|| invalid("record field offset overflows"))?;
-        if field.byte_offset < previous_end {
-            return Err(invalid("record fields overlap; union or overlapping layout unsupported"));
+        if is_union {
+            // C unions overlay members at offset zero, unlike structs.
+            // Reject exotic union layouts until explicitly modeled.
+            if field.byte_offset!=0 {
+                return Err(invalid("nonzero union member offset unsupported"));
+            }
+        } else {
+            if field.byte_offset < previous_end {
+                return Err(invalid("record fields overlap outside union"));
+            }
+            previous_end = end;
         }
-        previous_end = end;
         if end > native_size {
             return Err(invalid("record field exceeds native EDG object size"));
         }
@@ -906,8 +919,9 @@ fn lower_address(
                         canonical_abi_type(il,pointer.related
                             .ok_or_else(||invalid("arrow pointer has no target type"))?)?
                     };
-                    if !il.types.iter().any(|t|t.id==owner && semantic(4,t.kind)==7) {
-                        return Err(invalid("only plain C struct field selection supported"));
+                    if !il.types.iter().any(|t|t.id==owner &&
+                            matches!(semantic(4,t.kind),7|9)) {
+                        return Err(invalid("only C struct/union field selection supported"));
                     }
                     let fields=checked_record_fields(il,owner)?;
                     let field=fields.into_iter().find(|f|f.symbol==symbol)
@@ -1044,7 +1058,7 @@ fn lower_c_expression(
         node.data.operator.is_some_and(|op|semantic(3,op)==18) &&
         node.operands.len()==2 {
         let ty=canonical_abi_type(il,expression_type_id(graph,id)?)?;
-        if il.types.iter().any(|def|def.id==ty && semantic(4,def.kind)==7) {
+        if il.types.iter().any(|def|def.id==ty && matches!(semantic(4,def.kind),7|9)) {
             if node.data.parent.is_some() {
                 return Err(invalid("aggregate assignment value use unsupported"));
             }
@@ -1054,9 +1068,19 @@ fn lower_c_expression(
                 }
             }
             check_plain_storage_type(il,expression_type_id(graph,id)?)?;
-            let layout=flattened_copy_fields(il,ty)?;
+            let kind=il.types.iter().find(|d|d.id==ty)
+                .map(|d|semantic(4,d.kind)).ok_or_else(||
+                    invalid("missing aggregate assignment type"))?;
             let dst=lower_address(graph,node.operands[0],params,locals,il)?;
             let src=lower_address(graph,node.operands[1],params,locals,il)?;
+            if kind==9 {
+                let bytes=byte_size(il,ty)?;
+                if bytes==0 || bytes>512 {
+                    return Err(invalid("union copy exceeds 512-byte limit"));
+                }
+                return Ok(Expr::CopyBytes(bytes as u32,Box::new(dst),Box::new(src)));
+            }
+            let layout=flattened_copy_fields(il,ty)?;
             return Ok(Expr::CopyStruct(layout,Box::new(dst),Box::new(src)));
         }
     }
@@ -1487,7 +1511,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(result,found);
         },
         Expr::StoreAddress(_,a,b) | Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::CopyStruct(_,a,b) |
+        Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
         Expr::BitXor(a,b) | Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
@@ -1650,6 +1674,30 @@ fn emit_expr(
             for (&(ty,offset),value) in fields.iter().zip(values) {
                 let addr=if offset==0 {dst} else {fb.ins().iadd_imm(dst,offset)};
                 super::memory::store_integer(fb,addr,value,ty);
+            }
+            dst
+        }
+        Expr::CopyBytes(bytes,destination,source) => {
+            if *bytes==0 || *bytes>512 {
+                return Err(invalid("union byte copy exceeds supported size"));
+            }
+            let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
+            let src=emit_expr(source,fb,params,vars,globals,stack,local_types,calls)?;
+            // Read the object representation as bytes, not typed inactive
+            // union members. Read all bytes before any write to handle self
+            // assignments and overlapping regions conservatively.
+            let mut values=Vec::with_capacity(*bytes as usize);
+            for offset in 0..*bytes {
+                let addr=if offset==0 {src} else {
+                    fb.ins().iadd_imm(src,i64::from(offset))
+                };
+                values.push(fb.ins().load(types::I8,MemFlags::new(),addr,0));
+            }
+            for (offset,value) in values.into_iter().enumerate() {
+                let addr=if offset==0 {dst} else {
+                    fb.ins().iadd_imm(dst,offset as i64)
+                };
+                fb.ins().store(MemFlags::new(),value,addr,0);
             }
             dst
         }

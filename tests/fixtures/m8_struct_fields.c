@@ -142,3 +142,65 @@ long m8_array_field_copy(long n)
     src.marker = 0;
     return dst.values[0] + dst.values[1] + dst.values[2] + dst.marker;
 }
+
+/* M8: simple C unions use overlapping native offsets and have a single
+ * active typed member at a time. Copies use bytes, never inactive members. */
+union M8Union {
+    int first;
+    long second;
+    unsigned short values[4];
+};
+union M8Union m8_union_global;
+
+long m8_union_local(long n)
+{
+    union M8Union value;
+    value.second = n + 5;
+    union M8Union *ptr = &value;
+    ptr->second += n;
+    return value.second;
+}
+
+long m8_union_copy(long n)
+{
+    union M8Union src, dst;
+    src.second = n + 25;
+    dst = src;
+    src.second = 0;
+    return dst.second;
+}
+
+long m8_union_pointer_copy(union M8Union *dst, union M8Union *src)
+{
+    *dst = *src;
+    return dst->second;
+}
+
+long m8_union_self_copy(union M8Union *p)
+{
+    *p = *p;
+    return p->second;
+}
+
+long m8_union_array(long n)
+{
+    union M8Union slots[2];
+    slots[0].first = (int)n;
+    slots[1].second = n + 8;
+    return slots[0].first + slots[1].second;
+}
+
+long m8_union_global_update(long n)
+{
+    m8_union_global.second = n * 3;
+    return m8_union_global.second;
+}
+
+struct M8TaggedUnion { int tag; union M8Union data; };
+struct M8TaggedUnion m8_tagged_union;
+long m8_union_nested(long n)
+{
+    m8_tagged_union.tag = 7;
+    m8_tagged_union.data.second = n + 9;
+    return m8_tagged_union.data.second + m8_tagged_union.tag;
+}
