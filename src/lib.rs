@@ -265,6 +265,8 @@ pub struct RecordField {
     pub owner: TypeId,
     pub position: u32,
     pub ty: TypeId,
+    /// Identity of the native EDG field, matching enk_field operands.
+    pub symbol: SymbolId,
     pub name: String,
     pub byte_offset: u64,
     pub bit_offset: u32,
@@ -796,7 +798,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 7, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -907,11 +909,12 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         }
         10 => {
             let (Some(owner), Some(position), Some(ty), Some(name),
-                 Some(byte_offset), Some(bit_offset), Some(bit_width)) =
-                (n(0), n(1), n(2), t(3), fields[4].unsigned(), n(5), n(6)) else { return; };
+                 Some(byte_offset), Some(bit_offset), Some(bit_width), Some(symbol)) =
+                (n(0), n(1), n(2), t(3), fields[4].unsigned(), n(5), n(6), n(7)) else { return; };
+            if symbol == 0 { return; }
             output.record_fields.push(RecordField {
                 owner: TypeId(owner), position, ty: TypeId(ty), name,
-                byte_offset, bit_offset, bit_width });
+                symbol: SymbolId(symbol), byte_offset, bit_offset, bit_width });
         }
         11 => {
             let (Some(owner), Some(flags)) = (n(0), n(1)) else { return; };
