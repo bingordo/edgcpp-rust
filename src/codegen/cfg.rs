@@ -900,6 +900,56 @@ fn is_pointer_like(il:&Il,ty:crate::TypeId) -> Result<bool,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     Ok(il.types.iter().any(|t|t.id==ty && matches!(semantic(4,t.kind),5|6)))
 }
+/// Resolve a native named bitfield by field symbol identity. The address
+/// used by the resulting IR is the first occupied byte, not a C address-of
+/// operation (C prohibits taking the address of a bitfield).
+fn selected_bitfield(
+    graph:&Graph,id:ExpressionId,il:&Il,
+)->Result<Option<BitFieldLayout>,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing bitfield expression"))?;
+    if semantic(2,node.data.kind)!=3 {return Ok(None);}
+    let op=node.data.operator.map(|v|semantic(3,v)).unwrap_or(0);
+    if !matches!(op,52|53) || node.operands.len()!=2 {return Ok(None);}
+    let field_node=graph.expression(node.operands[1])
+        .ok_or_else(||invalid("missing EDG bitfield identity"))?;
+    if semantic(2,field_node.data.kind)!=5 || !field_node.operands.is_empty() {
+        return Err(invalid("invalid EDG field designator"));
+    }
+    let symbol=field_node.data.symbol_id
+        .ok_or_else(||invalid("missing EDG bitfield symbol"))?;
+    let base_type=canonical_abi_type(il,expression_type_id(graph,node.operands[0])?)?;
+    let owner=if op==52 {base_type} else {
+        let pointer=il.types.iter().find(|t|t.id==base_type &&
+            semantic(4,t.kind)==5).ok_or_else(||invalid("bitfield arrow needs pointer"))?;
+        canonical_abi_type(il,pointer.related
+            .ok_or_else(||invalid("bitfield pointer missing target"))?)?
+    };
+    if !il.types.iter().any(|t|t.id==owner &&
+        matches!(semantic(4,t.kind),7|9)) {
+        return Err(invalid("bitfield owner is not a record/union"));
+    }
+    let fields=checked_record_fields(il,owner)?;
+    let field=fields.into_iter().find(|f|f.symbol==symbol)
+        .ok_or_else(||invalid("unknown EDG record field identity"))?;
+    if field.bit_width==0 && field.bit_offset==0 {return Ok(None);}
+    let ty=canonical_abi_type(il,field.ty)?;
+    if ty!=canonical_abi_type(il,expression_type_id(graph,id)?)? {
+        return Err(invalid("bitfield expression/field types disagree"));
+    }
+    let info=il.c_integer_types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("bitfield integer type is missing"))?;
+    if info.is_bool {return Err(invalid("boolean bitfield unsupported"));}
+    let total=field.bit_offset+field.bit_width;
+    if total==0 || total>64 || field.bit_width>64 {
+        return Err(invalid("native bitfield exceeds supported width"));
+    }
+    Ok(Some(BitFieldLayout {
+        shift:field.bit_offset as u8,
+        width:field.bit_width as u8,
+        bytes:total.div_ceil(8) as u8,
+        signed:info.signed,
+    }))
+}
 /// Decode an addressable scalar or array designator; no implicit load.
 /// For subscript, EDG specifies that pointer and index may appear in either
 /// operand position. The stride is the size of the pointer's element type.
