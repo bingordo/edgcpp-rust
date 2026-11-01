@@ -61,7 +61,8 @@ fn normalized_bitfield_value(
 )->cranelift_codegen::ir::Value {
     let mask=if layout.width==64 {u64::MAX}
         else {(1u64<<layout.width)-1};
-    let masked=fb.ins().band(bits,fb.ins().iconst(types::I64,mask as i64));
+    let mask_value=fb.ins().iconst(types::I64,mask as i64);
+    let masked=fb.ins().band(bits,mask_value);
     if !layout.signed || layout.width==64 {return masked;}
     let shift=fb.ins().iconst(types::I64,i64::from(64-layout.width));
     let high=fb.ins().ishl(masked,shift);
@@ -88,14 +89,15 @@ pub(super) fn store_bitfield(
     let original=load_bitfield_bytes(fb,address,layout);
     let mask=if layout.width==64 {u64::MAX}
         else {(1u64<<layout.width)-1};
-    let narrowed=fb.ins().band(input,fb.ins().iconst(types::I64,mask as i64));
+    let mask_value=fb.ins().iconst(types::I64,mask as i64);
+    let narrowed=fb.ins().band(input,mask_value);
     let shifted=if layout.shift==0 {narrowed} else {
         let amount=fb.ins().iconst(types::I64,i64::from(layout.shift));
         fb.ins().ishl(narrowed,amount)
     };
     let clear_mask=!(mask<<layout.shift);
-    let retained=fb.ins().band(original,
-        fb.ins().iconst(types::I64,clear_mask as i64));
+    let clear_value=fb.ins().iconst(types::I64,clear_mask as i64);
+    let retained=fb.ins().band(original,clear_value);
     let combined=fb.ins().bor(retained,shifted);
     for i in 0..layout.bytes {
         let ptr=if i==0 {address} else {fb.ins().iadd_imm(address,i64::from(i))};
