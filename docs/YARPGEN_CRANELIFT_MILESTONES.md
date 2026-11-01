@@ -530,6 +530,10 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   `ck_aggregate`/`ck_designator` tree, including partially initialized
   and designated arrays, records and unions. Some native repeated constants
   are supported; unsupported dynamic entries fail closed.
+* Link-time relocations for supported static aggregate `ck_address` data
+  pointers (`abk_variable`), using actual ELF data references with signed
+  addends. GCC differential tests cover a forward target, an array-element
+  pointer addend and multiple pointers within one aggregate (PR #26).
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -550,20 +554,19 @@ is a verification route, not a separate compiler implementation.
 
 **Remaining before declaring M8 complete:**
 
-1. Relocatable static pointer/address initializers for aggregates and
-   validation of ELF relocations against GCC (not merely integer images).
-2. Bitfield layout, read/modify/write and constant initialization, using
+1. Bitfield layout, read/modify/write and constant initialization, using
    native EDG bit offsets/widths with packed/union/overlap diagnostics.
-3. General nonconstant aggregate initializer trees and source-order
+2. General nonconstant aggregate initializer trees and source-order
    evaluation in cases where EDG does not already lower them into supported
    executable statements. Add negative controls and dynamic-call cases.
-4. SysV x86-64 aggregate parameter/return classification, register/stack
+3. SysV x86-64 aggregate parameter/return classification, register/stack
    passing, hidden-result storage and interoperability tests with GCC.
-5. Coverage expansion for flexible members, packed/overaligned layouts,
-   qualifiers, unsupported pointer/union corner cases, compound literals,
-   and aggregate-as-expression uses.
+4. Remaining initializer relocation categories (function addresses, TLS,
+   aggregate locals, pointer constants other than supported data variables),
+   plus flexible members, packed/overaligned layouts, qualifiers,
+   compound literals and aggregate-as-expression uses.
 
 **Boundaries:** GNU statement expressions remain deferred as agreed. The
-current bitfield, aggregate ABI, relocatable initializer and extended
+current bitfield, aggregate ABI, unsupported relocation categories and extended
 lifetime cases must continue to reject unsupported semantics rather than
 silently emitting scalar or incorrectly aligned code.
