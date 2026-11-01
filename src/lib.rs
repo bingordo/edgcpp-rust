@@ -1325,6 +1325,15 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
 mod tests {
     use super::*;
     #[test]
+    fn native_aggregate_hex_decoder_is_exact_and_bounded() {
+        assert_eq!(decode_aggregate_hex("0001aaff"),Some(vec![0,1,170,255]));
+        assert!(decode_aggregate_hex("").is_none());
+        assert!(decode_aggregate_hex("f").is_none());
+        assert!(decode_aggregate_hex("0g").is_none());
+        assert!(decode_aggregate_hex("AB").is_none());
+        assert!(decode_aggregate_hex(&"00".repeat(4097)).is_none());
+    }
+    #[test]
     fn builds_owned_namespace_tree() {
         let il = Il { entities: vec![
             Entity::Namespace { name: "outer".into() },
