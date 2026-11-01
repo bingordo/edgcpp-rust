@@ -99,6 +99,19 @@ extern struct M8BitFields m8_bits_partial;
 union M8BitUnion { unsigned int active : 7; unsigned int raw; };
 extern union M8BitUnion m8_bitunion_constant;
 
+struct M8AbiPair { int first; int second; };
+struct M8AbiMixed { unsigned char tag; int amount; };
+struct M8AbiTiny { unsigned char value; };
+struct M8AbiShort { short first; short second; };
+extern long m8_abi_take_pair(struct M8AbiPair);
+extern long m8_abi_take_mixed(long, struct M8AbiMixed, int);
+extern long m8_abi_take_tiny(struct M8AbiTiny, long);
+extern long m8_abi_take_short(struct M8AbiShort);
+extern struct M8AbiPair m8_abi_return_pair(int,int);
+extern struct M8AbiMixed m8_abi_return_mixed(unsigned char,int);
+extern struct M8AbiTiny m8_abi_return_tiny(unsigned char);
+extern struct M8AbiPair m8_abi_roundtrip_pair(struct M8AbiPair);
+
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -221,5 +234,25 @@ int main(void)
            m8_bits_partial.first, m8_bits_partial.second,
            m8_bits_partial.negative, m8_bits_partial.fourth,
            m8_bits_partial.fifth, m8_bits_partial.sentinel);
+    struct M8AbiPair small_pair = { -23, 187 };
+    struct M8AbiMixed small_mixed = { 143, -1496 };
+    struct M8AbiTiny small_tiny = { 237 };
+    struct M8AbiShort small_shorts = { -78, 115 };
+    struct M8AbiPair returned_pair = m8_abi_return_pair(19, -31);
+    struct M8AbiMixed returned_mixed = m8_abi_return_mixed(109, -723);
+    struct M8AbiTiny returned_tiny = m8_abi_return_tiny(211);
+    struct M8AbiPair roundtrip = m8_abi_roundtrip_pair(small_pair);
+    printf("%zu %zu %zu %zu %ld %ld %ld %ld\\n",
+           sizeof(struct M8AbiPair), sizeof(struct M8AbiMixed),
+           sizeof(struct M8AbiTiny), sizeof(struct M8AbiShort),
+           m8_abi_take_pair(small_pair),
+           m8_abi_take_mixed(179, small_mixed, -7),
+           m8_abi_take_tiny(small_tiny, -819),
+           m8_abi_take_short(small_shorts));
+    printf("%d %d %hhu %d %hhu %d %d\\n",
+           returned_pair.first, returned_pair.second,
+           returned_mixed.tag, returned_mixed.amount,
+           returned_tiny.value,
+           roundtrip.first, roundtrip.second);
     return 0;
 }

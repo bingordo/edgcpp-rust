@@ -534,3 +534,52 @@ long m8_bitfields_constant_global(void)
            m8_bits_partial.fifth + m8_bits_partial.sentinel +
            m8_bitunion_constant.active;
 }
+
+/* M8 SysV AMD64 ABI: plain C structs occupying exactly one INTEGER-class
+ * eightbyte must be interchangeable with a GCC caller. These are *real*
+ * aggregate argument and return signatures, not manually passed pointers. */
+struct M8AbiPair { int first; int second; };
+struct M8AbiMixed { unsigned char tag; int amount; };
+struct M8AbiTiny { unsigned char value; };
+struct M8AbiShort { short first; short second; };
+
+long m8_abi_take_pair(struct M8AbiPair pair)
+{
+    return (long)pair.first * 11 + (long)pair.second * 17;
+}
+long m8_abi_take_mixed(long offset, struct M8AbiMixed mixed, int scale)
+{
+    return offset + (long)mixed.tag * scale + mixed.amount;
+}
+long m8_abi_take_tiny(struct M8AbiTiny tiny, long extra)
+{
+    return extra + tiny.value * 7;
+}
+long m8_abi_take_short(struct M8AbiShort shorts)
+{
+    return shorts.first * 5 + shorts.second * 3;
+}
+struct M8AbiPair m8_abi_return_pair(int a, int b)
+{
+    struct M8AbiPair pair;
+    pair.first = a + 9;
+    pair.second = b - 7;
+    return pair;
+}
+struct M8AbiMixed m8_abi_return_mixed(unsigned char tag, int amount)
+{
+    struct M8AbiMixed result;
+    result.tag = tag;
+    result.amount = amount;
+    return result;
+}
+struct M8AbiTiny m8_abi_return_tiny(unsigned char x)
+{
+    struct M8AbiTiny tiny;
+    tiny.value = x;
+    return tiny;
+}
+struct M8AbiPair m8_abi_roundtrip_pair(struct M8AbiPair input)
+{
+    return input;
+}
