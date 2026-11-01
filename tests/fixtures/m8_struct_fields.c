@@ -142,3 +142,20 @@ long m8_array_field_copy(long n)
     src.marker = 0;
     return dst.values[0] + dst.values[1] + dst.values[2] + dst.marker;
 }
+
+/* Explicit, fully zero-initialized automatic aggregates. Native EDG must
+ * classify these as whole-object zero before the backend accepts them. */
+long m8_zero_record(long n)
+{
+    struct M8Nested item = {0};
+    item.inner.second = n + 9;
+    return item.inner.first + item.inner.second +
+           item.values[0] + item.values[1] + item.values[2] +
+           item.tail;
+}
+long m8_zero_array(int n)
+{
+    unsigned short items[4] = {0};
+    items[2] = (unsigned short)n;
+    return items[0] + items[1] + items[2] + items[3];
+}
