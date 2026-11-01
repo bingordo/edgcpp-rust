@@ -25,6 +25,8 @@ extern long m8_nested_self_copy(struct M8Nested *);
 extern long m8_nested_global_update(long);
 extern long m8_array_field_copy(long);
 
+extern long m8_zero_record(long);
+extern long m8_zero_array(int);
 int main(void)
 {
     /* GCC's sizeof/alignof/offsetof are part of the comparison oracle. */
@@ -64,5 +66,8 @@ int main(void)
     struct M8Nested value = {{3,17}, {4,9,10}, 21};
     printf("%ld %ld %hu\\n", m8_nested_self_copy(&value),
            value.inner.second, value.values[1]);
+    printf("%ld %ld %ld %ld\\n",
+           m8_zero_record(12), m8_zero_record(-9),
+           m8_zero_array(27), m8_zero_array(0));
     return 0;
 }
