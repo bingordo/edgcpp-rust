@@ -558,6 +558,24 @@ fn check_switch_segments(body:&[Stmt]) -> Result<Vec<(Option<i64>,Vec<Stmt>)>,Co
     Ok(segments)
 }
 
+/// A break targets this switch only if it is not consumed by an enclosed
+/// switch. Branches inside an if can reach it; nested switches cannot.
+fn may_break_current_switch(body:&[Stmt]) -> bool {
+    body.iter().any(|stmt|match stmt {
+        Stmt::BreakSwitch => true,
+        Stmt::If(_,yes,no) =>
+            may_break_current_switch(yes) || may_break_current_switch(no),
+        Stmt::While(_,body) | Stmt::DoWhile(body,_) =>
+            may_break_current_switch(body),
+        Stmt::For{init,increment,body,..} =>
+            may_break_current_switch(init) ||
+            may_break_current_switch(increment) ||
+            may_break_current_switch(body),
+        Stmt::Switch(..) => false,
+        _ => false,
+    })
+}
+
 // Does this body contain a break aimed at the surrounding loop?
 // Nested loops consume their own breaks. Over-approximation is safe here:
 // this is only used to avoid inventing a fallthrough from for (;;).
@@ -642,12 +660,21 @@ fn check(
             Stmt::Switch(selector,body) => {
                 check_expr(selector,vars,params)?;
                 let segments=check_switch_segments(body)?;
-                for (_,chunk) in segments {
+                let has_default=segments.iter().any(|(value,_)|value.is_none());
+                let mut last_fallthrough=false;
+                for (_,chunk) in &segments {
                     let mut state=vars.clone();
-                    check(&chunk,&mut state,params,locals,loop_depth)?;
+                    last_fallthrough=check(chunk,&mut state,params,locals,loop_depth)?;
                 }
-                // A switch may miss every case, or exit via break.
-                // Deliberately do not infer definite writes across arms.
+                // All dispatch targets terminate when a default is present,
+                // no arm can break out, and the last arm cannot fall through.
+                // This recognizes C functions whose final switch returns
+                // from every case without requiring a synthetic return.
+                if has_default && !may_break_current_switch(body) &&
+                    !last_fallthrough {
+                    live=false;
+                }
+                // Do not infer definite assignments across switch arms.
             }
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
@@ -2424,17 +2451,27 @@ fn emit_body(
                     fb.seal_block(next);
                 }
                 fb.ins().jump(default.map(|i|blocks[i]).unwrap_or(exit),&[]);
+                let mut final_fallthrough=false;
                 for (i,(_,chunk)) in cases.iter().enumerate() {
                     fb.switch_to_block(blocks[i]);
-                    if emit_body(chunk,fb,args,vars,outer,local_types,result,
-                        globals,stack,calls,labels,Some(exit))? {
+                    let arm_live=emit_body(chunk,fb,args,vars,outer,local_types,
+                        result,globals,stack,calls,labels,Some(exit))?;
+                    if arm_live {
                         let target=blocks.get(i+1).copied().unwrap_or(exit);
                         fb.ins().jump(target,&[]);
                     }
+                    final_fallthrough=arm_live;
                 }
                 for block in blocks {fb.seal_block(block);}
                 fb.seal_block(exit);
-                fb.switch_to_block(exit);
+                if default.is_none() || may_break_current_switch(body) ||
+                    final_fallthrough {
+                    fb.switch_to_block(exit);
+                } else {
+                    // No path reaches the switch successor; Cranelift must
+                    // not invent an outgoing branch or demand another return.
+                    live=false;
+                }
             }
             Stmt::Goto(symbol) => {
                 let target=*labels.get(symbol).ok_or_else(||
