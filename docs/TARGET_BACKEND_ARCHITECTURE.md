@@ -85,11 +85,14 @@ numbers express the verified ABI mapping, not hand-assigned instructions.
 C aggregate classification still uses the existing supported
 integer-only `Option<u8>` source-level description. The plan introduces
 explicit `PassingMode` and piece classes as the **next layer**, without
-pretending FP/SSE, indirect-return storage, or **direct-call materialization**
-of two-register results works. Generated x86-64 functions can now return
-eligible 9–16-byte INTEGER-class structs in RAX/RDX and the GCC driver
-verifies both machine pieces; consuming such a result from a generated
-direct call still rejects explicitly.
+pretending FP/SSE, MEMORY-class stack/indirect-result storage or
+**arbitrary aggregate prvalue use** works. Generated x86-64 functions
+return eligible 9–16-byte INTEGER-class structs in RAX/RDX (PR #42),
+and matching generated direct calls now materialize both return pieces
+into an exact-sized temporary and can forward them by value (PR #43).
+Both directions are checked against the GCC differential driver.
+General aggregate assignment/initialization from function-return
+temporaries, variadics and indirect function calls remain separate gaps.
 Target-specific value packing and reconstruction remain in
 `target/x86_64.rs`. The Cranelift lowering now handles decoded arguments as vectors
 of machine pieces rather than a hard-coded optional second register.
