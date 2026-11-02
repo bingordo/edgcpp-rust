@@ -1,7 +1,16 @@
-# EDG → Cranelift reference code generator
+# EDG Rust frontend bridge, native compiler integration and Cranelift reference
 
-This branch is a fresh **code-generation implementation**, built on the
-previously working EDG C/C++ frontend bridge. The historical implementation,
+**Long-term goal:** use the owned EDG frontend semantics as an input to
+[`bingordo/compiler`](https://github.com/bingordo/compiler), with its own
+typed SSA CFG, optimizer and native code generator. The optional Cranelift
+backend is a **correctness/reference stepping-stone**, not a dependency or
+IR format for the main compiler. The native EDG-to-`compiler` adapter is
+planned, not yet implemented; see
+[the integration contract](docs/EDG_COMPILER_INTEGRATION.md) and
+[the clarified M9–M13 roadmap](docs/YARPGEN_CRANELIFT_MILESTONES.md#m9--control-flow-semantics-and-first-compiler-adapter).
+
+This branch includes a **reference code-generation implementation**, built
+on the previously working EDG C/C++ frontend bridge. The historical implementation,
 including experimental type dependency and interprocedural analysis, remains
 on [main](https://github.com/bingundu/edgcpp-rust/tree/main).
 The earlier pre-codegen snapshot is preserved on
@@ -40,12 +49,20 @@ optimizer, inliner, incremental analysis, call graph or whole-program framework
 is needed. Cranelift codegen should be isolated behind an optional Cargo
 feature so native bridge tests do not build it.
 
-## Milestone 2: EDG → bingundu/compiler
+## Next integration milestone: EDG → bingordo/compiler
 
-Once the Cranelift reference path passes executable tests, lower the same
-supported EDG constructs to `bingundu/compiler`'s frontend-neutral IR.
-Compare results against GCC and the Cranelift reference implementation.
-Keep the native compiler backend independent of EDG.
+Start a small EDG-to-`compiler-ir` adapter **in parallel** with continued
+Cranelift reference coverage; do not wait for complete x86 SysV ABI support
+in the reference backend. Build a checked, Cranelift-independent source
+semantics interface over `Il`/`graph::Graph`, then use the same semantic
+input with either Cranelift's CFG or `compiler`'s own typed SSA CFG.
+
+First acceptance case: a defined-behavior integer C function compiled
+through EDG + `bingordo/compiler`, producing native ELF linked with a
+GCC driver and matching GCC/Cranelift results. Keep the native compiler
+optimizer, IR and backends independent of both EDG and Cranelift; isolate
+EDG-specific lowering in a separate driver. Later expand through M9–M13
+as described in the [integration plan](docs/EDG_COMPILER_INTEGRATION.md).
 
 ## CI and CPU budget
 
