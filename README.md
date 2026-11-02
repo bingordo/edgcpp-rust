@@ -20,8 +20,11 @@ The earlier pre-codegen snapshot is preserved on
 [100-seed constrained YARPGen cohort](https://github.com/bingordo/compiler-ci/actions/runs/41443794336)
 and the
 [100-seed bounded-default cohort](https://github.com/bingordo/compiler-ci/actions/runs/41445555459)
-both passed **100/100** GCC/Clang differential cases. The latter changes only
-YARPGen's maximum array dimensionality to four; the completely unconstrained
+both passed **100/100** GCC/Clang differential cases; the subsequent
+[1,000-seed bounded-default run](https://github.com/bingordo/compiler-ci/actions/runs/41450045519)
+also passed **1,000/1,000**, with zero unsupported or wrong-output cases.
+The latter changes only YARPGen's maximum array dimensionality to four;
+the completely unconstrained
 profile was limited primarily by multi-GiB generated arrays and GCC
 small-code-model relocation failures. See
 [the measured coverage report](docs/YARPGEN_CRANELIFT_MILESTONES.md#measured-yarpgen-coverage-checkpoint-2026-11-02)
