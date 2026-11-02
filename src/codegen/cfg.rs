@@ -1163,7 +1163,7 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
         Some(CAbiInt{bits:64,signed:false,is_bool:false})
     } else {Some(call_type_abi(il,ret)?)};
     let abi=CAbi{aggregate_parameters,aggregate_result,parameters,result};
-    abi.validate_register_budget()?;
+    abi.passing_plan()?;
     Ok(CallDeclaration {symbol,name,abi})
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
