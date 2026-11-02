@@ -26,6 +26,10 @@ enum Stmt {
     DoWhile(Vec<Stmt>, Expr),
     Break,
     Continue,
+    /// User-visible C goto label, addressed by the owned EDG symbol identity.
+    Goto(crate::SymbolId),
+    /// A destination in the current function, not a separate frontend CFG.
+    Label(crate::SymbolId),
 }
 struct Routine {
     name: String, parameters: usize, locals: usize, body: Vec<Stmt>,
@@ -366,20 +370,35 @@ fn lower(
             Ok(vec![Stmt::For { init, condition, increment, body }])
         }
         10 | 11 => {
-            // Native EDG records classify only compiler-generated loop
-            // break/continue targets. Never interpret arbitrary gotos.
             let sem = semantic(1, node.data.kind);
             let matching: Vec<_> = il.loop_transfers.iter()
                 .filter(|t| t.function == *function && t.statement_path == *path)
                 .collect();
-            if matching.len() != 1 || graph.statement_label(id).is_none() {
-                return Err(invalid("unsupported non-loop goto or label"));
+            let label=graph.statement_label(id)
+                .ok_or_else(||invalid("goto/label lacks EDG target identity"))?;
+            if !matching.is_empty() {
+                // Keep compiler-generated structured-loop transfers separate
+                // from source-level gotos. No guessed target based on spelling.
+                if matching.len()!=1 {
+                    return Err(invalid("duplicate EDG loop-transfer metadata"));
+                }
+                return match (sem, matching[0].kind) {
+                    (10, 1) => Ok(vec![Stmt::Break]),
+                    (10, 2) => Ok(vec![Stmt::Continue]),
+                    (11, 3 | 4) => Ok(Vec::new()),
+                    _ => Err(invalid("inconsistent EDG loop-label classification")),
+                };
             }
-            match (sem, matching[0].kind) {
-                (10, 1) => Ok(vec![Stmt::Break]),
-                (10, 2) => Ok(vec![Stmt::Continue]),
-                (11, 3 | 4) => Ok(Vec::new()),
-                _ => Err(invalid("inconsistent EDG loop-label classification")),
+            if node.expression.is_some() ||
+                node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
+                return Err(invalid("source goto/label has unexpected nested statement"));
+            }
+            match (sem,label.definition) {
+                (10,false) if graph.goto_target(id).is_some() =>
+                    Ok(vec![Stmt::Goto(label.label)]),
+                (11,true) => Ok(vec![Stmt::Label(label.label)]),
+                (10,false) => Err(invalid("goto has unresolved label in function")),
+                _ => Err(invalid("invalid source goto/label definition metadata")),
             }
         }
         _ => Err(invalid(format!("unsupported EDG statement {}", node.data.kind))),
@@ -472,6 +491,54 @@ fn may_break_current_loop(body: &[Stmt]) -> bool {
     })
 }
 
+/// Predeclare source labels and reject unsupported jumps through structured
+/// loops. Labels are accepted at block level; a goto in an if-arm may target
+/// any such label in the same function. This is a *scope validator*, not a CFG.
+fn source_labels(body:&[Stmt]) -> Result<Vec<crate::SymbolId>,CodegenError> {
+    let mut definitions=HashSet::new();
+    let mut references=HashSet::new();
+    fn visit(body:&[Stmt],defs:&mut HashSet<crate::SymbolId>,
+             refs:&mut HashSet<crate::SymbolId>, nested:bool,
+             in_loop:bool) -> Result<(),CodegenError> {
+        for stmt in body {
+            match stmt {
+                Stmt::Label(label) => {
+                    if nested || in_loop {
+                        return Err(invalid("label inside structured control unsupported"));
+                    }
+                    if !defs.insert(*label) {
+                        return Err(invalid("duplicate source label"));
+                    }
+                }
+                Stmt::Goto(label) => {
+                    if in_loop {
+                        return Err(invalid("goto inside structured loop unsupported"));
+                    }
+                    refs.insert(*label);
+                }
+                Stmt::If(_,yes,no) => {
+                    visit(yes,defs,refs,true,in_loop)?;
+                    visit(no,defs,refs,true,in_loop)?;
+                }
+                Stmt::While(_,body) | Stmt::DoWhile(body,_) =>
+                    visit(body,defs,refs,true,true)?,
+                Stmt::For{init,increment,body,..} => {
+                    visit(init,defs,refs,true,true)?;
+                    visit(increment,defs,refs,true,true)?;
+                    visit(body,defs,refs,true,true)?;
+                }
+                _ => ()
+            }
+        }
+        Ok(())
+    }
+    visit(body,&mut definitions,&mut references,false,false)?;
+    if !references.is_subset(&definitions) {
+        return Err(invalid("unresolved user goto target"));
+    }
+    Ok(definitions.into_iter().collect())
+}
+
 // Returns true if execution can reach the end of this sequence.
 fn check(
     body: &[Stmt], vars: &mut HashSet<usize>, params: usize,
@@ -479,8 +546,15 @@ fn check(
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in body {
-        if !live { return Err(invalid("unreachable statement")); }
+        // A label can be entered through a forward jump even if the lexical
+        // predecessor returned or jumped away. Avoid phantom fallthrough.
+        // C permits arbitrary dead statements after a return or goto.
+        // No execution edge enters them unless a source label starts a new
+        // block; do not interpret their reads or writes as reachable.
+        if !live && !matches!(stmt, Stmt::Label(_)) {continue;}
         match stmt {
+            Stmt::Label(_) => live=true,
+            Stmt::Goto(_) => live=false,
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
                 live = false;
@@ -1753,9 +1827,16 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             .collect::<Result<Vec<_>,_>>()?);
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
+        let labels=source_labels(&body)?;
         let initialized: HashSet<usize> =
             (locals.len()..(locals.len()+ids.len())).collect();
-        let has_fallthrough = check(&body, &mut initialized.clone(),
+        let mut checked=initialized.clone();
+        // Across user gotos, lexical statement order is not a reliable
+        // definite-assignment analysis. Conservatively let Cranelift model
+        // all scalar locals as addressable storage and validate the selected
+        // target labels separately. Reading a skipped C initializer is UB.
+        if !labels.is_empty() { checked.extend(0..locals.len()); }
+        let has_fallthrough = check(&body, &mut checked,
             ids.len(), local_types.len(), 0)?;
         if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
@@ -1817,7 +1898,8 @@ fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
                 if let Some(condition)=condition {addressed_expr(condition,found);}
                 addressed_stmt(body,found); addressed_stmt(increment,found);
             }
-            Stmt::ReturnVoid | Stmt::Break | Stmt::Continue => {}
+            Stmt::ReturnVoid | Stmt::Break | Stmt::Continue |
+            Stmt::Goto(_) | Stmt::Label(_) => {}
         }
     }
 }
@@ -2212,12 +2294,25 @@ fn emit_body(
     outer: Option<LoopTargets<'_>>,
     local_types: &[CAbiInt], result: Option<CAbiInt>,
     globals: &GlobalValues,stack:&HashMap<usize,StackSlot>,
-    calls: &CallValues,
+    calls: &CallValues, labels:&HashMap<crate::SymbolId,Block>,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
-        if !live { return Err(invalid("unreachable statement")); }
+        if !live && !matches!(stmt,Stmt::Label(_)) {continue;}
         match stmt {
+            Stmt::Goto(symbol) => {
+                let target=*labels.get(symbol).ok_or_else(||
+                    invalid("source goto has no predeclared block"))?;
+                fb.ins().jump(target,&[]);
+                live=false;
+            }
+            Stmt::Label(symbol) => {
+                let target=*labels.get(symbol).ok_or_else(||
+                    invalid("source label has no predeclared block"))?;
+                if live {fb.ins().jump(target,&[]);}
+                fb.switch_to_block(target);
+                live=true;
+            }
             Stmt::Break => {
                 let dest = outer.ok_or_else(|| invalid("break outside loop"))?;
                 fb.ins().jump(dest.break_to, &[]);
@@ -2313,7 +2408,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -2321,7 +2416,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -2352,7 +2447,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -2361,7 +2456,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)? {
                     live = false;
                     continue;
                 }
@@ -2386,12 +2481,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -2415,7 +2510,7 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
@@ -2668,6 +2763,13 @@ fn emit_routines_with_globals(
             }).collect();
             let mut addressed=HashSet::new();
             addressed_stmt(&func.body,&mut addressed);
+            let label_ids=source_labels(&func.body)?;
+            // A source goto may bypass lexical SSA initialization; address
+            // all local/parameter slots so stores and reads preserve C memory
+            // semantics irrespective of the predecessor edge.
+            if !label_ids.is_empty() {addressed.extend(0..local_types.len());}
+            let labels:HashMap<_,_>=label_ids.into_iter()
+                .map(|id|(id,fb.create_block())).collect();
             // Aggregate formal parameters are addressable C objects,
             // not SSA scalar values. Materialize exactly the native object
             // width from the incoming INTEGER-class register.
@@ -2706,7 +2808,7 @@ fn emit_routines_with_globals(
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
-                &global_values,&stack,&call_values)?;
+                &global_values,&stack,&call_values,&labels)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
@@ -2714,6 +2816,9 @@ fn emit_routines_with_globals(
                     return Err(invalid("fallthrough in code generation"));
                 }
             }
+            // Source labels can receive forward and backward edges, including
+            // branches from inside an if-arm. Seal only after emission is done.
+            for block in labels.values() {fb.seal_block(*block);}
             fb.finalize();
         }
         module.define_function(id,&mut context).map_err(|e| CodegenError::Backend(e.to_string()))?;
@@ -2868,6 +2973,46 @@ mod tests {
             assert!(!may_break_current_loop(body));
         } else {panic!("expected for loop");}
         assert!(!check(&outer,&mut HashSet::new(),1,0,0).unwrap());
+    }
+
+    #[test]
+    fn user_label_map_validates_forward_backward_and_scoped_gotos() {
+        let label=crate::SymbolId(91);
+        let stmts=vec![
+            Stmt::If(Expr::Parameter(0),
+                vec![Stmt::Goto(label)],vec![]),
+            Stmt::Label(label),
+            Stmt::Store(0,Expr::Constant(3)),
+            Stmt::Goto(label),
+        ];
+        assert_eq!(source_labels(&stmts).unwrap(),vec![label]);
+        let unresolved=vec![Stmt::Goto(crate::SymbolId(92))];
+        assert!(source_labels(&unresolved).is_err());
+        let duplicate=vec![Stmt::Label(label),Stmt::Label(label)];
+        assert!(source_labels(&duplicate).is_err());
+        let nested=vec![Stmt::While(Expr::Parameter(0),
+            vec![Stmt::Goto(label)]),Stmt::Label(label)];
+        assert!(source_labels(&nested).is_err());
+    }
+
+    #[test]
+    fn user_goto_returns_to_a_labeled_block_without_lexical_fallthrough() {
+        let label=crate::SymbolId(100);
+        let body=vec![
+            Stmt::Store(0,Expr::Constant(0)),
+            Stmt::Goto(label),
+            Stmt::Label(label),
+            Stmt::Store(0,Expr::Add(Box::new(Expr::Local(0)),
+                Box::new(Expr::Constant(7)))),
+            Stmt::Return(Expr::Local(0)),
+        ];
+        assert!(source_labels(&body).is_ok());
+        let object=emit_routines(&[Routine {
+            name:"test_source_label_jump".into(),parameters:0,locals:1,
+            body,abi:None,local_types:None,
+            local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
     }
 
 }

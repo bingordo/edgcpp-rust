@@ -47,3 +47,39 @@ int m6_for_ever_continue(int limit)
     }
     return n;
 }
+
+/* M9: source labels are not synthetic break/continue targets. */
+int m9_goto_forward(int n)
+{
+    int result = 1;
+    if (n < 0) goto negative;
+    result += n * 3;
+    goto done;
+negative:
+    result += -n * 7;
+done:
+    return result;
+}
+
+/* Backedge to an earlier C label, with scalar state updated on each trip. */
+int m9_goto_backedge(int limit)
+{
+    int sum = 0;
+    int i = 0;
+again:
+    if (i >= limit) goto done;
+    sum += i * 5 + 3;
+    i++;
+    goto again;
+done:
+    return sum;
+}
+
+/* A forward jump bypasses valid but unreachable C statements. */
+int m9_skip_dead(int x)
+{
+    goto done;
+    x += 99;
+done:
+    return x + 9;
+}
