@@ -1211,10 +1211,50 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       unsigned loop_kind = 0;
       if (label->continue_label)
         loop_kind = stmt->kind == stmk_goto ? 2 : 4;
-      else if (label->break_label && !label->switch_break_label)
+      else if (label->switch_break_label)
+        loop_kind = stmt->kind == stmk_goto ? 5 : 6;
+      else if (label->break_label)
         loop_kind = stmt->kind == stmk_goto ? 1 : 3;
       if (loop_kind != 0)
         emit_record(44, {txt(function), txt(path), num(loop_kind)});
+    }
+    if (stmt->kind == stmk_switch_case) {
+      // A case/default has no executable expression of its own. Preserve
+      // native integer values as an i64 bit carrier, including unsigned
+      // 64-bit values. Status: 0=default, 1=integer, 2=unsupported.
+      a_switch_case_entry_ptr entry = stmt->variant.switch_case.extra_info;
+      uint32_t status = 2;
+      int64_t bits = 0;
+      if (entry != nullptr) {
+        if (entry->case_value == nullptr) {
+          status = 0;
+        } else if (entry->case_value->kind == ck_integer) {
+          a_boolean overflow = FALSE;
+          if (int_constant_is_signed(entry->case_value)) {
+            a_host_large_integer value =
+                value_of_integer_constant(entry->case_value, &overflow);
+            if (!overflow && sizeof(value) <= sizeof(int64_t)) {
+              bits = static_cast<int64_t>(value);
+              status = 1;
+            }
+          } else {
+            a_host_large_unsigned value =
+                unsigned_value_of_integer_constant(entry->case_value, &overflow);
+            if (!overflow &&
+                value <= static_cast<a_host_large_unsigned>(
+                    std::numeric_limits<uint64_t>::max())) {
+              uint64_t raw = static_cast<uint64_t>(value);
+              std::memcpy(&bits, &raw, sizeof(bits));
+              status = 1;
+            }
+          }
+        }
+#if GNU_EXTENSIONS_ALLOWED
+        if (entry->range_end != nullptr) status = 2;
+#endif
+      }
+      emit_record(53, {txt(function), txt(path), num(status),
+                       status == 1 ? signed_num(bits) : absent()});
     }
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
@@ -1755,6 +1795,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_goto)) return 10;
     if (value == static_cast<unsigned>(stmk_label)) return 11;
     if (value == static_cast<unsigned>(stmk_stmt_expr_result)) return 12;
+    if (value == static_cast<unsigned>(stmk_switch)) return 13;
+    if (value == static_cast<unsigned>(stmk_switch_case)) return 14;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
