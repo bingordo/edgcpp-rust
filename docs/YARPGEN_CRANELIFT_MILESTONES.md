@@ -444,6 +444,46 @@ Do not increase the automatic cohort size until this produces measurable
 acceptance improvement.
 
 
+## Measured YARPGen coverage checkpoint (2026-11-02)
+
+The optional Cranelift reference backend, on `cranelift-codegen` at
+`214bfd4` (PR #39, unconditional C `for (;;)` support), has now been
+differential-tested against independent GCC/Clang references with
+**100 fixed generated C programs (seeds 12345–12444)** in three profiles:
+
+| Generator profile | Oracle-valid | Passed | Unsupported | Other nonpasses |
+| --- | ---: | ---: | ---: | --- |
+| Constrained (`--max-array-dims=2` plus the existing feature switches) | 100 | **100** | 0 | 0 |
+| Default YARPGen options | 77 | **68** | 0 reported | 23 GCC baseline failures and 9 intentional size-guard rejections (previously classified as `codegen_failure`) |
+| Bounded default (only `--max-array-dims=4`) | 100 | **100** | 0 | 0 |
+
+Evidence: [100 constrained](https://github.com/bingordo/compiler-ci/actions/runs/41443794336),
+[100 default](https://github.com/bingordo/compiler-ci/actions/runs/41444762800),
+[100 bounded default](https://github.com/bingordo/compiler-ci/actions/runs/41445555459).
+The tests use a pinned YARPGen release, pinned EDG binary/source, explicit
+x86-64 C11 mode, GCC/Clang oracles and native executable comparisons.
+The default-profile failure artifact was inspected; it includes 22 GCC
+link failures with `R_X86_64_32[S]` relocation overflow for massive BSS,
+one GCC runtime/checksum failure, and nine EDG/Cranelift rejections of
+individual arrays over the existing 16 MiB safety limit. Some inputs have
+over **60 GiB of declared aggregate array storage**. Do not raise that
+backend guard or silently relabel the results as compiler wrong-code.
+PR #39's new `for (;;)` differential tests also passed independently.
+
+A harness classification fix now recognizes known intentional array/object
+size limits as `unsupported_construct` rather than `codegen_failure`.
+This changes future triage categories, **not** historical run results or
+compiler capabilities.
+
+**Interpretation:** For the measured resource-bounded generated-C subset,
+Cranelift is a usable reference oracle and produces native ELF objects with
+GCC interoperability. This does not establish whole-C compatibility,
+general SysV aggregate/FP ABI support or default unrestricted YARPGen
+acceptance. Continue increasing the **bounded-default** cohort to
+1,000 seeds and broadening focused C feature tests, ranking genuine
+supported-oracle failures ahead of arbitrary new lowering features.
+The EDG-to-`bingordo/compiler` interface remains the long-term goal.
+
 ## M8–M13 — C semantics, reference validation and compiler integration
 
 **Numbering note:** the older M0–M8 table above describes the original
