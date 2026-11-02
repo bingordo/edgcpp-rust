@@ -91,6 +91,21 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["codegen_failure"], 0)
         self.assertEqual(summary["backend_accepted"], 0)
 
+    def test_resource_guard_is_not_reported_as_backend_crash(self):
+        codegen = self.root / "oversized_array_codegen"
+        codegen.write_text(
+            "#!/bin/sh\\n"
+            "echo 'EDG IL lowering failed: InvalidFunction(\\\"array object too large\\\")' >&2\\n"
+            "exit 1\\n"
+        )
+        codegen.chmod(0o755)
+        run = self.invoke("--codegen", str(codegen))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        summary = json.loads((self.root / "cases" / "summary.json").read_text())
+        self.assertEqual(summary["counts"]["unsupported_construct"], 2)
+        self.assertEqual(summary["counts"]["codegen_failure"], 0)
+        self.assertEqual(summary["backend_accepted"], 0)
+
     def test_actual_codegen_failure_is_not_treated_as_unsupported(self):
         codegen = self.root / "broken_codegen"
         codegen.write_text("#!/bin/sh\necho 'Cranelift unexpected verifier error' >&2\nexit 2\n")
