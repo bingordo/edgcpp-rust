@@ -14,6 +14,9 @@ enum Stmt {
     InitializeAggregate(usize, Vec<u8>),
     Eval(Expr),
     Return(Expr),
+    /// Return a native 9-16-byte INTEGER aggregate in RAX/RDX. The argument
+    /// evaluates to the address of an existing C object, not its first word.
+    ReturnAggregate(u8, Expr),
     ReturnVoid,
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
@@ -185,13 +188,21 @@ fn lower(
                         site.statement_path==expression.data.statement_path &&
                         site.path==expression.data.path);
                     if direct_call {
+                        if size>8 {
+                            return Err(invalid(
+                                "two-GPR aggregate call return materialization unsupported"));
+                        }
                         // A one-register aggregate call already produces the
                         // packed SysV INTEGER result in RAX.
                         let returned=expr(id)?;
                         Ok(vec![Stmt::Return(returned)])
                     } else {
                         let address=lower_address(graph,id,params,locals,il)?;
-                        Ok(vec![Stmt::Return(Expr::PackAggregate(size,Box::new(address)))])
+                        if size>8 {
+                            Ok(vec![Stmt::ReturnAggregate(size,address)])
+                        } else {
+                            Ok(vec![Stmt::Return(Expr::PackAggregate(size,Box::new(address)))])
+                        }
                     }
                 } else {
                     Ok(vec![Stmt::Return(expr(id)?)])
@@ -492,6 +503,13 @@ fn check(
             }
             Stmt::Eval(e) => { check_expr(e, vars, params)?; }
             Stmt::Return(e) => { check_expr(e, vars, params)?; live = false; }
+            Stmt::ReturnAggregate(bytes,address) => {
+                if !(9..=16).contains(bytes) {
+                    return Err(invalid("invalid two-GPR C aggregate return size"));
+                }
+                check_expr(address,vars,params)?;
+                live = false;
+            }
             Stmt::ReturnVoid => { live = false; }
             Stmt::If(e, yes, no) => {
                 check_expr(e, vars, params)?;
@@ -1178,6 +1196,13 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     }
     let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
     let aggregate_result=target::ABI.classify_aggregate(il,ret)?;
+    if aggregate_result.is_some_and(|bytes|bytes>8) {
+        // The *producer* can return RAX/RDX now, but a call expression
+        // still needs a typed aggregate destination for both registers.
+        // Never silently return only the first physical value.
+        return Err(invalid(
+            "two-GPR aggregate call result materialization unsupported"));
+    }
     target::ABI.validate_aggregate_return(aggregate_result)?;
     let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
         None
@@ -1787,7 +1812,8 @@ fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
         match statement {
             Stmt::ZeroAggregate(index,_) |
             Stmt::InitializeAggregate(index,_) => {found.insert(*index);}
-            Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) => addressed_expr(e,found),
+            Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) |
+            Stmt::ReturnAggregate(_,e) => addressed_expr(e,found),
             Stmt::If(c,a,b) => { addressed_expr(c,found);
                 addressed_stmt(a,found); addressed_stmt(b,found); },
             Stmt::While(c,body) | Stmt::DoWhile(body,c) =>
@@ -2244,11 +2270,27 @@ fn emit_body(
             Stmt::Eval(e) => { let _ = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?; }
             Stmt::Return(e) => {
                 let ty = result.ok_or_else(|| invalid("value returned from void routine"))?;
+                if fb.func.signature.returns.len()!=1 {
+                    return Err(invalid("scalar C return incompatible with machine signature"));
+                }
                 let v = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?;
                 let v = if ty.bits == 64 { v }
                     else { fb.ins().ireduce(ty.cranelift(), v) };
                 fb.ins().return_(&[v]);
                 live = false;
+            }
+            Stmt::ReturnAggregate(bytes,address) => {
+                if result.is_none() || !(9..=16).contains(bytes) ||
+                   fb.func.signature.returns.len()!=2 {
+                    return Err(invalid("two-GPR return ABI/signature mismatch"));
+                }
+                let address=emit_expr(address,fb,args,vars,globals,stack,local_types,calls)?;
+                let pieces=target::ABI.pack_argument(fb,address,*bytes)?;
+                if pieces.len()!=2 {
+                    return Err(invalid("two-GPR return must produce exactly two values"));
+                }
+                fb.ins().return_(&pieces);
+                live=false;
             }
             Stmt::ReturnVoid => {
                 if result.is_some() { return Err(invalid("missing non-void return value")); }
