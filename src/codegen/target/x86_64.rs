@@ -173,7 +173,9 @@ impl TargetAbi for SysV {
                 location:integer(0)
             }]
         } else {Vec::new()};
-        Ok(PassingPlan{parameters,result})
+        let plan=PassingPlan{parameters,result};
+        plan.validate()?;
+        Ok(plan)
     }
 
     fn validate_aggregate_return(&self, aggregate: Option<u8>) -> Result<(), CodegenError> {
@@ -211,41 +213,40 @@ impl TargetAbi for SysV {
     }
 
     fn decode_parameters(
-        &self, fb:&mut FunctionBuilder<'_>, abi:&CAbi, machine_values:&[Value],
-    ) -> Result<(Vec<Value>,Vec<Option<Value>>),CodegenError> {
+        &self, fb:&mut FunctionBuilder<'_>, plan:&PassingPlan,
+        machine_values:&[Value],
+    ) -> Result<Vec<Vec<Value>>,CodegenError> {
         let mut physical=machine_values.iter().copied();
-        let mut params=Vec::with_capacity(abi.parameters.len());
-        let mut second_parts=Vec::with_capacity(abi.parameters.len());
-        for (ty,aggregate) in abi.parameters.iter().zip(&abi.aggregate_parameters) {
-            let value=physical.next().ok_or_else(||
-                CodegenError::InvalidFunction("missing machine argument".into()))?;
-            params.push(if ty.bits==64 {value}
-                else if ty.signed {fb.ins().sextend(types::I64,value)}
-                else {fb.ins().uextend(types::I64,value)});
-            second_parts.push(if aggregate.is_some_and(|bytes|bytes>8) {
-                Some(physical.next().ok_or_else(||
-                    CodegenError::InvalidFunction("missing second aggregate GPR".into()))?)
-            } else {None});
+        let mut decoded=Vec::with_capacity(plan.parameters.len());
+        for arg in &plan.parameters {
+            let mut values=Vec::with_capacity(arg.pieces.len());
+            for piece in &arg.pieces {
+                let value=physical.next().ok_or_else(||CodegenError::InvalidFunction(
+                    "missing physical ABI argument".into()))?;
+                values.push(if matches!(arg.mode,PassingMode::Scalar) &&
+                    piece.ty.bits < 64 {
+                    if piece.ty.signed {fb.ins().sextend(types::I64,value)}
+                    else {fb.ins().uextend(types::I64,value)}
+                } else {value});
+            }
+            decoded.push(values);
         }
         if physical.next().is_some() {
             return Err(CodegenError::InvalidFunction("extra machine arguments".into()));
         }
-        Ok((params,second_parts))
+        Ok(decoded)
     }
 
     fn materialize_aggregate(
         &self, fb:&mut FunctionBuilder<'_>, address:Value, size:u8,
-        first:Value, second:Option<Value>,
+        values:&[Value],
     ) -> Result<(),CodegenError> {
-        if size==0 || size>16 {
+        if size==0 || size>16 || values.len()!=if size>8 {2} else {1} {
             return Err(CodegenError::InvalidFunction(
-                "invalid SysV aggregate parameter width".into()));
+                "invalid SysV aggregate materialization pieces".into()));
         }
         for offset in 0..size {
-            let register=if offset<8 {first} else {
-                second.ok_or_else(||CodegenError::InvalidFunction(
-                    "missing second aggregate GPR".into()))?
-            };
+            let register=values[usize::from(offset/8)];
             let shift_bytes=offset%8;
             let part=if shift_bytes==0 {register} else {
                 let shift=fb.ins().iconst(types::I64,i64::from(shift_bytes)*8);
