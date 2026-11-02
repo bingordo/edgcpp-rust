@@ -345,12 +345,13 @@ and arrays allocated in the GCC driver. The reference backend needs correct
 external data symbol declarations, relocations, addressing and ABI, not just
 standalone local SSA values.
 
-**Keep the reference understandable.** Introduce a small typed, backend-neutral
-representation for expressions, lvalues, statement CFG and typed symbols
-rather than layering every new feature into the original untyped `Expr`
-and `cfg.rs`. Reuse that decoding and semantic checking for the future
-`bingundu/compiler` connection. The reference remains a *correctness
-oracle*, not a competing general optimizing compiler.
+**Keep the reference understandable and compiler-independent.** Export
+checked source semantics (typed expressions, lvalues, source statements,
+symbols and lifetimes) over the existing owned EDG `Il`/`graph::Graph`.
+Do not build an additional frontend CFG/SSA: each backend lowers source
+control directly into its own CFG. Reuse this checked interface for
+`bingordo/compiler`; the Cranelift backend remains an optional correctness
+reference rather than a competing optimizer.
 
 **Testing priority:** wrong-code, invalid ABI and nondeterministic
 miscompiles outrank unsupported-but-diagnosed features. Do focused unit
@@ -443,16 +444,45 @@ Do not increase the automatic cohort size until this produces measurable
 acceptance improvement.
 
 
-## M8–M13 — C coverage roadmap (planned, 2026-10-30)
+## M8–M13 — C semantics, reference validation and compiler integration
 
-**Scope and sequencing.** Defer any further GNU statement-expression work:
-the existing straight-line scalar support remains, but general nested
-control flow, nontrivial lifetimes and GNU block-value extensions are
-explicitly *out of scope* until this roadmap is complete. Do not regress
-existing M6 behavior. Use a small typed/lvalue framework and EDG metadata
-rather than adding source-pattern-specific rewrites to `cfg.rs`.
+**Primary goal:** make EDG a useful, checked Rust frontend for
+[`bingordo/compiler`](https://github.com/bingordo/compiler). Its existing
+typed block-argument SSA CFG, optimization pipeline and machine backend are
+the intended production consumer. **Cranelift is a stepping-stone reference
+backend** for testing EDG semantic extraction and GCC/Clang native
+interoperability; do not make `compiler` depend on Cranelift or on
+Cranelift's private `Expr`, `Stmt` or target ABI plan.
 
-### M8 — aggregate objects and initializers (start here)
+**Immediate integration track:** establish a checked, Cranelift-independent
+semantic projection over the existing owned `Il`/`graph::Graph` and a
+separate driver/adapter for `compiler`. Get a small integer-C function
+through EDG -> `compiler-ir` -> native ELF and compare it against GCC
+and, where supported, EDG -> Cranelift. Do this **during M9**, not after
+M10–M13 are complete. See [EDG/compiler integration plan](EDG_COMPILER_INTEGRATION.md)
+for API ownership, sequencing, and acceptance gates.
+
+**Three layers, no duplicated CFG:**
+
+1. **EDG bridge:** export owned source semantics (typed expressions/lvalues,
+   declarations, control statements, source locations, lifetimes and
+   target-validated object layouts) with checked accessors and diagnostics.
+   Neither `compiler-ir` nor Cranelift types appear in this public contract.
+2. **Reference adapter:** map those semantics directly to Cranelift IR,
+   keeping Cranelift-only CFG and SysV passing decisions private.
+3. **Compiler adapter:** map the same semantics into `compiler`'s existing
+   typed SSA CFG, verifiers and native backends. The native backend owns its
+   machine ABI. The bridge does not need a separate general CFG or SSA IR.
+
+**Scope and sequencing:** preserve currently supported straight-line GNU
+statement expressions but defer complex GNU statement-expression extensions.
+Prioritize front-end API reuse, native compiler integration and clearly
+specified C semantics over making Cranelift a complete alternative compiler.
+Fail closed when a backend or semantic interface lacks a required feature.
+Keep M9–M13 milestone IDs for the existing workstreams; the new
+compiler-integration track starts in parallel with M9.
+
+### M8 — aggregate objects and initializers (ongoing)
 
 * M8.1: inventory EDG record/union/field and initializer metadata; document
   size, alignment, layout, bitfield and relocation requirements; add negative
@@ -466,53 +496,88 @@ rather than adding source-pattern-specific rewrites to `cfg.rs`.
   and alias behavior; extend SysV aggregate ABI only in a separately tested
   step. **Gate:** GCC differential fixtures (nested records, arrays, unions,
   alignment, global and local initialization) and explicit rejection tests.
+* Keep the status inventory below authoritative: this checklist contains
+  ongoing *subtasks*, not a claim that all of M8 is unimplemented.
 
-### M9 — general statement CFG
+### M9 — control-flow semantics and first compiler adapter
 
-* Introduce per-function label/block discovery, branch target validation and
-  reachability; lower `switch`/case/default, fallthrough and arbitrary
-  non-loop goto/labels without abusing break/continue recognition.
-* Reject illegal jumps into scopes with unsupported initialization/lifetime
-  constraints. **Gate:** GCC differential fixtures with loops, fallthrough,
-  forward/backward jumps, nested scopes and unreachable blocks.
+* In the **shared EDG semantic interface**, expose and validate source label
+  identities, `goto` destinations, `switch` selector/case/default metadata,
+  fallthrough and scope/lifetime restrictions. Keep source statements and
+  symbols addressable; do **not** construct a generic frontend CFG.
+* In the **Cranelift reference adapter**, implement a two-pass per-function
+  label/block map and emit arbitrary `goto`, forward/backward branches,
+  case/default, fallthrough and unreachable-between-label statements into
+  **Cranelift's own CFG**. Handle block sealing only after all incoming
+  predecessors are known; do not abuse loop break/continue heuristics.
+* In the **compiler adapter**, start with integer functions, locals and
+  returns, then `if`/`while`, translating EDG operations directly into
+  `compiler-ir`'s existing CFG SSA and verifier. Add goto/switch to the
+  adapter as the shared source semantics become available.
+* **Gate:** one native ELF object produced by EDG -> `compiler` linked and
+  executed against a GCC driver, matching a reference Cranelift build where
+  supported; compiler IR verification; positive structured/forward/backward
+  control cases and explicit unsupported/invalid-jump diagnostics.
+  Do not require full M10–M13 language coverage before integration starts.
 
-### M10 — call and ABI completeness
+### M10 — function calls and ABI completeness
 
-* Extend typed function references to indirect calls through function
-  pointers, preserving prototypes, return conversions and symbol linkage.
-* Support unprototyped and variadic C calls only with verified SysV x86-64
-  default promotions and register/stack rules; handle aggregate arguments
-  after M8's ABI representation is validated.
-* **Gate:** separate C caller/callee compilation, GCC interop in both
-  directions, negative mismatched-prototype tests.
+* **Shared source contract:** function/pointer-to-function types, prototypes,
+  promoted argument/result types, evaluation order, symbol/linkage identity,
+  variadic/unprototyped distinctions, and aggregate native layouts.
+* **Adapters/backend ownership:** extend direct and indirect function calls;
+  the native `compiler` target backend implements its own calling convention,
+  not Cranelift's x86-specific `PassingPlan`. Cranelift reference handling
+  remains independently testable. Unsupported FP, aggregate MEMORY-class,
+  indirect-result and variadic cases fail closed until individually validated.
+* **Gate:** generated -> GCC and GCC -> generated calls and returns, plus
+  generated-to-generated calls, on both available backends; function pointer
+  cases, register exhaustion, default promotions and negative ABI tests.
+  Enabling full variadics is not a prerequisite for the first compiler driver.
 
 ### M11 — VLAs and dynamic automatic storage
 
-* Model runtime dimensions, checked size calculations, dynamic stack
-  allocation, nested-scope lifetimes and early exits. Preserve `sizeof`
-  semantics and reject unsupported dynamic initializers explicitly.
-* **Gate:** GCC differential for VLA indexing, nested scopes, bounds-related
-  size expressions and control-flow exits; stack-stress cases.
+* **Shared source contract:** runtime array bound expressions, evaluation
+  and `sizeof` rules, runtime storage size/alignment, lexical lifetimes and
+  early exits. Preserve source flow; do not duplicate backend CFGs.
+* **Backend adapters:** allocate/restore dynamic storage using each backend's
+  supported stack and scope mechanisms; reject unsafe cases such as
+  unsupported jumps into VLA scope and unimplemented dynamic initializers.
+* **Gate:** GCC differential for nested VLAs, side-effectful dimensions,
+  indexing, scope exit, and stack stress on each backend that claims support.
 
-### M12 — volatile and atomics
+### M12 — volatile and C11 atomics
 
-* Track volatile qualifiers in EDG memory operations; ensure observable
-  accesses are not eliminated, combined or reordered across sequencing.
-* Treat C11 atomics as a separate subphase with explicit ordering,
-  alignment, target instruction selection and fallback semantics. Do not
-  silently lower atomics to ordinary loads/stores.
-* **Gate:** IR/assembly assertions plus differential single-thread tests;
-  targeted concurrency litmus tests only after a sound memory model.
+* **Shared source contract:** qualifiers, exact access width/alignment,
+  observable load/store effects, evaluation sequencing and C11 memory
+  orderings. Distinguish ordinary, volatile and atomic operations explicitly.
+* **Backend adapters:** `compiler-ir`/target lowering and the Cranelift
+  reference adapter implement these semantics independently or reject the
+  unsupported operation. Do not replace volatile/atomic operations with
+  ordinary memory accesses, nor treat single-thread differential execution
+  as a proof of concurrency semantics.
+* **Gate:** IR/assembly effect assertions and GCC differential for volatile
+  accesses; focused atomic order and alignment cases, plus concurrency
+  litmus tests when memory-ordering implementation is ready.
 
-### M13 — semantic correctness audit and broader coverage
+### M13 — semantic audit and compiler integration validation
 
-* Target integer promotions/narrowing, signed/unsigned operations, pointer
-  provenance and aliasing, evaluation sequencing, casts and ABI boundaries.
-* Add focused GCC/Clang differential regressions and property-based
-  generation. Keep 10-seed automatic YARPGen and manually run unselected
-  100/1000-seed cohorts after targeted checks pass; record accepted/passed,
-  unsupported and severe failures separately. No performance benchmarking
-  gate yet.
+* Audit integer promotions, narrowing, signedness/overflow, pointer
+  provenance/aliasing, lvalue conversions, sequencing, diagnostics,
+  initializers and cross-function ABI contracts at the **shared semantic
+  boundary**, without copying transformation rules between adapters.
+* Grow the `compiler` adapter from the M9 native-ELF pilot through
+  supported memory, globals, pointers, aggregates, control flow and calls,
+  verifying typed SSA and target-specific ABI/layout invariants at each step.
+  This is an **integration acceptance track**, not a separate Cranelift
+  feature-completeness requirement.
+* Maintain focused GCC/Clang differential fixtures and property-based
+  semantic cases. Compare `compiler` and Cranelift wherever both support
+  the same source subset; record unsupported reference cases separately.
+  Run 10-seed automatic YARPGen and manual unselected 100/1,000-seed
+  cohorts after targeted gates. Report accepted/passed, unsupported and
+  severe-failure counts by backend. Defer performance gates until
+  correctness and coverage are credible.
 
 ### M8 implementation checkpoint (2026-11-01)
 
