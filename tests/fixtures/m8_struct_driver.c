@@ -147,6 +147,17 @@ extern struct M8AbiWideMixed m8_abi_return_wide_mixed(int,int,long);
 extern struct M8AbiWide m8_abi_roundtrip_wide(struct M8AbiWide);
 struct M8AbiNine { unsigned char a,b,c,d,e,f,g,h,i; };
 extern struct M8AbiNine m8_abi_return_nine(unsigned char);
+extern struct M8AbiWide m8_abi_forward_gcc_wide(int);
+extern struct M8AbiWide m8_abi_forward_local_wide(int);
+/* Independently GCC-generated two-register return; the Cranelift caller
+ * must materialize both RAX/RDX bytes without an ABI hidden pointer. */
+struct M8AbiWide gcc_m8_abi_make_wide(int n)
+{
+    struct M8AbiWide r;
+    r.first = (long)n * 19 - 97;
+    r.second = n + 33;
+    return r;
+}
 
 int main(void)
 {
@@ -326,5 +337,10 @@ int main(void)
     printf("%d %d %ld %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu\\n",
            mixed_result.first,mixed_result.second,mixed_result.third,
            nine.a,nine.b,nine.c,nine.d,nine.e,nine.f,nine.g,nine.h,nine.i);
+    struct M8AbiWide forwarded_gcc=m8_abi_forward_gcc_wide(-43);
+    struct M8AbiWide forwarded_local=m8_abi_forward_local_wide(97);
+    printf("%ld %d %ld %d\\n",
+           forwarded_gcc.first,forwarded_gcc.second,
+           forwarded_local.first,forwarded_local.second);
     return 0;
 }
