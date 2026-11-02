@@ -68,7 +68,7 @@ impl PassingPlan {
     /// Fail closed if a backend ever constructs an incomplete or inconsistent
     /// source-to-machine mapping. This is checked before IR is emitted.
     pub fn validate(&self) -> Result<(),CodegenError> {
-        let invalid=|msg|CodegenError::InvalidFunction(msg.into());
+        let invalid=|msg: &str| CodegenError::InvalidFunction(msg.into());
         for (i,arg) in self.parameters.iter().enumerate() {
             if arg.source_index!=i || arg.pieces.is_empty() {
                 return Err(invalid("missing or out-of-order ABI source argument"));
