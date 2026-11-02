@@ -62,6 +62,64 @@ impl PassingPlan {
     pub fn machine_returns(&self) -> Vec<CAbiInt> {
         self.result.iter().map(|piece|piece.ty).collect()
     }
+
+    /// Fail closed if a backend ever constructs an incomplete or inconsistent
+    /// source-to-machine mapping. This is checked before IR is emitted.
+    pub fn validate(&self) -> Result<(),CodegenError> {
+        let invalid=|msg|CodegenError::InvalidFunction(msg.into());
+        for (i,arg) in self.parameters.iter().enumerate() {
+            if arg.source_index!=i || arg.pieces.is_empty() {
+                return Err(invalid("missing or out-of-order ABI source argument"));
+            }
+            let expected=match arg.mode {
+                PassingMode::Scalar => {
+                    if arg.pieces.len()!=1 {
+                        return Err(invalid("scalar ABI argument must have one piece"));
+                    }
+                    arg.pieces[0].ty.bits/8
+                }
+                PassingMode::AggregateByValue{bytes} => {
+                    if bytes==0 {return Err(invalid("zero-size aggregate ABI argument"));}
+                    bytes
+                }
+                PassingMode::Indirect =>
+                    return Err(invalid("indirect ABI arguments require explicit lowering")),
+            };
+            let mut offset=0u8;
+            for piece in &arg.pieces {
+                if piece.object_offset!=offset || piece.object_bytes==0 ||
+                    piece.object_bytes>piece.ty.bits/8 {
+                    return Err(invalid("invalid ABI argument piece range"));
+                }
+                // The current IR implements INTEGER pieces; future floating
+                // pieces require new evaluation and materialization paths.
+                match piece.location {
+                    PieceLocation::Register{class:RegisterClass::Integer,..} |
+                    PieceLocation::Stack{..} => (),
+                    _ => return Err(invalid("floating ABI piece lowering unavailable")),
+                }
+                offset=offset.checked_add(piece.object_bytes)
+                    .ok_or_else(||invalid("ABI argument piece overflow"))?;
+            }
+            if offset!=expected {
+                return Err(invalid("incomplete ABI aggregate/scalar piece mapping"));
+            }
+        }
+        if self.result.len()>1 {
+            return Err(invalid("multi-piece result lowering unavailable"));
+        }
+        for piece in &self.result {
+            if piece.object_offset!=0 || piece.object_bytes==0 ||
+                piece.object_bytes>piece.ty.bits/8 {
+                return Err(invalid("invalid ABI return piece"));
+            }
+            if !matches!(piece.location,
+                PieceLocation::Register{class:RegisterClass::Integer,index:0}) {
+                return Err(invalid("unsupported ABI return location"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Validated platform layout and machine-level ABI mapping.
