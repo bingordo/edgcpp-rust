@@ -2976,4 +2976,44 @@ mod tests {
         assert!(!check(&outer,&mut HashSet::new(),1,0,0).unwrap());
     }
 
+    #[test]
+    fn user_label_map_validates_forward_backward_and_scoped_gotos() {
+        let label=crate::SymbolId(91);
+        let stmts=vec![
+            Stmt::If(Expr::Parameter(0),
+                vec![Stmt::Goto(label)],vec![]),
+            Stmt::Label(label),
+            Stmt::Store(0,Expr::Constant(3)),
+            Stmt::Goto(label),
+        ];
+        assert_eq!(source_labels(&stmts).unwrap(),vec![label]);
+        let unresolved=vec![Stmt::Goto(crate::SymbolId(92))];
+        assert!(source_labels(&unresolved).is_err());
+        let duplicate=vec![Stmt::Label(label),Stmt::Label(label)];
+        assert!(source_labels(&duplicate).is_err());
+        let nested=vec![Stmt::While(Expr::Parameter(0),
+            vec![Stmt::Goto(label)]),Stmt::Label(label)];
+        assert!(source_labels(&nested).is_err());
+    }
+
+    #[test]
+    fn user_goto_returns_to_a_labeled_block_without_lexical_fallthrough() {
+        let label=crate::SymbolId(100);
+        let body=vec![
+            Stmt::Store(0,Expr::Constant(0)),
+            Stmt::Goto(label),
+            Stmt::Label(label),
+            Stmt::Store(0,Expr::Add(Box::new(Expr::Local(0)),
+                Box::new(Expr::Constant(7)))),
+            Stmt::Return(Expr::Local(0)),
+        ];
+        assert!(source_labels(&body).is_ok());
+        let object=emit_routines(&[Routine {
+            name:"test_source_label_jump".into(),parameters:0,locals:1,
+            body,abi:None,local_types:None,
+            local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+    }
+
 }
