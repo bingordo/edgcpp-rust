@@ -315,14 +315,14 @@ int main(void)
            m8_abi_external_wide(wide_two));
     struct M8AbiWide wide_result1=m8_abi_return_wide(0x123456789abL,-135);
     struct M8AbiWide wide_result2=m8_abi_return_wide(-0x123456789abL,215);
-    struct M8AbiWide roundtrip=m8_abi_roundtrip_wide(wide_two);
+    struct M8AbiWide wide_roundtrip=m8_abi_roundtrip_wide(wide_two);
     struct M8AbiWideMixed mixed_result=
         m8_abi_return_wide_mixed(-37,111,-0x123456789L);
     struct M8AbiNine nine=m8_abi_return_nine(31);
     printf("%ld %d %ld %d %ld %d\\n",
            wide_result1.first,wide_result1.second,
            wide_result2.first,wide_result2.second,
-           roundtrip.first,roundtrip.second);
+           wide_roundtrip.first,wide_roundtrip.second);
     printf("%d %d %ld %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu\\n",
            mixed_result.first,mixed_result.second,mixed_result.third,
            nine.a,nine.b,nine.c,nine.d,nine.e,nine.f,nine.g,nine.h,nine.i);
