@@ -609,8 +609,12 @@ compiler-integration track starts in parallel with M9.
   into structured regions, case labels nested in `if`/loop statements,
   GNU case ranges, and some complex switch flow/semantic edge cases.
   Those remain explicitly rejected rather than inventing edges; do not
-  build an additional frontend CFG. Explicit exhaustive-return switch
-  handling is tracked separately in PR #50, pending its CI result.
+  build an additional frontend CFG. **Exhaustive-return switches** with
+  `default` and no reachable successor now work as well (PR #50):
+  correct termination analysis avoids fabricating a fallthrough edge or
+  demanding a trailing return in non-void C functions.
+  [PR #50 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41456760992)
+  passed the GCC native differential and Rust tests.
 
 ### M10 — function calls and ABI completeness
 
