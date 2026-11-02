@@ -92,6 +92,11 @@ of machine pieces rather than a hard-coded optional second register.
 
 ## Adding AArch64 later
 
+The steps below concern the **optional Cranelift reference target**. The
+production `bingordo/compiler` AArch64 backend does not depend on porting
+the reference backend; both consumers need matching EDG target layouts
+and independently validated calling conventions.
+
 1. Extend the implemented INTEGER-only `PassingPlan` with real FP/SIMD
    pieces, homogeneous floating aggregates, by-value aggregate stack
    arguments, indirect/result pointer arguments and whole-argument register
