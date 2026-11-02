@@ -4,14 +4,75 @@ use super::*;
 mod x86_64;
 pub(super) const ABI: x86_64::SysV = x86_64::SysV;
 
+/// Machine pieces retain their source-parameter identity independently of
+/// the number of physical values in a Cranelift signature. This is the common
+/// contract for direct calls, function entry and future target backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegisterClass {
+    Integer,
+    // The current lowering rejects floating arguments. Reserve the class in
+    // the plan so a future target does not encode FP as an integer register.
+    Floating,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PieceLocation {
+    Register { class: RegisterClass, index: u8 },
+    // Stack slots are *ABI planning metadata*: Cranelift performs final
+    // placement from the target calling convention's signature.
+    Stack { slot: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MachinePiece {
+    pub ty: CAbiInt,
+    pub object_offset: u8,
+    pub object_bytes: u8,
+    pub location: PieceLocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PassingMode {
+    Scalar,
+    AggregateByValue { bytes: u8 },
+    // An explicit future extension point. No target may select this until
+    // indirect argument/result materialization is implemented.
+    Indirect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParameterPlan {
+    pub source_index: usize,
+    pub mode: PassingMode,
+    pub pieces: Vec<MachinePiece>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PassingPlan {
+    pub parameters: Vec<ParameterPlan>,
+    pub result: Vec<MachinePiece>,
+}
+
+impl PassingPlan {
+    pub fn machine_parameters(&self) -> Vec<CAbiInt> {
+        self.parameters.iter()
+            .flat_map(|param| param.pieces.iter().map(|piece| piece.ty))
+            .collect()
+    }
+    pub fn machine_returns(&self) -> Vec<CAbiInt> {
+        self.result.iter().map(|piece|piece.ty).collect()
+    }
+}
+
 /// Validated platform layout and machine-level ABI mapping.
 /// The current IR encodes an integer-only aggregate subset; HFA/FP/MEMORY
 /// support will require richer argument/result descriptors before AArch64.
 pub(super) trait TargetAbi {
     fn isa_name(&self) -> &'static str;
     fn classify_aggregate(&self, il:&Il, ty:crate::TypeId) -> Result<Option<u8>,CodegenError>;
-    fn machine_parameters(&self, abi:&CAbi) -> Vec<CAbiInt>;
-    fn validate_register_budget(&self, abi:&CAbi) -> Result<(),CodegenError>;
+    /// Build the authoritative source-to-machine argument and result mapping.
+    /// Unsupported placement is rejected here, before any object is emitted.
+    fn passing_plan(&self, abi:&CAbi) -> Result<PassingPlan,CodegenError>;
     fn validate_aggregate_return(&self, aggregate:Option<u8>) -> Result<(),CodegenError>;
     /// Produce the checked representation of a source aggregate argument.
     fn lower_aggregate_argument(&self, size:u8, address:Expr) -> Expr;
