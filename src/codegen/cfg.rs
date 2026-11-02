@@ -525,9 +525,16 @@ fn check_switch_segments(body:&[Stmt]) -> Result<Vec<(Option<i64>,Vec<Stmt>)>,Co
                 } else {has_default=true;}
                 segments.push((*value,Vec::new()));
             }
-            // Reject inner case labels and switch-within-switch *in this first
-            // implementation* rather than guessing which jump table owns them.
-            Stmt::Switch(..) => return Err(invalid("nested switch unsupported")),
+            // Nested switches have their own case tables and break targets;
+            // their internal case labels must never be confused with the
+            // surrounding switch's flat source-order entries.
+            Stmt::Switch(..) => {
+                if let Some((_,chunk))=segments.last_mut() {
+                    chunk.push(stmt.clone());
+                } else {
+                    return Err(invalid("switch has executable pre-case statements"));
+                }
+            },
             Stmt::If(_,a,b) if a.iter().any(|s|matches!(s,Stmt::Case(_))) ||
                 b.iter().any(|s|matches!(s,Stmt::Case(_))) =>
                     return Err(invalid("case label nested in if unsupported")),

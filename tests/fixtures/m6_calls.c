@@ -151,3 +151,53 @@ int m9_switch_selector_once(int x)
     }
     return value + 100 * n;
 }
+
+/* Nested switch breaks must not escape the outer switch, and the outer
+ * switch's case table must not absorb any inner case constants. */
+int m9_switch_nested(int x, int y)
+{
+    int result = 5;
+    switch (x) {
+    case 1:
+        switch (y) {
+        case 2:
+            result += 7;
+            break;
+        case 3:
+            result += 11;
+            /* fall through */
+        default:
+            result += 13;
+            break;
+        }
+        result += 17;
+        break;
+    case 4:
+        result += 31;
+        break;
+    default:
+        result += 41;
+        break;
+    }
+    return result;
+}
+/* A default before later cases still falls through in source order. */
+int m9_switch_default_middle(int x)
+{
+    int result = 1;
+    switch (x) {
+    case 0:
+        result += 2;
+        break;
+    default:
+        result += 3;
+        /* fall through */
+    case 2:
+        result += 5;
+        break;
+    case 3:
+        result += 7;
+        break;
+    }
+    return result;
+}

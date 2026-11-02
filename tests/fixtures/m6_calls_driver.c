@@ -20,6 +20,8 @@ extern int m9_goto_for_exit(int);
 extern int m9_switch_fallthrough(int);
 extern int m9_switch_no_default(int);
 extern int m9_switch_selector_once(int);
+extern int m9_switch_nested(int,int);
+extern int m9_switch_default_middle(int);
 
 int main(void)
 {
@@ -51,5 +53,12 @@ int main(void)
     printf("%d %d %d\n",
            m9_switch_selector_once(-1), m9_switch_selector_once(2),
            m9_switch_selector_once(17));
+    printf("%d %d %d %d %d %d\n",
+           m9_switch_nested(1,2), m9_switch_nested(1,3),
+           m9_switch_nested(1,8), m9_switch_nested(4,2),
+           m9_switch_nested(9,3), m9_switch_nested(-1,19));
+    printf("%d %d %d %d\n",
+           m9_switch_default_middle(0),m9_switch_default_middle(2),
+           m9_switch_default_middle(3),m9_switch_default_middle(99));
     return 0;
 }
