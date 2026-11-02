@@ -2293,12 +2293,27 @@ fn emit_body(
     outer: Option<LoopTargets<'_>>,
     local_types: &[CAbiInt], result: Option<CAbiInt>,
     globals: &GlobalValues,stack:&HashMap<usize,StackSlot>,
-    calls: &CallValues,
+    calls: &CallValues, labels:&HashMap<crate::SymbolId,Block>,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
-        if !live { return Err(invalid("unreachable statement")); }
+        if !live && !matches!(stmt,Stmt::Label(_)) {
+            return Err(invalid("unreachable statement"));
+        }
         match stmt {
+            Stmt::Goto(symbol) => {
+                let target=*labels.get(symbol).ok_or_else(||
+                    invalid("source goto has no predeclared block"))?;
+                fb.ins().jump(target,&[]);
+                live=false;
+            }
+            Stmt::Label(symbol) => {
+                let target=*labels.get(symbol).ok_or_else(||
+                    invalid("source label has no predeclared block"))?;
+                if live {fb.ins().jump(target,&[]);}
+                fb.switch_to_block(target);
+                live=true;
+            }
             Stmt::Break => {
                 let dest = outer.ok_or_else(|| invalid("break outside loop"))?;
                 fb.ins().jump(dest.break_to, &[]);
@@ -2394,7 +2409,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -2402,7 +2417,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -2433,7 +2448,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -2442,7 +2457,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)? {
                     live = false;
                     continue;
                 }
@@ -2467,12 +2482,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -2496,7 +2511,7 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
@@ -2749,6 +2764,13 @@ fn emit_routines_with_globals(
             }).collect();
             let mut addressed=HashSet::new();
             addressed_stmt(&func.body,&mut addressed);
+            let label_ids=source_labels(&func.body)?;
+            // A source goto may bypass lexical SSA initialization; address
+            // all local/parameter slots so stores and reads preserve C memory
+            // semantics irrespective of the predecessor edge.
+            if !label_ids.is_empty() {addressed.extend(0..local_types.len());}
+            let labels:HashMap<_,_>=label_ids.into_iter()
+                .map(|id|(id,fb.create_block())).collect();
             // Aggregate formal parameters are addressable C objects,
             // not SSA scalar values. Materialize exactly the native object
             // width from the incoming INTEGER-class register.
@@ -2787,7 +2809,7 @@ fn emit_routines_with_globals(
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
-                &global_values,&stack,&call_values)?;
+                &global_values,&stack,&call_values,&labels)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
@@ -2795,6 +2817,9 @@ fn emit_routines_with_globals(
                     return Err(invalid("fallthrough in code generation"));
                 }
             }
+            // Source labels can receive forward and backward edges, including
+            // branches from inside an if-arm. Seal only after emission is done.
+            for block in labels.values() {fb.seal_block(*block);}
             fb.finalize();
         }
         module.define_function(id,&mut context).map_err(|e| CodegenError::Backend(e.to_string()))?;
