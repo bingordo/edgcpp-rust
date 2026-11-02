@@ -142,6 +142,11 @@ extern long m8_abi_take_wide_mixed(struct M8AbiWideMixed);
 extern long m8_abi_wide_at_limit(long, long, long, long, struct M8AbiWide);
 extern long m8_abi_internal_wide(struct M8AbiWide);
 extern long m8_abi_external_wide(struct M8AbiWide);
+extern struct M8AbiWide m8_abi_return_wide(long,int);
+extern struct M8AbiWideMixed m8_abi_return_wide_mixed(int,int,long);
+extern struct M8AbiWide m8_abi_roundtrip_wide(struct M8AbiWide);
+struct M8AbiNine { unsigned char a,b,c,d,e,f,g,h,i; };
+extern struct M8AbiNine m8_abi_return_nine(unsigned char);
 
 int main(void)
 {
@@ -308,5 +313,18 @@ int main(void)
     printf("%ld %ld\\n",
            m8_abi_internal_wide(wide_one),
            m8_abi_external_wide(wide_two));
+    struct M8AbiWide wide_result1=m8_abi_return_wide(0x123456789abL,-135);
+    struct M8AbiWide wide_result2=m8_abi_return_wide(-0x123456789abL,215);
+    struct M8AbiWide wide_roundtrip=m8_abi_roundtrip_wide(wide_two);
+    struct M8AbiWideMixed mixed_result=
+        m8_abi_return_wide_mixed(-37,111,-0x123456789L);
+    struct M8AbiNine nine=m8_abi_return_nine(31);
+    printf("%ld %d %ld %d %ld %d\\n",
+           wide_result1.first,wide_result1.second,
+           wide_result2.first,wide_result2.second,
+           wide_roundtrip.first,wide_roundtrip.second);
+    printf("%d %d %ld %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu %hhu\\n",
+           mixed_result.first,mixed_result.second,mixed_result.third,
+           nine.a,nine.b,nine.c,nine.d,nine.e,nine.f,nine.g,nine.h,nine.i);
     return 0;
 }

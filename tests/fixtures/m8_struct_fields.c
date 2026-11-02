@@ -635,3 +635,38 @@ long m8_abi_external_wide(struct M8AbiWide value)
 {
     return gcc_m8_abi_sum_wide(value);
 }
+
+
+/* SysV AMD64 returns up to two INTEGER eightbytes in RAX and RDX.
+ * These definitions are linked against an independently GCC-built caller. */
+struct M8AbiWide m8_abi_return_wide(long first, int second)
+{
+    struct M8AbiWide v;
+    v.first = first + 17;
+    v.second = second - 9;
+    return v;
+}
+struct M8AbiWideMixed m8_abi_return_wide_mixed(int first, int second, long third)
+{
+    struct M8AbiWideMixed v;
+    v.first = first + 4;
+    v.second = second - 7;
+    v.third = third * 3;
+    return v;
+}
+struct M8AbiWide m8_abi_roundtrip_wide(struct M8AbiWide incoming)
+{
+    return incoming;
+}
+/* Odd-size 9-byte record checks that the second result piece reads
+ * exactly its native byte, not padding beyond the C object. */
+struct M8AbiNine {
+    unsigned char a,b,c,d,e,f,g,h,i;
+};
+struct M8AbiNine m8_abi_return_nine(unsigned char x)
+{
+    struct M8AbiNine v;
+    v.a=x; v.b=x+1; v.c=x+2; v.d=x+3; v.e=x+4;
+    v.f=x+5; v.g=x+6; v.h=x+7; v.i=x+8;
+    return v;
+}

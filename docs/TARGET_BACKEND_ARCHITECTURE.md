@@ -45,7 +45,7 @@ Independent GCC/Clang differential tests
   selected implementation. **Only x86-64 is selected today.**
 - `src/codegen/target/x86_64.rs`: SysV aggregate classification, GPR budget,
   Cranelift machine parameter expansion, C struct argument byte packing,
-  one-GPR result packing, decoding incoming physical arguments, exact-sized
+  one/two-GPR INTEGER result packing, decoding incoming physical arguments, exact-sized
   materialization of aggregate parameters, and the Cranelift ISA name.
 - `src/codegen.rs`: backend-neutral C ABI scalar descriptors and expression
   syntax, plus the current x86-only entry point. It forwards ABI decisions to
@@ -85,7 +85,11 @@ numbers express the verified ABI mapping, not hand-assigned instructions.
 C aggregate classification still uses the existing supported
 integer-only `Option<u8>` source-level description. The plan introduces
 explicit `PassingMode` and piece classes as the **next layer**, without
-pretending float, indirect, or multi-register return lowering works.
+pretending FP/SSE, indirect-return storage, or **direct-call materialization**
+of two-register results works. Generated x86-64 functions can now return
+eligible 9–16-byte INTEGER-class structs in RAX/RDX and the GCC driver
+verifies both machine pieces; consuming such a result from a generated
+direct call still rejects explicitly.
 Target-specific value packing and reconstruction remain in
 `target/x86_64.rs`. The Cranelift lowering now handles decoded arguments as vectors
 of machine pieces rather than a hard-coded optional second register.

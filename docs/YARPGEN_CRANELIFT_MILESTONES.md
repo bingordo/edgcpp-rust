@@ -681,11 +681,21 @@ compiler-integration track starts in parallel with M9.
   lvalue address, and parameters are materialized bytewise into exact native
   storage, without overreads. The supported subset requires both GPRs to
   remain available; register exhaustion never silently splits a struct
-  across a GPR and the stack. Struct results still support only one GPR.
+  across a GPR and the stack. Two-register **producer-side** results
+  are implemented separately in PR #42, but direct calls receiving a
+  two-register result remain unsupported.
   GCC differential tests exercise native two-register calls, mixed fields,
   generated-to-generated calls, generated-to-GCC callbacks, and the six-GPR
   boundary. [Bridge CI #41358472051](https://github.com/bingordo/edgcpp-rust/actions/runs/41358472051)
   passed these alongside existing regressions.
+* **SysV AMD64 two-INTEGER-eightbyte struct returns (PR #42):**
+  generated functions now return plain native-aligned 9–16-byte INTEGER
+  structs through RAX/RDX. Both pieces are produced from exact object
+  bytes; the GCC caller differential checks 9-byte odd-size returns,
+  16-byte mixed-field returns, and parameter-to-result round trips.
+  Direct calls returning such structs remain an explicit unsupported
+  case until both result registers can be materialized into typed
+  aggregate temporaries. SSE/MEMORY/indirect results remain unsupported.
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -712,8 +722,9 @@ verification route, not a separate compiler implementation.
 **Remaining before declaring M8 complete:**
 
 1. Complete SysV x86-64 aggregate parameter/return classification:
-   two-INTEGER-eightbyte register-pair *returns*, SSE/SSEUP cases,
-   MEMORY-class stack arguments and hidden-result storage; handle register
+   **direct-call consumption of two-INTEGER-eightbyte register-pair returns**
+   (the producer-side RAX/RDX return is implemented in PR #42),
+   SSE/SSEUP cases, MEMORY-class stack arguments and hidden-result storage; handle register
    exhaustion/whole-aggregate stack placement, mixed scalar/aggregate calls,
    packed/unaligned layouts and direct-call aggregate temporaries. Two-GPR
    INTEGER arguments with sufficient free registers are implemented in PR #35;
