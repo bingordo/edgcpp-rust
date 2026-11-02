@@ -188,14 +188,15 @@ fn lower(
                         site.statement_path==expression.data.statement_path &&
                         site.path==expression.data.path);
                     if direct_call {
-                        if size>8 {
-                            return Err(invalid(
-                                "two-GPR aggregate call return materialization unsupported"));
-                        }
-                        // A one-register aggregate call already produces the
-                        // packed SysV INTEGER result in RAX.
+                        // A small aggregate call yields an INTEGER scalar;
+                        // a two-eightbyte call yields a temporary object
+                        // address after materializing both return registers.
                         let returned=expr(id)?;
-                        Ok(vec![Stmt::Return(returned)])
+                        if size>8 {
+                            Ok(vec![Stmt::ReturnAggregate(size,returned)])
+                        } else {
+                            Ok(vec![Stmt::Return(returned)])
+                        }
                     } else {
                         let address=lower_address(graph,id,params,locals,il)?;
                         if size>8 {
@@ -1196,13 +1197,6 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     }
     let ret=canonical_abi_type(il,def.related.ok_or_else(||invalid("call return type missing"))?)?;
     let aggregate_result=target::ABI.classify_aggregate(il,ret)?;
-    if aggregate_result.is_some_and(|bytes|bytes>8) {
-        // The *producer* can return RAX/RDX now, but a call expression
-        // still needs a typed aggregate destination for both registers.
-        // Never silently return only the first physical value.
-        return Err(invalid(
-            "two-GPR aggregate call result materialization unsupported"));
-    }
     target::ABI.validate_aggregate_return(aggregate_result)?;
     let result=if il.types.iter().any(|t|t.id==ret && semantic(4,t.kind)==4) {
         None
@@ -1935,7 +1929,20 @@ fn emit_expr(
                 }
             }
             let inst=fb.ins().call(*reference,&values);
-            if let Some(ty)=abi.result {
+            if let Some(bytes)=abi.aggregate_result.filter(|bytes|*bytes>8) {
+                // C aggregate call prvalues have object identity only within
+                // lowering. Preserve both RAX/RDX pieces in an exact-size
+                // temporary instead of losing RDX or assuming a pointer ABI.
+                let returned=fb.inst_results(inst).to_vec();
+                if returned.len()!=2 {
+                    return Err(invalid("two-register aggregate call result mismatch"));
+                }
+                let slot=fb.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,u32::from(bytes),3));
+                let address=fb.ins().stack_addr(types::I64,slot,0);
+                target::ABI.materialize_aggregate(fb,address,bytes,&returned)?;
+                address
+            } else if let Some(ty)=abi.result {
                 let result=*fb.inst_results(inst).first()
                     .ok_or_else(||invalid("non-void call has no result"))?;
                 if ty.bits==64 {result}
