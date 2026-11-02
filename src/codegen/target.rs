@@ -107,18 +107,25 @@ impl PassingPlan {
                 return Err(invalid("incomplete ABI aggregate/scalar piece mapping"));
             }
         }
-        if self.result.len()>1 {
-            return Err(invalid("multi-piece result lowering unavailable"));
+        // SysV INTEGER return values occupy RAX and optionally RDX.
+        // Enforce contiguous native bytes and explicit register positions:
+        // silently taking the first return value truncates C aggregates.
+        if self.result.len()>2 {
+            return Err(invalid("more than two ABI return pieces unsupported"));
         }
-        for piece in &self.result {
-            if piece.object_offset!=0 || piece.object_bytes==0 ||
+        let mut result_offset=0u8;
+        for (index,piece) in self.result.iter().enumerate() {
+            if piece.object_offset!=result_offset || piece.object_bytes==0 ||
                 piece.object_bytes>piece.ty.bits/8 {
                 return Err(invalid("invalid ABI return piece"));
             }
             if !matches!(piece.location,
-                PieceLocation::Register{class:RegisterClass::Integer,index:0}) {
+                PieceLocation::Register{class:RegisterClass::Integer,index:reg}
+                    if usize::from(reg)==index) {
                 return Err(invalid("unsupported ABI return location"));
             }
+            result_offset=result_offset.checked_add(piece.object_bytes)
+                .ok_or_else(||invalid("ABI result piece overflow"))?;
         }
         Ok(())
     }
