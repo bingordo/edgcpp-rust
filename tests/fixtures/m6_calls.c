@@ -74,3 +74,12 @@ again:
 done:
     return sum;
 }
+
+/* A forward jump bypasses valid but unreachable C statements. */
+int m9_skip_dead(int x)
+{
+    goto done;
+    x += 99;
+done:
+    return x + 9;
+}
