@@ -11,6 +11,10 @@ extern long m6_for_ever_break(int);
 extern int m6_for_ever_return(int);
 extern int m6_for_ever_continue(int);
 
+
+extern int m9_goto_forward(int);
+extern int m9_goto_backedge(int);
+
 int main(void)
 {
     printf("%lld %lld %lld\n", m6_execute(-11),
@@ -21,5 +25,9 @@ int main(void)
            m6_for_ever_return(0), m6_for_ever_return(71));
     printf("%d %d %d\n", m6_for_ever_continue(0),
            m6_for_ever_continue(6), m6_for_ever_continue(9));
+    printf("%d %d %d\n", m9_goto_forward(-13),
+           m9_goto_forward(0), m9_goto_forward(19));
+    printf("%d %d %d\n", m9_goto_backedge(0),
+           m9_goto_backedge(2), m9_goto_backedge(15));
     return 0;
 }
