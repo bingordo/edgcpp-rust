@@ -2815,7 +2815,9 @@ mod tests {
             init:vec![],condition:None,increment:vec![],
             body:vec![Stmt::While(Expr::Parameter(0),vec![Stmt::Break])],
         }];
-        assert!(!may_break_current_loop(&outer[0..0]));
+        if let Stmt::For{body,..}=&outer[0] {
+            assert!(!may_break_current_loop(body));
+        } else {panic!("expected for loop");}
         assert!(!check(&outer,&mut HashSet::new(),1,0,0).unwrap());
     }
 
