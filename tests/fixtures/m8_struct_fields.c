@@ -670,3 +670,16 @@ struct M8AbiNine m8_abi_return_nine(unsigned char x)
     v.f=x+5; v.g=x+6; v.h=x+7; v.i=x+8;
     return v;
 }
+
+
+/* C aggregate call results: both machine return pieces must survive a
+ * generated->generated and a generated->GCC call, including roundtrips. */
+extern struct M8AbiWide gcc_m8_abi_make_wide(int n);
+struct M8AbiWide m8_abi_forward_gcc_wide(int n)
+{
+    return gcc_m8_abi_make_wide(n);
+}
+struct M8AbiWide m8_abi_forward_local_wide(int n)
+{
+    return m8_abi_return_wide((long)n * 17, n - 5);
+}
