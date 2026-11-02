@@ -51,9 +51,12 @@ feature so native bridge tests do not build it.
 
 ## Next integration milestone: EDG → bingordo/compiler
 
-Start a small EDG-to-`compiler-ir` adapter **in parallel** with continued
-Cranelift reference coverage; do not wait for complete x86 SysV ABI support
-in the reference backend. Build a checked, Cranelift-independent source
+**Current priority:** first make EDG → Cranelift a usable reference compiler
+with a measured 100-seed controlled YARPGen cohort, targeted GCC/Clang
+differentials and clear unsupported-feature diagnostics. The existing
+ten-seed passing smoke is insufficient to establish broad usability.
+Only then start the separate EDG-to-`compiler-ir` adapter; the long-term
+goal is unchanged. Build a checked, Cranelift-independent source
 semantics interface over `Il`/`graph::Graph`, then use the same semantic
 input with either Cranelift's CFG or `compiler`'s own typed SSA CFG.
 
