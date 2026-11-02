@@ -2779,4 +2779,44 @@ mod tests {
         ];
         assert!(check(&body,&mut vars,1,1,0).is_err());
     }
+    #[test]
+    fn unconditional_for_requires_no_fabricated_exit_edge() {
+        let returns = vec![Stmt::For {
+            init:vec![], condition:None, increment:vec![],
+            body:vec![Stmt::Return(Expr::Parameter(0))],
+        }];
+        assert!(!check(&returns,&mut HashSet::new(),1,0,0).unwrap());
+        let object=emit_routines(&[Routine {
+            name:"forever_return_unit".into(),parameters:1,locals:0,body:returns,
+            abi:None,local_types:None,local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+
+        let with_break=vec![
+            Stmt::For {
+                init:vec![],condition:None,increment:vec![],
+                body:vec![Stmt::If(Expr::Parameter(0),
+                    vec![Stmt::Break],vec![Stmt::Return(Expr::Constant(12))])],
+            },
+            Stmt::Return(Expr::Constant(77)),
+        ];
+        assert!(!check(&with_break,&mut HashSet::new(),1,0,0).unwrap());
+        let object=emit_routines(&[Routine {
+            name:"forever_break_unit".into(),parameters:1,locals:0,
+            body:with_break,abi:None,local_types:None,
+            local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+    }
+
+    #[test]
+    fn breaks_inside_nested_loops_do_not_exit_the_outer_unconditional_for() {
+        let outer=vec![Stmt::For {
+            init:vec![],condition:None,increment:vec![],
+            body:vec![Stmt::While(Expr::Parameter(0),vec![Stmt::Break])],
+        }];
+        assert!(!may_break_current_loop(&outer[0..0]));
+        assert!(!check(&outer,&mut HashSet::new(),1,0,0).unwrap());
+    }
+
 }
