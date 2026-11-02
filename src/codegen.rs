@@ -686,7 +686,8 @@ struct CAbi {
     parameters: Vec<CAbiInt>,
     result: Option<CAbiInt>,
     /// Native object byte lengths for INTEGER-class struct arguments.
-    /// A 9–16 byte struct occupies two GPRs; returns still require one.
+    /// A 9–16 byte struct occupies two INTEGER registers for eligible
+    /// arguments and returns; call-result materialization is still pending.
     aggregate_parameters: Vec<Option<u8>>,
     aggregate_result: Option<u8>,
 }
