@@ -1,4 +1,4 @@
-# Milestone plan: EDG → Cranelift reference compiler with YARPGen validation
+# Milestone plan: EDG Rust frontend -> bingordo/compiler, with Cranelift reference and YARPGen validation
 
 Status: **M0–M5 completed with explicit scope limits; M5 pointer/array and first real-YARPGen execution gates CI-verified (2026-10-29). Next M6 calls, GNU block-valued expressions and remaining source semantics.**
 
@@ -232,7 +232,7 @@ M4: correct external/global scalar memory and ELF data relocations.
 | **M5 — Arrays, pointers and indexing** | Address-taken local stack slots, pointer types/ABI and decay; address-of/dereference, indexing and pointer arithmetic; multidimensional C arrays and element strides; lvalues, explicit scalar-element initialization and casts, bounded addressing, aliasing, aligned and unaligned accesses. Aggregate brace initializers move to M6 with generic source-value lowering. Don't falsely optimize through potentially aliasing pointers. | Handwritten 1-D/2-D array kernels, parameter arrays and globals, plus a real generated seed with GCC matching output. | XL |
 | **M6 — Calls, full CFG and source semantics** | Direct calls and C ABI interop; multiple functions/translation-unit references, void calls, argument conversions; fix loop/branch corner cases, `switch` if emitted, labels and generated goto shapes as required. Enforce C evaluation order, side effects and definite initialization without overly conservative false rejection. | Representative generated `func.c` cases compile and link; >=100 pinned seeds triaged; no invalid Cranelift verifier or relocation errors. | L–XL |
 | **M7 — Coverage-driven YARPGen completion** | Iterate on ranked failure buckets (not features in arbitrary order); enable wider generator profiles, optional pragmas/alignments if semantically relevant. Build reducer and regressions for each correctness bug. Run both Cranelift `none` and `speed`. | Meet the functional and breadth gates above over pinned 1,000-seed cohorts, including independent GCC/Clang baseline checks. | XL |
-| **M8 — Stabilize and reuse** | Freeze fixed seeds plus minimized regressions; verify reproducibility on clean Linux CI; document unsupported cases and cross-module boundaries; prepare shared front-end lowering for `bingundu/compiler` without coupling its IR to Cranelift. | 10k-seed monitored stress with useful triage; explicit ready/not-ready report and regression corpus; benchmark resource cost. | M–L |
+| **M8 — Stabilize and reuse** | Freeze fixed seeds plus minimized regressions; verify reproducibility on clean Linux CI; document unsupported cases and cross-module boundaries; prepare checked frontend semantics for `bingordo/compiler` without coupling its IR to Cranelift. | 10k-seed monitored stress with useful triage; explicit ready/not-ready report and regression corpus; benchmark resource cost. | M–L |
 
 **Ordering and focus:** M0/M1 first, then M2/M3 to establish correct semantics; M4/M5 unlock actual YARPGen's global-array-heavy programs. M6 resolves interop and CFG gaps found on generated cases. M7 is iterative and may pull M3/M6 subfeatures forward based on empirical unsupported-operation counts. Partial C++ support and full C++ name mangling are explicitly **out of scope** for the baseline.
 
@@ -396,7 +396,7 @@ ABI remain unsupported. Rejections must occur before an ELF object is
 created. Generic statement-expression and aggregate-initializer semantics
 belong in the generic M6 source/lvalue framework, not special-case macros.
 
-## Immediate next implementation task
+## Historical next-step record (M6, before the M9–M13 revision)
 
 **M6: calls, full CFG and source semantics**. First add a generic block-valued
 expression IR for EDG `enk_statement`, preserving nested scopes, temporaries,
@@ -445,6 +445,12 @@ acceptance improvement.
 
 
 ## M8–M13 — C semantics, reference validation and compiler integration
+
+**Numbering note:** the older M0–M8 table above describes the original
+YARPGen-focused research track. The subsequent **C-coverage M8–M13**
+track is a separate, later refinement; "M8 — stabilize and reuse" in
+the historical table is not the same as "M8 — aggregate objects" below.
+Do not use that earlier table as the current execution order.
 
 **Primary goal:** make EDG a useful, checked Rust frontend for
 [`bingordo/compiler`](https://github.com/bingordo/compiler). Its existing
