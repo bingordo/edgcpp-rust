@@ -120,10 +120,10 @@ class HarnessTests(unittest.TestCase):
     def test_failure_signature_prefers_actionable_diagnostic(self):
         codegen = self.root / "noisy_codegen"
         codegen.write_text(
-            "#!/bin/sh\\n"
-            "echo 'EDG IL lowering failed: unsupported EDG statement 42' >&2\\n"
-            "echo 'wrapper failed for /tmp/build-12345/func.c' >&2\\n"
-            "exit 1\\n"
+            "#!/bin/sh\n"
+            "echo 'EDG IL lowering failed: unsupported EDG statement 42' >&2\n"
+            "echo 'wrapper failed for /tmp/build-12345/func.c' >&2\n"
+            "exit 1\n"
         )
         codegen.chmod(0o755)
         run = self.invoke("--codegen", str(codegen))
