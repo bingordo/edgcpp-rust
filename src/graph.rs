@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, StatementSwitchCase, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -121,6 +121,7 @@ pub struct Graph {
     pub statement_attributes: Vec<StatementAttributes>,
     pub control_expressions: Vec<ControlExpression>,
     pub statement_labels: Vec<StatementLabel>,
+    pub statement_switch_cases: Vec<StatementSwitchCase>,
     pub statement_declarations: Vec<StatementDeclaration>,
     pub statement_initializations: Vec<StatementInitialization>,
     pub statement_sources: Vec<StatementSource>,
@@ -1266,6 +1267,17 @@ impl Graph {
         graph.static_local_owners.sort_by_key(|entry| (entry.routine.0, entry.symbol.0));
 
 
+        let mut switch_case_keys=std::collections::HashSet::new();
+        for case in &il.statement_switch_cases {
+            let key=(case.function.clone(),case.statement_path.clone());
+            if !smap.contains_key(&key) || !switch_case_keys.insert(key.clone()) ||
+                case.status>2 || (case.status==1)!=case.value.is_some() {
+                return Err(GraphError::InvalidStatementLabel {
+                    function:key.0,path:key.1,
+                });
+            }
+            graph.statement_switch_cases.push(case.clone());
+        }
         for label in &il.statement_labels {
             let key = (label.function.clone(), label.statement_path.clone());
             let Some(&statement) = smap.get(&key) else {

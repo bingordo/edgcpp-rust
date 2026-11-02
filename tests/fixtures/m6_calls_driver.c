@@ -17,6 +17,9 @@ extern int m9_goto_backedge(int);
 extern int m9_skip_dead(int);
 extern int m9_goto_while_exit(int);
 extern int m9_goto_for_exit(int);
+extern int m9_switch_fallthrough(int);
+extern int m9_switch_no_default(int);
+extern int m9_switch_selector_once(int);
 
 int main(void)
 {
@@ -38,5 +41,15 @@ int main(void)
            m9_goto_while_exit(3), m9_goto_while_exit(9));
     printf("%d %d %d\n", m9_goto_for_exit(-5),
            m9_goto_for_exit(3), m9_goto_for_exit(21));
+    printf("%d %d %d %d %d %d\n",
+           m9_switch_fallthrough(-2), m9_switch_fallthrough(0),
+           m9_switch_fallthrough(4), m9_switch_fallthrough(8),
+           m9_switch_fallthrough(-5), m9_switch_fallthrough(37));
+    printf("%d %d %d %d\n",
+           m9_switch_no_default(-1), m9_switch_no_default(3),
+           m9_switch_no_default(0), m9_switch_no_default(91));
+    printf("%d %d %d\n",
+           m9_switch_selector_once(-1), m9_switch_selector_once(2),
+           m9_switch_selector_once(17));
     return 0;
 }

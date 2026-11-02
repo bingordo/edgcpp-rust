@@ -109,3 +109,45 @@ int m9_goto_for_exit(int n)
 done:
     return sum;
 }
+
+/* M9 switch: source order and fallthrough, not just independent ifs. */
+int m9_switch_fallthrough(int x)
+{
+    int result = 7;
+    switch (x) {
+    case -2:
+        result += 3;
+        /* fall through */
+    case 0:
+        result += 11;
+        break;
+    case 4:
+        result += 23;
+        /* fall through */
+    default:
+        result += 37;
+        break;
+    }
+    return result;
+}
+int m9_switch_no_default(int x)
+{
+    int result = 41;
+    switch (x) {
+    case -1: result += 5; break;
+    case 3:  result += 13; break;
+    }
+    return result;
+}
+/* The selector must be evaluated only once, even without a match. */
+int m9_switch_selector_once(int x)
+{
+    int n = x;
+    int value = 2;
+    switch (n++) {
+    case -1: value = 5; break;
+    case 2: value = 19; break;
+    default: value = 37; break;
+    }
+    return value + 100 * n;
+}

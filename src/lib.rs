@@ -68,6 +68,8 @@ pub struct Il {
     pub control_expressions: Vec<ControlExpression>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
+    /// EDG case/default metadata from native switch statements.
+    pub statement_switch_cases: Vec<StatementSwitchCase>,
     /// Native generated-label classification for structured loop transfers.
     pub loop_transfers: Vec<LoopTransfer>,
     /// Variable declaration positions within structured statements.
@@ -563,7 +565,19 @@ pub struct StatementLabel {
     pub definition: bool,
 }
 
-/// 1=break goto, 2=continue goto, 3=break label, 4=continue label.
+/// Case/default constant associated with a native stmk_switch_case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementSwitchCase {
+    pub function: String,
+    pub statement_path: String,
+    /// 0=default, 1=integer constant, 2=unsupported (GNU range/dependent).
+    pub status: u32,
+    /// Signed i64 bit-carrier retaining unsigned 64-bit switch values.
+    pub value: Option<i64>,
+}
+
+/// 1=break goto, 2=continue goto, 3=break label, 4=continue label,
+/// 5=switch-break goto, 6=switch-break label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopTransfer {
     pub function: String,
@@ -820,6 +834,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
+        53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         _ => None,
     }
@@ -852,7 +867,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -903,8 +918,18 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         44 => {
             let (Some(function), Some(statement_path), Some(kind)) =
                 (t(0), t(1), n(2)) else { return; };
-            if !(1..=4).contains(&kind) { return; }
+            if !(1..=6).contains(&kind) { return; }
             output.loop_transfers.push(LoopTransfer { function, statement_path, kind });
+        }
+        53 => {
+            let (Some(function),Some(statement_path),Some(status)) =
+                (t(0),t(1),n(2)) else {return;};
+            if status>2 || (status==1)!=fields[3].signed().is_some() {
+                return;
+            }
+            output.statement_switch_cases.push(StatementSwitchCase {
+                function,statement_path,status,value:fields[3].signed(),
+            });
         }
         52 => {
             let (Some(symbol),Some(offset),Some(target),Some(addend)) =
