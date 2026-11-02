@@ -94,9 +94,9 @@ class HarnessTests(unittest.TestCase):
     def test_resource_guard_is_not_reported_as_backend_crash(self):
         codegen = self.root / "oversized_array_codegen"
         codegen.write_text(
-            "#!/bin/sh\\n"
-            "echo 'EDG IL lowering failed: InvalidFunction(\\\"array object too large\\\")' >&2\\n"
-            "exit 1\\n"
+            "#!/bin/sh\n"
+            "echo 'EDG IL lowering failed: InvalidFunction(\"array object too large\")' >&2\n"
+            "exit 1\n"
         )
         codegen.chmod(0o755)
         run = self.invoke("--codegen", str(codegen))
