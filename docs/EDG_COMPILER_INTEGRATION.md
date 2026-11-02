@@ -77,7 +77,38 @@ This is a semantic *source interface*, not a new optimization IR, generic
 three-address code, machine ABI passing plan, frontend SSA, or front-end
 CFG. Backends may directly build their own CFG/SSA from it.
 
-## First compiler integration slice (M9, parallel to reference CFG work)
+## Sequencing decision: stabilize Cranelift reference first
+
+**Current execution order:** make EDG -> Cranelift a usable reference C
+compiler before beginning the `bingordo/compiler` adapter. This revises the
+earlier proposal to run M9 integration concurrently. The long-term goal
+remains `bingordo/compiler`; this is a dependency gate, **not** a decision
+to adopt Cranelift IR in the main compiler.
+
+The immediate reference-readiness gate is:
+
+1. Native x86-64 ELF code generation, callable from C via the example
+   driver, with no silent wrong-code for the supported subset.
+2. A pinned **100-seed** controlled YARPGen cohort, with independent GCC and
+   Clang oracles, a published pass/unsupported/failure breakdown and
+   replayable failing cases. Do not infer broad coverage from the existing
+   ten-seed smoke.
+3. Important C language gaps prioritized from the actual failure ranking:
+   unconditional `for (;;)` and other control-flow cases, C ABI classes,
+   indirect calls, initializer semantics, etc. Do not prioritize features
+   without a representative failing case or concrete interoperability need.
+4. Preserve two-way GCC caller/callee tests and enforce explicit rejection
+   when native EDG semantics, ABI layouts or target capabilities are unknown.
+5. Maintain the owned `Il` / `graph::Graph` interface without making
+   production compiler code or reference-only Cranelift machinery its API.
+
+Only after the reference cohort and interoperability gates are credible do
+we begin the first `compiler-ir` integration pilot described next.
+The 1,000-seed constrained/default breadth gates in
+[YARPGen roadmap](YARPGEN_CRANELIFT_MILESTONES.md) remain longer-term
+acceptance goals; they are not claims of current success.
+
+## First compiler integration slice (after the reference-readiness gate)
 
 Create a separate EDG driver/adapter in `bingordo/compiler`, analogous to
 `tools/mini-c-driver`. Pin the EDG bridge revision and build configuration.

@@ -460,13 +460,18 @@ backend** for testing EDG semantic extraction and GCC/Clang native
 interoperability; do not make `compiler` depend on Cranelift or on
 Cranelift's private `Expr`, `Stmt` or target ABI plan.
 
-**Immediate integration track:** establish a checked, Cranelift-independent
-semantic projection over the existing owned `Il`/`graph::Graph` and a
-separate driver/adapter for `compiler`. Get a small integer-C function
-through EDG -> `compiler-ir` -> native ELF and compare it against GCC
-and, where supported, EDG -> Cranelift. Do this **during M9**, not after
-M10–M13 are complete. See [EDG/compiler integration plan](EDG_COMPILER_INTEGRATION.md)
-for API ownership, sequencing, and acceptance gates.
+**Updated execution priority (2026-11-02):** make the EDG -> Cranelift
+reference backend practically usable **before** beginning the separate
+`bingordo/compiler` adapter. The ten-seed constrained YARPGen CI is already
+green but does **not** establish sufficient coverage. First run and rank a
+pinned 100-seed controlled cohort (with independent GCC/Clang oracle), then
+implement the highest-value missing C semantics and ABI cases with targeted
+differential fixtures. Keep the original 1,000-seed functional and breadth
+gates as the eventual usability goals; unsupported cases are never counted
+as passes. The checked, Cranelift-independent `Il`/`graph::Graph` interface
+remains the future production integration boundary. See
+[EDG/compiler integration plan](EDG_COMPILER_INTEGRATION.md)
+for the readiness gate and subsequent adapter plan.
 
 **Three layers, no duplicated CFG:**
 
@@ -480,7 +485,9 @@ for API ownership, sequencing, and acceptance gates.
    typed SSA CFG, verifiers and native backends. The native backend owns its
    machine ABI. The bridge does not need a separate general CFG or SSA IR.
 
-**Scope and sequencing:** preserve currently supported straight-line GNU
+**Scope and sequencing:** make Cranelift reference codegen usable and
+well-measured first, then start the EDG-to-compiler adapter. Preserve
+currently supported straight-line GNU
 statement expressions but defer complex GNU statement-expression extensions.
 Prioritize front-end API reuse, native compiler integration and clearly
 specified C semantics over making Cranelift a complete alternative compiler.
@@ -516,10 +523,11 @@ compiler-integration track starts in parallel with M9.
   case/default, fallthrough and unreachable-between-label statements into
   **Cranelift's own CFG**. Handle block sealing only after all incoming
   predecessors are known; do not abuse loop break/continue heuristics.
-* In the **compiler adapter**, start with integer functions, locals and
-  returns, then `if`/`while`, translating EDG operations directly into
-  `compiler-ir`'s existing CFG SSA and verifier. Add goto/switch to the
-  adapter as the shared source semantics become available.
+* **After the reference-readiness gate**, start the **compiler adapter**
+  with integer functions, locals and returns, then `if`/`while`,
+  translating EDG operations directly into `compiler-ir`'s existing CFG
+  SSA and verifier. Add goto/switch as shared source semantics mature.
+  No production adapter work is in the current reference-stabilization phase.
 * **Gate:** one native ELF object produced by EDG -> `compiler` linked and
   executed against a GCC driver, matching a reference Cranelift build where
   supported; compiler IR verification; positive structured/forward/backward

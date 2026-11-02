@@ -18,7 +18,7 @@ enum Stmt {
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
     /// Condition is checked before the body; increment runs after the body.
-    For { init: Vec<Stmt>, condition: Expr, increment: Vec<Stmt>, body: Vec<Stmt> },
+    For { init: Vec<Stmt>, condition: Option<Expr>, increment: Vec<Stmt>, body: Vec<Stmt> },
     /// Test is at the bottom, so the body runs at least once.
     DoWhile(Vec<Stmt>, Expr),
     Break,
@@ -326,8 +326,10 @@ fn lower(
             // An increment is emitted as a synthetic stmk_expr child of the
             // for node, preserving its executable tree (including constants).
             // The original control-role-1 snapshot is also retained.
-            let condition = expr(node.expression.ok_or_else(|| invalid(
-                "unconditional for loop not yet supported"))?)?;
+            // In C, a missing for-condition is an unconditional true test.
+            // Keep the absence explicit so reachability recognizes a loop
+            // with no exit, rather than introducing an artificial false edge.
+            let condition = node.expression.map(expr).transpose()?;
             let mut init = None;
             let mut body = None;
             let mut increment = None;
@@ -445,6 +447,19 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::StoreLocal(..) => Err(invalid("legacy local assignment unsupported in CFG")),
     }
 }
+// Does this body contain a break aimed at the surrounding loop?
+// Nested loops consume their own breaks. Over-approximation is safe here:
+// this is only used to avoid inventing a fallthrough from for (;;).
+fn may_break_current_loop(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Break => true,
+        Stmt::If(_, yes, no) =>
+            may_break_current_loop(yes) || may_break_current_loop(no),
+        Stmt::While(..) | Stmt::DoWhile(..) | Stmt::For {..} => false,
+        _ => false,
+    })
+}
+
 // Returns true if execution can reach the end of this sequence.
 fn check(
     body: &[Stmt], vars: &mut HashSet<usize>, params: usize,
@@ -502,13 +517,20 @@ fn check(
                     live = false;
                     continue;
                 }
-                check_expr(condition, vars, params)?;
+                if let Some(condition) = condition {
+                    check_expr(condition, vars, params)?;
+                }
                 let mut nested = vars.clone();
                 check(body, &mut nested, params, locals, loop_depth + 1)?;
                 // Continue paths can execute the increment. Require that all
                 // its reads are safe even without any body-local writes.
                 let mut increment_state = vars.clone();
                 check(increment, &mut increment_state, params, locals, loop_depth + 1)?;
+                // A missing condition and no break aimed at this loop means
+                // there is no outgoing normal edge, even if the body returns.
+                if condition.is_none() && !may_break_current_loop(body) {
+                    live = false;
+                }
             }
             Stmt::DoWhile(body, condition) => {
                 let mut nested = vars.clone();
@@ -1771,7 +1793,8 @@ fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
             Stmt::While(c,body) | Stmt::DoWhile(body,c) =>
                 { addressed_expr(c,found); addressed_stmt(body,found); },
             Stmt::For{init,condition,increment,body} => {
-                addressed_stmt(init,found); addressed_expr(condition,found);
+                addressed_stmt(init,found);
+                if let Some(condition)=condition {addressed_expr(condition,found);}
                 addressed_stmt(body,found); addressed_stmt(increment,found);
             }
             Stmt::ReturnVoid | Stmt::Break | Stmt::Continue => {}
@@ -2299,9 +2322,13 @@ fn emit_body(
                 let exit = fb.create_block();
                 fb.ins().jump(head, &[]);
                 fb.switch_to_block(head);
-                let c = emit_expr(condition,fb,args,vars,globals,stack,local_types,calls)?;
-                let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
-                fb.ins().brif(flag, body_block, &[], exit, &[]);
+                if let Some(condition)=condition {
+                    let c = emit_expr(condition,fb,args,vars,globals,stack,local_types,calls)?;
+                    let flag = fb.ins().icmp_imm(IntCC::NotEqual, c, 0);
+                    fb.ins().brif(flag, body_block, &[], exit, &[]);
+                } else {
+                    fb.ins().jump(body_block, &[]);
+                }
                 fb.seal_block(body_block);
                 fb.switch_to_block(body_block);
                 let saw_break = Cell::new(false);
@@ -2321,7 +2348,11 @@ fn emit_body(
                 }
                 fb.seal_block(head);
                 fb.seal_block(exit);
-                fb.switch_to_block(exit);
+                if condition.is_some() || saw_break.get() {
+                    fb.switch_to_block(exit);
+                } else {
+                    live=false;
+                }
             }
             Stmt::DoWhile(body, cond) => {
                 let body_block = fb.create_block();
@@ -2682,7 +2713,7 @@ mod tests {
         let body = vec![
             Stmt::Store(0, Expr::Parameter(0)),
             Stmt::Store(1, Expr::Constant(0)),
-            Stmt::For { init: vec![], condition: condition.clone(),
+            Stmt::For { init: vec![], condition: Some(condition.clone()),
                 increment: increment.clone(),
                 body: vec![Stmt::Store(1, Expr::Add(
                     Box::new(Expr::Local(1)), Box::new(Expr::Local(0))))] },
@@ -2704,8 +2735,8 @@ mod tests {
             Stmt::Store(0, Expr::Parameter(0)),
             Stmt::For {
                 init: vec![],
-                condition: Expr::Compare(CompareOp::Less,
-                    Box::new(Expr::Local(0)), Box::new(Expr::Parameter(1))),
+                condition: Some(Expr::Compare(CompareOp::Less,
+                    Box::new(Expr::Local(0)), Box::new(Expr::Parameter(1)))),
                 increment: vec![Stmt::Store(0, Expr::Add(
                     Box::new(Expr::Local(0)), Box::new(Expr::Constant(1))))],
                 body: vec![
@@ -2748,4 +2779,46 @@ mod tests {
         ];
         assert!(check(&body,&mut vars,1,1,0).is_err());
     }
+    #[test]
+    fn unconditional_for_requires_no_fabricated_exit_edge() {
+        let returns = vec![Stmt::For {
+            init:vec![], condition:None, increment:vec![],
+            body:vec![Stmt::Return(Expr::Parameter(0))],
+        }];
+        assert!(!check(&returns,&mut HashSet::new(),1,0,0).unwrap());
+        let object=emit_routines(&[Routine {
+            name:"forever_return_unit".into(),parameters:1,locals:0,body:returns,
+            abi:None,local_types:None,local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+
+        let with_break=vec![
+            Stmt::For {
+                init:vec![],condition:None,increment:vec![],
+                body:vec![Stmt::If(Expr::Parameter(0),
+                    vec![Stmt::Break],vec![Stmt::Return(Expr::Constant(12))])],
+            },
+            Stmt::Return(Expr::Constant(77)),
+        ];
+        assert!(!check(&with_break,&mut HashSet::new(),1,0,0).unwrap());
+        let object=emit_routines(&[Routine {
+            name:"forever_break_unit".into(),parameters:1,locals:0,
+            body:with_break,abi:None,local_types:None,
+            local_storage:None,local_alignments:None,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+    }
+
+    #[test]
+    fn breaks_inside_nested_loops_do_not_exit_the_outer_unconditional_for() {
+        let outer=vec![Stmt::For {
+            init:vec![],condition:None,increment:vec![],
+            body:vec![Stmt::While(Expr::Parameter(0),vec![Stmt::Break])],
+        }];
+        if let Stmt::For{body,..}=&outer[0] {
+            assert!(!may_break_current_loop(body));
+        } else {panic!("expected for loop");}
+        assert!(!check(&outer,&mut HashSet::new(),1,0,0).unwrap());
+    }
+
 }
