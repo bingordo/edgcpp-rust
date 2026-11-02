@@ -30,6 +30,10 @@ enum Stmt {
     Goto(crate::SymbolId),
     /// A destination in the current function, not a separate frontend CFG.
     Label(crate::SymbolId),
+    /// Integer-switch arms use EDG's original C case constants.
+    Switch(Expr,Vec<Stmt>),
+    Case(Option<i64>),
+    BreakSwitch,
 }
 struct Routine {
     name: String, parameters: usize, locals: usize, body: Vec<Stmt>,
@@ -369,6 +373,32 @@ fn lower(
                 None => Vec::new() };
             Ok(vec![Stmt::For { init, condition, increment, body }])
         }
+        13 => {
+            let selector=expr(node.expression.ok_or_else(||
+                invalid("switch has no selector expression"))?)?;
+            let children:Vec<_>=node.children.iter().copied()
+                .filter(|&child|!is_gnu_child(graph,child,path)).collect();
+            if children.len()!=1 ||
+                !graph.statement(children[0]).is_some_and(|s|
+                    s.data.path.starts_with(&format!("{path}.body."))) {
+                return Err(invalid("switch body is not unique"));
+            }
+            let body=lower(graph,children[0],params,locals,il)?;
+            // Initial scope: flat case/default labels of a compound body;
+            // every other layout must fail clearly until its CFG entry
+            // semantics have been checked.
+            check_switch_segments(&body)?;
+            Ok(vec![Stmt::Switch(selector,body)])
+        }
+        14 => {
+            let cases:Vec<_>=il.statement_switch_cases.iter()
+                .filter(|c|c.function==*function && c.statement_path==*path)
+                .collect();
+            if cases.len()!=1 || cases[0].status==2 {
+                return Err(invalid("unsupported switch case value/range"));
+            }
+            Ok(vec![Stmt::Case(cases[0].value)])
+        }
         10 | 11 => {
             let sem = semantic(1, node.data.kind);
             let matching: Vec<_> = il.loop_transfers.iter()
@@ -385,7 +415,8 @@ fn lower(
                 return match (sem, matching[0].kind) {
                     (10, 1) => Ok(vec![Stmt::Break]),
                     (10, 2) => Ok(vec![Stmt::Continue]),
-                    (11, 3 | 4) => Ok(Vec::new()),
+                    (10, 5) => Ok(vec![Stmt::BreakSwitch]),
+                    (11, 3 | 4 | 6) => Ok(Vec::new()),
                     _ => Err(invalid("inconsistent EDG loop-label classification")),
                 };
             }
@@ -478,6 +509,48 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::StoreLocal(..) => Err(invalid("legacy local assignment unsupported in CFG")),
     }
 }
+/// Extract cases from a flat switch body. Do not accidentally treat case
+/// labels within nested if/loops as ordinary sequential statements.
+fn check_switch_segments(body:&[Stmt]) -> Result<Vec<(Option<i64>,Vec<Stmt>)>,CodegenError> {
+    let mut segments:Vec<(Option<i64>,Vec<Stmt>)>=Vec::new();
+    let mut seen=HashSet::new();
+    let mut has_default=false;
+    for stmt in body {
+        match stmt {
+            Stmt::Case(value) => {
+                if let Some(value)=value {
+                    if !seen.insert(*value) {return Err(invalid("duplicate switch case"));}
+                } else if has_default {
+                    return Err(invalid("duplicate switch default"));
+                } else {has_default=true;}
+                segments.push((*value,Vec::new()));
+            }
+            // Reject inner case labels and switch-within-switch *in this first
+            // implementation* rather than guessing which jump table owns them.
+            Stmt::Switch(..) => return Err(invalid("nested switch unsupported")),
+            Stmt::If(_,a,b) if a.iter().any(|s|matches!(s,Stmt::Case(_))) ||
+                b.iter().any(|s|matches!(s,Stmt::Case(_))) =>
+                    return Err(invalid("case label nested in if unsupported")),
+            Stmt::While(_,a) | Stmt::DoWhile(a,_) if
+                a.iter().any(|s|matches!(s,Stmt::Case(_))) =>
+                    return Err(invalid("case label nested in loop unsupported")),
+            Stmt::For{body:a,..} if a.iter().any(|s|matches!(s,Stmt::Case(_))) =>
+                return Err(invalid("case label nested in for unsupported")),
+            _ => {
+                if let Some((_,chunk))=segments.last_mut() {
+                    chunk.push(stmt.clone());
+                } else {
+                    // Statements lexically preceding the first case are not
+                    // entered by selection. They must not be executed.
+                    // Declarations already lower to no-op; reject effects.
+                    return Err(invalid("switch has executable pre-case statements"));
+                }
+            }
+        }
+    }
+    Ok(segments)
+}
+
 // Does this body contain a break aimed at the surrounding loop?
 // Nested loops consume their own breaks. Over-approximation is safe here:
 // this is only used to avoid inventing a fallthrough from for (;;).
@@ -522,6 +595,8 @@ fn source_labels(body:&[Stmt]) -> Result<Vec<crate::SymbolId>,CodegenError> {
                 }
                 Stmt::While(_,body) | Stmt::DoWhile(body,_) =>
                     visit(body,defs,refs,true,true)?,
+                Stmt::Switch(_,body) =>
+                    visit(body,defs,refs,true,in_loop)?,
                 Stmt::For{init,increment,body,..} => {
                     visit(init,defs,refs,true,true)?;
                     visit(increment,defs,refs,true,true)?;
@@ -555,6 +630,18 @@ fn check(
         match stmt {
             Stmt::Label(_) => live=true,
             Stmt::Goto(_) => live=false,
+            Stmt::Case(_) => return Err(invalid("switch case outside switch")),
+            Stmt::BreakSwitch => {live=false;}
+            Stmt::Switch(selector,body) => {
+                check_expr(selector,vars,params)?;
+                let segments=check_switch_segments(body)?;
+                for (_,chunk) in segments {
+                    let mut state=vars.clone();
+                    check(&chunk,&mut state,params,locals,loop_depth)?;
+                }
+                // A switch may miss every case, or exit via break.
+                // Deliberately do not infer definite writes across arms.
+            }
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
                 live = false;
@@ -1893,13 +1980,18 @@ fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
                 addressed_stmt(a,found); addressed_stmt(b,found); },
             Stmt::While(c,body) | Stmt::DoWhile(body,c) =>
                 { addressed_expr(c,found); addressed_stmt(body,found); },
+            Stmt::Switch(selector,body) => {
+                addressed_expr(selector,found);
+                addressed_stmt(body,found);
+            }
             Stmt::For{init,condition,increment,body} => {
                 addressed_stmt(init,found);
                 if let Some(condition)=condition {addressed_expr(condition,found);}
                 addressed_stmt(body,found); addressed_stmt(increment,found);
             }
             Stmt::ReturnVoid | Stmt::Break | Stmt::Continue |
-            Stmt::Goto(_) | Stmt::Label(_) => {}
+            Stmt::Goto(_) | Stmt::Label(_) | Stmt::Case(_) |
+            Stmt::BreakSwitch => {}
         }
     }
 }
