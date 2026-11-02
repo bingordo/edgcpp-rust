@@ -12,6 +12,7 @@ pub(super) enum RegisterClass {
     Integer,
     // The current lowering rejects floating arguments. Reserve the class in
     // the plan so a future target does not encode FP as an integer register.
+    #[allow(dead_code)] // reserved for HFA/FP ABI extensions
     Floating,
 }
 
@@ -37,6 +38,7 @@ pub(super) enum PassingMode {
     AggregateByValue { bytes: u8 },
     // An explicit future extension point. No target may select this until
     // indirect argument/result materialization is implemented.
+    #[allow(dead_code)] // reserved for by-reference aggregate passing
     Indirect,
 }
 
@@ -144,19 +146,18 @@ pub(super) trait TargetAbi {
         &self, fb:&mut FunctionBuilder<'_>,
         address:cranelift_codegen::ir::Value, size:u8,
     ) -> Result<cranelift_codegen::ir::Value,CodegenError>;
-    /// Convert incoming physical ABI values into one logical C parameter each.
-    /// The optional second register is used only for aggregate materialization.
+    /// Decode physical values into one vector of pieces for each C source
+    /// argument. Source parameters and physical register counts stay distinct.
     fn decode_parameters(
-        &self, fb:&mut FunctionBuilder<'_>, abi:&CAbi,
+        &self, fb:&mut FunctionBuilder<'_>, plan:&PassingPlan,
         machine_values:&[cranelift_codegen::ir::Value],
-    ) -> Result<(Vec<cranelift_codegen::ir::Value>,
-                 Vec<Option<cranelift_codegen::ir::Value>>),CodegenError>;
-    /// Store exactly the native object bytes from the incoming register(s).
+    ) -> Result<Vec<Vec<cranelift_codegen::ir::Value>>,CodegenError>;
+    /// Materialize an aggregate from its validated machine pieces. The
+    /// generic CFG does not know whether a target uses one or two GPRs.
     fn materialize_aggregate(
         &self, fb:&mut FunctionBuilder<'_>,
         address:cranelift_codegen::ir::Value, size:u8,
-        first:cranelift_codegen::ir::Value,
-        second:Option<cranelift_codegen::ir::Value>,
+        values:&[cranelift_codegen::ir::Value],
     ) -> Result<(),CodegenError>;
 
 }
