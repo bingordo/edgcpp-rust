@@ -2387,11 +2387,48 @@ fn emit_body(
     local_types: &[CAbiInt], result: Option<CAbiInt>,
     globals: &GlobalValues,stack:&HashMap<usize,StackSlot>,
     calls: &CallValues, labels:&HashMap<crate::SymbolId,Block>,
+    switch_break:Option<Block>,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
         if !live && !matches!(stmt,Stmt::Label(_)) {continue;}
         match stmt {
+            Stmt::BreakSwitch => {
+                let dest=switch_break.ok_or_else(||
+                    invalid("switch break outside switch"))?;
+                fb.ins().jump(dest,&[]);
+                live=false;
+            }
+            Stmt::Case(_) => return Err(invalid("case label outside switch dispatcher")),
+            Stmt::Switch(selector,body) => {
+                let cases=check_switch_segments(body)?;
+                let exit=fb.create_block();
+                let blocks:Vec<Block>=(0..cases.len()).map(|_|
+                    fb.create_block()).collect();
+                // Evaluate C's switch selector exactly once.
+                let selector=emit_expr(selector,fb,args,vars,globals,stack,local_types,calls)?;
+                let default=cases.iter().position(|(v,_)|v.is_none());
+                for (idx,(value,_)) in cases.iter().enumerate() {
+                    let Some(value)=value else {continue;};
+                    let next=fb.create_block();
+                    let match_case=fb.ins().icmp_imm(IntCC::Equal,selector,*value);
+                    fb.ins().brif(match_case,blocks[idx],&[],next,&[]);
+                    fb.switch_to_block(next);
+                    fb.seal_block(next);
+                }
+                fb.ins().jump(default.map(|i|blocks[i]).unwrap_or(exit),&[]);
+                for (i,(_,chunk)) in cases.iter().enumerate() {
+                    fb.switch_to_block(blocks[i]);
+                    if emit_body(chunk,fb,args,vars,outer,local_types,result,
+                        globals,stack,calls,labels,Some(exit))? {
+                        let target=blocks.get(i+1).copied().unwrap_or(exit);
+                        fb.ins().jump(target,&[]);
+                    }
+                }
+                for block in blocks {fb.seal_block(block);}
+                fb.seal_block(exit);
+                fb.switch_to_block(exit);
+            }
             Stmt::Goto(symbol) => {
                 let target=*labels.get(symbol).ok_or_else(||
                     invalid("source goto has no predeclared block"))?;
@@ -2500,7 +2537,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -2508,7 +2545,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -2539,7 +2576,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -2548,7 +2585,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)? {
                     live = false;
                     continue;
                 }
@@ -2573,12 +2610,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -2602,7 +2639,7 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
@@ -2900,7 +2937,7 @@ fn emit_routines_with_globals(
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
-                &global_values,&stack,&call_values,&labels)?;
+                &global_values,&stack,&call_values,&labels,None)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
