@@ -574,6 +574,28 @@ compiler-integration track starts in parallel with M9.
   control cases and explicit unsupported/invalid-jump diagnostics.
   Do not require full M10–M13 language coverage before integration starts.
 
+**M9 implementation checkpoint (2026-11-02, PRs #45–#46):**
+
+- **Implemented in the Cranelift reference:** EDG-owned source label
+  identities resolve to predeclared Cranelift basic blocks, including
+  forward jumps, backward jumps, jumps out of `if`, `while` and
+  `for (;;)` bodies, and source statements skipped by a jump. User label
+  blocks are sealed after their incoming branches are built. Functions
+  containing source labels use memory-backed locals and parameters so
+  lexical SSA assumptions do not cross these control-flow joins.
+- **Validated:** unit tests reject duplicate/missing labels; the native
+  M6 GCC differential compares conditional forward jumps, backward
+  updates, skipped dead statements and named loop exits.
+  [PR #45 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41453226369)
+  and [PR #46 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41453712620)
+  passed.
+- **Not yet implemented:** source labels inside `if` or loop bodies,
+  entering structured regions via goto, general `switch` selection,
+  case/default labels, fallthrough and switch-break semantics. The
+  Cranelift reference still deliberately rejects those cases rather than
+  inventing control flow. Avoid adding a separate frontend CFG; first
+  extend the checked EDG metadata and Cranelift block emission.
+
 ### M10 — function calls and ABI completeness
 
 * **Shared source contract:** function/pointer-to-function types, prototypes,
