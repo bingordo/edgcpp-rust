@@ -97,28 +97,83 @@ impl TargetAbi for SysV {
         Ok(Some(size.bytes as u8))
     }
 
-    fn machine_parameters(&self, abi: &CAbi) -> Vec<CAbiInt> {
-        let mut params = Vec::new();
-        for (ty, aggregate) in abi.parameters.iter().zip(&abi.aggregate_parameters) {
-            params.push(*ty);
-            if aggregate.is_some_and(|bytes| bytes > 8) {
-                params.push(CAbiInt { bits:64, signed:false, is_bool:false });
-            }
+    fn passing_plan(&self, abi: &CAbi) -> Result<PassingPlan, CodegenError> {
+        if abi.parameters.len()!=abi.aggregate_parameters.len() {
+            return Err(CodegenError::InvalidFunction(
+                "source argument and aggregate ABI counts differ".into()));
         }
-        params
-    }
-
-    fn validate_register_budget(&self, abi: &CAbi) -> Result<(), CodegenError> {
-        let mut consumed = 0usize;
-        for aggregate in &abi.aggregate_parameters {
-            let registers = if aggregate.is_some_and(|bytes| bytes > 8) {2} else {1};
-            if registers == 2 && consumed > 4 {
-                return Err(CodegenError::InvalidFunction(
-                    "two-GPR aggregate with exhausted SysV registers unsupported".into()));
-            }
-            consumed += registers;
+        let mut gpr=0u8;
+        let mut stack_slot=0u32;
+        let mut parameters=Vec::with_capacity(abi.parameters.len());
+        let integer=|index| PieceLocation::Register {
+            class:RegisterClass::Integer,index
+        };
+        for (source_index,(&ty,&aggregate)) in abi.parameters.iter()
+            .zip(&abi.aggregate_parameters).enumerate() {
+            let (mode,pieces)=if let Some(bytes)=aggregate {
+                if bytes==0 || bytes>16 || ty.bits!=64 {
+                    return Err(CodegenError::InvalidFunction(
+                        "invalid SysV INTEGER aggregate descriptor".into()));
+                }
+                if bytes>8 {
+                    // SysV never splits one aggregate between GPR and stack.
+                    // A full stack-by-value lowering is not yet implemented.
+                    if gpr>4 {
+                        return Err(CodegenError::InvalidFunction(
+                            "two-GPR aggregate with exhausted SysV registers unsupported".into()));
+                    }
+                    let first=MachinePiece {
+                        ty,object_offset:0,object_bytes:8,location:integer(gpr)
+                    };
+                    let second=MachinePiece {
+                        ty,object_offset:8,object_bytes:bytes-8,
+                        location:integer(gpr+1)
+                    };
+                    gpr+=2;
+                    (PassingMode::AggregateByValue{bytes},vec![first,second])
+                } else {
+                    let location=if gpr<6 {
+                        let reg=integer(gpr);
+                        gpr+=1;
+                        reg
+                    } else {
+                        let slot=stack_slot;
+                        stack_slot+=1;
+                        PieceLocation::Stack{slot}
+                    };
+                    (PassingMode::AggregateByValue{bytes},vec![MachinePiece {
+                        ty,object_offset:0,object_bytes:bytes,location
+                    }])
+                }
+            } else {
+                if !matches!(ty.bits,8|16|32|64) {
+                    return Err(CodegenError::InvalidFunction(
+                        "unsupported scalar machine width".into()));
+                }
+                let location=if gpr<6 {
+                    let reg=integer(gpr);
+                    gpr+=1;
+                    reg
+                } else {
+                    let slot=stack_slot;
+                    stack_slot+=1;
+                    PieceLocation::Stack{slot}
+                };
+                (PassingMode::Scalar,vec![MachinePiece {
+                    ty,object_offset:0,object_bytes:ty.bits/8,location
+                }])
+            };
+            parameters.push(ParameterPlan{source_index,mode,pieces});
         }
-        Ok(())
+        self.validate_aggregate_return(abi.aggregate_result)?;
+        let result=if let Some(ty)=abi.result {
+            vec![MachinePiece{
+                ty,object_offset:0,
+                object_bytes:abi.aggregate_result.unwrap_or(ty.bits/8),
+                location:integer(0)
+            }]
+        } else {Vec::new()};
+        Ok(PassingPlan{parameters,result})
     }
 
     fn validate_aggregate_return(&self, aggregate: Option<u8>) -> Result<(), CodegenError> {
