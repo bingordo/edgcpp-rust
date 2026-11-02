@@ -1866,16 +1866,23 @@ fn emit_expr(
             if abi!=declared || arguments.len()!=abi.parameters.len() {
                 return Err(invalid("direct call ABI mismatch"));
             }
-            let mut values=Vec::with_capacity(abi.machine_parameters().len());
-            for ((arg,ty),aggregate) in arguments.iter().zip(&abi.parameters)
-                .zip(&abi.aggregate_parameters) {
+            let plan=abi.passing_plan()?;
+            let mut values=Vec::with_capacity(plan.machine_parameters().len());
+            for (arg,entry) in arguments.iter().zip(&plan.parameters) {
                 let value=emit_expr(arg,fb,params,vars,globals,stack,local_types,calls)?;
-                if let Some(bytes)=aggregate.filter(|bytes| *bytes>8) {
-                    // The operand is a single evaluated lvalue address.
-                    values.extend(target::ABI.pack_argument(fb,value,bytes)?);
-                } else {
-                    values.push(if ty.bits==64 {value}
-                        else {fb.ins().ireduce(ty.cranelift(),value)});
+                match entry.mode {
+                    target::PassingMode::AggregateByValue{bytes} if bytes>8 => {
+                        // Evaluated once; the target ABI plan owns its pieces.
+                        values.extend(target::ABI.pack_argument(fb,value,bytes)?);
+                    }
+                    target::PassingMode::Indirect =>
+                        return Err(invalid("indirect ABI argument lowering unavailable")),
+                    _ => {
+                        let ty=entry.pieces.first().ok_or_else(||
+                            invalid("missing scalar ABI piece"))?.ty;
+                        values.push(if ty.bits==64 {value}
+                            else {fb.ins().ireduce(ty.cranelift(),value)});
+                    }
                 }
             }
             let inst=fb.ins().call(*reference,&values);
@@ -2496,8 +2503,9 @@ fn emit_routines_with_globals(
             return Err(invalid("defined function parameter count mismatch"));
         }
         let mut signature=module.make_signature();
-        for ty in abi.machine_parameters() {signature.params.push(AbiParam::new(ty.cranelift()));}
-        if let Some(ty)=abi.result {signature.returns.push(AbiParam::new(ty.cranelift()));}
+        let plan=abi.passing_plan()?;
+        for ty in plan.machine_parameters() {signature.params.push(AbiParam::new(ty.cranelift()));}
+        for ty in plan.machine_returns() {signature.returns.push(AbiParam::new(ty.cranelift()));}
         let id=module.declare_function(&func.name,Linkage::Export,&signature)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         if by_name.insert(func.name.clone(),(id,abi)).is_some() {
@@ -2510,10 +2518,11 @@ fn emit_routines_with_globals(
             continue;
         }
         let mut signature=module.make_signature();
-        for ty in callee.abi.machine_parameters() {
+        let plan=callee.abi.passing_plan()?;
+        for ty in plan.machine_parameters() {
             signature.params.push(AbiParam::new(ty.cranelift()));
         }
-        if let Some(ty)=callee.abi.result {
+        for ty in plan.machine_returns() {
             signature.returns.push(AbiParam::new(ty.cranelift()));
         }
         let id=module.declare_function(&callee.name,Linkage::Import,&signature)
@@ -2533,10 +2542,11 @@ fn emit_routines_with_globals(
         if abi.parameters.len() != func.parameters {
             return Err(invalid("ABI parameter count mismatch"));
         }
-        for param in abi.machine_parameters() {
+        let plan=abi.passing_plan()?;
+        for param in plan.machine_parameters() {
             context.func.signature.params.push(AbiParam::new(param.cranelift()));
         }
-        if let Some(result) = abi.result {
+        for result in plan.machine_returns() {
             context.func.signature.returns.push(AbiParam::new(result.cranelift()));
         }
         let id=by_name.get(&func.name)
