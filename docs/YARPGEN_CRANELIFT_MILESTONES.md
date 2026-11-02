@@ -682,8 +682,8 @@ compiler-integration track starts in parallel with M9.
   storage, without overreads. The supported subset requires both GPRs to
   remain available; register exhaustion never silently splits a struct
   across a GPR and the stack. Two-register **producer-side** results
-  are implemented separately in PR #42, but direct calls receiving a
-  two-register result remain unsupported.
+  are implemented separately in PR #42; receiving/directly forwarding
+  these results is implemented in PR #43.
   GCC differential tests exercise native two-register calls, mixed fields,
   generated-to-generated calls, generated-to-GCC callbacks, and the six-GPR
   boundary. [Bridge CI #41358472051](https://github.com/bingordo/edgcpp-rust/actions/runs/41358472051)
@@ -693,9 +693,10 @@ compiler-integration track starts in parallel with M9.
   structs through RAX/RDX. Both pieces are produced from exact object
   bytes; the GCC caller differential checks 9-byte odd-size returns,
   16-byte mixed-field returns, and parameter-to-result round trips.
-  Direct calls returning such structs remain an explicit unsupported
-  case until both result registers can be materialized into typed
-  aggregate temporaries. SSE/MEMORY/indirect results remain unsupported.
+  Direct calls returning such structs can now materialize both result
+  registers into exact-sized temporaries and forward them by value
+  (PR #43). Arbitrary aggregate prvalue consumers, SSE/MEMORY/indirect
+  results remain unsupported.
 * Runtime nonconstant braced initialization *as lowered by EDG* for the
   tested scalar leaf expressions, arrays, nested records and unions. The
   GCC differential fixture also verifies a side-effectful call occurs once,
@@ -722,9 +723,10 @@ verification route, not a separate compiler implementation.
 **Remaining before declaring M8 complete:**
 
 1. Complete SysV x86-64 aggregate parameter/return classification:
-   **direct-call consumption of two-INTEGER-eightbyte register-pair returns**
-   (the producer-side RAX/RDX return is implemented in PR #42),
-   SSE/SSEUP cases, MEMORY-class stack arguments and hidden-result storage; handle register
+   **general consumption of two-INTEGER-eightbyte function-result temporaries**
+   beyond direct return forwarding (PRs #42/#43 cover producers and direct
+   call/return forwarding), SSE/SSEUP cases, MEMORY-class stack arguments
+   and hidden-result storage; handle register
    exhaustion/whole-aggregate stack placement, mixed scalar/aggregate calls,
    packed/unaligned layouts and direct-call aggregate temporaries. Two-GPR
    INTEGER arguments with sufficient free registers are implemented in PR #35;
