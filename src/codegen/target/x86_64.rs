@@ -261,3 +261,57 @@ impl TargetAbi for SysV {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn signature(aggregates: &[Option<u8>]) -> CAbi {
+        let scalar=CAbiInt{bits:64,signed:true,is_bool:false};
+        CAbi {
+            parameters:vec![scalar;aggregates.len()],
+            aggregate_parameters:aggregates.to_vec(),
+            aggregate_result:None,
+            result:Some(scalar),
+        }
+    }
+
+    #[test]
+    fn plan_keeps_source_indices_independent_of_machine_slots() {
+        let plan=SysV.passing_plan(&signature(&[
+            None,None,None,None,Some(16),None
+        ])).unwrap();
+        assert_eq!(plan.parameters.len(),6);
+        assert_eq!(plan.machine_parameters().len(),7);
+        assert_eq!(plan.parameters[4].source_index,4);
+        assert_eq!(plan.parameters[4].mode,PassingMode::AggregateByValue{bytes:16});
+        assert_eq!(plan.parameters[4].pieces[0].object_offset,0);
+        assert_eq!(plan.parameters[4].pieces[1].object_offset,8);
+        assert_eq!(plan.parameters[4].pieces[1].location,
+            PieceLocation::Register{class:RegisterClass::Integer,index:5});
+        assert_eq!(plan.parameters[5].pieces[0].location,
+            PieceLocation::Stack{slot:0});
+        assert_eq!(plan.machine_returns().len(),1);
+    }
+
+    #[test]
+    fn plan_preserves_scalar_stack_order_and_single_piece_aggregates() {
+        let plan=SysV.passing_plan(&signature(&[
+            None,None,None,None,None,None,Some(8),None
+        ])).unwrap();
+        assert_eq!(plan.parameters[6].pieces[0].location,
+            PieceLocation::Stack{slot:0});
+        assert_eq!(plan.parameters[7].pieces[0].location,
+            PieceLocation::Stack{slot:1});
+        assert_eq!(plan.parameters[6].mode,PassingMode::AggregateByValue{bytes:8});
+    }
+
+    #[test]
+    fn plan_rejects_split_aggregate_and_malformed_source_mapping() {
+        assert!(SysV.passing_plan(&signature(&[
+            None,None,None,None,None,Some(16)
+        ])).is_err());
+        let mut malformed=signature(&[None,Some(16)]);
+        malformed.aggregate_parameters.pop();
+        assert!(SysV.passing_plan(&malformed).is_err());
+    }
+}
