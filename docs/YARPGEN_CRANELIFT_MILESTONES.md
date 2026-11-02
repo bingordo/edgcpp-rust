@@ -479,9 +479,14 @@ compiler capabilities.
 Cranelift is a usable reference oracle and produces native ELF objects with
 GCC interoperability. This does not establish whole-C compatibility,
 general SysV aggregate/FP ABI support or default unrestricted YARPGen
-acceptance. Continue increasing the **bounded-default** cohort to
-1,000 seeds and broadening focused C feature tests, ranking genuine
-supported-oracle failures ahead of arbitrary new lowering features.
+acceptance. The [1,000-seed bounded-default cohort](https://github.com/bingordo/compiler-ci/actions/runs/41450045519)
+has since completed with **1,000 generated, 1,000 GCC/Clang-oracle-valid,
+1,000 passed, zero unsupported, and zero wrong-output/compile/link/runtime
+failures**. The same sole YARPGen resource constraint
+(`--max-array-dims=4`) applies, and the tested codegen SHA is
+`4f3e5356`; this is not proof of general C support or of later M9 changes.
+Prioritize the remaining C feature/ABI gaps over further expanding the
+constrained generator harness.
 The EDG-to-`bingordo/compiler` interface remains the long-term goal.
 
 ## M8–M13 — C semantics, reference validation and compiler integration
@@ -504,11 +509,12 @@ Cranelift's private `Expr`, `Stmt` or target ABI plan.
 reference backend practically usable **before** beginning the separate
 `bingordo/compiler` adapter. The ten-seed constrained YARPGen CI is already
 green but does **not** establish sufficient coverage. First run and rank a
-pinned 100-seed controlled cohort (with independent GCC/Clang oracle), then
-implement the highest-value missing C semantics and ABI cases with targeted
-differential fixtures. Keep the original 1,000-seed functional and breadth
-gates as the eventual usability goals; unsupported cases are never counted
-as passes. The checked, Cranelift-independent `Il`/`graph::Graph` interface
+pinned 100-seed and 1,000-seed **bounded-default** cohorts (both now
+complete at 100% pass with independent GCC/Clang oracles); then implement
+the highest-value missing C semantics and ABI cases with targeted
+differential fixtures. The unrestricted generator is separately limited by
+multi-GiB arrays and baseline GCC small-code-model failures; unsupported
+cases must never count as passes. The checked, Cranelift-independent `Il`/`graph::Graph` interface
 remains the future production integration boundary. See
 [EDG/compiler integration plan](EDG_COMPILER_INTEGRATION.md)
 for the readiness gate and subsequent adapter plan.
@@ -589,12 +595,26 @@ compiler-integration track starts in parallel with M9.
   [PR #45 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41453226369)
   and [PR #46 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41453712620)
   passed.
-- **Not yet implemented:** source labels inside `if` or loop bodies,
-  entering structured regions via goto, general `switch` selection,
-  case/default labels, fallthrough and switch-break semantics. The
-  Cranelift reference still deliberately rejects those cases rather than
-  inventing control flow. Avoid adding a separate frontend CFG; first
-  extend the checked EDG metadata and Cranelift block emission.
+- **Integer `switch` implemented next (PRs #48–#49):** EDG now
+  exports owned case/default integer values and switch-break classification.
+  The reference lowers flat case groups into Cranelift dispatch blocks with
+  source-order fallthrough, default handling, selector evaluated once,
+  independent switch-break destinations and nested switches. The M6 GCC
+  differential includes positive/negative selector values, no-default
+  cases, nested breaks, and default preceding another case.
+  [PR #48 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41455780972)
+  and [PR #49 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41456297111)
+  passed.
+- **Still incomplete:** source labels inside `if` or loop bodies, jumping
+  into structured regions, case labels nested in `if`/loop statements,
+  GNU case ranges, and some complex switch flow/semantic edge cases.
+  Those remain explicitly rejected rather than inventing edges; do not
+  build an additional frontend CFG. **Exhaustive-return switches** with
+  `default` and no reachable successor now work as well (PR #50):
+  correct termination analysis avoids fabricating a fallthrough edge or
+  demanding a trailing return in non-void C functions.
+  [PR #50 CI](https://github.com/bingordo/edgcpp-rust/actions/runs/41456760992)
+  passed the GCC native differential and Rust tests.
 
 ### M10 — function calls and ABI completeness
 
