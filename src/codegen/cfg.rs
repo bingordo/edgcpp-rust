@@ -2567,8 +2567,12 @@ fn emit_routines_with_globals(
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let machine_values=fb.block_params(entry).to_vec();
-            let (params,second_parts)=
-                target::ABI.decode_parameters(&mut fb,&abi,&machine_values)?;
+            let decoded=target::ABI.decode_parameters(
+                &mut fb,&plan,&machine_values)?;
+            let params:Vec<_>=decoded.iter().map(|pieces|
+                pieces.first().copied().ok_or_else(||
+                    invalid("missing decoded source argument")))
+                .collect::<Result<_,_>>()?;
             let local_types = func.local_types.clone().unwrap_or_else(|| {
                 vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
             });
@@ -2608,14 +2612,15 @@ fn emit_routines_with_globals(
                 stack.insert(index,slot);
             }
             if func.abi.is_some() {
-                for (i,value) in params.iter().enumerate() {
+                for (i,values) in decoded.iter().enumerate() {
+                    let first=params[i];
                     if let Some(bytes)=abi.aggregate_parameters[i] {
                         let address=local_address(&mut fb,&stack,func.locals+i)?;
                         target::ABI.materialize_aggregate(
-                            &mut fb,address,bytes,*value,second_parts[i])?;
+                            &mut fb,address,bytes,values)?;
                     } else {
                         local_write(&mut fb,&vars,&stack,&local_types,
-                            func.locals+i,*value)?;
+                            func.locals+i,first)?;
                     }
                 }
             }
