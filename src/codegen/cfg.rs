@@ -548,9 +548,10 @@ fn check(
     for stmt in body {
         // A label can be entered through a forward jump even if the lexical
         // predecessor returned or jumped away. Avoid phantom fallthrough.
-        if !live && !matches!(stmt, Stmt::Label(_)) {
-            return Err(invalid("unreachable statement"));
-        }
+        // C permits arbitrary dead statements after a return or goto.
+        // No execution edge enters them unless a source label starts a new
+        // block; do not interpret their reads or writes as reachable.
+        if !live && !matches!(stmt, Stmt::Label(_)) {continue;}
         match stmt {
             Stmt::Label(_) => live=true,
             Stmt::Goto(_) => live=false,
@@ -2297,9 +2298,7 @@ fn emit_body(
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
-        if !live && !matches!(stmt,Stmt::Label(_)) {
-            return Err(invalid("unreachable statement"));
-        }
+        if !live && !matches!(stmt,Stmt::Label(_)) {continue;}
         match stmt {
             Stmt::Goto(symbol) => {
                 let target=*labels.get(symbol).ok_or_else(||
