@@ -124,7 +124,7 @@ def classify_codegen(step: ProcessResult) -> str:
 
 def failure_signature(step: ProcessResult) -> str:
     """Group failures by actionable compiler diagnostic, not per-seed paths."""
-    lines = (step.stderr + "\\n" + step.stdout).splitlines()
+    lines = (step.stderr + "\n" + step.stdout).splitlines()
     # Compiler output may end in a generic traceback or wrapper failure;
     # prefer the first explicit unsupported/EDG error when available.
     diagnostic = next((line.strip() for line in lines
