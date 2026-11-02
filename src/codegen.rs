@@ -691,13 +691,10 @@ struct CAbi {
     aggregate_result: Option<u8>,
 }
 impl CAbi {
-    // Temporary forwarding wrappers keep the existing lowering stable while
-    // all physical calling-convention rules move into a target implementation.
-    fn machine_parameters(&self) -> Vec<CAbiInt> {
-        target::ABI.machine_parameters(self)
-    }
-    fn validate_register_budget(&self) -> Result<(), CodegenError> {
-        target::ABI.validate_register_budget(self)
+    /// The selected target constructs one plan for signatures, calls, and
+    /// function entry. The generic C frontend never counts hardware registers.
+    fn passing_plan(&self) -> Result<target::PassingPlan,CodegenError> {
+        target::ABI.passing_plan(self)
     }
 }
 fn cfg_routine_abi(
@@ -767,7 +764,7 @@ fn cfg_routine_abi(
         aggregate_parameters.push(aggregate);
     }
     let abi=CAbi { parameters: args, result,aggregate_parameters,aggregate_result };
-    abi.validate_register_budget()?;
+    abi.passing_plan()?;
     Ok(abi)
 }
 
@@ -967,14 +964,14 @@ mod tests {
             result: Some(ty),
         };
         let ok = signature(vec![None,None,None,None,Some(16),None]);
-        assert!(ok.validate_register_budget().is_ok());
-        assert_eq!(ok.machine_parameters().len(), 7);
+        assert!(ok.passing_plan().is_ok());
+        assert_eq!(ok.passing_plan().unwrap().machine_parameters().len(), 7);
         let narrow = signature(vec![None,Some(8),None]);
-        assert_eq!(narrow.machine_parameters().len(), 3);
+        assert_eq!(narrow.passing_plan().unwrap().machine_parameters().len(), 3);
         let split = signature(vec![None,None,None,None,None,Some(16)]);
-        assert!(split.validate_register_budget().is_err());
+        assert!(split.passing_plan().is_err());
         let stack = signature(vec![None,None,None,None,None,None,Some(12)]);
-        assert!(stack.validate_register_budget().is_err());
+        assert!(stack.passing_plan().is_err());
     }
 
     #[test]

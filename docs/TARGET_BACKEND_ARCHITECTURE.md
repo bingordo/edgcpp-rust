@@ -48,13 +48,39 @@ The existing one- and two-INTEGER-eightbyte SysV tests remain authoritative:
 native C caller/generated callee, generated caller/GCC callee, generated-to-
 generated calls, scalar/aggregate mixtures, and the register exhaustion guard.
 
+## Source-to-machine ABI passing plan (implemented)
+
+The target boundary now builds a `PassingPlan` for each supported
+function signature. This maps **logical C source argument indices** to
+one or more `MachinePiece` values with an explicit integer/future-FP class,
+byte offset and width, and register/stack placement metadata. The plan
+also records the machine return pieces. It is validated before emission.
+
+The same checked plan determines Cranelift function declarations, imported
+function declarations, direct-call physical argument counts, and incoming
+function-entry decoding. The x86-64 implementation assigns SysV's six
+integer argument registers in order and tracks scalar stack overflow.
+Two-eightbyte aggregates require both GPRs to be available; split or
+stack-by-value two-eightbyte arguments are still rejected. Physical
+register allocation remains Cranelift's responsibility; plan register
+numbers express the verified ABI mapping, not hand-assigned instructions.
+
+C aggregate classification still uses the existing supported
+integer-only `Option<u8>` source-level description. The plan introduces
+explicit `PassingMode` and piece classes as the **next layer**, without
+pretending float, indirect, or multi-register return lowering works.
+Target-specific value packing and reconstruction remain in
+`target/x86_64.rs`. The CFG now handles decoded arguments as vectors
+of machine pieces rather than a hard-coded optional second register.
+
 ## Adding AArch64 later
 
-1. Expand the current `Option<u8>` integer-aggregate descriptor into a
-   generic *passing plan*: distinguish INTEGER, FP/SIMD, homogeneous floating
-   aggregates, stack-by-value, indirect/result pointer and per-argument
-   machine locations (including a whole-argument rollback if registers are
-   exhausted). Keep the source parameter index independent of machine slots.
+1. Extend the implemented INTEGER-only `PassingPlan` with real FP/SIMD
+   pieces, homogeneous floating aggregates, by-value aggregate stack
+   arguments, indirect/result pointer arguments and whole-argument register
+   rollback. Replace the remaining source-level `Option<u8>` aggregate
+   descriptor only when those new modes have actual lowering support.
+   Source parameter indices are already distinct from physical pieces.
 2. Implement `target/aarch64.rs` against that plan and add explicit target
    selection. Do **not** copy the x86 `>8`-bytes check or six-GPR budget;
    AAPCS64 has its own x0–x7/v0–v7 rules, HFA handling, indirect results and
@@ -88,8 +114,8 @@ generated calls, scalar/aggregate mixtures, and the register exhaustion guard.
 - Existing x86-64 behavior and GCC differential tests are a regression gate
   for any further refactor.
 
-**Limit today:** This patch establishes the target seam for the *currently
-supported* integer-only ABI. It does not yet provide the richer passing-plan
-IR, an AArch64 build, target-dependent EDG configuration or endian-independent
-global data emission. Those are explicit follow-up steps, not implemented
-capabilities.
+**Limit today:** The integer-oriented passing-plan IR is implemented, but
+the FP, HFA, indirect and aggregate stack-by-value classes are not. This
+project does not yet provide an AArch64 build, target-dependent EDG layout
+configuration or endian-independent global data emission. These are
+explicit follow-up steps, not implemented capabilities.

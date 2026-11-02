@@ -1163,7 +1163,7 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
         Some(CAbiInt{bits:64,signed:false,is_bool:false})
     } else {Some(call_type_abi(il,ret)?)};
     let abi=CAbi{aggregate_parameters,aggregate_result,parameters,result};
-    abi.validate_register_budget()?;
+    abi.passing_plan()?;
     Ok(CallDeclaration {symbol,name,abi})
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
@@ -1866,16 +1866,23 @@ fn emit_expr(
             if abi!=declared || arguments.len()!=abi.parameters.len() {
                 return Err(invalid("direct call ABI mismatch"));
             }
-            let mut values=Vec::with_capacity(abi.machine_parameters().len());
-            for ((arg,ty),aggregate) in arguments.iter().zip(&abi.parameters)
-                .zip(&abi.aggregate_parameters) {
+            let plan=abi.passing_plan()?;
+            let mut values=Vec::with_capacity(plan.machine_parameters().len());
+            for (arg,entry) in arguments.iter().zip(&plan.parameters) {
                 let value=emit_expr(arg,fb,params,vars,globals,stack,local_types,calls)?;
-                if let Some(bytes)=aggregate.filter(|bytes| *bytes>8) {
-                    // The operand is a single evaluated lvalue address.
-                    values.extend(target::ABI.pack_argument(fb,value,bytes)?);
-                } else {
-                    values.push(if ty.bits==64 {value}
-                        else {fb.ins().ireduce(ty.cranelift(),value)});
+                match entry.mode {
+                    target::PassingMode::AggregateByValue{bytes} if bytes>8 => {
+                        // Evaluated once; the target ABI plan owns its pieces.
+                        values.extend(target::ABI.pack_argument(fb,value,bytes)?);
+                    }
+                    target::PassingMode::Indirect =>
+                        return Err(invalid("indirect ABI argument lowering unavailable")),
+                    _ => {
+                        let ty=entry.pieces.first().ok_or_else(||
+                            invalid("missing scalar ABI piece"))?.ty;
+                        values.push(if ty.bits==64 {value}
+                            else {fb.ins().ireduce(ty.cranelift(),value)});
+                    }
                 }
             }
             let inst=fb.ins().call(*reference,&values);
@@ -2496,8 +2503,9 @@ fn emit_routines_with_globals(
             return Err(invalid("defined function parameter count mismatch"));
         }
         let mut signature=module.make_signature();
-        for ty in abi.machine_parameters() {signature.params.push(AbiParam::new(ty.cranelift()));}
-        if let Some(ty)=abi.result {signature.returns.push(AbiParam::new(ty.cranelift()));}
+        let plan=abi.passing_plan()?;
+        for ty in plan.machine_parameters() {signature.params.push(AbiParam::new(ty.cranelift()));}
+        for ty in plan.machine_returns() {signature.returns.push(AbiParam::new(ty.cranelift()));}
         let id=module.declare_function(&func.name,Linkage::Export,&signature)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         if by_name.insert(func.name.clone(),(id,abi)).is_some() {
@@ -2510,10 +2518,11 @@ fn emit_routines_with_globals(
             continue;
         }
         let mut signature=module.make_signature();
-        for ty in callee.abi.machine_parameters() {
+        let plan=callee.abi.passing_plan()?;
+        for ty in plan.machine_parameters() {
             signature.params.push(AbiParam::new(ty.cranelift()));
         }
-        if let Some(ty)=callee.abi.result {
+        for ty in plan.machine_returns() {
             signature.returns.push(AbiParam::new(ty.cranelift()));
         }
         let id=module.declare_function(&callee.name,Linkage::Import,&signature)
@@ -2533,10 +2542,11 @@ fn emit_routines_with_globals(
         if abi.parameters.len() != func.parameters {
             return Err(invalid("ABI parameter count mismatch"));
         }
-        for param in abi.machine_parameters() {
+        let plan=abi.passing_plan()?;
+        for param in plan.machine_parameters() {
             context.func.signature.params.push(AbiParam::new(param.cranelift()));
         }
-        if let Some(result) = abi.result {
+        for result in plan.machine_returns() {
             context.func.signature.returns.push(AbiParam::new(result.cranelift()));
         }
         let id=by_name.get(&func.name)
@@ -2557,8 +2567,12 @@ fn emit_routines_with_globals(
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let machine_values=fb.block_params(entry).to_vec();
-            let (params,second_parts)=
-                target::ABI.decode_parameters(&mut fb,&abi,&machine_values)?;
+            let decoded=target::ABI.decode_parameters(
+                &mut fb,&plan,&machine_values)?;
+            let params:Vec<_>=decoded.iter().map(|pieces|
+                pieces.first().copied().ok_or_else(||
+                    invalid("missing decoded source argument")))
+                .collect::<Result<_,_>>()?;
             let local_types = func.local_types.clone().unwrap_or_else(|| {
                 vec![CAbiInt { bits: 64, signed: true, is_bool: false }; func.locals]
             });
@@ -2598,14 +2612,15 @@ fn emit_routines_with_globals(
                 stack.insert(index,slot);
             }
             if func.abi.is_some() {
-                for (i,value) in params.iter().enumerate() {
+                for (i,values) in decoded.iter().enumerate() {
+                    let first=params[i];
                     if let Some(bytes)=abi.aggregate_parameters[i] {
                         let address=local_address(&mut fb,&stack,func.locals+i)?;
                         target::ABI.materialize_aggregate(
-                            &mut fb,address,bytes,*value,second_parts[i])?;
+                            &mut fb,address,bytes,values)?;
                     } else {
                         local_write(&mut fb,&vars,&stack,&local_types,
-                            func.locals+i,*value)?;
+                            func.locals+i,first)?;
                     }
                 }
             }
