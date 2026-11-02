@@ -201,3 +201,27 @@ int m9_switch_default_middle(int x)
     }
     return result;
 }
+
+/* Every dispatch path returns: no synthetic post-switch return is required. */
+int m9_switch_all_return(int x)
+{
+    switch (x) {
+    case -3: return x + 7;
+    case 0:  return 17;
+    case 4:  return 41;
+    default: return x * 5 - 9;
+    }
+}
+int m9_switch_fallthrough_return(int x)
+{
+    switch (x) {
+    case -1:
+    case 0:
+        return 13;
+    case 3:
+        if (x > 2) return 29;
+        /* otherwise fall through */
+    default:
+        return 47;
+    }
+}
