@@ -109,6 +109,12 @@ def classify_codegen(step: ProcessResult) -> str:
         "unsupported local", "not supported", "unsupported construct",
         "initializer has no supported", "only simple local assignment",
         "requires signed 64-bit",
+        # Deliberate backend resource/complexity gates, not verifier/codegen
+        # failures. Default YARPGen can declare multi-GiB array objects.
+        "array object too large", "array object exceeds",
+        "aggregate zero initializer exceeds 4 kib limit",
+        "aggregate native image exceeds 4 kib limit",
+        "bitfield/union byte copy exceeds 512-byte limit",
     )):
         return "unsupported_construct"
     if "edg compilation failed" in log or "edg bridge:" in log:
