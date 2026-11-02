@@ -26,6 +26,10 @@ enum Stmt {
     DoWhile(Vec<Stmt>, Expr),
     Break,
     Continue,
+    /// User-visible C goto label, addressed by the owned EDG symbol identity.
+    Goto(crate::SymbolId),
+    /// A destination in the current function, not a separate frontend CFG.
+    Label(crate::SymbolId),
 }
 struct Routine {
     name: String, parameters: usize, locals: usize, body: Vec<Stmt>,
@@ -366,20 +370,35 @@ fn lower(
             Ok(vec![Stmt::For { init, condition, increment, body }])
         }
         10 | 11 => {
-            // Native EDG records classify only compiler-generated loop
-            // break/continue targets. Never interpret arbitrary gotos.
             let sem = semantic(1, node.data.kind);
             let matching: Vec<_> = il.loop_transfers.iter()
                 .filter(|t| t.function == *function && t.statement_path == *path)
                 .collect();
-            if matching.len() != 1 || graph.statement_label(id).is_none() {
-                return Err(invalid("unsupported non-loop goto or label"));
+            let label=graph.statement_label(id)
+                .ok_or_else(||invalid("goto/label lacks EDG target identity"))?;
+            if !matching.is_empty() {
+                // Keep compiler-generated structured-loop transfers separate
+                // from source-level gotos. No guessed target based on spelling.
+                if matching.len()!=1 {
+                    return Err(invalid("duplicate EDG loop-transfer metadata"));
+                }
+                return match (sem, matching[0].kind) {
+                    (10, 1) => Ok(vec![Stmt::Break]),
+                    (10, 2) => Ok(vec![Stmt::Continue]),
+                    (11, 3 | 4) => Ok(Vec::new()),
+                    _ => Err(invalid("inconsistent EDG loop-label classification")),
+                };
             }
-            match (sem, matching[0].kind) {
-                (10, 1) => Ok(vec![Stmt::Break]),
-                (10, 2) => Ok(vec![Stmt::Continue]),
-                (11, 3 | 4) => Ok(Vec::new()),
-                _ => Err(invalid("inconsistent EDG loop-label classification")),
+            if node.expression.is_some() ||
+                node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
+                return Err(invalid("source goto/label has unexpected nested statement"));
+            }
+            match (sem,label.definition) {
+                (10,false) if graph.goto_target(id).is_some() =>
+                    Ok(vec![Stmt::Goto(label.label)]),
+                (11,true) => Ok(vec![Stmt::Label(label.label)]),
+                (10,false) => Err(invalid("goto has unresolved label in function")),
+                _ => Err(invalid("invalid source goto/label definition metadata")),
             }
         }
         _ => Err(invalid(format!("unsupported EDG statement {}", node.data.kind))),
@@ -472,6 +491,54 @@ fn may_break_current_loop(body: &[Stmt]) -> bool {
     })
 }
 
+/// Predeclare source labels and reject unsupported jumps through structured
+/// loops. Labels are accepted at block level; a goto in an if-arm may target
+/// any such label in the same function. This is a *scope validator*, not a CFG.
+fn source_labels(body:&[Stmt]) -> Result<Vec<crate::SymbolId>,CodegenError> {
+    let mut definitions=HashSet::new();
+    let mut references=HashSet::new();
+    fn visit(body:&[Stmt],defs:&mut HashSet<crate::SymbolId>,
+             refs:&mut HashSet<crate::SymbolId>, nested:bool,
+             in_loop:bool) -> Result<(),CodegenError> {
+        for stmt in body {
+            match stmt {
+                Stmt::Label(label) => {
+                    if nested || in_loop {
+                        return Err(invalid("label inside structured control unsupported"));
+                    }
+                    if !defs.insert(*label) {
+                        return Err(invalid("duplicate source label"));
+                    }
+                }
+                Stmt::Goto(label) => {
+                    if in_loop {
+                        return Err(invalid("goto inside structured loop unsupported"));
+                    }
+                    refs.insert(*label);
+                }
+                Stmt::If(_,yes,no) => {
+                    visit(yes,defs,refs,true,in_loop)?;
+                    visit(no,defs,refs,true,in_loop)?;
+                }
+                Stmt::While(_,body) | Stmt::DoWhile(body,_) =>
+                    visit(body,defs,refs,true,true)?,
+                Stmt::For{init,increment,body,..} => {
+                    visit(init,defs,refs,true,true)?;
+                    visit(increment,defs,refs,true,true)?;
+                    visit(body,defs,refs,true,true)?;
+                }
+                _ => ()
+            }
+        }
+        Ok(())
+    }
+    visit(body,&mut definitions,&mut references,false,false)?;
+    if !references.is_subset(&definitions) {
+        return Err(invalid("unresolved user goto target"));
+    }
+    Ok(definitions.into_iter().collect())
+}
+
 // Returns true if execution can reach the end of this sequence.
 fn check(
     body: &[Stmt], vars: &mut HashSet<usize>, params: usize,
@@ -479,8 +546,14 @@ fn check(
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in body {
-        if !live { return Err(invalid("unreachable statement")); }
+        // A label can be entered through a forward jump even if the lexical
+        // predecessor returned or jumped away. Avoid phantom fallthrough.
+        if !live && !matches!(stmt, Stmt::Label(_)) {
+            return Err(invalid("unreachable statement"));
+        }
         match stmt {
+            Stmt::Label(_) => live=true,
+            Stmt::Goto(_) => live=false,
             Stmt::Break | Stmt::Continue => {
                 if loop_depth == 0 { return Err(invalid("break/continue outside loop")); }
                 live = false;
@@ -1753,9 +1826,16 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             .collect::<Result<Vec<_>,_>>()?);
         local_types.extend(abi.parameters.iter().copied());
         let body = lower(&graph, roots[0], &ids, &locals, il)?;
+        let labels=source_labels(&body)?;
         let initialized: HashSet<usize> =
             (locals.len()..(locals.len()+ids.len())).collect();
-        let has_fallthrough = check(&body, &mut initialized.clone(),
+        let mut checked=initialized.clone();
+        // Across user gotos, lexical statement order is not a reliable
+        // definite-assignment analysis. Conservatively let Cranelift model
+        // all scalar locals as addressable storage and validate the selected
+        // target labels separately. Reading a skipped C initializer is UB.
+        if !labels.is_empty() { checked.extend(0..locals.len()); }
+        let has_fallthrough = check(&body, &mut checked,
             ids.len(), local_types.len(), 0)?;
         if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
@@ -1817,7 +1897,8 @@ fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
                 if let Some(condition)=condition {addressed_expr(condition,found);}
                 addressed_stmt(body,found); addressed_stmt(increment,found);
             }
-            Stmt::ReturnVoid | Stmt::Break | Stmt::Continue => {}
+            Stmt::ReturnVoid | Stmt::Break | Stmt::Continue |
+            Stmt::Goto(_) | Stmt::Label(_) => {}
         }
     }
 }
