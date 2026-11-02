@@ -31,8 +31,8 @@ impl TargetAbi for SysV {
     /// Conservative SysV AMD64 INTEGER-class classification. Plain, naturally
     /// aligned C structs of at most two eightbytes can use GPR arguments.
     /// Floating, packed, nested, bitfield, union and MEMORY cases fail closed.
-    /// Two-GPR results remain deliberately unsupported until multi-value return
-    /// lowering is implemented and GCC-differential-tested.
+    /// Two-GPR INTEGER-class results use RAX/RDX. Calls returning such values
+    /// require their own aggregate materialization; only producers are enabled.
     fn classify_aggregate(&self, il:&Il, ty:crate::TypeId) ->Result<Option<u8>,CodegenError> {
         let ty=canonical_abi_type(il,ty)?;
         let Some(def)=il.types.iter().find(|t|t.id==ty) else {
@@ -167,11 +167,23 @@ impl TargetAbi for SysV {
         }
         self.validate_aggregate_return(abi.aggregate_result)?;
         let result=if let Some(ty)=abi.result {
-            vec![MachinePiece{
-                ty,object_offset:0,
-                object_bytes:abi.aggregate_result.unwrap_or(ty.bits/8),
-                location:integer(0)
-            }]
+            match abi.aggregate_result {
+                Some(bytes) if bytes>8 => vec![
+                    MachinePiece{
+                        ty,object_offset:0,object_bytes:8,
+                        location:integer(0)
+                    },
+                    MachinePiece{
+                        ty,object_offset:8,object_bytes:bytes-8,
+                        location:integer(1)
+                    },
+                ],
+                other=>vec![MachinePiece{
+                    ty,object_offset:0,
+                    object_bytes:other.unwrap_or(ty.bits/8),
+                    location:integer(0)
+                }],
+            }
         } else {Vec::new()};
         let plan=PassingPlan{parameters,result};
         plan.validate()?;
@@ -179,9 +191,9 @@ impl TargetAbi for SysV {
     }
 
     fn validate_aggregate_return(&self, aggregate: Option<u8>) -> Result<(), CodegenError> {
-        if aggregate.is_some_and(|bytes| bytes > 8) {
+        if aggregate.is_some_and(|bytes| bytes==0 || bytes>16) {
             return Err(CodegenError::InvalidFunction(
-                "two-GPR aggregate returns not yet supported".into()));
+                "invalid SysV two-eightbyte aggregate return".into()));
         }
         Ok(())
     }
@@ -303,6 +315,23 @@ mod tests {
         assert_eq!(plan.parameters[7].pieces[0].location,
             PieceLocation::Stack{slot:1});
         assert_eq!(plan.parameters[6].mode,PassingMode::AggregateByValue{bytes:8});
+    }
+
+    #[test]
+    fn plan_builds_rax_rdx_return_for_two_eightbyte_aggregate() {
+        let mut abi=signature(&[None]);
+        abi.aggregate_result=Some(16);
+        let plan=SysV.passing_plan(&abi).unwrap();
+        assert_eq!(plan.machine_returns().len(),2);
+        assert_eq!(plan.result[0].object_bytes,8);
+        assert_eq!(plan.result[1].object_offset,8);
+        assert_eq!(plan.result[1].object_bytes,8);
+        assert_eq!(plan.result[1].location,PieceLocation::Register{
+            class:RegisterClass::Integer,index:1
+        });
+        abi.aggregate_result=Some(9);
+        let plan=SysV.passing_plan(&abi).unwrap();
+        assert_eq!(plan.result[1].object_bytes,1);
     }
 
     #[test]
