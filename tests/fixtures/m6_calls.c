@@ -83,3 +83,29 @@ int m9_skip_dead(int x)
 done:
     return x + 9;
 }
+
+/* A source goto may exit a while loop without pretending to be break. */
+int m9_goto_while_exit(int n)
+{
+    int sum = 0;
+    while (n > 0) {
+        if (n == 3) goto done;
+        sum += n * 2;
+        n--;
+    }
+done:
+    return sum - n;
+}
+
+/* An unconditional for-loop can terminate only through its named label. */
+int m9_goto_for_exit(int n)
+{
+    int sum = 0;
+    for (;;) {
+        if (n <= 0) goto done;
+        sum += n;
+        n--;
+    }
+done:
+    return sum;
+}

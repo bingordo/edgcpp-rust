@@ -511,9 +511,9 @@ fn source_labels(body:&[Stmt]) -> Result<Vec<crate::SymbolId>,CodegenError> {
                     }
                 }
                 Stmt::Goto(label) => {
-                    if in_loop {
-                        return Err(invalid("goto inside structured loop unsupported"));
-                    }
+                    // A branch *out* of a loop is legal: the destination
+                    // remains unsealed until the complete function is built.
+                    // Jumping *into* an interior loop label is still rejected.
                     refs.insert(*label);
                 }
                 Stmt::If(_,yes,no) => {
@@ -2992,7 +2992,10 @@ mod tests {
         assert!(source_labels(&duplicate).is_err());
         let nested=vec![Stmt::While(Expr::Parameter(0),
             vec![Stmt::Goto(label)]),Stmt::Label(label)];
-        assert!(source_labels(&nested).is_err());
+        assert!(source_labels(&nested).is_ok());
+        let interior_label=vec![Stmt::While(Expr::Parameter(0),
+            vec![Stmt::Label(label)])];
+        assert!(source_labels(&interior_label).is_err());
     }
 
     #[test]

@@ -15,6 +15,8 @@ extern int m6_for_ever_continue(int);
 extern int m9_goto_forward(int);
 extern int m9_goto_backedge(int);
 extern int m9_skip_dead(int);
+extern int m9_goto_while_exit(int);
+extern int m9_goto_for_exit(int);
 
 int main(void)
 {
@@ -32,5 +34,9 @@ int main(void)
            m9_goto_backedge(2), m9_goto_backedge(15));
     printf("%d %d %d\n", m9_skip_dead(-10),
            m9_skip_dead(0), m9_skip_dead(21));
+    printf("%d %d %d\n", m9_goto_while_exit(0),
+           m9_goto_while_exit(3), m9_goto_while_exit(9));
+    printf("%d %d %d\n", m9_goto_for_exit(-5),
+           m9_goto_for_exit(3), m9_goto_for_exit(21));
     return 0;
 }
