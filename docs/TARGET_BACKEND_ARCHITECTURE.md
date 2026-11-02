@@ -1,32 +1,42 @@
 # Target architecture and ABI boundary (EDG / Cranelift)
 
-This document describes the **current implementation**, and separates it from
-**future AArch64 work**. The current reference backend generates x86-64 ELF
-objects using the SysV AMD64 C ABI; it does **not** generate AArch64 objects.
+This document describes the **optional Cranelift reference backend** and
+separates it from **future AArch64 work**. The primary product goal is an
+EDG frontend interface for `bingordo/compiler`, whose independent typed
+SSA CFG and native backend are the intended consumer
+([integration contract](EDG_COMPILER_INTEGRATION.md)).
+The current Cranelift reference emits x86-64 ELF objects using the SysV
+AMD64 C ABI; it does **not** emit AArch64 objects.
 
 ## Design rule
 
 EDG language semantics, validated native type/layout metadata, expression
-evaluation order, lvalues, dataflow and statement CFG belong in generic
-lowering. The machine calling convention, ABI classifications, register
-assignments, byte packing of aggregate arguments/results, and construction of
-the Cranelift ISA belong in the selected *target* module.
+evaluation order, lvalues, source statements and lifetime information belong
+in the **backend-neutral frontend interface**. There is no reason to
+construct a duplicate general frontend CFG: each consumer lowers those
+statements into its **own** CFG/SSA. Cranelift-specific ABI classifications,
+register assignments, byte packing of aggregate arguments/results, and ISA
+construction stay in the *reference target* module; `bingordo/compiler`
+uses its own backend ABI implementation.
 
 ```text
 EDG native IL + validated C types/layouts
         |
         v
-Generic C expressions / lvalues / statement CFG
+Checked C expressions / lvalues / source statements
         |
         +--> TargetAbi: aggregate classification + supported ABI gate
         |       +--> target/x86_64.rs (today: SysV AMD64 subset)
         |       +--> target/aarch64.rs (planned: AAPCS64)
         |
         v
-Cranelift IR call/return signatures and body
+     +--> Cranelift reference adapter -> Cranelift CFG/ELF
+     |
+     +--> bingordo/compiler adapter -> compiler-ir CFG/SSA
+                                         -> native backend/ELF
         |
         v
-Target ISA -> relocatable ELF object -> GCC/Clang ABI differential tests
+Independent GCC/Clang differential tests
 ```
 
 ## Current boundary
@@ -40,9 +50,16 @@ Target ISA -> relocatable ELF object -> GCC/Clang ABI differential tests
 - `src/codegen.rs`: backend-neutral C ABI scalar descriptors and expression
   syntax, plus the current x86-only entry point. It forwards ABI decisions to
   `TargetAbi`; it must not acquire new SysV register rules.
-- `src/codegen/cfg.rs`: generic EDG CFG and lvalue sequencing, calls, imports,
-  Cranelift emission, native stack slots, and object production; physical
-  argument/result layout calls the selected ABI hooks.
+- `src/codegen/cfg.rs`: **Cranelift-specific reference lowering** for EDG
+  statements, lvalue sequencing, calls, imports, Cranelift blocks, native
+  stack slots and object production; physical argument/result layout calls
+  the selected reference ABI hooks.
+- `src/lib.rs` and `src/graph.rs`: the owned, Cranelift-independent
+  source snapshot and indexed graph to use as the basis for the checked
+  frontend API. They are **not** a frontend CFG or optimizer.
+- `bingordo/compiler`: separate production-target integration, using its
+  existing SSA CFG and ABI/backend infrastructure. No EDG adapter is
+  claimed implemented yet.
 
 The existing one- and two-INTEGER-eightbyte SysV tests remain authoritative:
 native C caller/generated callee, generated caller/GCC callee, generated-to-
@@ -56,9 +73,9 @@ one or more `MachinePiece` values with an explicit integer/future-FP class,
 byte offset and width, and register/stack placement metadata. The plan
 also records the machine return pieces. It is validated before emission.
 
-The same checked plan determines Cranelift function declarations, imported
-function declarations, direct-call physical argument counts, and incoming
-function-entry decoding. The x86-64 implementation assigns SysV's six
+Within the **Cranelift reference backend**, the same checked plan determines
+function declarations, imported function declarations, direct-call physical
+argument counts, and incoming function-entry decoding. The x86-64 implementation assigns SysV's six
 integer argument registers in order and tracks scalar stack overflow.
 Two-eightbyte aggregates require both GPRs to be available; split or
 stack-by-value two-eightbyte arguments are still rejected. Physical
@@ -70,7 +87,7 @@ integer-only `Option<u8>` source-level description. The plan introduces
 explicit `PassingMode` and piece classes as the **next layer**, without
 pretending float, indirect, or multi-register return lowering works.
 Target-specific value packing and reconstruction remain in
-`target/x86_64.rs`. The CFG now handles decoded arguments as vectors
+`target/x86_64.rs`. The Cranelift lowering now handles decoded arguments as vectors
 of machine pieces rather than a hard-coded optional second register.
 
 ## Adding AArch64 later
