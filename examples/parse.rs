@@ -89,6 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  decl.function, decl.statement_path, decl.position,
                  variable.name, decl.symbol.0, decl.ty.0, decl.is_vla);
     }
+    for dim in &graph.vla_dimensions {
+        println!("VLA dimension function={} statement={} array_type={} expression={} copied={}",
+                 dim.function, dim.statement_path, dim.array_type.0,
+                 dim.has_expression, dim.copied);
+    }
     for init in &graph.statement_initializations {
         let variable = init.symbol.and_then(|id| graph.symbol(id));
         println!("statement initialization {} path={} symbol={:?} name={:?} kind={} role={} follows_execution={} braced={}",
