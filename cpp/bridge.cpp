@@ -1172,6 +1172,21 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           }
           if (fits) emit_record(45, {txt(function), txt(path), signed_num(value)});
         }
+        // A C function-pointer initializer may be folded into a native
+        // ck_address/abk_routine constant. Preserve the routine identity,
+        // never cast that pointer to an integer literal or infer it by name.
+        if (variable_symbol != 0 && init->variable != nullptr &&
+            init->kind == dik_constant && init->variant.constant.ptr != nullptr &&
+            init->variant.constant.ptr->kind == ck_address) {
+          const auto &address = init->variant.constant.ptr->variant.address;
+          if (address.kind == abk_routine && address.variant.routine != nullptr &&
+              address.offset == 0 && !address.is_object_reflection) {
+            a_routine_ptr target = address.variant.routine;
+            const uint32_t id = emit_symbol(target, 1,
+                declaration_name(target->source_corresp, true, true));
+            emit_record(54, {txt(function), txt(path), num(id)});
+          }
+        }
         // Preserve exact constant aggregate values with their native type,
         // even for partially initialized or designated subobjects.
         if (variable_symbol != 0 && init->variable != nullptr &&
