@@ -2081,11 +2081,6 @@ fn lower_c_expression(
                             if access==MemoryAccess::Ordinary {
                                 Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
                             } else {
-                                if access==MemoryAccess::Atomic &&
-                                   !matches!(kind,CCompoundOp::Add|CCompoundOp::Sub|
-                                     CCompoundOp::And|CCompoundOp::Or|CCompoundOp::Xor) {
-                                    return Err(invalid("C11 indirect atomic RMW operator unsupported"));
-                                }
                                 if ty.is_bool {return Err(invalid("qualified bool RMW unsupported"));}
                                 Expr::CompoundQualified(ty,compute_ty,access,kind,address.unwrap(),rhs)
                             }
