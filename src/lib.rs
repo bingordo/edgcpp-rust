@@ -74,6 +74,8 @@ pub struct Il {
     pub loop_transfers: Vec<LoopTransfer>,
     /// Variable declaration positions within structured statements.
     pub statement_declarations: Vec<StatementDeclaration>,
+    /// Runtime VLA bound evaluation sites; tied to native array type IDs.
+    pub vla_dimensions: Vec<VlaDimension>,
     /// Dynamic initialization execution sites with optional expression trees.
     pub statement_initializations: Vec<StatementInitialization>,
     /// Exact scalar i64 dynamic initializer constants at execution sites.
@@ -446,6 +448,20 @@ pub struct StatementDeclaration {
     pub symbol: SymbolId,
     pub ty: TypeId,
     pub is_vla: bool,
+}
+
+/// Native `stmk_set_vla_size`: the bound is evaluated at this program point,
+/// not when the array type is first visited. An expression, if present,
+/// resides in the ordinary statement expression tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VlaDimension {
+    pub function: String,
+    pub statement_path: String,
+    pub array_type: TypeId,
+    pub has_expression: bool,
+    /// EDG's copied dimensions reuse an original dimension's stored value.
+    /// Their identity must be resolved before code generation.
+    pub copied: bool,
 }
 
 /// A dynamic initializer executed at a statement (rather than merely
@@ -835,6 +851,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         31 => Some(il.local_variables.len()),
         32 => Some(il.static_local_owners.len()),
         33 => Some(il.statement_declarations.len()),
+        56 => Some(il.vla_dimensions.len()),
         34 => Some(il.statement_initializations.len()),
         35 => Some(il.statement_sources.len()),
         36 => Some(il.symbol_sources.len()),
@@ -889,7 +906,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1153,6 +1170,17 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 function, statement_path, symbol: n(2).map(SymbolId), kind,
                 follows_execution: flags & 1 != 0,
                 braced: flags & 2 != 0, role,
+            });
+        }
+        56 => {
+            let (Some(function),Some(statement_path),Some(ty),
+                 Some(has_expr),Some(copied)) =
+                (t(0),t(1),n(2),n(3),n(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() || ty==0 ||
+                has_expr>1 || copied>1 || (copied==1 && has_expr==1) {return;}
+            output.vla_dimensions.push(VlaDimension {
+                function,statement_path,array_type:TypeId(ty),
+                has_expression:has_expr==1,copied:copied==1,
             });
         }
         33 => {
@@ -1660,6 +1688,36 @@ mod tests {
                     bad_location.as_ptr(), bad_location.len(), 0);
         }
         assert!(state.malformed);
+    }
+
+    #[test]
+    fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let mut state = Collector { il: Il::default(), panicked:false, malformed:false };
+        let valid=[string(b"f"),string(b"0.block.1"),
+                   number(42),number(1),number(0)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),56,
+                    valid.as_ptr(),valid.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.vla_dimensions.len(),1);
+        assert_eq!(state.il.vla_dimensions[0].array_type,TypeId(42));
+        assert!(state.il.vla_dimensions[0].has_expression);
+        assert!(!state.il.vla_dimensions[0].copied);
+        let invalid=[string(b"f"),string(b"0.block.2"),
+                     number(42),number(1),number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),56,
+                    invalid.as_ptr(),invalid.len(),0);
+        }
+        assert!(state.malformed);
+        assert_eq!(state.il.vla_dimensions.len(),1);
     }
 
     #[test]

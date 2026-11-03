@@ -31,6 +31,16 @@ small-code-model relocation failures. See
 for exact counts and unsupported capabilities. This is validation of the
 specified generated-C workload, not a claim of full C compatibility.
 
+**C11 VLA reference support (M11):** On the pinned EDG build, C VLAs
+are lowered into runtime dimension calculations and `__vla_alloc`/
+`__vla_dealloc` calls. The Cranelift ELF backend accepts the checked
+scalar/pointer subset and passes GCC differential cases covering 1D/2D
+arrays, runtime `sizeof`, side-effectful dimensions, nested scopes,
+early returns and loops. Applications must link
+[`runtime/vla_runtime.c`](runtime/vla_runtime.c) or a compatible EDG
+runtime. This does **not** provide a native `bingordo/compiler` backend
+or full C++ VLA / longjmp support. See the [M11 implementation notes](docs/M11_VLA.md).
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.

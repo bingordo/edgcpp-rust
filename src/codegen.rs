@@ -56,6 +56,9 @@ pub enum Expr {
     Call(crate::SymbolId, CAbi, Vec<Expr>),
     /// An evaluated function pointer with a checked function prototype ABI.
     CallIndirect(Box<Expr>, CAbi, Vec<Expr>),
+    /// EDG-lowered __vla_alloc writes a local pointer through its address.
+    /// The wrapped checked call executes once; this models its definite write.
+    VlaAlloc(usize, Box<Expr>),
     /// Straight-line GNU statement-expression block: execute all prefix
     /// expressions exactly once, then evaluate the final block value.
     BlockValue(Vec<Expr>, Box<Expr>),
@@ -187,7 +190,7 @@ fn emit_expr(
         }
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
-        Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
+        Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
@@ -439,7 +442,7 @@ fn checked_local(
 /// proper Cranelift blocks, branches and phi handling are implemented.
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
-        Expr::Call(..) | Expr::CallIndirect(..) | Expr::BlockValue(..) |
+        Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |

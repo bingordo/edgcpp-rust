@@ -1,7 +1,7 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
-use crate::{Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, StatementSwitchCase, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
+use crate::{VlaDimension, Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, StatementSwitchCase, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StatementId(pub usize);
@@ -34,6 +34,8 @@ pub enum GraphError {
     InvalidStatementDeclaration { function: String, path: String },
     DuplicateStatementDeclaration { function: String, path: String, position: u32 },
     InvalidStatementDeclarationPosition { function: String, path: String },
+    InvalidVlaDimension { function: String, path: String },
+    DuplicateVlaDimension { function: String, path: String },
     InvalidStatementInitialization { function: String, path: String },
     InvalidSourceLocation { function: String, path: String },
     DuplicateSourceLocation { function: String, path: String },
@@ -123,6 +125,7 @@ pub struct Graph {
     pub statement_labels: Vec<StatementLabel>,
     pub statement_switch_cases: Vec<StatementSwitchCase>,
     pub statement_declarations: Vec<StatementDeclaration>,
+    pub vla_dimensions: Vec<VlaDimension>,
     pub statement_initializations: Vec<StatementInitialization>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
@@ -1335,6 +1338,29 @@ impl Graph {
         graph.statement_declarations.sort_by_key(|d|
             (d.function.clone(), d.statement_path.clone(), d.position));
 
+        // A VLA dimension belongs to a particular *execution statement*,
+        // not to a declaration's source spelling or global type lifetime.
+        let mut vla_sites=std::collections::HashSet::new();
+        for dim in &il.vla_dimensions {
+            let key=(dim.function.clone(),dim.statement_path.clone());
+            if !smap.contains_key(&key) || !type_map.contains_key(&dim.array_type) ||
+                (dim.copied && dim.has_expression) ||
+                (dim.has_expression && !il.expressions.iter().any(|e|
+                    e.function==dim.function && e.statement_path==dim.statement_path &&
+                    e.path=="0" && e.parent.is_none()))
+            {
+                return Err(GraphError::InvalidVlaDimension {
+                    function:key.0,path:key.1,
+                });
+            }
+            if !vla_sites.insert(key.clone()) {
+                return Err(GraphError::DuplicateVlaDimension {
+                    function:key.0,path:key.1,
+                });
+            }
+            graph.vla_dimensions.push(dim.clone());
+        }
+
         let mut init_keys = std::collections::HashSet::new();
         for init in &il.statement_initializations {
             let key = (init.function.clone(), init.statement_path.clone());
@@ -1869,6 +1895,13 @@ impl Graph {
         self.expression_source_index.get(&(function.to_owned(), statement.to_owned(),
                                             role, path.to_owned()))
             .map(|&idx| &self.expression_sources[idx].location)
+    }
+
+    /// Runtime VLA dimension evaluated at a specific statement execution site.
+    /// This is intentionally separate from the array's declaration.
+    pub fn vla_dimension_at(&self, function:&str, path:&str) -> Option<&VlaDimension> {
+        self.vla_dimensions.iter().find(|dim|
+            dim.function==function && dim.statement_path==path)
     }
 
     /// Variable declarations belonging to a statement, in EDG list order.
@@ -4307,6 +4340,46 @@ mod tests {
         il.statement_sources.pop();
         il.symbol_sources[0].symbol = SymbolId(99);
         assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::InvalidSymbolSource(SymbolId(99)));
+    }
+
+    #[test]
+    fn m11_vla_dimensions_keep_execution_identity_and_reject_bad_links() {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"vla".into(),path:"0".into(),parent:None,kind:1,
+        });
+        il.types.push(TypeDef {
+            id:TypeId(7),kind:6,related_role:None,related:None,
+        });
+        il.expressions.push(Expression {
+            function:"vla".into(),statement_path:"0".into(),
+            path:"0".into(),parent:None,kind:1,operator:None,
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,
+            constant_integer:Some(12),related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        });
+        il.vla_dimensions.push(VlaDimension {
+            function:"vla".into(),statement_path:"0".into(),
+            array_type:TypeId(7),has_expression:true,copied:false,
+        });
+        let graph=Graph::from_il(&il).unwrap();
+        assert_eq!(graph.vla_dimension_at("vla","0").unwrap().array_type,TypeId(7));
+        assert!(graph.vla_dimension_at("vla","1").is_none());
+        il.vla_dimensions.push(il.vla_dimensions[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateVlaDimension {..})));
+        il.vla_dimensions.pop();
+        il.vla_dimensions[0].array_type=TypeId(999);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidVlaDimension {..})));
+        il.vla_dimensions[0].array_type=TypeId(7);
+        il.expressions.clear();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidVlaDimension {..})));
+        il.vla_dimensions[0].has_expression=false;
+        il.vla_dimensions[0].copied=true;
+        assert!(Graph::from_il(&il).is_ok());
     }
 
     #[test]

@@ -642,6 +642,25 @@ compiler-integration track starts in parallel with M9.
 * **Gate:** GCC differential for nested VLAs, side-effectful dimensions,
   indexing, scope exit, and stack stress on each backend that claims support.
 
+**M11 Cranelift reference checkpoint (2026-11-02, PR #53):**
+The pinned EDG frontend lowers C11 VLAs into runtime-size temporaries,
+pointer indexing, and explicit `__vla_alloc` / `__vla_dealloc` helper calls.
+The Rust reference backend now handles this lowered scalar/pointer subset,
+including definite pointer initialization through the checked allocator
+call and generated local temporaries. An optional standalone runtime is
+shipped in `runtime/vla_runtime.c`; applications must link this or a
+compatible EDG runtime. The generated ELF object vs GCC driver differential
+passed 1D/nested/side-effect cases in
+[CI 41579999195](https://github.com/bingordo/edgcpp-rust/actions/runs/41579999195),
+then 2D indexing, runtime `sizeof`, early returns, loop exits and repeated
+allocation stress in
+[CI 41580672223](https://github.com/bingordo/edgcpp-rust/actions/runs/41580672223).
+The shared graph also preserves unlowered EDG VLA dimension metadata for
+future non-Cranelift adapters, but the pinned EDG binary does not emit it.
+**This checkpoint is not a native `compiler` backend, unlowered-VLA
+codegen, or full C++ VLA/longjmp/over-alignment implementation.**
+See [M11 details](M11_VLA.md) for the runtime contract and limits.
+
 ### M12 — volatile and C11 atomics
 
 * **Shared source contract:** qualifiers, exact access width/alignment,

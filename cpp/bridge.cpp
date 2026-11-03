@@ -660,6 +660,7 @@ static bool aggregate_initializer_image(
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
 static uint32_t emit_variable_type(a_variable_ptr var);
+static uint32_t emit_routine_type(a_routine_ptr routine);
 static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
                             unsigned depth, bool single = false);
@@ -687,6 +688,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     referenced = declaration_name(node->variant.routine.ptr->source_corresp, true, true);
     symbol = emit_symbol(node->variant.routine.ptr, 1, referenced);
+    emit_routine_type(node->variant.routine.ptr);
   } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
     const char *field = source_name(node->variant.field.ptr->source_corresp);
     if (field != nullptr) referenced = field;
@@ -826,6 +828,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     a_routine_ptr routine = node->variant.routine.ptr;
     symbol = emit_symbol(routine, 1, declaration_name(routine->source_corresp, true, true));
+    emit_routine_type(routine);
   } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
     a_field_ptr field = node->variant.field.ptr;
     const char *name = source_name(field->source_corresp);
@@ -854,6 +857,22 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
 // a linked sequence. Never follow dependent->next into the enclosing list.
 // Emit each symbol's declared type once, even if it is visible from
 // multiple EDG scope lists or was referenced earlier by an expression.
+// A compiler-inserted runtime helper may be referenced without appearing in
+// the source namespace's routine list. Export its real EDG prototype on the
+// first reference, and deduplicate with later scope traversal.
+static uint32_t emit_routine_type(a_routine_ptr routine)
+{
+  if (routine == nullptr) return 0;
+  const uint32_t type_id = emit_type(routine->type, 0);
+  if (type_id != 0 && emitted_symbol_types.insert(routine).second) {
+    const auto found = symbol_ids.find(routine);
+    if (found != symbol_ids.end()) {
+      emit_record(25, {num(found->second), num(type_id)});
+    }
+  }
+  return type_id;
+}
+
 static uint32_t emit_variable_type(a_variable_ptr var)
 {
   if (var == nullptr) return 0;
@@ -986,7 +1005,9 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       if (symbol == 0 || ty == 0) continue;
       const uint32_t flags =
           (var->compiler_generated ? 1u : 0u) |
-          (group == 1 ? 2u : 0u) |
+          // scope->variables can also contain lowered automatic temporaries.
+          // Classify storage from the declaration, not list membership.
+          ((var->storage_class == sc_static || var->is_thread_local) ? 2u : 0u) |
           (var->is_struct_binding ? 4u : 0u) |
           (var->is_handler_param ? 8u : 0u);
       emit_record(31, {num(routine), num(id), num(symbol), num(ty),
@@ -1091,6 +1112,22 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                            num(symbol), num(ty), num(0)});
         }
       }
+    } else if (stmt->kind == stmk_set_vla_size &&
+               stmt->variant.vla_dimension != nullptr) {
+      // EDG stores a runtime VLA bound in the function scope, not in the
+      // array's type. The set-size statement is its execution/evaluation
+      // point, including side effects and re-entry through a loop.
+      a_vla_dimension_ptr dim = stmt->variant.vla_dimension;
+      uint32_t array_type = emit_type(dim->type, 0);
+      const bool has_expr = dim->dimension_expr != nullptr;
+      if (array_type != 0) {
+        emit_record(56, {txt(function), txt(path), num(array_type),
+                         num(has_expr ? 1 : 0),
+                         num(dim->original_dimension != nullptr ? 1 : 0)});
+      }
+      if (has_expr && stmt->expr == nullptr) {
+        emit_expr(dim->dimension_expr, function, path, "0", "", 0);
+      }
     } else if (stmt->kind == stmk_vla_decl &&
                !stmt->variant.vla.is_typedef_decl &&
                stmt->variant.vla.variant.variable != nullptr) {
@@ -1101,8 +1138,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           declaration_name(variable->source_corresp, false));
       const uint32_t ty = emit_variable_type(variable);
       if (symbol != 0 && ty != 0) {
+        // Variably modified pointer declarations are not VLA allocations.
         emit_record(33, {txt(function), txt(path), num(0),
-                         num(symbol), num(ty), num(1)});
+                         num(symbol), num(ty), num(variable->is_vla ? 1 : 0)});
       }
     }
     // Initialization is an execution point, which can differ from the
@@ -1485,7 +1523,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // symbol display name: overload and destructor names can differ.
       emit_record(42, {num(routine_symbol), txt(name)});
       if (routine_type_id != 0) {
-        emit_record(25, {num(routine_symbol), num(routine_type_id)});
+        emit_routine_type(r);
       }
       // Routine classification and dispatch properties are EDG-native.
       // Bit 9 reflects the implicit this parameter, not a source keyword.
@@ -1825,6 +1863,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_stmt_expr_result)) return 12;
     if (value == static_cast<unsigned>(stmk_switch)) return 13;
     if (value == static_cast<unsigned>(stmk_switch_case)) return 14;
+    if (value == static_cast<unsigned>(stmk_set_vla_size)) return 15;
+    if (value == static_cast<unsigned>(stmk_vla_decl)) return 16;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;

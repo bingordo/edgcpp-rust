@@ -48,12 +48,36 @@ struct Routine {
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
-/// CFG-only scalar local validation. Addressable and volatile storage remains
-/// deliberately unsupported until the memory backend is implemented.
+/// Allow compiler-generated scalar locals only in the *specific* lowered
+/// EDG VLA runtime path, where the source frontend has already inserted
+/// allocation and deallocation calls. Do not reinterpret arbitrary C++
+/// compiler temporaries as scalar values.
+fn has_lowered_vla_runtime(il:&Il,routine:crate::SymbolId) -> bool {
+    let Some(function)=il.routine_identities.iter()
+        .find(|r|r.routine==routine).map(|r|r.function.as_str()) else {return false;};
+    let mut alloc=false;
+    let mut dealloc=false;
+    for expr in &il.expressions {
+        if expr.function!=function {continue;}
+        match expr.reference.as_deref() {
+            Some("__vla_alloc") => alloc=true,
+            Some("__vla_dealloc") => dealloc=true,
+            _=>{},
+        }
+    }
+    alloc && dealloc
+}
+/// CFG-only scalar local validation. Ordinary C++ generated temporaries
+/// still need explicit lifetime and value-category handling.
 fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, CodegenError> {
-    if local.static_storage || local.compiler_generated ||
-        local.structured_binding || local.handler_parameter {
-        return Err(invalid(format!("unsupported local storage for {}", local.symbol.0)));
+    let lowered_vla=has_lowered_vla_runtime(il,local.routine);
+    if local.static_storage || local.structured_binding || local.handler_parameter ||
+        (local.compiler_generated && !lowered_vla) {
+        return Err(invalid(format!(
+            "unsupported local storage for {} (routine={}, static={}, generated={}, structured={}, handler={}, vla_helpers={})",
+            local.symbol.0,local.routine.0,local.static_storage,
+            local.compiler_generated,local.structured_binding,
+            local.handler_parameter,lowered_vla)));
     }
     // Typedef chains may hide qualifiers. Conservatively reject them now.
     let mut ty = local.ty;
@@ -70,6 +94,12 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
+    // Lowered VLA helpers introduce integer dimension temporaries and pointer
+    // storage. Compiler-generated aggregates are never accepted here.
+    if local.compiler_generated && !il.types.iter().any(|d| d.id == ty &&
+        matches!(semantic(4,d.kind),1|5)) {
+        return Err(invalid("unsupported generated VLA temporary type"));
+    }
     if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7|9)) {
         // Records are stack-addressed aggregates, never scalar SSA values.
         // Keep the placeholder ABI type solely for local slot bookkeeping.
@@ -473,6 +503,14 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             if abi.parameters.len()!=args.len() {return Err(invalid("invalid indirect-call arity"));}
             check_expr(callee,vars,params)?;
             for arg in args {check_expr(arg,vars,params)?;}
+            Ok(())
+        },
+        Expr::VlaAlloc(index,call) => {
+            // The EDG lowering performs *(&local) = malloc(bytes) through
+            // its proven runtime helper. This is a definite write, unlike an
+            // arbitrary external call with an address argument.
+            check_expr(call,vars,params)?;
+            vars.insert(*index);
             Ok(())
         },
         Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) |
@@ -1486,6 +1524,15 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     result.sort_by(|a,b|a.name.cmp(&b.name));
     Ok(result)
 }
+/// Accept exactly the address of one stack-backed C pointer local.
+/// Arbitrary pointer casts or pointer arithmetic do not prove a written slot.
+fn lowered_vla_slot(arg:&Expr) -> Option<usize> {
+    match arg {
+        Expr::AddressLocal(index) => Some(*index),
+        Expr::Normalize(_,inner) => lowered_vla_slot(inner),
+        _ => None,
+    }
+}
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
@@ -1527,7 +1574,20 @@ fn lower_c_expression(
             }
         }
         return Ok(if let Some(symbol)=symbol {
-            Expr::Call(symbol,abi,args)
+            let decl=direct_call_decl(il,symbol)?;
+            if decl.name=="__vla_alloc" {
+                let caller=graph.routine_for_function(&node.data.function)
+                    .ok_or_else(||invalid("VLA helper call has no owning function"))?;
+                if !has_lowered_vla_runtime(il,caller) || abi.result.is_some() ||
+                    abi.parameters.len()!=2 || args.len()!=2 {
+                    return Err(invalid("unsupported VLA allocation helper signature/lifetime"));
+                }
+                let target=lowered_vla_slot(&args[0]).ok_or_else(||
+                    invalid("VLA allocator must receive address of an automatic pointer"))?;
+                Expr::VlaAlloc(target,Box::new(Expr::Call(symbol,abi,args)))
+            } else {
+                Expr::Call(symbol,abi,args)
+            }
         } else {
             // Evaluate the function pointer exactly once at the call site.
             let pointer=lower_c_expression(graph,node.operands[0],params,locals,il)?;
@@ -2076,6 +2136,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
     match expr {
         Expr::AddressLocal(i) => {found.insert(*i);}
         Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
+        Expr::VlaAlloc(_,call) => addressed_expr(call,found),
         Expr::CallIndirect(callee,_,args) => {
             addressed_expr(callee,found);
             for arg in args {addressed_expr(arg,found);}
@@ -2215,6 +2276,10 @@ fn emit_expr(
                 let _=emit_expr(effect,fb,params,vars,globals,stack,local_types,calls)?;
             }
             emit_expr(result,fb,params,vars,globals,stack,local_types,calls)?
+        }
+        Expr::VlaAlloc(_,call) => {
+            // Lowered EDG call remains the single source of side effects.
+            emit_expr(call,fb,params,vars,globals,stack,local_types,calls)?
         }
         Expr::AddressFunction(symbol) => {
             let (reference,_)=calls.get(symbol)
