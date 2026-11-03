@@ -248,6 +248,32 @@ jobs:
             fi
           )
 
+      - name: M11 rejects unsupported VLA runtime lowering
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m11_vla_semantics.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            rm -f m11_rejected.o m11_rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen m11_rejected.o --c11 m11_vla_semantics.c > m11_rejected.log 2>&1; then
+              echo 'M11 VLA unexpectedly emitted an object without runtime bounds and cleanup'
+              exit 1
+            fi
+            grep -E 'EDG IL lowering failed: InvalidFunction|unsupported|missing' m11_rejected.log || {
+              cat m11_rejected.log
+              echo 'M11 VLA was not rejected with a semantic/lowering diagnostic'
+              exit 1
+            }
+            test ! -e m11_rejected.o
+          )
+
       - name: Test optional Cranelift ELF backend (targeted)
         working-directory: edgcpp-rust
         env:
