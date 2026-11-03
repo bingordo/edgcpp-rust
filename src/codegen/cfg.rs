@@ -48,11 +48,30 @@ struct Routine {
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
-/// CFG-only scalar local validation. Addressable and volatile storage remains
-/// deliberately unsupported until the memory backend is implemented.
+/// Allow compiler-generated scalar locals only in the *specific* lowered
+/// EDG VLA runtime path, where the source frontend has already inserted
+/// allocation and deallocation calls. Do not reinterpret arbitrary C++
+/// compiler temporaries as scalar values.
+fn has_lowered_vla_runtime(il:&Il,routine:crate::SymbolId) -> bool {
+    let Some(function)=il.routine_identities.iter()
+        .find(|r|r.routine==routine).map(|r|r.function.as_str()) else {return false;};
+    let mut alloc=false;
+    let mut dealloc=false;
+    for expr in &il.expressions {
+        if expr.function!=function {continue;}
+        match expr.reference.as_deref() {
+            Some("__vla_alloc") => alloc=true,
+            Some("__vla_dealloc") => dealloc=true,
+            _=>{},
+        }
+    }
+    alloc && dealloc
+}
+/// CFG-only scalar local validation. Ordinary C++ generated temporaries
+/// still need explicit lifetime and value-category handling.
 fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, CodegenError> {
-    if local.static_storage || local.compiler_generated ||
-        local.structured_binding || local.handler_parameter {
+    if local.static_storage || local.structured_binding || local.handler_parameter ||
+        (local.compiler_generated && !has_lowered_vla_runtime(il,local.routine)) {
         return Err(invalid(format!("unsupported local storage for {}", local.symbol.0)));
     }
     // Typedef chains may hide qualifiers. Conservatively reject them now.
@@ -70,6 +89,12 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
         ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
     }
     let ty = canonical_abi_type(il, local.ty)?;
+    // Lowered VLA helpers introduce integer dimension temporaries and pointer
+    // storage. Compiler-generated aggregates are never accepted here.
+    if local.compiler_generated && !il.types.iter().any(|d| d.id == ty &&
+        matches!(semantic(4,d.kind),1|5)) {
+        return Err(invalid("unsupported generated VLA temporary type"));
+    }
     if il.types.iter().any(|d| d.id == ty && matches!(semantic(4,d.kind),5|6|7|9)) {
         // Records are stack-addressed aggregates, never scalar SSA values.
         // Keep the placeholder ABI type solely for local slot bookkeeping.
