@@ -460,7 +460,7 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::PointerOffset(a,b,_) => contains_local_write(a) || contains_local_write(b),
         Expr::Neg(a) => contains_local_write(a),
         Expr::Constant(_) | Expr::Parameter(_) | Expr::Local(_) |
-        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => false,
+        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressFunction(_) | Expr::AddressLocal(_) => false,
     }
 }
 
