@@ -34,3 +34,4 @@ int m12_atomic_two_reads(void) {
 int m12_atomic_post(void) { return m12_a32++; }
 int m12_atomic_add(int delta) { return m12_a32 += delta; }
 int m12_atomic_dec(void) { return --m12_a32; }
+int m12_atomic_mul_three(void) { return m12_a32 *= 3; }
