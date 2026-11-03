@@ -1266,6 +1266,11 @@ fn lower_address(
             }
             Ok(Expr::AddressGlobal(sym))
         }
+        6 => {
+            let symbol=node.data.symbol_id.ok_or_else(||invalid("routine address without symbol"))?;
+            direct_call_decl(il,symbol)?;
+            Ok(Expr::AddressFunction(symbol))
+        }
         3 => {
             let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
             match op {
@@ -1416,19 +1421,35 @@ fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
     abi.passing_plan()?;
     Ok(abi)
 }
+/// Accept only a real function type or a pointer to a function. Do not
+/// reinterpret an arbitrary data pointer as a callable C prototype.
+fn callable_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing call target type"))?;
+    let function_ty=match semantic(4,def.kind) {
+        2 => ty,
+        5 if def.related_role==Some(1) => canonical_abi_type(il,
+            def.related.ok_or_else(||invalid("function pointer without target"))?)?,
+        _ => return Err(invalid("call target is not a function/function pointer")),
+    };
+    function_type_abi(il,function_ty)
+}
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
-    let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
+    // Member calls remain a separate C++ ABI/lifetime feature.
     for site in &il.calls {
-        if site.first_argument!=1 { return Err(invalid("member/indirect call unsupported")); }
-        let callee=il.expressions.iter().find(|e|
-            e.function==site.function && e.statement_path==site.statement_path &&
-            e.path==format!("{}.0",site.path))
-            .ok_or_else(||invalid("call missing callee expression"))?;
-        let symbol=callee.symbol_id.ok_or_else(||invalid("call callee is not direct routine"))?;
+        if site.first_argument!=1 { return Err(invalid("member call ABI unsupported")); }
+    }
+    // Include ordinary calls AND function designators whose addresses are
+    // taken but never directly called. Both need FuncRefs and ELF relocations.
+    let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
+    for expr in &il.expressions {
+        if semantic(2,expr.kind)!=6 {continue;}
+        let symbol=expr.symbol_id.ok_or_else(||invalid("routine expression without symbol"))?;
         let decl=direct_call_decl(il,symbol)?;
         if let Some(previous)=found.get(&symbol) {
             if previous.abi!=decl.abi || previous.name!=decl.name {
-                return Err(invalid("inconsistent direct-call type"));
+                return Err(invalid("inconsistent routine reference type"));
             }
         } else {found.insert(symbol,decl);}
     }
@@ -1446,33 +1467,61 @@ fn lower_c_expression(
         site.statement_path==node.data.statement_path &&
         site.path==node.data.path) {
         if site.first_argument!=1 || node.operands.is_empty() {
-            return Err(invalid("indirect/member call unsupported"));
+            return Err(invalid("member call unsupported or missing callee"));
         }
         let callee=graph.expression(node.operands[0])
-            .ok_or_else(||invalid("direct call missing function operand"))?;
-        let symbol=callee.data.symbol_id.ok_or_else(||
-            invalid("function-pointer calls unsupported"))?;
-        let decl=direct_call_decl(il,symbol)?;
-        if decl.abi.parameters.len()!=node.operands.len()-1 {
-            return Err(invalid(format!("{}: direct-call argument count mismatch",decl.name)));
+            .ok_or_else(||invalid("call missing callee expression"))?;
+        let direct=semantic(2,callee.data.kind)==6;
+        let (symbol,abi)=if direct {
+            let symbol=callee.data.symbol_id
+                .ok_or_else(||invalid("direct routine without symbol"))?;
+            let decl=direct_call_decl(il,symbol)?;
+            (Some(symbol),decl.abi)
+        } else {
+            (None,callable_type_abi(il,expression_type_id(graph,node.operands[0])?)?)
+        };
+        if abi.parameters.len()!=node.operands.len()-1 {
+            return Err(invalid("call argument count disagrees with EDG prototype"));
         }
-        let mut args=Vec::with_capacity(decl.abi.parameters.len());
+        let mut args=Vec::with_capacity(abi.parameters.len());
         for (&operand,aggregate) in node.operands[1..].iter()
-            .zip(&decl.abi.aggregate_parameters) {
+            .zip(&abi.aggregate_parameters) {
             if let Some(size)=aggregate {
                 let actual=target::ABI.classify_aggregate(il,expression_type_id(graph,operand)?)?;
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
                 let address=lower_address(graph,operand,params,locals,il)?;
-                // A two-register argument is packed from this address once
-                // in emit_expr::Call, preserving side effects in the lvalue.
                 args.push(target::ABI.lower_aggregate_argument(*size,address));
             } else {
                 args.push(lower_c_expression(graph,operand,params,locals,il)?);
             }
         }
-        return Ok(Expr::Call(symbol,decl.abi,args));
+        return Ok(if let Some(symbol)=symbol {
+            Expr::Call(symbol,abi,args)
+        } else {
+            // Evaluate the function pointer exactly once at the call site.
+            let pointer=lower_c_expression(graph,node.operands[0],params,locals,il)?;
+            Expr::CallIndirect(Box::new(pointer),abi,args)
+        });
+    }
+    // A routine designator decays to a function pointer; it is never a load
+    // from a scalar data symbol.
+    if semantic(2,node.data.kind)==6 {
+        let symbol=node.data.symbol_id
+            .ok_or_else(||invalid("routine designator has no symbol"))?;
+        direct_call_decl(il,symbol)?;
+        return Ok(Expr::AddressFunction(symbol));
+    }
+    // The result of *function_pointer is itself a function designator.
+    // There is no load from executable memory: use the pointer value.
+    if semantic(2,node.data.kind)==3 && node.operands.len()==1 &&
+        node.data.operator.is_some_and(|op|semantic(3,op)==44) {
+        let ty=canonical_abi_type(il,expression_type_id(graph,id)?)?;
+        if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==2) {
+            callable_type_abi(il,ty)?;
+            return lower_c_expression(graph,node.operands[0],params,locals,il);
+        }
     }
     // C struct assignment is an aggregate operation, not an I64 expression.
     // Only a standalone assignment statement is supported at this stage:
