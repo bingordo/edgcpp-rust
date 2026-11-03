@@ -248,7 +248,7 @@ jobs:
             fi
           )
 
-      - name: M11 rejects unsupported VLA runtime lowering
+      - name: M11 lowered C11 VLA allocation/cleanup GCC differential
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
@@ -258,20 +258,16 @@ jobs:
         run: |
           set -euo pipefail
           cp tests/fixtures/m11_vla_semantics.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m11_vla_runtime.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m11_vla_driver.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            rm -f m11_rejected.o m11_rejected.log
-            if ../../../edgcpp-rust/target/debug/examples/codegen m11_rejected.o --c11 m11_vla_semantics.c > m11_rejected.log 2>&1; then
-              echo 'M11 VLA unexpectedly emitted an object without runtime bounds and cleanup'
-              exit 1
-            fi
-            grep -E 'EDG IL lowering failed: InvalidFunction|unsupported|missing' m11_rejected.log || {
-              cat m11_rejected.log
-              echo 'M11 VLA was not rejected with a semantic/lowering diagnostic'
-              exit 1
-            }
-            test ! -e m11_rejected.o
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m11.o --c11 m11_vla_semantics.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m11_vla_semantics.c m11_vla_driver.c -o gcc_m11
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m11.o m11_vla_runtime.c m11_vla_driver.c -o cranelift_m11
+            ./gcc_m11
+            ./cranelift_m11
           )
 
       - name: Test optional Cranelift ELF backend (targeted)
