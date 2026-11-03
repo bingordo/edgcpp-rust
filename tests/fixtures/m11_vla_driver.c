@@ -11,12 +11,23 @@ int m11_early_return(int);
 int m11_loop_exits(int);
 int m11_loop_stress(int);
 
+#ifdef M11_VLA_TEST_INSTRUMENTATION
+extern long m11_vla_test_live(void);
+#endif
+
 static void check(const char *name, int n, int got, int expected)
 {
     if (got != expected) {
         fprintf(stderr, "%s(%d) got=%d expected=%d\n", name, n, got, expected);
         exit(1);
     }
+#ifdef M11_VLA_TEST_INSTRUMENTATION
+    long live = m11_vla_test_live();
+    if (live != 0) {
+        fprintf(stderr, "%s(%d) leaked %ld live VLA allocations\n", name, n, live);
+        exit(1);
+    }
+#endif
 }
 int main(void)
 {
