@@ -505,6 +505,14 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             for arg in args {check_expr(arg,vars,params)?;}
             Ok(())
         },
+        Expr::VlaAlloc(index,call) => {
+            // The EDG lowering performs *(&local) = malloc(bytes) through
+            // its proven runtime helper. This is a definite write, unlike an
+            // arbitrary external call with an address argument.
+            check_expr(call,vars,params)?;
+            vars.insert(*index);
+            Ok(())
+        },
         Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) |
         Expr::PackAggregate(_,a) =>
             check_expr(a,vars,params),
@@ -1516,6 +1524,15 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     result.sort_by(|a,b|a.name.cmp(&b.name));
     Ok(result)
 }
+/// Accept exactly the address of one stack-backed C pointer local.
+/// Arbitrary pointer casts or pointer arithmetic do not prove a written slot.
+fn lowered_vla_slot(arg:&Expr) -> Option<usize> {
+    match arg {
+        Expr::AddressLocal(index) => Some(*index),
+        Expr::Normalize(_,inner) => lowered_vla_slot(inner),
+        _ => None,
+    }
+}
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
     locals: &[&crate::LocalVariable], il: &Il,
@@ -1557,7 +1574,20 @@ fn lower_c_expression(
             }
         }
         return Ok(if let Some(symbol)=symbol {
-            Expr::Call(symbol,abi,args)
+            let decl=direct_call_decl(il,symbol)?;
+            if decl.name=="__vla_alloc" {
+                let caller=graph.routine_for_function(&node.data.function)
+                    .ok_or_else(||invalid("VLA helper call has no owning function"))?;
+                if !has_lowered_vla_runtime(il,caller) || abi.result.is_some() ||
+                    abi.parameters.len()!=2 || args.len()!=2 {
+                    return Err(invalid("unsupported VLA allocation helper signature/lifetime"));
+                }
+                let target=lowered_vla_slot(&args[0]).ok_or_else(||
+                    invalid("VLA allocator must receive address of an automatic pointer"))?;
+                Expr::VlaAlloc(target,Box::new(Expr::Call(symbol,abi,args)))
+            } else {
+                Expr::Call(symbol,abi,args)
+            }
         } else {
             // Evaluate the function pointer exactly once at the call site.
             let pointer=lower_c_expression(graph,node.operands[0],params,locals,il)?;
@@ -2106,6 +2136,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
     match expr {
         Expr::AddressLocal(i) => {found.insert(*i);}
         Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
+        Expr::VlaAlloc(_,call) => addressed_expr(call,found),
         Expr::CallIndirect(callee,_,args) => {
             addressed_expr(callee,found);
             for arg in args {addressed_expr(arg,found);}
@@ -2245,6 +2276,10 @@ fn emit_expr(
                 let _=emit_expr(effect,fb,params,vars,globals,stack,local_types,calls)?;
             }
             emit_expr(result,fb,params,vars,globals,stack,local_types,calls)?
+        }
+        Expr::VlaAlloc(_,call) => {
+            // Lowered EDG call remains the single source of side effects.
+            emit_expr(call,fb,params,vars,globals,stack,local_types,calls)?
         }
         Expr::AddressFunction(symbol) => {
             let (reference,_)=calls.get(symbol)
