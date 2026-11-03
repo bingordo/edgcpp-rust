@@ -1986,8 +1986,16 @@ fn lower_c_expression(
                                 if access==MemoryAccess::Ordinary {
                                     Expr::CompoundAddress(ty,promoted_integer_type(ty),
                                         op,address.unwrap(),amount)
-                                } else {
+                                } else if is_pointer_like(il,
+                                    expression_type_id(graph,operands[0])?)? {
+                                    // Atomics on pointer *objects* require a
+                                    // different representation and scaled arithmetic.
                                     return Err(invalid("qualified indirect pointer update unsupported"));
+                                } else {
+                                    // ++(*p) updates an integer pointee. This is
+                                    // not the pointer-arithmetic case above.
+                                    Expr::CompoundQualified(ty,promoted_integer_type(ty),
+                                        access,op,address.unwrap(),amount)
                                 }
                             },
                         }
