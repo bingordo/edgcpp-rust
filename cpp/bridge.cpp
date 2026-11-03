@@ -756,6 +756,19 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       }
     }
   }
+  // Some routine designators are already folded to ck_address/abk_routine
+  // by EDG (for example, both arms of a function-pointer conditional).
+  // Record the exact routine symbol, never treat a function as data bytes.
+  if (has_constant && node->variant.constant.ptr->kind == ck_address) {
+    const auto &address = node->variant.constant.ptr->variant.address;
+    if (address.kind == abk_routine && address.variant.routine != nullptr &&
+        address.offset == 0 && !address.is_object_reflection) {
+      a_routine_ptr target = address.variant.routine;
+      const uint32_t id = emit_symbol(target, 1,
+          declaration_name(target->source_corresp, true, true));
+      emit_record(55, {txt(function), txt(stmt_path), txt(path), num(id)});
+    }
+  }
   emit_record(6, {txt(function), txt(stmt_path), txt(path),
                   parent.empty() ? absent() : txt(parent),
                   node->kind == enk_operation ? num(op) : absent(),
@@ -1171,6 +1184,21 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
             }
           }
           if (fits) emit_record(45, {txt(function), txt(path), signed_num(value)});
+        }
+        // A C function-pointer initializer may be folded into a native
+        // ck_address/abk_routine constant. Preserve the routine identity,
+        // never cast that pointer to an integer literal or infer it by name.
+        if (variable_symbol != 0 && init->variable != nullptr &&
+            init->kind == dik_constant && init->variant.constant.ptr != nullptr &&
+            init->variant.constant.ptr->kind == ck_address) {
+          const auto &address = init->variant.constant.ptr->variant.address;
+          if (address.kind == abk_routine && address.variant.routine != nullptr &&
+              address.offset == 0 && !address.is_object_reflection) {
+            a_routine_ptr target = address.variant.routine;
+            const uint32_t id = emit_symbol(target, 1,
+                declaration_name(target->source_corresp, true, true));
+            emit_record(54, {txt(function), txt(path), num(id)});
+          }
         }
         // Preserve exact constant aggregate values with their native type,
         // even for partially initialized or designated subobjects.
@@ -1804,6 +1832,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     // GNU statement expressions own embedded blocks, not just operands.
     if (value == static_cast<unsigned>(enk_statement)) return 4;
     if (value == static_cast<unsigned>(enk_field)) return 5;
+    // Named C routine designators are values (function addresses), not data.
+    if (value == static_cast<unsigned>(enk_routine)) return 6;
   } else if (category == 3) {
     if (value == static_cast<unsigned>(eok_add)) return 1;
     if (value == static_cast<unsigned>(eok_subtract)) return 2;
