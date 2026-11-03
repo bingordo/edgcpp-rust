@@ -47,9 +47,19 @@ they are not C atomic transactions. The GCC/Cranelift differential
 checks old/new return values, narrower integers and 40,000 increments
 across four threads through an `_Atomic int*`.
 
-Atomic indirect multiply, divide, modulo, shifts and compare-exchange
-remain unsupported until a real CAS loop/operation is available; they
-must not silently become split non-atomic accesses. Qualified local
+**M12 CAS arithmetic follow-up:** Atomic integer multiply, divide, modulo
+and left/right shifts use a sequentially consistent native compare-exchange
+retry loop, sharing one implementation for globals and pointer lvalues.
+The address and RHS are evaluated once outside the retry loop. Each failed
+CAS retries only the memory read, arithmetic and compare-exchange.
+Both GCC and Cranelift-generated objects are tested for expression
+results, including a concurrent test mixing increments with atomic
+multiply-by-one to force possible CAS collisions.
+
+Atomic pointer objects, source-visible compare-exchange APIs, explicit
+memory orders other than the default sequentially consistent ordering,
+and fences remain unsupported. These must not silently lower to
+non-atomic memory accesses. Qualified local
 storage, struct/union fields and bitfields, mixed/unknown qualifiers,
 MMIO, arbitrary pointer-object atomics, misaligned targets and non-scalar
 pointees also remain unsupported. A valid typed pointer must reference
