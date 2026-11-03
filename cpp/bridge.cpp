@@ -660,6 +660,7 @@ static bool aggregate_initializer_image(
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
 static uint32_t emit_variable_type(a_variable_ptr var);
+static uint32_t emit_routine_type(a_routine_ptr routine);
 static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
                             unsigned depth, bool single = false);
@@ -687,6 +688,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     referenced = declaration_name(node->variant.routine.ptr->source_corresp, true, true);
     symbol = emit_symbol(node->variant.routine.ptr, 1, referenced);
+    emit_routine_type(node->variant.routine.ptr);
   } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
     const char *field = source_name(node->variant.field.ptr->source_corresp);
     if (field != nullptr) referenced = field;
@@ -826,6 +828,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
   } else if (node->kind == enk_routine && node->variant.routine.ptr != nullptr) {
     a_routine_ptr routine = node->variant.routine.ptr;
     symbol = emit_symbol(routine, 1, declaration_name(routine->source_corresp, true, true));
+    emit_routine_type(routine);
   } else if (node->kind == enk_field && node->variant.field.ptr != nullptr) {
     a_field_ptr field = node->variant.field.ptr;
     const char *name = source_name(field->source_corresp);
@@ -854,6 +857,22 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
 // a linked sequence. Never follow dependent->next into the enclosing list.
 // Emit each symbol's declared type once, even if it is visible from
 // multiple EDG scope lists or was referenced earlier by an expression.
+// A compiler-inserted runtime helper may be referenced without appearing in
+// the source namespace's routine list. Export its real EDG prototype on the
+// first reference, and deduplicate with later scope traversal.
+static uint32_t emit_routine_type(a_routine_ptr routine)
+{
+  if (routine == nullptr) return 0;
+  const uint32_t type_id = emit_type(routine->type, 0);
+  if (type_id != 0 && emitted_symbol_types.insert(routine).second) {
+    const auto found = symbol_ids.find(routine);
+    if (found != symbol_ids.end()) {
+      emit_record(25, {num(found->second), num(type_id)});
+    }
+  }
+  return type_id;
+}
+
 static uint32_t emit_variable_type(a_variable_ptr var)
 {
   if (var == nullptr) return 0;
@@ -1502,7 +1521,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // symbol display name: overload and destructor names can differ.
       emit_record(42, {num(routine_symbol), txt(name)});
       if (routine_type_id != 0) {
-        emit_record(25, {num(routine_symbol), num(routine_type_id)});
+        emit_routine_type(r);
       }
       // Routine classification and dispatch properties are EDG-native.
       // Bit 9 reflects the implicit this parameter, not a source keyword.
