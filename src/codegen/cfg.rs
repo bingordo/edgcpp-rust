@@ -70,9 +70,14 @@ fn has_lowered_vla_runtime(il:&Il,routine:crate::SymbolId) -> bool {
 /// CFG-only scalar local validation. Ordinary C++ generated temporaries
 /// still need explicit lifetime and value-category handling.
 fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, CodegenError> {
+    let lowered_vla=has_lowered_vla_runtime(il,local.routine);
     if local.static_storage || local.structured_binding || local.handler_parameter ||
-        (local.compiler_generated && !has_lowered_vla_runtime(il,local.routine)) {
-        return Err(invalid(format!("unsupported local storage for {}", local.symbol.0)));
+        (local.compiler_generated && !lowered_vla) {
+        return Err(invalid(format!(
+            "unsupported local storage for {} (routine={}, static={}, generated={}, structured={}, handler={}, vla_helpers={})",
+            local.symbol.0,local.routine.0,local.static_storage,
+            local.compiler_generated,local.structured_binding,
+            local.handler_parameter,lowered_vla)));
     }
     // Typedef chains may hide qualifiers. Conservatively reject them now.
     let mut ty = local.ty;
