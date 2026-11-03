@@ -1091,6 +1091,22 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                            num(symbol), num(ty), num(0)});
         }
       }
+    } else if (stmt->kind == stmk_set_vla_size &&
+               stmt->variant.vla_dimension != nullptr) {
+      // EDG stores a runtime VLA bound in the function scope, not in the
+      // array's type. The set-size statement is its execution/evaluation
+      // point, including side effects and re-entry through a loop.
+      a_vla_dimension_ptr dim = stmt->variant.vla_dimension;
+      uint32_t array_type = emit_type(dim->type, 0);
+      const bool has_expr = dim->dimension_expr != nullptr;
+      if (array_type != 0) {
+        emit_record(56, {txt(function), txt(path), num(array_type),
+                         num(has_expr ? 1 : 0),
+                         num(dim->original_dimension != nullptr ? 1 : 0)});
+      }
+      if (has_expr && stmt->expr == nullptr) {
+        emit_expr(dim->dimension_expr, function, path, "0", "", 0);
+      }
     } else if (stmt->kind == stmk_vla_decl &&
                !stmt->variant.vla.is_typedef_decl &&
                stmt->variant.vla.variant.variable != nullptr) {
@@ -1101,8 +1117,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           declaration_name(variable->source_corresp, false));
       const uint32_t ty = emit_variable_type(variable);
       if (symbol != 0 && ty != 0) {
+        // Variably modified pointer declarations are not VLA allocations.
         emit_record(33, {txt(function), txt(path), num(0),
-                         num(symbol), num(ty), num(1)});
+                         num(symbol), num(ty), num(variable->is_vla ? 1 : 0)});
       }
     }
     // Initialization is an execution point, which can differ from the
@@ -1825,6 +1842,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_stmt_expr_result)) return 12;
     if (value == static_cast<unsigned>(stmk_switch)) return 13;
     if (value == static_cast<unsigned>(stmk_switch_case)) return 14;
+    if (value == static_cast<unsigned>(stmk_set_vla_size)) return 15;
+    if (value == static_cast<unsigned>(stmk_vla_decl)) return 16;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
