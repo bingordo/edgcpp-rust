@@ -50,11 +50,11 @@ qualified scalar reads/writes. This also supports naturally aligned scalar RAM l
 `volatile` and `_Atomic` pointer indirection and indexing (M12
 follow-up), preserving qualifiers from the pointee rather than the
 converted rvalue expression. It does **not** implement MMIO volatile,
-qualified local storage, qualified indirect read-modify-write,
-CAS-based arithmetic, or explicit C11 memory orders. Direct C11 integer
-atomic add/sub/bitwise RMW on globals and four-thread atomic increments
-are regression-tested; unsupported cases reject rather than becoming
-ordinary loads/stores. See
+qualified local storage, source-visible compare-exchange APIs, or
+explicit C11 memory orders. Direct and indirect C11 integer atomic
+add/sub/bitwise RMW and CAS-loop multiply/divide/modulo/shifts are
+supported and concurrent native retry tests are included; unsupported
+cases reject rather than becoming ordinary loads/stores. See
 [the M12 qualified memory contract](docs/M12_QUALIFIED_MEMORY.md).
 
 ## Reused, not reimplemented
