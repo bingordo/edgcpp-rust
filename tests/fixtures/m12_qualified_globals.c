@@ -30,3 +30,7 @@ int m12_atomic_two_reads(void) {
     int y = m12_a32;
     return x+y;
 }
+/* The read-modify-write must be one indivisible C11 operation. */
+int m12_atomic_post(void) { return m12_a32++; }
+int m12_atomic_add(int delta) { return m12_a32 += delta; }
+int m12_atomic_dec(void) { return --m12_a32; }
