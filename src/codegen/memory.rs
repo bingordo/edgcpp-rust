@@ -5,6 +5,50 @@ use super::*;
 use super::cfg::normalize_c_value;
 use cranelift_codegen::ir::MemFlags;
 
+use super::cfg::MemoryAccess;
+
+/// Cranelift 0.121 has no volatile flag for ordinary memory operations. The
+/// reference x86-64 backend uses its effectful seq-cst scalar atomic
+/// load/store instructions for *naturally aligned RAM* volatile accesses.
+/// This is deliberately stronger ordering than ISO C volatile requires; it
+/// does NOT claim support for device/MMIO registers, packed scalar fields or
+/// volatile bitfields. Keep the distinct frontend access classes.
+pub(super) fn load_integer_access(
+    fb:&mut FunctionBuilder<'_>,
+    address:cranelift_codegen::ir::Value,
+    ty:CAbiInt, access:MemoryAccess,
+)->cranelift_codegen::ir::Value {
+    let raw=match access {
+        MemoryAccess::Ordinary =>
+            fb.ins().load(ty.cranelift(),MemFlags::new(),address,0),
+        MemoryAccess::Volatile | MemoryAccess::Atomic =>
+            fb.ins().atomic_load(ty.cranelift(),MemFlags::new(),address),
+    };
+    let extended=if ty.bits==64 {raw}
+        else if ty.signed {fb.ins().sextend(types::I64,raw)}
+        else {fb.ins().uextend(types::I64,raw)};
+    normalize_c_value(fb,extended,ty)
+}
+pub(super) fn store_integer_access(
+    fb:&mut FunctionBuilder<'_>,
+    address:cranelift_codegen::ir::Value,
+    value:cranelift_codegen::ir::Value,
+    ty:CAbiInt,access:MemoryAccess,
+)->cranelift_codegen::ir::Value {
+    let normalized=normalize_c_value(fb,value,ty);
+    let narrow=if ty.bits==64 {normalized}
+        else {fb.ins().ireduce(ty.cranelift(),normalized)};
+    match access {
+        MemoryAccess::Ordinary => {
+            fb.ins().store(MemFlags::new(),narrow,address,0);
+        }
+        MemoryAccess::Volatile | MemoryAccess::Atomic => {
+            fb.ins().atomic_store(MemFlags::new(),narrow,address);
+        }
+    };
+    normalized
+}
+
 /// Read a C integer scalar from an address, preserving native width and
 /// canonicalizing it to the I64 representation used by the CFG IR.
 /// The address must refer to valid, suitably aligned nonvolatile storage.
