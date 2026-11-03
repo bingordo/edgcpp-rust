@@ -41,7 +41,8 @@ int m11_multidim(int n, int m) {
 int m11_sizeof(int n) {
     int count = n;
     int values[++count];
-    return (int)(sizeof values / sizeof values[0]) + count;
+    int runtime_elements = (int)(sizeof values / sizeof values[0]);
+    return runtime_elements + count;
 }
 
 /* EDG must insert cleanup on both source return edges. */
