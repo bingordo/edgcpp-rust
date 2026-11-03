@@ -306,6 +306,24 @@ fn lower(
             }
             let value = if let Some(id) = node.expression {
                 expr(id)?
+            } else if let Some(reference) = {
+                let matches:Vec<_>=il.statement_routine_initializers.iter()
+                    .filter(|v|v.function==*function && v.statement_path==*path)
+                    .collect();
+                if matches.len()>1 {
+                    return Err(invalid("multiple native routine initializers"));
+                }
+                matches.into_iter().next()
+            } {
+                if local_kind != 5 {
+                    return Err(invalid("routine address initializer on non-pointer local"));
+                }
+                let target=direct_call_decl(il,reference.symbol)?;
+                let declared=callable_type_abi(il,local_ty)?;
+                if target.abi!=declared {
+                    return Err(invalid("function pointer initializer has incompatible ABI"));
+                }
+                Expr::AddressFunction(reference.symbol)
             } else {
                 let scalars: Vec<_> = il.statement_integer_initializers.iter()
                     .filter(|v| v.function == *function && v.statement_path == *path)
@@ -1449,9 +1467,13 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Include ordinary calls AND function designators whose addresses are
     // taken but never directly called. Both need FuncRefs and ELF relocations.
     let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
-    for expr in &il.expressions {
-        if semantic(2,expr.kind)!=6 {continue;}
-        let symbol=expr.symbol_id.ok_or_else(||invalid("routine expression without symbol"))?;
+    let mut symbols:Vec<_>=il.expressions.iter()
+        .filter(|expr|semantic(2,expr.kind)==6)
+        .map(|expr|expr.symbol_id.ok_or_else(||
+            invalid("routine expression without symbol")))
+        .collect::<Result<Vec<_>,_>>()?;
+    symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
+    for symbol in symbols {
         let decl=direct_call_decl(il,symbol)?;
         if let Some(previous)=found.get(&symbol) {
             if previous.abi!=decl.abi || previous.name!=decl.name {
