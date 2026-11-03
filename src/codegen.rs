@@ -26,6 +26,8 @@ pub enum Expr {
     /// Explicit address/lvalue nodes. Memory is read or written at the point
     /// of evaluation; aliasing pointers must never be cached as SSA values.
     AddressGlobal(crate::SymbolId),
+    /// Address of a named routine, resolved through a declared FuncRef.
+    AddressFunction(crate::SymbolId),
     AddressLocal(usize),
     LoadAddress(CAbiInt, Box<Expr>),
     StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
@@ -52,6 +54,8 @@ pub enum Expr {
     Global(crate::SymbolId),
     /// Direct C function call with EDG-validated SysV scalar/pointer signature.
     Call(crate::SymbolId, CAbi, Vec<Expr>),
+    /// An evaluated function pointer with a checked function prototype ABI.
+    CallIndirect(Box<Expr>, CAbi, Vec<Expr>),
     /// Straight-line GNU statement-expression block: execute all prefix
     /// expressions exactly once, then evaluate the final block value.
     BlockValue(Vec<Expr>, Box<Expr>),
@@ -183,7 +187,7 @@ fn emit_expr(
         }
         Expr::Conditional(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
-        Expr::Global(..) | Expr::Call(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
+        Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
@@ -435,7 +439,7 @@ fn checked_local(
 /// proper Cranelift blocks, branches and phi handling are implemented.
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
-        Expr::Call(..) | Expr::BlockValue(..) |
+        Expr::Call(..) | Expr::CallIndirect(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
