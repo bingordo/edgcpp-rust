@@ -112,6 +112,8 @@ pub struct Il {
     pub global_variables: Vec<GlobalVariable>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
+    /// Folded source expression constants holding C routine pointers.
+    pub constant_routine_addresses: Vec<ConstantRoutineAddress>,
     /// Ordered parameter edges belonging to routine types.
     pub type_parameters: Vec<TypeParameter>,
     /// Known fixed array bounds (in elements).
@@ -253,6 +255,14 @@ pub struct ConstantAddress {
     pub path: String,
     pub symbol: SymbolId,
     pub byte_offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstantRoutineAddress {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub symbol: SymbolId,
 }
 
 /// Parameter edge from a routine type, in declaration order.
@@ -838,6 +848,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         44 => Some(il.loop_transfers.len()),
         45 => Some(il.statement_integer_initializers.len()),
         54 => Some(il.statement_routine_initializers.len()),
+        55 => Some(il.constant_routine_addresses.len()),
         46 => Some(il.c_integer_types.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
@@ -878,7 +889,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1023,6 +1034,15 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             if function.is_empty() || statement_path.is_empty() || symbol==0 {return;}
             output.statement_routine_initializers.push(StatementRoutineInitializer {
                 function,statement_path,symbol:SymbolId(symbol),
+            });
+        }
+        55 => {
+            let (Some(function),Some(statement_path),Some(path),Some(symbol)) =
+                (t(0),t(1),t(2),n(3)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() || symbol==0 {return;}
+            output.constant_routine_addresses.push(ConstantRoutineAddress {
+                function,statement_path,path,symbol:SymbolId(symbol),
             });
         }
         8 => {
