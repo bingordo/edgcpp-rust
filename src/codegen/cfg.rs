@@ -2788,35 +2788,13 @@ fn emit_expr(
             let (_,_,access)=globals.get(symbol)
                 .ok_or_else(||invalid("global compound access missing"))?;
             if *access==MemoryAccess::Atomic {
-                if ty.is_bool {return Err(invalid("atomic bool RMW unsupported"));}
-                use cranelift_codegen::ir::AtomicRmwOp;
-                let atomic_op=match op {
-                    CCompoundOp::Add=>AtomicRmwOp::Add,
-                    CCompoundOp::Sub=>AtomicRmwOp::Sub,
-                    CCompoundOp::And=>AtomicRmwOp::And,
-                    CCompoundOp::Or=>AtomicRmwOp::Or,
-                    CCompoundOp::Xor=>AtomicRmwOp::Xor,
-                    _=>return Err(invalid("C11 atomic RMW operator unsupported")),
-                };
+                // Reuse the same integer RMW/CAS implementation for global
+                // storage and qualified pointer lvalues, keeping the
+                // target-owned memory-order semantics in one place.
                 let address=global_address(fb,globals,*symbol)?;
-                let rhs=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
-                let rhs=normalize_c_value(fb,rhs,*ty);
-                let narrow=if ty.bits==64 {rhs}
-                    else {fb.ins().ireduce(ty.cranelift(),rhs)};
-                let old=fb.ins().atomic_rmw(
-                    ty.cranelift(),MemFlags::new(),atomic_op,address,narrow);
-                let old=if ty.bits==64 {old}
-                    else if ty.signed {fb.ins().sextend(types::I64,old)}
-                    else {fb.ins().uextend(types::I64,old)};
-                let updated=match op {
-                    CCompoundOp::Add=>fb.ins().iadd(old,rhs),
-                    CCompoundOp::Sub=>fb.ins().isub(old,rhs),
-                    CCompoundOp::And=>fb.ins().band(old,rhs),
-                    CCompoundOp::Or=>fb.ins().bor(old,rhs),
-                    CCompoundOp::Xor=>fb.ins().bxor(old,rhs),
-                    _=>unreachable!(),
-                };
-                return Ok(normalize_c_value(fb,updated,*ty));
+                let operand=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+                return emit_qualified_compound(
+                    fb,*ty,*compute_ty,*access,*op,address,operand);
             }
             let address = global_address(fb,globals,*symbol)?;
             let old = super::memory::load_integer_access(fb,address,*ty,*access);
