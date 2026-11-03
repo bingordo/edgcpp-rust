@@ -1691,6 +1691,36 @@ mod tests {
     }
 
     #[test]
+    fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
+        };
+        let number = |value| WireField {
+            data: std::ptr::null(), length: 0, value, tag: 2,
+        };
+        let mut state = Collector { il: Il::default(), panicked:false, malformed:false };
+        let valid=[string(b"f"),string(b"0.block.1"),
+                   number(42),number(1),number(0)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),56,
+                    valid.as_ptr(),valid.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.vla_dimensions.len(),1);
+        assert_eq!(state.il.vla_dimensions[0].array_type,TypeId(42));
+        assert!(state.il.vla_dimensions[0].has_expression);
+        assert!(!state.il.vla_dimensions[0].copied);
+        let invalid=[string(b"f"),string(b"0.block.2"),
+                     number(42),number(1),number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),56,
+                    invalid.as_ptr(),invalid.len(),0);
+        }
+        assert!(state.malformed);
+        assert_eq!(state.il.vla_dimensions.len(),1);
+    }
+
+    #[test]
     fn decodes_declaration_and_initializer_site_events() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
