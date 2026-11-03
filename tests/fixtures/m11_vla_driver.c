@@ -10,6 +10,8 @@ int m11_sizeof(int);
 int m11_early_return(int);
 int m11_loop_exits(int);
 int m11_loop_stress(int);
+int m11_deep_return(int);
+int m11_repeated_nested(int);
 
 #ifdef M11_VLA_TEST_INSTRUMENTATION
 extern long m11_vla_test_live(void);
@@ -51,10 +53,23 @@ int main(void)
         }
         check("loop exits", n, m11_loop_exits(n), sum);
         check("loop stress", n, m11_loop_stress(n), n*(n+1)/2);
+        check("deep return", n, m11_deep_return(n),
+              (n & 1) ? 4*n+1 : (n % 3 == 0) ? 6*n+1 : 9*n+1);
+        int nested_sum = 0;
+        for (int k=1; k<=n; ++k) {
+            for (int j=1; j<=3; ++j) {
+                if (j==2 && k % 5 == 0) continue;
+                nested_sum += k+j;
+            }
+            nested_sum += k;
+        }
+        check("repeated nested", n, m11_repeated_nested(n), nested_sum);
     }
     for (int n=1; n<500; ++n) {
         check("repeat nested", n, m11_nested(n), 36);
         check("reentry", n, m11_loop_stress(n), n*(n+1)/2);
+        check("deep return repeat", n, m11_deep_return(n),
+              (n & 1) ? 4*n+1 : (n % 3 == 0) ? 6*n+1 : 9*n+1);
     }
     return 0;
 }
