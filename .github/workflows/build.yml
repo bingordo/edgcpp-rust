@@ -323,6 +323,27 @@ jobs:
             fi
           )
 
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
       - name: M6 GNU block-value expression GCC differential
         working-directory: edgcpp-rust
         env:
