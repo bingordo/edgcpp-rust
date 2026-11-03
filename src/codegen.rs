@@ -40,6 +40,10 @@ pub enum Expr {
     /// from the pointer's pointee, never the converted EDG rvalue type.
     LoadQualified(CAbiInt, MemoryAccess, Box<Expr>),
     StoreQualified(CAbiInt, MemoryAccess, Box<Expr>, Box<Expr>),
+    /// Evaluate the lvalue address once, then perform a qualified C
+    /// increment/decrement. C11 atomics require an indivisible RMW.
+    PostQualified(CAbiInt, MemoryAccess, i64, Box<Expr>),
+    CompoundQualified(CAbiInt, CAbiInt, MemoryAccess, CCompoundOp, Box<Expr>, Box<Expr>),
     /// Pack up to eight native bytes into one SysV INTEGER-class GPR.
     PackAggregate(u8, Box<Expr>),
     /// Typed native C bitfield access. Only exact overlapping bits are
@@ -202,6 +206,7 @@ fn emit_expr(
         Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::LoadQualified(..) | Expr::StoreQualified(..) |
+        Expr::PostQualified(..) | Expr::CompoundQualified(..) |
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
@@ -453,7 +458,9 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::BlockValue(..) |
-        Expr::StoreAddress(..) | Expr::StoreQualified(..) | Expr::StoreBitField(..) |
+        Expr::StoreAddress(..) | Expr::StoreQualified(..) |
+        Expr::PostQualified(..) | Expr::CompoundQualified(..) |
+        Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) | Expr::PostAddress(..) |
