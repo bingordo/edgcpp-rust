@@ -47,3 +47,8 @@ int m12_indirect_atomic_div(_Atomic int *p,int n) { return *p /= n; }
 int m12_indirect_atomic_rem(_Atomic int *p,int n) { return *p %= n; }
 int m12_indirect_atomic_shl(_Atomic int *p,int n) { return *p <<= n; }
 int m12_indirect_atomic_shr(_Atomic int *p,int n) { return *p >>= n; }
+/* The external RHS has an observable effect; CAS retries must not replay it. */
+extern int m12_rhs_once(void);
+int m12_indirect_atomic_mul_rhs(_Atomic int *p) {
+    return *p *= m12_rhs_once();
+}
