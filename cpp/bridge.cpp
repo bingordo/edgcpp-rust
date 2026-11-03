@@ -1005,7 +1005,9 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       if (symbol == 0 || ty == 0) continue;
       const uint32_t flags =
           (var->compiler_generated ? 1u : 0u) |
-          (group == 1 ? 2u : 0u) |
+          // scope->variables can also contain lowered automatic temporaries.
+          // Classify storage from the declaration, not list membership.
+          ((var->storage_class == sc_static || var->is_thread_local) ? 2u : 0u) |
           (var->is_struct_binding ? 4u : 0u) |
           (var->is_handler_param ? 8u : 0u);
       emit_record(31, {num(routine), num(id), num(symbol), num(ty),
