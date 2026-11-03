@@ -1370,16 +1370,30 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
         return Err(invalid("indirect/function-pointer calls not implemented"));
     }
+    let abi=function_type_abi(il,ty)?;
+    Ok(CallDeclaration {symbol,name,abi})
+}
+
+/// Validate a C function prototype independently of whether the callee is a
+/// named symbol or a function-pointer expression. ABI placement remains owned
+/// by the selected target and is never inferred from the callee's spelling.
+fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing called function type"))?;
+    if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
+        return Err(invalid("callee type is not a C function prototype"));
+    }
     let proto=il.function_signatures.iter().find(|s|s.owner==ty)
         .ok_or_else(||invalid("called function missing prototype metadata"))?;
-    if proto.variadic { return Err(invalid("variadic direct C calls unsupported")); }
+    if proto.variadic { return Err(invalid("variadic C calls unsupported")); }
     let mut declared:Vec<_>=il.type_parameters.iter().filter(|p|p.owner==ty).collect();
     declared.sort_by_key(|p|p.position);
     if declared.iter().enumerate().any(|(i,p)|p.position!=i as u32) {
-        return Err(invalid("noncontiguous direct-call parameters"));
+        return Err(invalid("noncontiguous call parameters"));
     }
     if !proto.prototyped && !declared.is_empty() {
-        return Err(invalid("unprototyped direct C calls with arguments unsupported"));
+        return Err(invalid("unprototyped C calls with arguments unsupported"));
     }
     let mut parameters=Vec::with_capacity(declared.len());
     let mut aggregate_parameters=Vec::with_capacity(declared.len());
@@ -1400,7 +1414,7 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     } else {Some(call_type_abi(il,ret)?)};
     let abi=CAbi{aggregate_parameters,aggregate_result,parameters,result};
     abi.passing_plan()?;
-    Ok(CallDeclaration {symbol,name,abi})
+    Ok(abi)
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
