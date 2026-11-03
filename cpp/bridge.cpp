@@ -1804,6 +1804,8 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     // GNU statement expressions own embedded blocks, not just operands.
     if (value == static_cast<unsigned>(enk_statement)) return 4;
     if (value == static_cast<unsigned>(enk_field)) return 5;
+    // Named C routine designators are values (function addresses), not data.
+    if (value == static_cast<unsigned>(enk_routine)) return 6;
   } else if (category == 3) {
     if (value == static_cast<unsigned>(eok_add)) return 1;
     if (value == static_cast<unsigned>(eok_subtract)) return 2;
