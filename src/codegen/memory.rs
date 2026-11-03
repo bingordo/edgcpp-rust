@@ -5,7 +5,6 @@ use super::*;
 use super::cfg::normalize_c_value;
 use cranelift_codegen::ir::MemFlags;
 
-use super::cfg::MemoryAccess;
 
 /// Cranelift 0.121 has no volatile flag for ordinary memory operations. The
 /// reference x86-64 backend uses its effectful seq-cst scalar atomic
