@@ -77,6 +77,8 @@ The gate exercises:
 - Two-dimensional VLA row strides with runtime bounds.
 - Runtime `sizeof VLA` with the original dimension evaluated once.
 - Cleanup across early returns and nested `break`/`continue` paths.
+- Three simultaneously live VLA scopes with alternate nested return edges,
+  plus inner-loop `continue` cleanup while an outer VLA stays live.
 - Loop re-entry and hundreds of repeated allocation/deallocation iterations.
 
 First 1D/nested end-to-end pass:
