@@ -441,13 +441,19 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::Parameter(i) => if *i < params { Ok(()) } else { Err(invalid("invalid parameter")) },
         Expr::Local(i) => if vars.contains(i) { Ok(()) }
             else { Err(invalid(format!("local {i} read before initialization"))) },
-        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressLocal(_) => Ok(()),
+        Expr::Global(_) | Expr::AddressGlobal(_) | Expr::AddressFunction(_) | Expr::AddressLocal(_) => Ok(()),
         Expr::BlockValue(effects,result) => {
             for effect in effects {check_expr(effect,vars,params)?;}
             check_expr(result,vars,params)
         }
         Expr::Call(_,abi,args) => {
             if abi.parameters.len()!=args.len() {return Err(invalid("invalid call arity"));}
+            for arg in args {check_expr(arg,vars,params)?;}
+            Ok(())
+        },
+        Expr::CallIndirect(callee,abi,args) => {
+            if abi.parameters.len()!=args.len() {return Err(invalid("invalid indirect-call arity"));}
+            check_expr(callee,vars,params)?;
             for arg in args {check_expr(arg,vars,params)?;}
             Ok(())
         },
@@ -2038,6 +2044,10 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
     match expr {
         Expr::AddressLocal(i) => {found.insert(*i);}
         Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
+        Expr::CallIndirect(callee,_,args) => {
+            addressed_expr(callee,found);
+            for arg in args {addressed_expr(arg,found);}
+        },
         Expr::BlockValue(effects,result) => {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
@@ -2063,7 +2073,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(a,found),
         Expr::PostLocal(..) | Expr::PostGlobal(..) | Expr::Constant(_) |
         Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) |
-        Expr::AddressGlobal(_) => {}
+        Expr::AddressGlobal(_) | Expr::AddressFunction(_) => {}
     }
 }
 fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
@@ -2174,12 +2184,30 @@ fn emit_expr(
             }
             emit_expr(result,fb,params,vars,globals,stack,local_types,calls)?
         }
-        Expr::Call(symbol,abi,arguments) => {
-            let (reference,declared)=calls.get(symbol)
-                .ok_or_else(||invalid("direct call has no declared function"))?;
-            if abi!=declared || arguments.len()!=abi.parameters.len() {
-                return Err(invalid("direct call ABI mismatch"));
+        Expr::AddressFunction(symbol) => {
+            let (reference,_)=calls.get(symbol)
+                .ok_or_else(||invalid("routine address has no declared function"))?;
+            fb.ins().func_addr(types::I64,*reference)
+        }
+        Expr::Call(..) | Expr::CallIndirect(..) => {
+            let (abi,arguments)=match e {
+                Expr::Call(_,abi,args) | Expr::CallIndirect(_,abi,args) => (abi,args),
+                _ => unreachable!(),
+            };
+            if arguments.len()!=abi.parameters.len() {
+                return Err(invalid("call argument count/ABI mismatch"));
             }
+            // C and C++ require the function designator to be evaluated
+            // before entering the called function. Evaluate it once here.
+            let indirect_target=if let Expr::CallIndirect(callee,_,_)=e {
+                Some(emit_expr(callee,fb,params,vars,globals,stack,local_types,calls)?)
+            } else {None};
+            let direct_ref=if let Expr::Call(symbol,_,_)=e {
+                let (reference,declared)=calls.get(symbol)
+                    .ok_or_else(||invalid("direct call has no declared function"))?;
+                if abi!=declared {return Err(invalid("direct call ABI mismatch"));}
+                Some(*reference)
+            } else {None};
             let plan=abi.passing_plan()?;
             let mut values=Vec::with_capacity(plan.machine_parameters().len());
             for (arg,entry) in arguments.iter().zip(&plan.parameters) {
@@ -2199,11 +2227,23 @@ fn emit_expr(
                     }
                 }
             }
-            let inst=fb.ins().call(*reference,&values);
+            let inst=if let Some(target)=indirect_target {
+                // Signatures are target-call-convention descriptors. They
+                // intentionally share the same passing plan as direct calls.
+                let mut signature=cranelift_codegen::ir::Signature::new(
+                    fb.func.signature.call_conv);
+                for ty in plan.machine_parameters() {
+                    signature.params.push(AbiParam::new(ty.cranelift()));
+                }
+                for ty in plan.machine_returns() {
+                    signature.returns.push(AbiParam::new(ty.cranelift()));
+                }
+                let reference=fb.import_signature(signature);
+                fb.ins().call_indirect(reference,target,&values)
+            } else {
+                fb.ins().call(direct_ref.ok_or_else(||invalid("missing direct callee"))?,&values)
+            };
             if let Some(bytes)=abi.aggregate_result.filter(|bytes|*bytes>8) {
-                // C aggregate call prvalues have object identity only within
-                // lowering. Preserve both RAX/RDX pieces in an exact-size
-                // temporary instead of losing RDX or assuming a pointer ABI.
                 let returned=fb.inst_results(inst).to_vec();
                 if returned.len()!=2 {
                     return Err(invalid("two-register aggregate call result mismatch"));
