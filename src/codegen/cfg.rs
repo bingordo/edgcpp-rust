@@ -518,6 +518,7 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::PackAggregate(_,a) =>
             check_expr(a,vars,params),
         Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::CompoundQualified(_,_,_,_,a,b) |
         Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
@@ -526,7 +527,8 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
         }
-        Expr::PostAddress(_,_,a) | Expr::PostBitField(_,_,a) =>
+        Expr::PostAddress(_,_,a) | Expr::PostQualified(_,_,_,a) |
+        Expr::PostBitField(_,_,a) =>
             check_expr(a,vars,params),
         Expr::AssignGlobal(_,_,e) => check_expr(e,vars,params),
         Expr::CompoundGlobal(_,_,_,_,e) => check_expr(e,vars,params),
@@ -1962,11 +1964,13 @@ fn lower_c_expression(
                             Some(ScalarPlace::Ssa(i)) => Expr::PostLocal(i,ty,delta),
                             Some(ScalarPlace::Memory(s)) => Expr::PostGlobal(s,ty,delta),
                             None => {
-                                if indirect_lvalue_access(graph,operands[0],il)?
-                                    !=MemoryAccess::Ordinary {
-                                    return Err(invalid("qualified indirect increment needs RMW"));
+                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                if access==MemoryAccess::Ordinary {
+                                    Expr::PostAddress(ty,delta,address.unwrap())
+                                } else {
+                                    if ty.is_bool {return Err(invalid("qualified bool increment unsupported"));}
+                                    Expr::PostQualified(ty,access,delta,address.unwrap())
                                 }
-                                Expr::PostAddress(ty,delta,address.unwrap())
                             },
                         }
                     } else {
@@ -1978,12 +1982,13 @@ fn lower_c_expression(
                             Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,
                                 promoted_integer_type(ty),op,amount),
                             None => {
-                                if indirect_lvalue_access(graph,operands[0],il)?
-                                    !=MemoryAccess::Ordinary {
+                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                if access==MemoryAccess::Ordinary {
+                                    Expr::CompoundAddress(ty,promoted_integer_type(ty),
+                                        op,address.unwrap(),amount)
+                                } else {
                                     return Err(invalid("qualified indirect pointer update unsupported"));
                                 }
-                                Expr::CompoundAddress(ty,promoted_integer_type(ty),
-                                    op,address.unwrap(),amount)
                             },
                         }
                     }
@@ -2064,11 +2069,18 @@ fn lower_c_expression(
                         Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
                         None => {
-                            if indirect_lvalue_access(graph,operands[0],il)?
-                                !=MemoryAccess::Ordinary {
-                                return Err(invalid("qualified indirect compound needs RMW"));
+                            let access=indirect_lvalue_access(graph,operands[0],il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
+                            } else {
+                                if access==MemoryAccess::Atomic &&
+                                   !matches!(kind,CCompoundOp::Add|CCompoundOp::Sub|
+                                     CCompoundOp::And|CCompoundOp::Or|CCompoundOp::Xor) {
+                                    return Err(invalid("C11 indirect atomic RMW operator unsupported"));
+                                }
+                                if ty.is_bool {return Err(invalid("qualified bool RMW unsupported"));}
+                                Expr::CompoundQualified(ty,compute_ty,access,kind,address.unwrap(),rhs)
                             }
-                            Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
                         },
                     }
                 }
@@ -2269,6 +2281,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(result,found);
         },
         Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::CompoundQualified(_,_,_,_,a,b) |
         Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
@@ -2287,7 +2300,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
         Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
         Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
-        Expr::PostAddress(_,_,a) | Expr::PostBitField(_,_,a) =>
+        Expr::PostAddress(_,_,a) | Expr::PostQualified(_,_,_,a) |
+        Expr::PostBitField(_,_,a) =>
             addressed_expr(a,found),
         Expr::PostLocal(..) | Expr::PostGlobal(..) | Expr::Constant(_) |
         Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) |
