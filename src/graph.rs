@@ -4343,6 +4343,46 @@ mod tests {
     }
 
     #[test]
+    fn m11_vla_dimensions_keep_execution_identity_and_reject_bad_links() {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"vla".into(),path:"0".into(),parent:None,kind:1,
+        });
+        il.types.push(TypeDef {
+            id:TypeId(7),kind:6,related_role:None,related:None,
+        });
+        il.expressions.push(Expression {
+            function:"vla".into(),statement_path:"0".into(),
+            path:"0".into(),parent:None,kind:1,operator:None,
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,
+            constant_integer:Some(12),related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        });
+        il.vla_dimensions.push(VlaDimension {
+            function:"vla".into(),statement_path:"0".into(),
+            array_type:TypeId(7),has_expression:true,copied:false,
+        });
+        let graph=Graph::from_il(&il).unwrap();
+        assert_eq!(graph.vla_dimension_at("vla","0").unwrap().array_type,TypeId(7));
+        assert!(graph.vla_dimension_at("vla","1").is_none());
+        il.vla_dimensions.push(il.vla_dimensions[0].clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::DuplicateVlaDimension {..})));
+        il.vla_dimensions.pop();
+        il.vla_dimensions[0].array_type=TypeId(999);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidVlaDimension {..})));
+        il.vla_dimensions[0].array_type=TypeId(7);
+        il.expressions.clear();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidVlaDimension {..})));
+        il.vla_dimensions[0].has_expression=false;
+        il.vla_dimensions[0].copied=true;
+        assert!(Graph::from_il(&il).is_ok());
+    }
+
+    #[test]
     fn declaration_sites_and_initializer_execution_are_distinct() {
         let mut il = Il::default();
         for path in ["0", "1"] {
