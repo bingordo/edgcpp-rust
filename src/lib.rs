@@ -78,6 +78,8 @@ pub struct Il {
     pub statement_initializations: Vec<StatementInitialization>,
     /// Exact scalar i64 dynamic initializer constants at execution sites.
     pub statement_integer_initializers: Vec<StatementIntegerInitializer>,
+    /// Function-pointer constants keep native EDG routine symbol identities.
+    pub statement_routine_initializers: Vec<StatementRoutineInitializer>,
     /// Constant EDG aggregate images at local initialization statements.
     pub statement_aggregate_initializers: Vec<StatementAggregateInitializer>,
     /// Constant EDG aggregate images for statically defined globals.
@@ -459,6 +461,14 @@ pub struct StatementIntegerInitializer {
     pub value: i64,
 }
 
+/// Exact routine address in a folded dynamic initializer (ck_address).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementRoutineInitializer {
+    pub function: String,
+    pub statement_path: String,
+    pub symbol: SymbolId,
+}
+
 /// Native constant aggregate data, captured while EDG IL pointers are valid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementAggregateInitializer {
@@ -827,6 +837,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         43 => Some(il.signed_i64_types.len()),
         44 => Some(il.loop_transfers.len()),
         45 => Some(il.statement_integer_initializers.len()),
+        54 => Some(il.statement_routine_initializers.len()),
         46 => Some(il.c_integer_types.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
@@ -867,7 +878,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1004,6 +1015,14 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 (t(0), t(1), fields[2].signed()) else { return; };
             output.statement_integer_initializers.push(StatementIntegerInitializer {
                 function, statement_path, value,
+            });
+        }
+        54 => {
+            let (Some(function),Some(statement_path),Some(symbol)) =
+                (t(0),t(1),n(2)) else {return;};
+            if function.is_empty() || statement_path.is_empty() || symbol==0 {return;}
+            output.statement_routine_initializers.push(StatementRoutineInitializer {
+                function,statement_path,symbol:SymbolId(symbol),
             });
         }
         8 => {
