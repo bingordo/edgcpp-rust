@@ -1865,7 +1865,12 @@ fn lower_c_expression(
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
                         } else {
-                            Expr::LoadAddress(output,Box::new(address))
+                            let access=indirect_lvalue_access(graph,id,il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::LoadAddress(output,Box::new(address))
+                            } else {
+                                Expr::LoadQualified(output,access,Box::new(address))
+                            }
                         }
                     }
                     45 if operands.len()==2 => {
@@ -1874,7 +1879,12 @@ fn lower_c_expression(
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
                         } else {
-                            Expr::LoadAddress(output,Box::new(address))
+                            let access=indirect_lvalue_access(graph,id,il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::LoadAddress(output,Box::new(address))
+                            } else {
+                                Expr::LoadQualified(output,access,Box::new(address))
+                            }
                         }
                     }
                     46 if operands.len()==1 => lower_address(
@@ -1949,7 +1959,13 @@ fn lower_c_expression(
                         match place {
                             Some(ScalarPlace::Ssa(i)) => Expr::PostLocal(i,ty,delta),
                             Some(ScalarPlace::Memory(s)) => Expr::PostGlobal(s,ty,delta),
-                            None => Expr::PostAddress(ty,delta,address.unwrap()),
+                            None => {
+                                if indirect_lvalue_access(graph,operands[0],il)?
+                                    !=MemoryAccess::Ordinary {
+                                    return Err(invalid("qualified indirect increment needs RMW"));
+                                }
+                                Expr::PostAddress(ty,delta,address.unwrap())
+                            },
                         }
                     } else {
                         let op=if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
@@ -1959,8 +1975,14 @@ fn lower_c_expression(
                                 promoted_integer_type(ty),op,amount),
                             Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,
                                 promoted_integer_type(ty),op,amount),
-                            None => Expr::CompoundAddress(ty,promoted_integer_type(ty),
-                                op,address.unwrap(),amount),
+                            None => {
+                                if indirect_lvalue_access(graph,operands[0],il)?
+                                    !=MemoryAccess::Ordinary {
+                                    return Err(invalid("qualified indirect pointer update unsupported"));
+                                }
+                                Expr::CompoundAddress(ty,promoted_integer_type(ty),
+                                    op,address.unwrap(),amount)
+                            },
                         }
                     }
                 } else {
@@ -2012,7 +2034,12 @@ fn lower_c_expression(
                             if let Some(layout)=selected_bitfield(graph,operands[0],il)? {
                                 Expr::StoreBitField(layout,address.unwrap(),rhs)
                             } else {
-                                Expr::StoreAddress(ty,address.unwrap(),rhs)
+                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                if access==MemoryAccess::Ordinary {
+                                    Expr::StoreAddress(ty,address.unwrap(),rhs)
+                                } else {
+                                    Expr::StoreQualified(ty,access,address.unwrap(),rhs)
+                                }
                             }
                         }
                     }
@@ -2034,7 +2061,13 @@ fn lower_c_expression(
                     match place {
                         Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
-                        None => Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs),
+                        None => {
+                            if indirect_lvalue_access(graph,operands[0],il)?
+                                !=MemoryAccess::Ordinary {
+                                return Err(invalid("qualified indirect compound needs RMW"));
+                            }
+                            Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
+                        },
                     }
                 }
             } else if matches!(op, 23 | 24 | 26) {
