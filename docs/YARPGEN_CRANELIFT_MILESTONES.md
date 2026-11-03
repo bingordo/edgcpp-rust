@@ -675,6 +675,22 @@ See [M11 details](M11_VLA.md) for the runtime contract and limits.
   accesses; focused atomic order and alignment cases, plus concurrency
   litmus tests when memory-ordering implementation is ready.
 
+**M12 partial implementation checkpoint (2026-11-03, PR #54):**
+The EDG → Cranelift reference backend preserves separate qualifier
+access modes for naturally aligned scalar RAM globals. Volatile loads
+and stores and simple C11 sequentially consistent atomic load/store use
+effectful Cranelift 0.121 atomic instructions (the latter is a stronger
+ordering than C volatile requires). The GCC native differential covers
+byte, short, int, and long accesses, ordered writes, repeated reads, and
+C11 scalar atomic loads/stores. Unsupported atomic RMW and qualified
+pointer dereferences are explicit negative cases.
+
+The M12 gate is **not complete**: MMIO-grade volatile semantics require
+a genuinely volatile backend operation, and explicit C11 weak memory
+orders, RMW/CAS, qualified local or indirect memory, concurrency tests,
+and native `bingordo/compiler` lowering remain outstanding.
+See [the M12 contract](M12_QUALIFIED_MEMORY.md).
+
 ### M13 — semantic audit and compiler integration validation
 
 * Audit integer promotions, narrowing, signedness/overflow, pointer
