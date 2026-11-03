@@ -1,6 +1,5 @@
-/* M11 EDG VLA semantic projection: the runtime bound must be captured at
- * stmk_set_vla_size, independently of the variable's declaration site.
- * This is a parse/graph gate, not yet a Cranelift executable fixture. */
+/* M11 executable VLA differential fixture. EDG-lowered runtime bounds,
+ * indexing and cleanup must match GCC and satisfy the live-allocation gate. */
 int m11_simple(int n) {
     int data[n + 1];
     for (int i = 0; i <= n; ++i) data[i] = i * 3 + 1;
@@ -75,6 +74,42 @@ int m11_loop_stress(int n) {
         int values[(i % 17) + 2];
         values[0] = i;
         sum += values[0];
+    }
+    return sum;
+}
+
+/* Three nested live VLAs: every return edge must release its entire
+ * active scope chain in reverse order. */
+int m11_deep_return(int n) {
+    int outer[n + 1];
+    outer[0] = n + 1;
+    {
+        int middle[n + 2];
+        middle[0] = 3 * n;
+        if (n & 1) return outer[0] + middle[0];
+        {
+            int inner[n + 3];
+            inner[0] = 5 * n;
+            if (n % 3 == 0) return outer[0] + inner[0];
+            return outer[0] + middle[0] + inner[0];
+        }
+    }
+}
+
+/* Inner continue edges must free the inner VLA without releasing the outer
+ * loop's live VLA. Both allocations are repeated on the next iteration. */
+int m11_repeated_nested(int n) {
+    int sum = 0;
+    for (int i = 1; i <= n; ++i) {
+        int outer[i + 1];
+        outer[0] = i;
+        for (int j = 1; j <= 3; ++j) {
+            int inner[i + j + 1];
+            inner[0] = i + j;
+            if (j == 2 && i % 5 == 0) continue;
+            sum += inner[0];
+        }
+        sum += outer[0];
     }
     return sum;
 }
