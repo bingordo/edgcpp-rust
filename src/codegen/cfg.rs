@@ -886,9 +886,6 @@ enum ScalarPlace {
 /// Access class of a C scalar lvalue. Native EDG qualifier bits are
 /// TQ_VOLATILE (2) and TQ_C11_ATOMIC (8); ordinary and qualified memory
 /// accesses must never accidentally share non-atomic optimizations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MemoryAccess { Ordinary, Volatile, Atomic }
-
 fn scalar_memory_access(il:&Il,ty:crate::TypeId)
     -> Result<MemoryAccess,CodegenError> {
     let mut current=ty;
@@ -927,8 +924,8 @@ fn scalar_memory_access(il:&Il,ty:crate::TypeId)
 /// EDG may normalize the *result* type of a dereference to an
 /// unqualified rvalue type. The pointee's native qualifier is authoritative
 /// for the memory access, so never inspect only the result expression.
-fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
-    -> Result<(),CodegenError> {
+fn pointee_memory_access(il:&Il,pointer_ty:crate::TypeId)
+    -> Result<MemoryAccess,CodegenError> {
     let canonical=canonical_abi_type(il,pointer_ty)?;
     let def=il.types.iter().find(|t|t.id==canonical)
         .ok_or_else(||invalid("missing pointer/array operand type"))?;
@@ -936,10 +933,38 @@ fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
         return Err(invalid("indirect access has non-pointer type"));
     }
     let element=def.related.ok_or_else(||invalid("indirect access has no pointee type"))?;
-    if scalar_memory_access(il,element)?!=MemoryAccess::Ordinary {
-        return Err(invalid("qualified pointer dereference requires M12 lvalue lowering"));
+    let access=scalar_memory_access(il,element)?;
+    if access!=MemoryAccess::Ordinary {
+        let size=byte_size(il,element)?;
+        let align=storage_alignment(il,element)?;
+        if !matches!(size,1|2|4|8) || align<size {
+            return Err(invalid("qualified indirect access needs naturally aligned scalar storage"));
+        }
+        let base=canonical_abi_type(il,element)?;
+        if !il.types.iter().any(|t|t.id==base && semantic(4,t.kind)==1) {
+            return Err(invalid("qualified indirect aggregates/pointers unsupported"));
+        }
     }
-    Ok(())
+    Ok(access)
+}
+/// The native pointee carries qualifiers, not necessarily the EDG rvalue.
+fn indirect_lvalue_access(graph:&Graph,id:ExpressionId,il:&Il)
+    -> Result<MemoryAccess,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing qualified lvalue"))?;
+    if semantic(2,node.data.kind)!=3 {return Ok(MemoryAccess::Ordinary);}
+    let op=node.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
+    match op {
+        44 if node.operands.len()==1 =>
+            pointee_memory_access(il,expression_type_id(graph,node.operands[0])?),
+        45 if node.operands.len()==2 => {
+            let a=node.operands[0];let b=node.operands[1];
+            let pointer=if is_pointer_like(il,expression_type_id(graph,a)?)? {a}
+                else if is_pointer_like(il,expression_type_id(graph,b)?)? {b}
+                else {return Err(invalid("subscript has no pointer operand"));};
+            pointee_memory_access(il,expression_type_id(graph,pointer)?)
+        }
+        _=>Ok(MemoryAccess::Ordinary),
+    }
 }
 fn scalar_global(
     il: &Il, symbol: crate::SymbolId,
@@ -1396,20 +1421,16 @@ fn lower_address(
             let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
             match op {
                 44 if node.operands.len()==1 => {
-                    reject_qualified_pointee(il,
+                    let _=pointee_memory_access(il,
                         expression_type_id(graph,node.operands[0])?)?;
                     lower_c_expression(graph,node.operands[0],params,locals,il)
                 }
                 45 if node.operands.len()==2 => {
-                    if scalar_memory_access(il,expression_type_id(graph,id)?)?
-                        !=MemoryAccess::Ordinary {
-                        return Err(invalid("qualified array/pointer lvalue unsupported"));
-                    }
                     let a=node.operands[0]; let b=node.operands[1];
                     let (pointer,index)=if is_pointer_like(il,expression_type_id(graph,a)?)? {(a,b)}
                         else if is_pointer_like(il,expression_type_id(graph,b)?)? {(b,a)}
                         else { return Err(invalid("subscript has no pointer operand")); };
-                    reject_qualified_pointee(il,expression_type_id(graph,pointer)?)?;
+                    let _=pointee_memory_access(il,expression_type_id(graph,pointer)?)?;
                     let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
                     let base=lower_c_expression(graph,pointer,params,locals,il)?;
                     let index=lower_c_expression(graph,index,params,locals,il)?;
