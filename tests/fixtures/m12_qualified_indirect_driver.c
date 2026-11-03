@@ -25,6 +25,12 @@ int m12_indirect_atomic_div(_Atomic int *,int);
 int m12_indirect_atomic_rem(_Atomic int *,int);
 int m12_indirect_atomic_shl(_Atomic int *,int);
 int m12_indirect_atomic_shr(_Atomic int *,int);
+int m12_indirect_atomic_mul_rhs(_Atomic int *);
+static _Atomic int rhs_calls;
+int m12_rhs_once(void) {
+    atomic_fetch_add_explicit(&rhs_calls,1,memory_order_seq_cst);
+    return 1;
+}
 static _Atomic int concurrent_counter;
 static void *worker(void *arg) {
     (void)arg;
@@ -33,7 +39,7 @@ static void *worker(void *arg) {
 }
 static void *cas_worker(void *arg) {
     (void)arg;
-    for (int i=0;i<10000;++i) (void)m12_indirect_atomic_mul(&concurrent_counter,1);
+    for (int i=0;i<10000;++i) (void)m12_indirect_atomic_mul_rhs(&concurrent_counter);
     return NULL;
 }
 static void check(const char *what,long actual,long expected) {
@@ -108,5 +114,7 @@ int main(void) {
     }
     check("contended atomic CAS retry",
           atomic_load_explicit(&concurrent_counter,memory_order_seq_cst),20000);
+    check("CAS RHS evaluated once per source expression",
+          atomic_load_explicit(&rhs_calls,memory_order_seq_cst),20000);
     return 0;
 }
