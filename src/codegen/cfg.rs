@@ -924,6 +924,23 @@ fn scalar_memory_access(il:&Il,ty:crate::TypeId)
     }
     Err(invalid("recursive qualified type"))
 }
+/// EDG may normalize the *result* type of a dereference to an
+/// unqualified rvalue type. The pointee's native qualifier is authoritative
+/// for the memory access, so never inspect only the result expression.
+fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
+    -> Result<(),CodegenError> {
+    let canonical=canonical_abi_type(il,pointer_ty)?;
+    let def=il.types.iter().find(|t|t.id==canonical)
+        .ok_or_else(||invalid("missing pointer/array operand type"))?;
+    if !matches!(semantic(4,def.kind),5|6) {
+        return Err(invalid("indirect access has non-pointer type"));
+    }
+    let element=def.related.ok_or_else(||invalid("indirect access has no pointee type"))?;
+    if scalar_memory_access(il,element)?!=MemoryAccess::Ordinary {
+        return Err(invalid("qualified pointer dereference requires M12 lvalue lowering"));
+    }
+    Ok(())
+}
 fn scalar_global(
     il: &Il, symbol: crate::SymbolId,
 ) -> Result<(String, CAbiInt), CodegenError> {
@@ -1379,10 +1396,8 @@ fn lower_address(
             let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
             match op {
                 44 if node.operands.len()==1 => {
-                    if scalar_memory_access(il,expression_type_id(graph,id)?)?
-                        !=MemoryAccess::Ordinary {
-                        return Err(invalid("qualified pointer dereference requires M12 lvalue lowering"));
-                    }
+                    reject_qualified_pointee(il,
+                        expression_type_id(graph,node.operands[0])?)?;
                     lower_c_expression(graph,node.operands[0],params,locals,il)
                 }
                 45 if node.operands.len()==2 => {
@@ -1394,6 +1409,7 @@ fn lower_address(
                     let (pointer,index)=if is_pointer_like(il,expression_type_id(graph,a)?)? {(a,b)}
                         else if is_pointer_like(il,expression_type_id(graph,b)?)? {(b,a)}
                         else { return Err(invalid("subscript has no pointer operand")); };
+                    reject_qualified_pointee(il,expression_type_id(graph,pointer)?)?;
                     let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
                     let base=lower_c_expression(graph,pointer,params,locals,il)?;
                     let index=lower_c_expression(graph,index,params,locals,il)?;
