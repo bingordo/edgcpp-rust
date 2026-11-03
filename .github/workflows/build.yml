@@ -269,7 +269,7 @@ jobs:
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m11.o --c11 m11_vla_semantics.c
             gcc -std=c11 -O2 -Wall -Wextra -Werror m11_vla_semantics.c m11_vla_driver.c -o gcc_m11
-            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m11.o m11_vla_runtime.c m11_vla_driver.c -o cranelift_m11
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -DM11_VLA_TEST_INSTRUMENTATION edg_m11.o m11_vla_runtime.c m11_vla_driver.c -o cranelift_m11
             ./gcc_m11
             ./cranelift_m11
           )
