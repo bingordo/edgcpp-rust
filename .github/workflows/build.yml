@@ -236,7 +236,7 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/parse --c11 m11_vla_semantics.c > m11_il.txt
-            grep -E '^statement declaration m11_|^VLA dimension |^expression m11_|^type id=|^symbol type name=' m11_il.txt | head -n 165 || true
+            grep -E '^statement declaration m11_|^VLA dimension |^expression m11_|^reference m11_|^type id=|^symbol type name=' m11_il.txt | head -n 200 || true
             grep -qF 'statement declaration m11_simple' m11_il.txt
             grep -qF 'statement declaration m11_side_effect' m11_il.txt
             grep -qF 'statement declaration m11_nested' m11_il.txt
