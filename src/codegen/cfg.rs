@@ -3112,6 +3112,22 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 mod tests {
     use super::*;
     #[test]
+    fn m10_indirect_callback_object_has_native_call_signature() {
+        let word=CAbiInt{bits:64,signed:true,is_bool:false};
+        let callback_abi=CAbi {
+            parameters:vec![word],result:Some(word),
+            aggregate_parameters:vec![None],aggregate_result:None,
+        };
+        let routine=Routine {
+            name:"m10_test_forward".to_string(),parameters:2,locals:0,
+            body:vec![Stmt::Return(Expr::CallIndirect(
+                Box::new(Expr::Parameter(0)),callback_abi,
+                vec![Expr::Parameter(1)]))],
+            abi:None,local_types:None,local_storage:None,local_alignments:None,
+        };
+        assert!(!emit_routines(&[routine]).unwrap().is_empty());
+    }
+    #[test]
     fn emits_loop_and_merges_mutable_local() {
         let body = vec![
             Stmt::Store(0,Expr::Parameter(0)),
