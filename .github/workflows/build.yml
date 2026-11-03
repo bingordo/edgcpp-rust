@@ -257,6 +257,10 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          # A cached example executable may belong to a previous commit.
+          # Rebuild after checking out the PR head before invoking it.
+          cargo build --features codegen --example codegen
           cp tests/fixtures/m11_vla_semantics.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m11_vla_runtime.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m11_vla_driver.c ../edgcpp/build/gcc-release/
