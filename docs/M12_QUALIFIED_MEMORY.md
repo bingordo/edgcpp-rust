@@ -17,12 +17,14 @@ misaligned/packed members, or arbitrary memory-mapped hardware registers.
 These remain unsupported. For ordinary memory all previous loads and
 stores retain the original non-atomic lowering.
 
-For C11 `_Atomic` globals, direct scalar assignment and reads use
-sequentially consistent operations. Compound assignments, post/pre increment,
-compare-exchange, fences and explicit non-SC orders must **not** be
-lowered as split ordinary or atomic load-plus-store pairs. They remain
-separate M12 work until the EDG operation/ordering metadata and target
-RMW lowering are modeled. Similarly, qualified pointer dereferences,
+For C11 `_Atomic` integer globals, direct scalar reads and assignments
+use sequentially consistent operations. Postincrement/decrement and native
+integer compound add/subtract/AND/OR/XOR use indivisible Cranelift
+`atomic_rmw` operations, preserving old versus new expression results.
+The GCC differential now includes a four-thread concurrent increment
+stress test. Atomic multiplication/division, compare-exchange, explicit
+weak/non-SC orders, fences, atomic pointers and complex RMW still fail
+closed: they require CAS-loop or explicit ordering semantics. Similarly, qualified pointer dereferences,
 qualified local storage, qualified aggregate fields, mixed/unknown
 qualifiers and non-scalar or insufficiently aligned globals fail closed.
 
