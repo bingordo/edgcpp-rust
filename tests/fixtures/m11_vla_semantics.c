@@ -25,3 +25,55 @@ int m11_nested(int n) {
     }
     return outer[0];
 }
+
+/* The second VLA dimension must participate in row strides, not only the
+ * total allocation size. */
+int m11_multidim(int n, int m) {
+    int values[n + 1][m + 2];
+    for (int i = 0; i <= n; ++i)
+        for (int j = 0; j < m + 2; ++j)
+            values[i][j] = 7*i + 3*j + 1;
+    return values[n][m + 1] + values[0][0] + values[n/2][m/2];
+}
+
+/* sizeof must use the saved runtime dimension and never evaluate ++count
+ * a second time. */
+int m11_sizeof(int n) {
+    int count = n;
+    int values[++count];
+    return (int)(sizeof values / sizeof values[0]) + count;
+}
+
+/* EDG must insert cleanup on both source return edges. */
+int m11_early_return(int n) {
+    int values[n + 4];
+    values[0] = 2*n + 1;
+    if ((n & 1) == 0) return values[0] + 4;
+    values[1] = n + 3;
+    return values[0] + values[1];
+}
+
+/* Re-enter one lexical VLA scope repeatedly, including early exits. */
+int m11_loop_exits(int n) {
+    int sum = 0;
+    for (int i = 1; i <= n; ++i) {
+        int values[i + 2];
+        values[i] = i*3 + 2;
+        if (i % 3 == 0) continue;
+        if (i % 7 == 0) break;
+        sum += values[i];
+    }
+    return sum;
+}
+
+/* Hundreds of alloc/dealloc iterations check that expired allocations do
+ * not get reused as live pointer slots across loop backedges. */
+int m11_loop_stress(int n) {
+    int sum = 0;
+    for (int i = 1; i <= n; ++i) {
+        int values[(i % 17) + 2];
+        values[0] = i;
+        sum += values[0];
+    }
+    return sum;
+}
