@@ -1473,6 +1473,7 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
             invalid("routine expression without symbol")))
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
+    symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
     for symbol in symbols {
         let decl=direct_call_decl(il,symbol)?;
         if let Some(previous)=found.get(&symbol) {
@@ -1637,6 +1638,15 @@ fn lower_c_expression(
         1 => {
             if let Some(value)=node.data.constant_integer {
                 Expr::Constant(value)
+            } else if let Some(address)=il.constant_routine_addresses.iter().find(|a|
+                a.function==node.data.function &&
+                a.statement_path==node.data.statement_path && a.path==node.data.path) {
+                let decl=direct_call_decl(il,address.symbol)?;
+                let actual=callable_type_abi(il,expression_type_id(graph,id)?)?;
+                if actual!=decl.abi {
+                    return Err(invalid("folded function-pointer constant type mismatch"));
+                }
+                Expr::AddressFunction(address.symbol)
             } else if let Some(address)=il.constant_addresses.iter().find(|a|
                 a.function==node.data.function &&
                 a.statement_path==node.data.statement_path && a.path==node.data.path) {
