@@ -2400,6 +2400,80 @@ fn compound_value(
             else {CIntBinaryOp::UnsignedShiftRight},fb,before,after),
     }
 }
+/// C qualified scalar increment: an atomic update must be indivisible,
+/// whereas a volatile update is one observable load followed by one store.
+/// The caller evaluates the lvalue address exactly once.
+fn emit_qualified_post(
+    fb:&mut FunctionBuilder<'_>,ty:CAbiInt,access:MemoryAccess,
+    address:cranelift_codegen::ir::Value,delta:i64,
+)->Result<cranelift_codegen::ir::Value,CodegenError> {
+    if ty.is_bool {return Err(invalid("qualified bool increment unsupported"));}
+    if access==MemoryAccess::Atomic {
+        let value=fb.ins().iconst(types::I64,delta);
+        let narrow=if ty.bits==64 {value}
+            else {fb.ins().ireduce(ty.cranelift(),value)};
+        let old=fb.ins().atomic_rmw(
+            ty.cranelift(),MemFlags::new(),
+            cranelift_codegen::ir::AtomicRmwOp::Add,address,narrow);
+        let old=if ty.bits==64 {old}
+            else if ty.signed {fb.ins().sextend(types::I64,old)}
+            else {fb.ins().uextend(types::I64,old)};
+        return Ok(normalize_c_value(fb,old,ty));
+    }
+    let old=super::memory::load_integer_access(fb,address,ty,access);
+    let amount=fb.ins().iconst(types::I64,delta);
+    let next=fb.ins().iadd(old,amount);
+    super::memory::store_integer_access(fb,address,next,ty,access);
+    Ok(old)
+}
+
+/// A C11 qualified compound update uses a native RMW for simple integer
+/// operators; multiplying or dividing would need an atomic CAS loop.
+/// Volatile operators use the same integer promotions as normal C, with
+/// each memory effect retained by the backend.
+fn emit_qualified_compound(
+    fb:&mut FunctionBuilder<'_>,ty:CAbiInt,compute_ty:CAbiInt,
+    access:MemoryAccess,op:CCompoundOp,address:cranelift_codegen::ir::Value,
+    rhs:cranelift_codegen::ir::Value,
+)->Result<cranelift_codegen::ir::Value,CodegenError> {
+    if ty.is_bool && access==MemoryAccess::Atomic {
+        return Err(invalid("atomic bool RMW unsupported"));
+    }
+    if access==MemoryAccess::Atomic {
+        use cranelift_codegen::ir::AtomicRmwOp;
+        let atomic_op=match op {
+            CCompoundOp::Add=>AtomicRmwOp::Add,
+            CCompoundOp::Sub=>AtomicRmwOp::Sub,
+            CCompoundOp::And=>AtomicRmwOp::And,
+            CCompoundOp::Or=>AtomicRmwOp::Or,
+            CCompoundOp::Xor=>AtomicRmwOp::Xor,
+            _=>return Err(invalid("C11 indirect atomic RMW operator unsupported")),
+        };
+        let rhs=normalize_c_value(fb,rhs,ty);
+        let narrow=if ty.bits==64 {rhs}
+            else {fb.ins().ireduce(ty.cranelift(),rhs)};
+        let old=fb.ins().atomic_rmw(ty.cranelift(),MemFlags::new(),atomic_op,address,narrow);
+        let old=if ty.bits==64 {old}
+            else if ty.signed {fb.ins().sextend(types::I64,old)}
+            else {fb.ins().uextend(types::I64,old)};
+        let result=match op {
+            CCompoundOp::Add=>fb.ins().iadd(old,rhs),
+            CCompoundOp::Sub=>fb.ins().isub(old,rhs),
+            CCompoundOp::And=>fb.ins().band(old,rhs),
+            CCompoundOp::Or=>fb.ins().bor(old,rhs),
+            CCompoundOp::Xor=>fb.ins().bxor(old,rhs),
+            _=>unreachable!(),
+        };
+        return Ok(normalize_c_value(fb,result,ty));
+    }
+    let before=super::memory::load_integer_access(fb,address,ty,access);
+    let before=normalize_c_value(fb,before,compute_ty);
+    let after=if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
+        rhs
+    } else {normalize_c_value(fb,rhs,compute_ty)};
+    let result=compound_value(fb,before,after,compute_ty,op);
+    Ok(super::memory::store_integer_access(fb,address,result,ty,access))
+}
 fn emit_expr(
     e: &Expr, fb: &mut FunctionBuilder<'_>,
     params: &[cranelift_codegen::ir::Value], vars: &[Variable],
@@ -2610,6 +2684,15 @@ fn emit_expr(
             let value=fb.ins().iadd(old,delta);
             super::memory::store_integer(fb,address,value,*ty);
             old
+        }
+        Expr::PostQualified(ty,access,delta,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            emit_qualified_post(fb,*ty,*access,address,*delta)?
+        }
+        Expr::CompoundQualified(ty,compute_ty,access,op,pointer,rhs) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+            emit_qualified_compound(fb,*ty,*compute_ty,*access,*op,address,value)?
         }
         Expr::PointerOffset(base,index,stride) => {
             let base=emit_expr(base,fb,params,vars,globals,stack,local_types,calls)?;
