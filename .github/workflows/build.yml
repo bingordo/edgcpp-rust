@@ -293,16 +293,16 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m12.o --c11 m12_qualified_globals.c
-            gcc -std=c11 -O2 -Wall -Wextra -Werror m12_qualified_globals.c m12_qualified_driver.c -o gcc_m12
-            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m12.o m12_qualified_driver.c -o cranelift_m12
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_qualified_globals.c m12_qualified_driver.c -o gcc_m12
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread edg_m12.o m12_qualified_driver.c -o cranelift_m12
             ./gcc_m12
             ./cranelift_m12
             rm -f m12_rejected.o m12_rejected.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_atomic_rejected.c >m12_rejected.log 2>&1; then
-              echo "Atomic read-modify-write silently accepted"
+              echo "Unsupported atomic multiply silently accepted"
               exit 1
             fi
-            grep -E 'atomic RMW lowering|atomic compound assignment requires atomic RMW|unsupported EDG operation' m12_rejected.log
+            grep -E 'C11 atomic RMW operator unsupported|unsupported EDG operation' m12_rejected.log
             test ! -e m12_rejected.o
             rm -f m12_rejected.o m12_rejected.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_unsupported_indirect.c >m12_rejected.log 2>&1; then
