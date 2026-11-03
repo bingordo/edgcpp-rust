@@ -63,6 +63,13 @@ runtime, then executes the same assertions. The CI step rebuilds
 `target/debug/examples/codegen` before the test so a cached executable
 cannot silently test a previous commit.
 
+The gate is additionally compiled with
+`M11_VLA_TEST_INSTRUMENTATION` for the EDG-generated object: the runtime
+requires LIFO deallocation, and the GCC test driver asserts **zero live VLA
+allocations after each call**. Thus passing computed values alone cannot
+hide missed cleanup on early returns or loop exits. The instrumentation
+is not compiled into the ordinary optional runtime.
+
 The gate exercises:
 
 - Positive 1D bounds, sequential indexing and a side-effectful `++count`.
