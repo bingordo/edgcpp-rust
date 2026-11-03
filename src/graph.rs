@@ -34,6 +34,8 @@ pub enum GraphError {
     InvalidStatementDeclaration { function: String, path: String },
     DuplicateStatementDeclaration { function: String, path: String, position: u32 },
     InvalidStatementDeclarationPosition { function: String, path: String },
+    InvalidVlaDimension { function: String, path: String },
+    DuplicateVlaDimension { function: String, path: String },
     InvalidStatementInitialization { function: String, path: String },
     InvalidSourceLocation { function: String, path: String },
     DuplicateSourceLocation { function: String, path: String },
@@ -123,6 +125,7 @@ pub struct Graph {
     pub statement_labels: Vec<StatementLabel>,
     pub statement_switch_cases: Vec<StatementSwitchCase>,
     pub statement_declarations: Vec<StatementDeclaration>,
+    pub vla_dimensions: Vec<VlaDimension>,
     pub statement_initializations: Vec<StatementInitialization>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
@@ -1335,6 +1338,29 @@ impl Graph {
         graph.statement_declarations.sort_by_key(|d|
             (d.function.clone(), d.statement_path.clone(), d.position));
 
+        // A VLA dimension belongs to a particular *execution statement*,
+        // not to a declaration's source spelling or global type lifetime.
+        let mut vla_sites=std::collections::HashSet::new();
+        for dim in &il.vla_dimensions {
+            let key=(dim.function.clone(),dim.statement_path.clone());
+            if !smap.contains_key(&key) || !type_map.contains_key(&dim.array_type) ||
+                (dim.copied && dim.has_expression) ||
+                (dim.has_expression && !il.expressions.iter().any(|e|
+                    e.function==dim.function && e.statement_path==dim.statement_path &&
+                    e.path=="0" && e.parent.is_none()))
+            {
+                return Err(GraphError::InvalidVlaDimension {
+                    function:key.0,path:key.1,
+                });
+            }
+            if !vla_sites.insert(key.clone()) {
+                return Err(GraphError::DuplicateVlaDimension {
+                    function:key.0,path:key.1,
+                });
+            }
+            graph.vla_dimensions.push(dim.clone());
+        }
+
         let mut init_keys = std::collections::HashSet::new();
         for init in &il.statement_initializations {
             let key = (init.function.clone(), init.statement_path.clone());
@@ -1869,6 +1895,13 @@ impl Graph {
         self.expression_source_index.get(&(function.to_owned(), statement.to_owned(),
                                             role, path.to_owned()))
             .map(|&idx| &self.expression_sources[idx].location)
+    }
+
+    /// Runtime VLA dimension evaluated at a specific statement execution site.
+    /// This is intentionally separate from the array's declaration.
+    pub fn vla_dimension_at(&self, function:&str, path:&str) -> Option<&VlaDimension> {
+        self.vla_dimensions.iter().find(|dim|
+            dim.function==function && dim.statement_path==path)
     }
 
     /// Variable declarations belonging to a statement, in EDG list order.
