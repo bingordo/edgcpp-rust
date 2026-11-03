@@ -39,3 +39,16 @@ int m12_indirect_volatile_post(volatile int *p) { return (*p)++; }
 int m12_indirect_volatile_pre(volatile int *p) { return --(*p); }
 int m12_indirect_volatile_add(volatile int *p,int n) { return *p += n; }
 short m12_indirect_atomic_short_post(_Atomic short *p) { return (*p)++; }
+
+/* Arithmetic not representable by native fetch-add/bitwise RMW must use an
+ * atomic CAS retry loop. Each RHS is evaluated exactly once. */
+int m12_indirect_atomic_mul(_Atomic int *p,int n) { return *p *= n; }
+int m12_indirect_atomic_div(_Atomic int *p,int n) { return *p /= n; }
+int m12_indirect_atomic_rem(_Atomic int *p,int n) { return *p %= n; }
+int m12_indirect_atomic_shl(_Atomic int *p,int n) { return *p <<= n; }
+int m12_indirect_atomic_shr(_Atomic int *p,int n) { return *p >>= n; }
+/* The external RHS has an observable effect; CAS retries must not replay it. */
+extern int m12_rhs_once(void);
+int m12_indirect_atomic_mul_rhs(_Atomic int *p) {
+    return *p *= m12_rhs_once();
+}

@@ -19,6 +19,7 @@ int m12_atomic_two_reads(void);
 int m12_atomic_post(void);
 int m12_atomic_add(int);
 int m12_atomic_dec(void);
+int m12_atomic_mul_three(void);
 static void expect(const char *label,long actual,long want) {
     if(actual!=want) {
         fprintf(stderr,"%s: got %ld expected %ld\n",label,actual,want);
@@ -48,6 +49,7 @@ int main(void) {
         expect("atomic post stored",m12_atomic_get(),x+1);
         expect("atomic compound",m12_atomic_add(9),x+10);
         expect("atomic decrement",m12_atomic_dec(),x+9);
+        expect("atomic CAS multiply",m12_atomic_mul_three(),3*(x+9));
     }
     m12_atomic_put(0);
     pthread_t threads[4];

@@ -299,10 +299,10 @@ jobs:
             ./cranelift_m12
             rm -f m12_rejected.o m12_rejected.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_atomic_rejected.c >m12_rejected.log 2>&1; then
-              echo "Unsupported atomic multiply silently accepted"
+              echo "Unsupported atomic pointer global silently accepted"
               exit 1
             fi
-            grep -E 'C11 atomic RMW operator unsupported|unsupported EDG operation' m12_rejected.log
+            grep -E 'atomic pointer globals need typed pointer RMW semantics|unsupported EDG operation' m12_rejected.log
             test ! -e m12_rejected.o
             rm -f m12_rejected.o m12_rejected.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_unsupported_indirect.c >m12_rejected.log 2>&1; then
@@ -331,16 +331,20 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_pointer.o --c11 m12_qualified_indirect.c
+            # Check machine code includes actual compare-and-exchange,
+            # not only a sequence of ordinary loads/stores.
+            objdump -dr edg_m12_pointer.o > m12_pointer_disasm.txt
+            grep -qi 'cmpxchg' m12_pointer_disasm.txt
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_qualified_indirect.c m12_qualified_indirect_driver.c -o gcc_m12_pointer
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread edg_m12_pointer.o m12_qualified_indirect_driver.c -o cranelift_m12_pointer
             ./gcc_m12_pointer
             ./cranelift_m12_pointer
             rm -f m12_bad_pointer.o m12_bad_pointer.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_bad_pointer.o --c11 m12_qualified_indirect_rejected.c >m12_bad_pointer.log 2>&1; then
-              echo "Unsupported indirect atomic multiply unexpectedly accepted"
+              echo "Unsupported indirect atomic pointer unexpectedly accepted"
               exit 1
             fi
-            grep -E 'C11 indirect atomic RMW operator unsupported|unsupported EDG operation' m12_bad_pointer.log
+            grep -E 'qualified indirect aggregates/pointers unsupported|unsupported EDG operation' m12_bad_pointer.log
             test ! -e m12_bad_pointer.o
           )
 

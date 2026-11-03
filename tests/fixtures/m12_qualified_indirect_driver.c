@@ -20,10 +20,26 @@ int m12_indirect_volatile_post(volatile int *);
 int m12_indirect_volatile_pre(volatile int *);
 int m12_indirect_volatile_add(volatile int *,int);
 short m12_indirect_atomic_short_post(_Atomic short *);
+int m12_indirect_atomic_mul(_Atomic int *,int);
+int m12_indirect_atomic_div(_Atomic int *,int);
+int m12_indirect_atomic_rem(_Atomic int *,int);
+int m12_indirect_atomic_shl(_Atomic int *,int);
+int m12_indirect_atomic_shr(_Atomic int *,int);
+int m12_indirect_atomic_mul_rhs(_Atomic int *);
+static _Atomic int rhs_calls;
+int m12_rhs_once(void) {
+    atomic_fetch_add_explicit(&rhs_calls,1,memory_order_seq_cst);
+    return 1;
+}
 static _Atomic int concurrent_counter;
 static void *worker(void *arg) {
     (void)arg;
     for (int i=0;i<10000;++i) (void)m12_indirect_atomic_post(&concurrent_counter);
+    return NULL;
+}
+static void *cas_worker(void *arg) {
+    (void)arg;
+    for (int i=0;i<10000;++i) (void)m12_indirect_atomic_mul_rhs(&concurrent_counter);
     return NULL;
 }
 static void check(const char *what,long actual,long expected) {
@@ -69,6 +85,13 @@ int main(void) {
         check("atomic or new",m12_indirect_atomic_or(&a,0x40),value);
         check("atomic RMW stored",m12_indirect_atomic_get(&a),value);
     }
+    m12_indirect_atomic_put(&a,120);
+    check("CAS multiply",m12_indirect_atomic_mul(&a,3),360);
+    check("CAS divide",m12_indirect_atomic_div(&a,6),60);
+    check("CAS remainder",m12_indirect_atomic_rem(&a,7),4);
+    check("CAS shift left",m12_indirect_atomic_shl(&a,2),16);
+    check("CAS shift right",m12_indirect_atomic_shr(&a,1),8);
+    check("CAS stored",m12_indirect_atomic_get(&a),8);
     check("atomic short old",m12_indirect_atomic_short_post(&small),100);
     check("atomic short stored",atomic_load_explicit(&small,memory_order_seq_cst),101);
     atomic_store_explicit(&concurrent_counter,0,memory_order_seq_cst);
@@ -81,5 +104,17 @@ int main(void) {
     }
     check("four-thread indirect atomic RMW",
           atomic_load_explicit(&concurrent_counter,memory_order_seq_cst),40000);
+    atomic_store_explicit(&concurrent_counter,0,memory_order_seq_cst);
+    for (int i=0;i<4;++i) {
+        if(pthread_create(&threads[i],NULL,
+                          i<2?worker:cas_worker,NULL)!=0) abort();
+    }
+    for (int i=0;i<4;++i) {
+        if(pthread_join(threads[i],NULL)!=0) abort();
+    }
+    check("contended atomic CAS retry",
+          atomic_load_explicit(&concurrent_counter,memory_order_seq_cst),20000);
+    check("CAS RHS evaluated once per source expression",
+          atomic_load_explicit(&rhs_calls,memory_order_seq_cst),20000);
     return 0;
 }

@@ -2081,11 +2081,6 @@ fn lower_c_expression(
                             if access==MemoryAccess::Ordinary {
                                 Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
                             } else {
-                                if access==MemoryAccess::Atomic &&
-                                   !matches!(kind,CCompoundOp::Add|CCompoundOp::Sub|
-                                     CCompoundOp::And|CCompoundOp::Or|CCompoundOp::Xor) {
-                                    return Err(invalid("C11 indirect atomic RMW operator unsupported"));
-                                }
                                 if ty.is_bool {return Err(invalid("qualified bool RMW unsupported"));}
                                 Expr::CompoundQualified(ty,compute_ty,access,kind,address.unwrap(),rhs)
                             }
@@ -2439,6 +2434,44 @@ fn emit_qualified_post(
 /// operators; multiplying or dividing would need an atomic CAS loop.
 /// Volatile operators use the same integer promotions as normal C, with
 /// each memory effect retained by the backend.
+/// C11 compound arithmetic without a native atomic_rmw opcode must
+/// retry with compare-exchange. The RHS and lvalue address are evaluated by
+/// the caller *before* entering this loop, so a CAS failure never replays
+/// user-visible effects. All operations are sequentially consistent.
+fn emit_atomic_cas_compound(
+    fb:&mut FunctionBuilder<'_>,ty:CAbiInt,compute_ty:CAbiInt,
+    op:CCompoundOp,address:cranelift_codegen::ir::Value,
+    rhs:cranelift_codegen::ir::Value,
+)->Result<cranelift_codegen::ir::Value,CodegenError> {
+    if ty.is_bool {return Err(invalid("atomic bool CAS arithmetic unsupported"));}
+    if !matches!(op,CCompoundOp::Mul|CCompoundOp::Div|CCompoundOp::Rem|
+                 CCompoundOp::Shl|CCompoundOp::Shr) {
+        return Err(invalid("unsupported atomic CAS arithmetic operator"));
+    }
+    let rhs=if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {rhs}
+        else {normalize_c_value(fb,rhs,compute_ty)};
+    let retry=fb.create_block();
+    let done=fb.create_block();
+    fb.append_block_param(done,types::I64);
+    fb.ins().jump(retry,&[]);
+    fb.switch_to_block(retry);
+    let old_raw=fb.ins().atomic_load(ty.cranelift(),MemFlags::new(),address);
+    let old=if ty.bits==64 {old_raw}
+        else if ty.signed {fb.ins().sextend(types::I64,old_raw)}
+        else {fb.ins().uextend(types::I64,old_raw)};
+    let old=normalize_c_value(fb,old,compute_ty);
+    let result=compound_value(fb,old,rhs,compute_ty,op);
+    let new=normalize_c_value(fb,result,ty);
+    let new_raw=if ty.bits==64 {new}
+        else {fb.ins().ireduce(ty.cranelift(),new)};
+    let observed=fb.ins().atomic_cas(MemFlags::new(),address,old_raw,new_raw);
+    let success=fb.ins().icmp(IntCC::Equal,observed,old_raw);
+    fb.ins().brif(success,done,&[new.into()],retry,&[]);
+    fb.seal_block(retry);
+    fb.seal_block(done);
+    fb.switch_to_block(done);
+    Ok(fb.block_params(done)[0])
+}
 fn emit_qualified_compound(
     fb:&mut FunctionBuilder<'_>,ty:CAbiInt,compute_ty:CAbiInt,
     access:MemoryAccess,op:CCompoundOp,address:cranelift_codegen::ir::Value,
@@ -2455,7 +2488,7 @@ fn emit_qualified_compound(
             CCompoundOp::And=>AtomicRmwOp::And,
             CCompoundOp::Or=>AtomicRmwOp::Or,
             CCompoundOp::Xor=>AtomicRmwOp::Xor,
-            _=>return Err(invalid("C11 indirect atomic RMW operator unsupported")),
+            _=>return emit_atomic_cas_compound(fb,ty,compute_ty,op,address,rhs),
         };
         let rhs=normalize_c_value(fb,rhs,ty);
         let narrow=if ty.bits==64 {rhs}
@@ -2750,35 +2783,13 @@ fn emit_expr(
             let (_,_,access)=globals.get(symbol)
                 .ok_or_else(||invalid("global compound access missing"))?;
             if *access==MemoryAccess::Atomic {
-                if ty.is_bool {return Err(invalid("atomic bool RMW unsupported"));}
-                use cranelift_codegen::ir::AtomicRmwOp;
-                let atomic_op=match op {
-                    CCompoundOp::Add=>AtomicRmwOp::Add,
-                    CCompoundOp::Sub=>AtomicRmwOp::Sub,
-                    CCompoundOp::And=>AtomicRmwOp::And,
-                    CCompoundOp::Or=>AtomicRmwOp::Or,
-                    CCompoundOp::Xor=>AtomicRmwOp::Xor,
-                    _=>return Err(invalid("C11 atomic RMW operator unsupported")),
-                };
+                // Reuse the same integer RMW/CAS implementation for global
+                // storage and qualified pointer lvalues, keeping the
+                // target-owned memory-order semantics in one place.
                 let address=global_address(fb,globals,*symbol)?;
-                let rhs=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
-                let rhs=normalize_c_value(fb,rhs,*ty);
-                let narrow=if ty.bits==64 {rhs}
-                    else {fb.ins().ireduce(ty.cranelift(),rhs)};
-                let old=fb.ins().atomic_rmw(
-                    ty.cranelift(),MemFlags::new(),atomic_op,address,narrow);
-                let old=if ty.bits==64 {old}
-                    else if ty.signed {fb.ins().sextend(types::I64,old)}
-                    else {fb.ins().uextend(types::I64,old)};
-                let updated=match op {
-                    CCompoundOp::Add=>fb.ins().iadd(old,rhs),
-                    CCompoundOp::Sub=>fb.ins().isub(old,rhs),
-                    CCompoundOp::And=>fb.ins().band(old,rhs),
-                    CCompoundOp::Or=>fb.ins().bor(old,rhs),
-                    CCompoundOp::Xor=>fb.ins().bxor(old,rhs),
-                    _=>unreachable!(),
-                };
-                return Ok(normalize_c_value(fb,updated,*ty));
+                let operand=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+                return emit_qualified_compound(
+                    fb,*ty,*compute_ty,*access,*op,address,operand);
             }
             let address = global_address(fb,globals,*symbol)?;
             let old = super::memory::load_integer_access(fb,address,*ty,*access);
