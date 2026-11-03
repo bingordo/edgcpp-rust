@@ -1,0 +1,26 @@
+name: M10 indirect-call baseline
+on:
+  push:
+    paths:
+      - 'tests/fixtures/m10_indirect_*.c'
+      - 'tools/m10_indirect_baseline.py'
+      - '.github/workflows/m10-indirect-baseline.yml'
+  pull_request:
+    paths:
+      - 'tests/fixtures/m10_indirect_*.c'
+      - 'tools/m10_indirect_baseline.py'
+      - '.github/workflows/m10-indirect-baseline.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: m10-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gcc-clang-oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify GCC and Clang callback ABI baseline
+        run: python3 tools/m10_indirect_baseline.py
