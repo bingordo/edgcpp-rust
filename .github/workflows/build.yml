@@ -331,6 +331,10 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_pointer.o --c11 m12_qualified_indirect.c
+            # Check machine code includes actual compare-and-exchange,
+            # not only a sequence of ordinary loads/stores.
+            objdump -dr edg_m12_pointer.o > m12_pointer_disasm.txt
+            grep -qi 'cmpxchg' m12_pointer_disasm.txt
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_qualified_indirect.c m12_qualified_indirect_driver.c -o gcc_m12_pointer
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread edg_m12_pointer.o m12_qualified_indirect_driver.c -o cranelift_m12_pointer
             ./gcc_m12_pointer
