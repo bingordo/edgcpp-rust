@@ -37,12 +37,22 @@ RAM operations as qualified globals. GCC differential fixtures test
 pointer parameters, repeated volatile reads, scalar writes, 16-bit
 accesses, indexing, and C11 atomic loads/stores.
 
-Qualified indirect compound and pre/post increment are **rejected** until
-volatile RMW or indivisible C11 atomic indirect RMW is supported; they
+**M12 indirect RMW follow-up:** C11 integer pointer pre/post increment
+and integer add/sub/AND/OR/XOR compound updates now execute as indivisible
+native sequentially consistent `atomic_rmw` operations. The lvalue
+address and RHS are each evaluated exactly once. For RAM `volatile`
+pointees, compound updates perform an observable read followed by an
+observable store, respecting the existing C integer promotion rules;
+they are not C atomic transactions. The GCC/Cranelift differential
+checks old/new return values, narrower integers and 40,000 increments
+across four threads through an `_Atomic int*`.
+
+Atomic indirect multiply, divide, modulo, shifts and compare-exchange
+remain unsupported until a real CAS loop/operation is available; they
 must not silently become split non-atomic accesses. Qualified local
 storage, struct/union fields and bitfields, mixed/unknown qualifiers,
 MMIO, arbitrary pointer-object atomics, misaligned targets and non-scalar
-pointees also remain unsupported. A valid C typed pointer must reference
+pointees also remain unsupported. A valid typed pointer must reference
 suitably aligned storage.
 
 `tests/fixtures/m12_qualified_globals.c` and the GCC-built driver check
@@ -50,8 +60,8 @@ C11 linkage, signed 8/16/32/64-bit volatile accesses, repeated reads,
 ordered writes and sequentially consistent atomic scalar reads/writes.
 `m12_atomic_rejected.c` guards unsupported CAS-loop arithmetic;
 `m12_qualified_indirect_rejected.c` and
-`m12_unsupported_indirect.c` guard unsupported indirect atomic and
-volatile RMW respectively.
+`m12_unsupported_indirect.c` guard unsupported indirect atomic
+multiplication and volatile bitfield accesses respectively.
 
 Full M12 completion requires native target and `bingordo/compiler` support
 for precise ordering, true volatile load/store primitives, and concurrent
