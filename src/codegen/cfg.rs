@@ -513,10 +513,12 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             vars.insert(*index);
             Ok(())
         },
-        Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) |
+        Expr::LoadAddress(_,a) | Expr::LoadQualified(_,_,a) |
+        Expr::LoadBitField(_,a) |
         Expr::PackAggregate(_,a) =>
             check_expr(a,vars,params),
-        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
@@ -2266,7 +2268,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
         },
-        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
@@ -2279,6 +2282,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(a,found);addressed_expr(b,found);addressed_expr(c,found);
         }
         Expr::Normalize(_,a) | Expr::LoadAddress(_,a) |
+        Expr::LoadQualified(_,_,a) |
         Expr::PackAggregate(_,a) |
         Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
@@ -2485,6 +2489,10 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer(fb,address,*ty)
         }
+        Expr::LoadQualified(ty,access,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::load_integer_access(fb,address,*ty,*access)
+        }
         Expr::PackAggregate(bytes,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             target::ABI.pack_result(fb,address,*bytes)?
@@ -2497,6 +2505,11 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::StoreQualified(ty,access,pointer,value) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::store_integer_access(fb,address,value,*ty,*access)
         }
         Expr::StoreBitField(layout,pointer,value) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
