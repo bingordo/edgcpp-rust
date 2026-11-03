@@ -15,6 +15,11 @@ pub struct Function {
     pub result: Expr,
 }
 
+/// C scalar memory effects must not be lost when lowering an lvalue.
+/// Qualified RAM accesses are emitted using effectful instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAccess { Ordinary, Volatile, Atomic }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Constant(i64),
@@ -31,6 +36,10 @@ pub enum Expr {
     AddressLocal(usize),
     LoadAddress(CAbiInt, Box<Expr>),
     StoreAddress(CAbiInt, Box<Expr>, Box<Expr>),
+    /// C qualified scalar indirect lvalues: the access class is determined
+    /// from the pointer's pointee, never the converted EDG rvalue type.
+    LoadQualified(CAbiInt, MemoryAccess, Box<Expr>),
+    StoreQualified(CAbiInt, MemoryAccess, Box<Expr>, Box<Expr>),
     /// Pack up to eight native bytes into one SysV INTEGER-class GPR.
     PackAggregate(u8, Box<Expr>),
     /// Typed native C bitfield access. Only exact overlapping bits are
@@ -192,6 +201,7 @@ fn emit_expr(
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |
         Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
+        Expr::LoadQualified(..) | Expr::StoreQualified(..) |
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
@@ -443,7 +453,7 @@ fn checked_local(
 fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::BlockValue(..) |
-        Expr::StoreAddress(..) | Expr::StoreBitField(..) |
+        Expr::StoreAddress(..) | Expr::StoreQualified(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) | Expr::PostAddress(..) |
@@ -459,6 +469,7 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::IntegerBinary(_, a, b) =>
             contains_local_write(a) || contains_local_write(b),
         Expr::Normalize(_, a) | Expr::LoadAddress(_,a) |
+        Expr::LoadQualified(_,_,a) |
         Expr::PackAggregate(_,a) | Expr::LoadBitField(_,a) => contains_local_write(a),
         Expr::PointerOffset(a,b,_) => contains_local_write(a) || contains_local_write(b),
         Expr::Neg(a) => contains_local_write(a),
