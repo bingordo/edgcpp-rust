@@ -288,6 +288,7 @@ jobs:
           cp tests/fixtures/m12_qualified_globals.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m12_qualified_driver.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m12_atomic_rejected.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_unsupported_indirect.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -302,6 +303,13 @@ jobs:
               exit 1
             fi
             grep -E 'atomic RMW lowering|atomic compound assignment requires atomic RMW|unsupported EDG operation' m12_rejected.log
+            test ! -e m12_rejected.o
+            rm -f m12_rejected.o m12_rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_unsupported_indirect.c >m12_rejected.log 2>&1; then
+              echo "Qualified pointer access silently accepted"
+              exit 1
+            fi
+            grep -E 'qualified pointer dereference|qualified array/pointer lvalue unsupported|qualified/reference aggregate field unsupported' m12_rejected.log
             test ! -e m12_rejected.o
           )
 
