@@ -222,6 +222,28 @@ jobs:
             grep -qF 'integer constant outer::big_unsigned' il_result.txt
           )
 
+      - name: M11 VLA dimension evaluation semantic snapshot (parse only)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m11_vla_semantics.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 m11_vla_semantics.c > m11_il.txt
+            grep -qF 'statement declaration m11_simple' m11_il.txt
+            grep -qF 'vla=true' m11_il.txt
+            grep -qF 'VLA dimension function=m11_simple' m11_il.txt
+            grep -qF 'VLA dimension function=m11_side_effect' m11_il.txt
+            grep -qF 'VLA dimension function=m11_nested' m11_il.txt
+            grep -qF 'expression=true copied=false' m11_il.txt
+          )
+
       - name: Test optional Cranelift ELF backend (targeted)
         working-directory: edgcpp-rust
         env:
