@@ -693,11 +693,16 @@ with GCC differential and negative tests for unsupported indirect RMW.
 The pointer's native pointee qualifiers, not its converted rvalue type,
 determine the access mode.
 
+Atomic multiply/divide/modulo and shifts now use sequentially consistent
+CAS retry loops for both qualified pointer and global integer lvalues,
+with GCC differential and contended retry testing. Source expression
+side effects are evaluated once before retry.
+
 The M12 gate is **not complete**: MMIO-grade volatile semantics require
-a genuinely volatile backend operation, and explicit C11 weak memory
-orders, indirect RMW/CAS, qualified local/aggregate memory, further
-concurrency tests, and native `bingordo/compiler` lowering remain
-outstanding.
+a genuinely volatile backend operation, and explicit C11 memory orders,
+source-visible compare-exchange/fences, qualified local/aggregate memory,
+wider concurrency litmus tests, and native `bingordo/compiler` lowering
+remain outstanding.
 See [the M12 contract](M12_QUALIFIED_MEMORY.md).
 
 ### M13 — semantic audit and compiler integration validation
