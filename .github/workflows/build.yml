@@ -262,7 +262,7 @@ jobs:
           # Rebuild after checking out the PR head before invoking it.
           cargo build --features codegen --example codegen
           cp tests/fixtures/m11_vla_semantics.c ../edgcpp/build/gcc-release/
-          cp tests/fixtures/m11_vla_runtime.c ../edgcpp/build/gcc-release/
+          cp runtime/vla_runtime.c ../edgcpp/build/gcc-release/m11_vla_runtime.c
           cp tests/fixtures/m11_vla_driver.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
