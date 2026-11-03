@@ -883,6 +883,64 @@ enum ScalarPlace {
 /// Global symbols are resolved by their EDG identities, not guessed from a
 /// variable's spelling. Qualified, thread-local, and function-local static
 /// declarations require a different storage model and are refused.
+/// Access class of a C scalar lvalue. Native EDG qualifier bits are
+/// TQ_VOLATILE (2) and TQ_C11_ATOMIC (8); ordinary and qualified memory
+/// accesses must never accidentally share non-atomic optimizations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MemoryAccess { Ordinary, Volatile, Atomic }
+
+fn scalar_memory_access(il:&Il,ty:crate::TypeId)
+    -> Result<MemoryAccess,CodegenError> {
+    let mut current=ty;
+    let mut access=MemoryAccess::Ordinary;
+    for _ in 0..=il.types.len() {
+        if let Some(d)=il.type_details.iter().find(|d|d.owner==current) {
+            if d.is_reference || d.is_rvalue_reference {
+                return Err(invalid("qualified reference access unsupported"));
+            }
+            let flags=d.qualifiers.unwrap_or(0);
+            // Reject const, restrict, address-space and other qualifiers in
+            // this initial M12 subset until their exact semantics are modeled.
+            if flags & !10 != 0 || flags == 10 {
+                return Err(invalid("unsupported/mixed C scalar qualifiers"));
+            }
+            let found=match flags {
+                0=>MemoryAccess::Ordinary,
+                2=>MemoryAccess::Volatile,
+                8=>MemoryAccess::Atomic,
+                _=>return Err(invalid("unsupported scalar qualifier combination")),
+            };
+            if found!=MemoryAccess::Ordinary {
+                if access!=MemoryAccess::Ordinary && access!=found {
+                    return Err(invalid("conflicting scalar memory access qualifiers"));
+                }
+                access=found;
+            }
+        }
+        let def=il.types.iter().find(|t|t.id==current)
+            .ok_or_else(||invalid("missing qualified type"))?;
+        if semantic(4,def.kind)!=3 {return Ok(access);}
+        current=def.related.ok_or_else(||invalid("unresolved qualified typeref"))?;
+    }
+    Err(invalid("recursive qualified type"))
+}
+/// EDG may normalize the *result* type of a dereference to an
+/// unqualified rvalue type. The pointee's native qualifier is authoritative
+/// for the memory access, so never inspect only the result expression.
+fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
+    -> Result<(),CodegenError> {
+    let canonical=canonical_abi_type(il,pointer_ty)?;
+    let def=il.types.iter().find(|t|t.id==canonical)
+        .ok_or_else(||invalid("missing pointer/array operand type"))?;
+    if !matches!(semantic(4,def.kind),5|6) {
+        return Err(invalid("indirect access has non-pointer type"));
+    }
+    let element=def.related.ok_or_else(||invalid("indirect access has no pointee type"))?;
+    if scalar_memory_access(il,element)?!=MemoryAccess::Ordinary {
+        return Err(invalid("qualified pointer dereference requires M12 lvalue lowering"));
+    }
+    Ok(())
+}
 fn scalar_global(
     il: &Il, symbol: crate::SymbolId,
 ) -> Result<(String, CAbiInt), CodegenError> {
@@ -902,18 +960,19 @@ fn scalar_global(
     }
     let mut ty = il.symbol_types.iter().find(|s| s.symbol == symbol)
         .ok_or_else(|| invalid("global has no declared type"))?.ty;
-    for _ in 0..=il.types.len() {
-        if let Some(d) = il.type_details.iter().find(|d| d.owner == ty) {
-            if d.is_reference || d.is_rvalue_reference || d.qualifiers.unwrap_or(0) != 0 {
-                return Err(invalid(format!("qualified global {name} needs memory semantics")));
-            }
-        }
-        let def = il.types.iter().find(|d| d.id == ty)
-            .ok_or_else(|| invalid("unresolved global type"))?;
-        if semantic(4, def.kind) != 3 { break; }
-        ty = def.related.ok_or_else(|| invalid("invalid global typedef"))?;
-    }
+    let access=scalar_memory_access(il,ty)?;
     let ty = canonical_abi_type(il,ty)?;
+    if access==MemoryAccess::Atomic &&
+        il.types.iter().any(|d|d.id==ty && semantic(4,d.kind)==5) {
+        return Err(invalid("atomic pointer globals need typed pointer RMW semantics"));
+    }
+    if access!=MemoryAccess::Ordinary {
+        let alignment=storage_alignment(il,ty)?;
+        let bytes=byte_size(il,ty)?;
+        if !matches!(bytes,1|2|4|8) || alignment<bytes {
+            return Err(invalid("qualified scalar requires naturally aligned 1/2/4/8-byte storage"));
+        }
+    }
     if il.types.iter().any(|d|d.id==ty && semantic(4,d.kind)==5) {
         return Ok((name,CAbiInt { bits:64,signed:false,is_bool:false }));
     }
@@ -1336,13 +1395,21 @@ fn lower_address(
         3 => {
             let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
             match op {
-                44 if node.operands.len()==1 =>
-                    lower_c_expression(graph,node.operands[0],params,locals,il),
+                44 if node.operands.len()==1 => {
+                    reject_qualified_pointee(il,
+                        expression_type_id(graph,node.operands[0])?)?;
+                    lower_c_expression(graph,node.operands[0],params,locals,il)
+                }
                 45 if node.operands.len()==2 => {
+                    if scalar_memory_access(il,expression_type_id(graph,id)?)?
+                        !=MemoryAccess::Ordinary {
+                        return Err(invalid("qualified array/pointer lvalue unsupported"));
+                    }
                     let a=node.operands[0]; let b=node.operands[1];
                     let (pointer,index)=if is_pointer_like(il,expression_type_id(graph,a)?)? {(a,b)}
                         else if is_pointer_like(il,expression_type_id(graph,b)?)? {(b,a)}
                         else { return Err(invalid("subscript has no pointer operand")); };
+                    reject_qualified_pointee(il,expression_type_id(graph,pointer)?)?;
                     let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
                     let base=lower_c_expression(graph,pointer,params,locals,il)?;
                     let index=lower_c_expression(graph,index,params,locals,il)?;
@@ -2228,11 +2295,11 @@ fn local_write(fb:&mut FunctionBuilder<'_>,vars:&[Variable],
 type CallValues = HashMap<crate::SymbolId,
     (cranelift_codegen::ir::FuncRef,CAbi)>;
 type GlobalValues = HashMap<crate::SymbolId,
-    (cranelift_codegen::ir::GlobalValue, CAbiInt)>;
+    (cranelift_codegen::ir::GlobalValue, CAbiInt, MemoryAccess)>;
 fn global_address(
     fb: &mut FunctionBuilder<'_>, globals: &GlobalValues, symbol: crate::SymbolId,
 ) -> Result<cranelift_codegen::ir::Value, CodegenError> {
-    let (value, _) = globals.get(&symbol).ok_or_else(|| invalid(
+    let (value, _, _) = globals.get(&symbol).ok_or_else(|| invalid(
         format!("unresolved external data symbol {}",symbol.0)))?;
     Ok(fb.ins().global_value(types::I64, *value))
 }
@@ -2471,27 +2538,78 @@ fn emit_expr(
             fb.ins().iadd(base,offset)
         },
         Expr::Global(symbol) => {
-            let (_,ty) = globals.get(symbol).ok_or_else(|| invalid("unknown global"))?;
+            let (_,ty,access) = globals.get(symbol).ok_or_else(|| invalid("unknown global"))?;
             let address = global_address(fb,globals,*symbol)?;
-            super::memory::load_integer(fb,address,*ty)
+            super::memory::load_integer_access(fb,address,*ty,*access)
         }
         Expr::AssignGlobal(symbol,ty,rhs) => {
             let value = emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let address = global_address(fb,globals,*symbol)?;
-            super::memory::store_integer(fb,address,value,*ty)
+            let (_,_,access)=globals.get(symbol)
+                .ok_or_else(||invalid("global assignment access missing"))?;
+            super::memory::store_integer_access(fb,address,value,*ty,*access)
         }
         Expr::PostGlobal(symbol,ty,delta) => {
+            let (_,_,access)=globals.get(symbol)
+                .ok_or_else(||invalid("global increment access missing"))?;
+            if *access==MemoryAccess::Atomic {
+                if ty.is_bool {return Err(invalid("atomic bool increment unsupported"));}
+                let address=global_address(fb,globals,*symbol)?;
+                let value=fb.ins().iconst(types::I64,*delta);
+                let value=if ty.bits==64 {value}
+                    else {fb.ins().ireduce(ty.cranelift(),value)};
+                let old=fb.ins().atomic_rmw(
+                    ty.cranelift(),MemFlags::new(),
+                    cranelift_codegen::ir::AtomicRmwOp::Add,address,value);
+                let old=if ty.bits==64 {old}
+                    else if ty.signed {fb.ins().sextend(types::I64,old)}
+                    else {fb.ins().uextend(types::I64,old)};
+                return Ok(normalize_c_value(fb,old,*ty));
+            }
             let address = global_address(fb,globals,*symbol)?;
-            let old = super::memory::load_integer(fb,address,*ty);
+            let old = super::memory::load_integer_access(fb,address,*ty,*access);
             let delta = fb.ins().iconst(types::I64,*delta);
             let value = fb.ins().iadd(old,delta);
-            super::memory::store_integer(fb,address,value,*ty);
+            super::memory::store_integer_access(fb,address,value,*ty,*access);
             old
         }
         Expr::CompoundGlobal(symbol,ty,compute_ty,op,rhs) => {
             // Evaluate destination once, then RHS, then perform one store.
+            let (_,_,access)=globals.get(symbol)
+                .ok_or_else(||invalid("global compound access missing"))?;
+            if *access==MemoryAccess::Atomic {
+                if ty.is_bool {return Err(invalid("atomic bool RMW unsupported"));}
+                use cranelift_codegen::ir::AtomicRmwOp;
+                let atomic_op=match op {
+                    CCompoundOp::Add=>AtomicRmwOp::Add,
+                    CCompoundOp::Sub=>AtomicRmwOp::Sub,
+                    CCompoundOp::And=>AtomicRmwOp::And,
+                    CCompoundOp::Or=>AtomicRmwOp::Or,
+                    CCompoundOp::Xor=>AtomicRmwOp::Xor,
+                    _=>return Err(invalid("C11 atomic RMW operator unsupported")),
+                };
+                let address=global_address(fb,globals,*symbol)?;
+                let rhs=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+                let rhs=normalize_c_value(fb,rhs,*ty);
+                let narrow=if ty.bits==64 {rhs}
+                    else {fb.ins().ireduce(ty.cranelift(),rhs)};
+                let old=fb.ins().atomic_rmw(
+                    ty.cranelift(),MemFlags::new(),atomic_op,address,narrow);
+                let old=if ty.bits==64 {old}
+                    else if ty.signed {fb.ins().sextend(types::I64,old)}
+                    else {fb.ins().uextend(types::I64,old)};
+                let updated=match op {
+                    CCompoundOp::Add=>fb.ins().iadd(old,rhs),
+                    CCompoundOp::Sub=>fb.ins().isub(old,rhs),
+                    CCompoundOp::And=>fb.ins().band(old,rhs),
+                    CCompoundOp::Or=>fb.ins().bor(old,rhs),
+                    CCompoundOp::Xor=>fb.ins().bxor(old,rhs),
+                    _=>unreachable!(),
+                };
+                return Ok(normalize_c_value(fb,updated,*ty));
+            }
             let address = global_address(fb,globals,*symbol)?;
-            let old = super::memory::load_integer(fb,address,*ty);
+            let old = super::memory::load_integer_access(fb,address,*ty,*access);
             let after = emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
             let before = normalize_c_value(fb,old,*compute_ty);
             let after = if matches!(op,CCompoundOp::Shl|CCompoundOp::Shr) {
@@ -2500,7 +2618,7 @@ fn emit_expr(
                 normalize_c_value(fb,after,*compute_ty)
             };
             let result = compound_value(fb,before,after,*compute_ty,*op);
-            super::memory::store_integer(fb,address,result,*ty)
+            super::memory::store_integer_access(fb,address,result,*ty,*access)
         },
         Expr::StoreLocal(..) => return Err(invalid("nested assignment unsupported")),
         Expr::Normalize(ty, a) => {
@@ -2909,6 +3027,7 @@ struct ScalarGlobal {
     symbol: crate::SymbolId,
     name: String,
     ty: CAbiInt,
+    access: MemoryAccess,
     linkage: Linkage,
     initializer: Option<Vec<u8>>,
     relocations: Vec<(usize,crate::SymbolId,i64)>,
@@ -2984,8 +3103,12 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             }
             relocations.push((start,reloc.target,reloc.addend));
         }
+        let access=scalar_memory_access(il,declared)?;
+        if access!=MemoryAccess::Ordinary && scalar.is_none() {
+            return Err(invalid("qualified aggregate globals unsupported"));
+        }
         result.push(ScalarGlobal {
-            symbol:id,name,ty,linkage,initializer,relocations,storage_bytes,alignment
+            symbol:id,name,ty,access,linkage,initializer,relocations,storage_bytes,alignment
         });
     }
     Ok(result)
@@ -3012,7 +3135,7 @@ fn emit_routines_with_globals(
     for g in globals {
         let id = module.declare_data(&g.name,g.linkage,true,false)
             .map_err(|e| CodegenError::Backend(e.to_string()))?;
-        if declared.insert(g.symbol,(id,g.ty)).is_some() {
+        if declared.insert(g.symbol,(id,g.ty,g.access)).is_some() {
             return Err(invalid("duplicate global identity"));
         }
     }
@@ -3105,8 +3228,8 @@ fn emit_routines_with_globals(
             let reference=module.declare_func_in_func(*id,&mut context.func);
             Ok((call.symbol,(reference,abi.clone())))
         }).collect::<Result<HashMap<_,_>,CodegenError>>()?;
-        let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty))|
-            (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty))).collect();
+        let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty,access))|
+            (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty,*access))).collect();
         let mut fb_context = FunctionBuilderContext::new();
         {
             let mut fb = FunctionBuilder::new(&mut context.func,&mut fb_context);
