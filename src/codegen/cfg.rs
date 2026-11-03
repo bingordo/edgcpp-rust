@@ -945,6 +945,10 @@ fn scalar_global(
         .ok_or_else(|| invalid("global has no declared type"))?.ty;
     let access=scalar_memory_access(il,ty)?;
     let ty = canonical_abi_type(il,ty)?;
+    if access==MemoryAccess::Atomic &&
+        il.types.iter().any(|d|d.id==ty && semantic(4,d.kind)==5) {
+        return Err(invalid("atomic pointer globals need typed pointer RMW semantics"));
+    }
     if access!=MemoryAccess::Ordinary {
         let alignment=storage_alignment(il,ty)?;
         let bytes=byte_size(il,ty)?;
@@ -2533,7 +2537,18 @@ fn emit_expr(
             let (_,_,access)=globals.get(symbol)
                 .ok_or_else(||invalid("global increment access missing"))?;
             if *access==MemoryAccess::Atomic {
-                return Err(invalid("C11 atomic increment requires atomic RMW lowering"));
+                if ty.is_bool {return Err(invalid("atomic bool increment unsupported"));}
+                let address=global_address(fb,globals,*symbol)?;
+                let value=fb.ins().iconst(types::I64,*delta);
+                let value=if ty.bits==64 {value}
+                    else {fb.ins().ireduce(ty.cranelift(),value)};
+                let old=fb.ins().atomic_rmw(
+                    ty.cranelift(),MemFlags::new(),
+                    cranelift_codegen::ir::AtomicRmwOp::Add,address,value);
+                let old=if ty.bits==64 {old}
+                    else if ty.signed {fb.ins().sextend(types::I64,old)}
+                    else {fb.ins().uextend(types::I64,old)};
+                return Ok(normalize_c_value(fb,old,*ty));
             }
             let address = global_address(fb,globals,*symbol)?;
             let old = super::memory::load_integer_access(fb,address,*ty,*access);
@@ -2547,7 +2562,35 @@ fn emit_expr(
             let (_,_,access)=globals.get(symbol)
                 .ok_or_else(||invalid("global compound access missing"))?;
             if *access==MemoryAccess::Atomic {
-                return Err(invalid("C11 atomic compound assignment requires atomic RMW lowering"));
+                if ty.is_bool {return Err(invalid("atomic bool RMW unsupported"));}
+                use cranelift_codegen::ir::AtomicRmwOp;
+                let atomic_op=match op {
+                    CCompoundOp::Add=>AtomicRmwOp::Add,
+                    CCompoundOp::Sub=>AtomicRmwOp::Sub,
+                    CCompoundOp::And=>AtomicRmwOp::And,
+                    CCompoundOp::Or=>AtomicRmwOp::Or,
+                    CCompoundOp::Xor=>AtomicRmwOp::Xor,
+                    _=>return Err(invalid("C11 atomic RMW operator unsupported")),
+                };
+                let address=global_address(fb,globals,*symbol)?;
+                let rhs=emit_expr(rhs,fb,params,vars,globals,stack,local_types,calls)?;
+                let rhs=normalize_c_value(fb,rhs,*ty);
+                let narrow=if ty.bits==64 {rhs}
+                    else {fb.ins().ireduce(ty.cranelift(),rhs)};
+                let old=fb.ins().atomic_rmw(
+                    ty.cranelift(),MemFlags::new(),atomic_op,address,narrow);
+                let old=if ty.bits==64 {old}
+                    else if ty.signed {fb.ins().sextend(types::I64,old)}
+                    else {fb.ins().uextend(types::I64,old)};
+                let updated=match op {
+                    CCompoundOp::Add=>fb.ins().iadd(old,rhs),
+                    CCompoundOp::Sub=>fb.ins().isub(old,rhs),
+                    CCompoundOp::And=>fb.ins().band(old,rhs),
+                    CCompoundOp::Or=>fb.ins().bor(old,rhs),
+                    CCompoundOp::Xor=>fb.ins().bxor(old,rhs),
+                    _=>unreachable!(),
+                };
+                return Ok(normalize_c_value(fb,updated,*ty));
             }
             let address = global_address(fb,globals,*symbol)?;
             let old = super::memory::load_integer_access(fb,address,*ty,*access);
