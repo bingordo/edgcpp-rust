@@ -756,6 +756,19 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       }
     }
   }
+  // Some routine designators are already folded to ck_address/abk_routine
+  // by EDG (for example, both arms of a function-pointer conditional).
+  // Record the exact routine symbol, never treat a function as data bytes.
+  if (has_constant && node->variant.constant.ptr->kind == ck_address) {
+    const auto &address = node->variant.constant.ptr->variant.address;
+    if (address.kind == abk_routine && address.variant.routine != nullptr &&
+        address.offset == 0 && !address.is_object_reflection) {
+      a_routine_ptr target = address.variant.routine;
+      const uint32_t id = emit_symbol(target, 1,
+          declaration_name(target->source_corresp, true, true));
+      emit_record(55, {txt(function), txt(stmt_path), txt(path), num(id)});
+    }
+  }
   emit_record(6, {txt(function), txt(stmt_path), txt(path),
                   parent.empty() ? absent() : txt(parent),
                   node->kind == enk_operation ? num(op) : absent(),
