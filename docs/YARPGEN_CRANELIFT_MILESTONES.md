@@ -682,8 +682,10 @@ and stores and simple C11 sequentially consistent atomic load/store use
 effectful Cranelift 0.121 atomic instructions (the latter is a stronger
 ordering than C volatile requires). The GCC native differential covers
 byte, short, int, and long accesses, ordered writes, repeated reads, and
-C11 scalar atomic loads/stores. Unsupported atomic RMW and qualified
-pointer dereferences are explicit negative cases.
+C11 scalar atomic loads/stores. Integer atomic add/sub/bitwise
+read-modify-write operations use indivisible Cranelift `atomic_rmw`;
+four-thread increment stress validates concurrent effects. Unsupported
+CAS-loop arithmetic and qualified pointer dereferences are negative cases.
 
 The M12 gate is **not complete**: MMIO-grade volatile semantics require
 a genuinely volatile backend operation, and explicit C11 weak memory
