@@ -70,8 +70,8 @@ C11 linkage, signed 8/16/32/64-bit volatile accesses, repeated reads,
 ordered writes and sequentially consistent atomic scalar reads/writes.
 `m12_atomic_rejected.c` guards unsupported CAS-loop arithmetic;
 `m12_qualified_indirect_rejected.c` and
-`m12_unsupported_indirect.c` guard unsupported indirect atomic
-multiplication and volatile bitfield accesses respectively.
+`m12_atomic_rejected.c` guard unsupported atomic pointer objects;
+`m12_unsupported_indirect.c` guards volatile bitfields.
 
 Full M12 completion requires native target and `bingordo/compiler` support
 for precise ordering, true volatile load/store primitives, and concurrent
