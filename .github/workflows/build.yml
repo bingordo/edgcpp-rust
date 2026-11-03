@@ -306,10 +306,10 @@ jobs:
             test ! -e m12_rejected.o
             rm -f m12_rejected.o m12_rejected.log
             if ../../../edgcpp-rust/target/debug/examples/codegen m12_rejected.o --c11 m12_unsupported_indirect.c >m12_rejected.log 2>&1; then
-              echo "Qualified pointer access silently accepted"
+              echo "Unsupported volatile pointer RMW silently accepted"
               exit 1
             fi
-            grep -E 'qualified pointer dereference|qualified array/pointer lvalue unsupported|qualified/reference aggregate field unsupported' m12_rejected.log
+            grep -E 'qualified indirect increment needs RMW|qualified indirect compound needs RMW|unsupported EDG operation' m12_rejected.log
             test ! -e m12_rejected.o
           )
 
