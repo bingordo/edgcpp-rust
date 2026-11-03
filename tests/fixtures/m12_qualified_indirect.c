@@ -25,3 +25,17 @@ int m12_indirect_atomic_twice(_Atomic int *p) {
     int b=*p;
     return a+b;
 }
+
+/* Increment/decrement and supported compounds through qualified pointers:
+ * an atomic operator must execute as one RMW, not a load/store pair. */
+int m12_indirect_atomic_post(_Atomic int *p) { return (*p)++; }
+int m12_indirect_atomic_pre(_Atomic int *p) { return ++(*p); }
+int m12_indirect_atomic_sub(_Atomic int *p,int n) { return *p -= n; }
+int m12_indirect_atomic_add(_Atomic int *p,int n) { return *p += n; }
+int m12_indirect_atomic_xor(_Atomic int *p,int n) { return *p ^= n; }
+int m12_indirect_atomic_and(_Atomic int *p,int n) { return *p &= n; }
+int m12_indirect_atomic_or(_Atomic int *p,int n) { return *p |= n; }
+int m12_indirect_volatile_post(volatile int *p) { return (*p)++; }
+int m12_indirect_volatile_pre(volatile int *p) { return --(*p); }
+int m12_indirect_volatile_add(volatile int *p,int n) { return *p += n; }
+short m12_indirect_atomic_short_post(_Atomic short *p) { return (*p)++; }
