@@ -46,11 +46,15 @@ or full C++ VLA / longjmp support. See the [M11 implementation notes](docs/M11_V
 distinguishes ordinary, C `volatile` and C11 `_Atomic` accesses to
 naturally aligned 8/16/32/64-bit RAM globals. The 0.121 Cranelift backend
 uses conservative, effectful sequentially consistent operations for
-qualified scalar reads/writes. This does **not** implement MMIO volatile,
-general qualified pointers, CAS-based arithmetic, or explicit C11 memory
-orders. Direct C11 integer atomic add/sub/bitwise RMW is supported and
-four-thread native atomic increments are regression-tested; other
-unsupported cases reject rather than silently becoming ordinary loads/stores. See
+qualified scalar reads/writes. This also supports naturally aligned scalar RAM loads/stores via
+`volatile` and `_Atomic` pointer indirection and indexing (M12
+follow-up), preserving qualifiers from the pointee rather than the
+converted rvalue expression. It does **not** implement MMIO volatile,
+qualified local storage, qualified indirect read-modify-write,
+CAS-based arithmetic, or explicit C11 memory orders. Direct C11 integer
+atomic add/sub/bitwise RMW on globals and four-thread atomic increments
+are regression-tested; unsupported cases reject rather than becoming
+ordinary loads/stores. See
 [the M12 qualified memory contract](docs/M12_QUALIFIED_MEMORY.md).
 
 ## Reused, not reimplemented
