@@ -1,6 +1,5 @@
 /* Qualified C lvalues through explicit pointer parameters.  All storage
  * belongs to an independently GCC-compiled driver, never to our ELF. */
-#include <stdatomic.h>
 int m12_indirect_volatile_read(volatile int *p) {
     int a=*p;
     int b=*p;
