@@ -41,6 +41,17 @@ early returns and loops. Applications must link
 runtime. This does **not** provide a native `bingordo/compiler` backend
 or full C++ VLA / longjmp support. See the [M11 implementation notes](docs/M11_VLA.md).
 
+
+**Qualified scalar memory (M12, partial):** The reference backend
+distinguishes ordinary, C `volatile` and C11 `_Atomic` accesses to
+naturally aligned 8/16/32/64-bit RAM globals. The 0.121 Cranelift backend
+uses conservative, effectful sequentially consistent operations for
+qualified scalar reads/writes. This does **not** implement MMIO volatile,
+general qualified pointers, atomic read-modify-write, explicit C11 memory
+orders or concurrent atomic validation. Unsupported cases reject rather
+than silently becoming ordinary loads/stores. See
+[the M12 qualified memory contract](docs/M12_QUALIFIED_MEMORY.md).
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
