@@ -236,6 +236,7 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/parse --c11 m11_vla_semantics.c > m11_il.txt
+            grep -E 'statement declaration|VLA dimension|statement m11_' m11_il.txt | head -n 120 || true
             grep -qF 'statement declaration m11_simple' m11_il.txt
             grep -qF 'vla=true' m11_il.txt
             grep -qF 'VLA dimension function=m11_simple' m11_il.txt
