@@ -687,10 +687,17 @@ read-modify-write operations use indivisible Cranelift `atomic_rmw`;
 four-thread increment stress validates concurrent effects. Unsupported
 CAS-loop arithmetic and qualified pointer dereferences are negative cases.
 
+A follow-up adds naturally aligned 1/2/4/8-byte scalar RAM
+`volatile`/`_Atomic` pointer loads/stores and pointer subscripting,
+with GCC differential and negative tests for unsupported indirect RMW.
+The pointer's native pointee qualifiers, not its converted rvalue type,
+determine the access mode.
+
 The M12 gate is **not complete**: MMIO-grade volatile semantics require
 a genuinely volatile backend operation, and explicit C11 weak memory
-orders, RMW/CAS, qualified local or indirect memory, concurrency tests,
-and native `bingordo/compiler` lowering remain outstanding.
+orders, indirect RMW/CAS, qualified local/aggregate memory, further
+concurrency tests, and native `bingordo/compiler` lowering remain
+outstanding.
 See [the M12 contract](M12_QUALIFIED_MEMORY.md).
 
 ### M13 — semantic audit and compiler integration validation

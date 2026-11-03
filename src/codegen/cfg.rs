@@ -513,10 +513,12 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             vars.insert(*index);
             Ok(())
         },
-        Expr::LoadAddress(_,a) | Expr::LoadBitField(_,a) |
+        Expr::LoadAddress(_,a) | Expr::LoadQualified(_,_,a) |
+        Expr::LoadBitField(_,a) |
         Expr::PackAggregate(_,a) =>
             check_expr(a,vars,params),
-        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
@@ -886,9 +888,6 @@ enum ScalarPlace {
 /// Access class of a C scalar lvalue. Native EDG qualifier bits are
 /// TQ_VOLATILE (2) and TQ_C11_ATOMIC (8); ordinary and qualified memory
 /// accesses must never accidentally share non-atomic optimizations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MemoryAccess { Ordinary, Volatile, Atomic }
-
 fn scalar_memory_access(il:&Il,ty:crate::TypeId)
     -> Result<MemoryAccess,CodegenError> {
     let mut current=ty;
@@ -927,8 +926,8 @@ fn scalar_memory_access(il:&Il,ty:crate::TypeId)
 /// EDG may normalize the *result* type of a dereference to an
 /// unqualified rvalue type. The pointee's native qualifier is authoritative
 /// for the memory access, so never inspect only the result expression.
-fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
-    -> Result<(),CodegenError> {
+fn pointee_memory_access(il:&Il,pointer_ty:crate::TypeId)
+    -> Result<MemoryAccess,CodegenError> {
     let canonical=canonical_abi_type(il,pointer_ty)?;
     let def=il.types.iter().find(|t|t.id==canonical)
         .ok_or_else(||invalid("missing pointer/array operand type"))?;
@@ -936,10 +935,38 @@ fn reject_qualified_pointee(il:&Il,pointer_ty:crate::TypeId)
         return Err(invalid("indirect access has non-pointer type"));
     }
     let element=def.related.ok_or_else(||invalid("indirect access has no pointee type"))?;
-    if scalar_memory_access(il,element)?!=MemoryAccess::Ordinary {
-        return Err(invalid("qualified pointer dereference requires M12 lvalue lowering"));
+    let access=scalar_memory_access(il,element)?;
+    if access!=MemoryAccess::Ordinary {
+        let size=byte_size(il,element)?;
+        let align=storage_alignment(il,element)?;
+        if !matches!(size,1|2|4|8) || align<size {
+            return Err(invalid("qualified indirect access needs naturally aligned scalar storage"));
+        }
+        let base=canonical_abi_type(il,element)?;
+        if !il.types.iter().any(|t|t.id==base && semantic(4,t.kind)==1) {
+            return Err(invalid("qualified indirect aggregates/pointers unsupported"));
+        }
     }
-    Ok(())
+    Ok(access)
+}
+/// The native pointee carries qualifiers, not necessarily the EDG rvalue.
+fn indirect_lvalue_access(graph:&Graph,id:ExpressionId,il:&Il)
+    -> Result<MemoryAccess,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing qualified lvalue"))?;
+    if semantic(2,node.data.kind)!=3 {return Ok(MemoryAccess::Ordinary);}
+    let op=node.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
+    match op {
+        44 if node.operands.len()==1 =>
+            pointee_memory_access(il,expression_type_id(graph,node.operands[0])?),
+        45 if node.operands.len()==2 => {
+            let a=node.operands[0];let b=node.operands[1];
+            let pointer=if is_pointer_like(il,expression_type_id(graph,a)?)? {a}
+                else if is_pointer_like(il,expression_type_id(graph,b)?)? {b}
+                else {return Err(invalid("subscript has no pointer operand"));};
+            pointee_memory_access(il,expression_type_id(graph,pointer)?)
+        }
+        _=>Ok(MemoryAccess::Ordinary),
+    }
 }
 fn scalar_global(
     il: &Il, symbol: crate::SymbolId,
@@ -1396,20 +1423,16 @@ fn lower_address(
             let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
             match op {
                 44 if node.operands.len()==1 => {
-                    reject_qualified_pointee(il,
+                    let _=pointee_memory_access(il,
                         expression_type_id(graph,node.operands[0])?)?;
                     lower_c_expression(graph,node.operands[0],params,locals,il)
                 }
                 45 if node.operands.len()==2 => {
-                    if scalar_memory_access(il,expression_type_id(graph,id)?)?
-                        !=MemoryAccess::Ordinary {
-                        return Err(invalid("qualified array/pointer lvalue unsupported"));
-                    }
                     let a=node.operands[0]; let b=node.operands[1];
                     let (pointer,index)=if is_pointer_like(il,expression_type_id(graph,a)?)? {(a,b)}
                         else if is_pointer_like(il,expression_type_id(graph,b)?)? {(b,a)}
                         else { return Err(invalid("subscript has no pointer operand")); };
-                    reject_qualified_pointee(il,expression_type_id(graph,pointer)?)?;
+                    let _=pointee_memory_access(il,expression_type_id(graph,pointer)?)?;
                     let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
                     let base=lower_c_expression(graph,pointer,params,locals,il)?;
                     let index=lower_c_expression(graph,index,params,locals,il)?;
@@ -1844,7 +1867,12 @@ fn lower_c_expression(
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
                         } else {
-                            Expr::LoadAddress(output,Box::new(address))
+                            let access=indirect_lvalue_access(graph,id,il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::LoadAddress(output,Box::new(address))
+                            } else {
+                                Expr::LoadQualified(output,access,Box::new(address))
+                            }
                         }
                     }
                     45 if operands.len()==2 => {
@@ -1853,7 +1881,12 @@ fn lower_c_expression(
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
                         } else {
-                            Expr::LoadAddress(output,Box::new(address))
+                            let access=indirect_lvalue_access(graph,id,il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::LoadAddress(output,Box::new(address))
+                            } else {
+                                Expr::LoadQualified(output,access,Box::new(address))
+                            }
                         }
                     }
                     46 if operands.len()==1 => lower_address(
@@ -1928,7 +1961,13 @@ fn lower_c_expression(
                         match place {
                             Some(ScalarPlace::Ssa(i)) => Expr::PostLocal(i,ty,delta),
                             Some(ScalarPlace::Memory(s)) => Expr::PostGlobal(s,ty,delta),
-                            None => Expr::PostAddress(ty,delta,address.unwrap()),
+                            None => {
+                                if indirect_lvalue_access(graph,operands[0],il)?
+                                    !=MemoryAccess::Ordinary {
+                                    return Err(invalid("qualified indirect increment needs RMW"));
+                                }
+                                Expr::PostAddress(ty,delta,address.unwrap())
+                            },
                         }
                     } else {
                         let op=if op==41 {CCompoundOp::Add} else {CCompoundOp::Sub};
@@ -1938,8 +1977,14 @@ fn lower_c_expression(
                                 promoted_integer_type(ty),op,amount),
                             Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,
                                 promoted_integer_type(ty),op,amount),
-                            None => Expr::CompoundAddress(ty,promoted_integer_type(ty),
-                                op,address.unwrap(),amount),
+                            None => {
+                                if indirect_lvalue_access(graph,operands[0],il)?
+                                    !=MemoryAccess::Ordinary {
+                                    return Err(invalid("qualified indirect pointer update unsupported"));
+                                }
+                                Expr::CompoundAddress(ty,promoted_integer_type(ty),
+                                    op,address.unwrap(),amount)
+                            },
                         }
                     }
                 } else {
@@ -1991,7 +2036,12 @@ fn lower_c_expression(
                             if let Some(layout)=selected_bitfield(graph,operands[0],il)? {
                                 Expr::StoreBitField(layout,address.unwrap(),rhs)
                             } else {
-                                Expr::StoreAddress(ty,address.unwrap(),rhs)
+                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                if access==MemoryAccess::Ordinary {
+                                    Expr::StoreAddress(ty,address.unwrap(),rhs)
+                                } else {
+                                    Expr::StoreQualified(ty,access,address.unwrap(),rhs)
+                                }
                             }
                         }
                     }
@@ -2013,7 +2063,13 @@ fn lower_c_expression(
                     match place {
                         Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
-                        None => Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs),
+                        None => {
+                            if indirect_lvalue_access(graph,operands[0],il)?
+                                !=MemoryAccess::Ordinary {
+                                return Err(invalid("qualified indirect compound needs RMW"));
+                            }
+                            Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
+                        },
                     }
                 }
             } else if matches!(op, 23 | 24 | 26) {
@@ -2212,7 +2268,8 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
         },
-        Expr::StoreAddress(_,a,b) | Expr::StoreBitField(_,a,b) |
+        Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
+        Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
         Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
@@ -2225,6 +2282,7 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(a,found);addressed_expr(b,found);addressed_expr(c,found);
         }
         Expr::Normalize(_,a) | Expr::LoadAddress(_,a) |
+        Expr::LoadQualified(_,_,a) |
         Expr::PackAggregate(_,a) |
         Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
@@ -2431,6 +2489,10 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer(fb,address,*ty)
         }
+        Expr::LoadQualified(ty,access,pointer) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::load_integer_access(fb,address,*ty,*access)
+        }
         Expr::PackAggregate(bytes,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             target::ABI.pack_result(fb,address,*bytes)?
@@ -2443,6 +2505,11 @@ fn emit_expr(
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::store_integer(fb,address,value,*ty)
+        }
+        Expr::StoreQualified(ty,access,pointer,value) => {
+            let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::store_integer_access(fb,address,value,*ty,*access)
         }
         Expr::StoreBitField(layout,pointer,value) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
