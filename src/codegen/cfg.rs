@@ -175,6 +175,14 @@ fn lower_gnu_block(
                                         .ok_or_else(||invalid("GNU param has no type"))?.ty;
                                     call_type_abi(il,declared)?
                                 };
+                            if i<locals.len() {
+                                let access=scalar_memory_access(il,locals[i].ty)?;
+                                if access!=MemoryAccess::Ordinary {
+                                    effects.push(Expr::StoreQualified(ty,access,
+                                        Box::new(Expr::AddressLocal(i)),Box::new(e)));
+                                    continue;
+                                }
+                            }
                             effects.push(Expr::AssignLocal(i,ty,Box::new(e)));
                         }
                         _ => return Err(invalid("non-scalar GNU initializer")),
