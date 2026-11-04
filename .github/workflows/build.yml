@@ -336,6 +336,7 @@ jobs:
           cp tests/fixtures/m14_fp_driver.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_bad_int.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_bad_local.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_bad_global.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -345,7 +346,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter edg_m14_fp.o m14_fp_driver.c -o cranelift_m14_fp
             ./gcc_m14_fp
             ./cranelift_m14_fp
-            for source in m14_fp_bad_int.c m14_fp_bad_local.c; do
+            for source in m14_fp_bad_int.c m14_fp_bad_local.c m14_fp_bad_global.c; do
               rm -f m14_bad.o m14_bad.log
               if ../../../edgcpp-rust/target/debug/examples/codegen m14_bad.o --c11 "$source" >m14_bad.log 2>&1; then
                 echo "Unsupported FP construct compiled without implementation: $source"
