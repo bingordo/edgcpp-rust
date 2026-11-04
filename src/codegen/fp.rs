@@ -877,6 +877,23 @@ mod tests {
             FloatStmt::Return(FloatExpr::Local(0)),
         ];
         assert!(emit_float_bodies(&[one_side]).is_ok());
+        // Empty false (or true) arms carry a previously defined value.
+        let mut no_else=valid.clone();
+        no_else.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            FloatStmt::IfAssign(cond.clone(),
+                vec![(0,FloatExpr::Parameter(1))],vec![]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[no_else]).is_ok());
+        let mut empty_then=valid.clone();
+        empty_then.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            FloatStmt::IfAssign(cond.clone(),
+                vec![],vec![(0,FloatExpr::Parameter(1))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[empty_then]).is_ok());
         // But a value defined on only one predecessor is not initialized
         // after the merge; another local's assignment cannot fix it.
         let mut uninit=valid.clone();
@@ -903,13 +920,20 @@ mod tests {
             FloatStmt::Return(FloatExpr::Local(0)),
         ];
         assert!(emit_float_bodies(&[wrong_type]).is_err());
-        let mut empty_arm=valid;
-        empty_arm.statements=vec![
-            FloatStmt::IfAssign(cond,
+        let mut missing_else_uninit=valid.clone();
+        missing_else_uninit.statements=vec![
+            FloatStmt::IfAssign(cond.clone(),
                 vec![(0,FloatExpr::Parameter(0))],vec![]),
             FloatStmt::Return(FloatExpr::Local(0)),
         ];
-        assert!(emit_float_bodies(&[empty_arm]).is_err());
+        assert!(emit_float_bodies(&[missing_else_uninit]).is_err());
+        let mut no_effect=valid;
+        no_effect.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            FloatStmt::IfAssign(cond,vec![],vec![]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[no_effect]).is_err());
     }
 
     #[test]
