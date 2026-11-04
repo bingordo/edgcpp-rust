@@ -759,14 +759,14 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       std::numeric_limits<double>::is_iec559) {
     const auto &value = node->variant.constant.ptr->variant.float_value;
     if (node->type->variant.float_kind == fk_float &&
-        node->type->size == 4 && TARG_SIZEOF_FLOAT == 4 &&
+        node->type->size == 4 &&
         sizeof(float) == 4) {
       uint32_t bits = 0;
       std::memcpy(&bits, &value, sizeof(bits));
       emit_record(58, {txt(function), txt(stmt_path), txt(path),
                        num(type_id), num(32), num(bits)});
     } else if (node->type->variant.float_kind == fk_double &&
-               node->type->size == 8 && TARG_SIZEOF_DOUBLE == 8 &&
+               node->type->size == 8 &&
                sizeof(double) == 8) {
       uint64_t bits = 0;
       std::memcpy(&bits, &value, sizeof(bits));
