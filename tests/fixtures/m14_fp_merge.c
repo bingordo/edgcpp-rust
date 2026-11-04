@@ -1,0 +1,40 @@
+/* M14: SSA join after if/else with per-arm scalar FP assignment. */
+double m14_join_absdiff(double a,double b) {
+    double v;
+    if (a < b) v = b-a; else v = a-b;
+    return v;
+}
+double m14_join_ordered(double a,double b) {
+    double x = a;
+    double y = b;
+    if (a != b) {
+        x = a+b;
+        y = x*2.0;
+    } else {
+        y = a-b;
+        x = y+1.0;
+    }
+    return x-y;
+}
+double m14_join_sequential(double a,double b,double c) {
+    double v = a;
+    if (a > b) v = a-b; else v = b-a;
+    if (v > c) v = v-c; else v = v+c;
+    return v;
+}
+float m14_join_f32(float a,float b) {
+    float v;
+    if (a > b) v = a; else v = b;
+    return v;
+}
+double m14_join_existing(double a,double b) {
+    double x = a;
+    double y = b;
+    if (a >= b) x = a+1.0; else y = b+2.0;
+    return x+y;
+}
+double m14_join_nan(double a,double b) {
+    double v;
+    if (a != b) v = 10.0; else v = 20.0;
+    return v;
+}
