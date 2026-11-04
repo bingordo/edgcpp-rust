@@ -312,15 +312,16 @@ jobs:
             if ../../../edgcpp-rust/target/debug/examples/parse --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_il.log 2>&1; then
               echo "EDG decoded GNU atomic builtin syntax (probe only)"
               grep -E '^(expression m12_probe_|reference m12_probe_|type id=|symbol type name=|statement declaration m12_probe_)' m12_gnu_atomic_il.log | head -n 180 || true
-              # Native object generation is diagnostic: do not silently
-              # consider an external unresolved builtin a supported atomic.
+              # Native generated objects must not claim builtins are
+              # implemented by leaving raw external calls unresolved.
+              rm -f m12_gnu_atomic_probe.o
               if ../../../edgcpp-rust/target/debug/examples/codegen m12_gnu_atomic_probe.o --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_codegen.log 2>&1; then
-                echo "Diagnostic native ELF emitted; unresolved symbols:"
+                echo "Unvalidated source atomic builtin silently emitted native ELF"
                 nm -u m12_gnu_atomic_probe.o || true
-              else
-                echo "GNU atomic lowering currently rejects: "
-                tail -n 15 m12_gnu_atomic_codegen.log
+                exit 1
               fi
+              grep -E 'source atomic builtin __atomic_.*requires checked memory-order lowering' m12_gnu_atomic_codegen.log
+              test ! -e m12_gnu_atomic_probe.o
             else
               echo "EDG cannot parse GNU atomic builtins; backend work not yet possible"
               tail -n 35 m12_gnu_atomic_il.log
