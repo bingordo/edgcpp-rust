@@ -296,7 +296,7 @@ jobs:
             fi
           )
 
-      - name: M12 characterize GCC atomic builtin lowering (probe only)
+      - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
@@ -305,27 +305,41 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
           cp tests/fixtures/m12_gnu_atomic_probe.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_atomic_compat.h ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_c11_explicit_api.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_c11_explicit_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_invalid_order_*.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            if ../../../edgcpp-rust/target/debug/examples/parse --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_il.log 2>&1; then
-              echo "EDG decoded GNU atomic builtin syntax (probe only)"
-              grep -E '^(expression m12_probe_|reference m12_probe_|type id=|symbol type name=|statement declaration m12_probe_)' m12_gnu_atomic_il.log | head -n 180 || true
-              # Native generated objects must not claim builtins are
-              # implemented by leaving raw external calls unresolved.
-              rm -f m12_gnu_atomic_probe.o
-              if ../../../edgcpp-rust/target/debug/examples/codegen m12_gnu_atomic_probe.o --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_codegen.log 2>&1; then
-                echo "Unvalidated source atomic builtin silently emitted native ELF"
-                nm -u m12_gnu_atomic_probe.o || true
+            ../../../edgcpp-rust/target/debug/examples/codegen m12_gnu_atomic_probe.o --c11 --gcc m12_gnu_atomic_probe.c
+            if nm -u m12_gnu_atomic_probe.o | grep -Eq '__atomic_|__sync_'; then
+              echo "Unvalidated unresolved atomic builtin in generated ELF"
+              exit 1
+            fi
+            ../../../edgcpp-rust/target/debug/examples/codegen m12_c11_explicit.o --c11 --gcc m12_c11_explicit_api.c
+            if nm -u m12_c11_explicit.o | grep -Eq '__atomic_|__sync_'; then
+              echo "Unresolved source-level atomic builtin in C11 differential ELF"
+              exit 1
+            fi
+            objdump -dr m12_c11_explicit.o > m12_explicit_disasm.txt
+            grep -Eiq '(xchg|xadd|cmpxchg|lock|mfence)' m12_explicit_disasm.txt
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_c11_explicit_api.c m12_c11_explicit_driver.c -o gcc_m12_explicit
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_c11_explicit.o m12_c11_explicit_driver.c -o cranelift_m12_explicit
+            ./gcc_m12_explicit
+            ./cranelift_m12_explicit
+            for source in m12_invalid_order_load.c m12_invalid_order_store.c m12_invalid_order_cas.c m12_invalid_order_dynamic.c; do
+              rm -f m12_invalid_order.o m12_invalid_order.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen m12_invalid_order.o --c11 --gcc "$source" >m12_invalid_order.log 2>&1; then
+                echo "Invalid atomic order accepted: $source"
                 exit 1
               fi
-              grep -E 'source atomic builtin __atomic_.*requires checked memory-order lowering' m12_gnu_atomic_codegen.log
-              test ! -e m12_gnu_atomic_probe.o
-            else
-              echo "EDG cannot parse GNU atomic builtins; backend work not yet possible"
-              tail -n 35 m12_gnu_atomic_il.log
-            fi
+              grep -E 'atomic order|atomic compare-exchange|atomic order/weak operand must be literal|invalid/dynamic GNU C11 atomic' m12_invalid_order.log
+              test ! -e m12_invalid_order.o
+            done
           )
 
       - name: M12 qualified scalar C11 native GCC differential
