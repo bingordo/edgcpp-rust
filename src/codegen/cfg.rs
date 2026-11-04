@@ -79,21 +79,20 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
             local.compiler_generated,local.structured_binding,
             local.handler_parameter,lowered_vla)));
     }
-    // Typedef chains may hide qualifiers. Conservatively reject them now.
-    let mut ty = local.ty;
-    for _ in 0..=il.types.len() {
-        if let Some(detail) = il.type_details.iter().find(|d| d.owner == ty) {
-            if detail.is_reference || detail.is_rvalue_reference ||
-               detail.qualifiers.unwrap_or(0) != 0 {
-                return Err(invalid("qualified/reference local requires memory semantics"));
-            }
-        }
-        let def = il.types.iter().find(|d| d.id == ty)
-            .ok_or_else(|| invalid("missing local type definition"))?;
-        if semantic(4, def.kind) != 3 { break; }
-        ty = def.related.ok_or_else(|| invalid("unresolved local typeref"))?;
-    }
+    // Scalar qualifiers hidden by typedefs are authoritative: volatile and
+    // C11 atomic automatic locals must live in addressable storage, never SSA.
+    let access=scalar_memory_access(il,local.ty)?;
     let ty = canonical_abi_type(il, local.ty)?;
+    if access!=MemoryAccess::Ordinary {
+        let kind=il.types.iter().find(|t|t.id==ty)
+            .map(|t|semantic(4,t.kind))
+            .ok_or_else(||invalid("qualified local has no canonical type"))?;
+        let bytes=byte_size(il,local.ty)?;
+        let align=storage_alignment(il,local.ty)?;
+        if kind!=1 || !matches!(bytes,1|2|4|8) || align<bytes {
+            return Err(invalid("qualified automatic local needs naturally aligned integer scalar"));
+        }
+    }
     // Lowered VLA helpers introduce integer dimension temporaries and pointer
     // storage. Compiler-generated aggregates are never accepted here.
     if local.compiler_generated && !il.types.iter().any(|d| d.id == ty &&
@@ -970,6 +969,22 @@ fn indirect_lvalue_access(graph:&Graph,id:ExpressionId,il:&Il)
         _=>Ok(MemoryAccess::Ordinary),
     }
 }
+/// Preserve a direct automatic object's declared qualifiers even when
+/// EDG converts its expression type to an unqualified rvalue type.
+fn lvalue_memory_access(
+    graph:&Graph,id:ExpressionId,locals:&[&crate::LocalVariable],il:&Il,
+) -> Result<MemoryAccess,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing lvalue access"))?;
+    if semantic(2,node.data.kind)==2 {
+        if let Some(sym)=node.data.symbol_id {
+            if let Some(local)=locals.iter().find(|v|v.symbol==sym) {
+                cfg_local_type(il,local)?;
+                return scalar_memory_access(il,local.ty);
+            }
+        }
+    }
+    indirect_lvalue_access(graph,id,il)
+}
 fn scalar_global(
     il: &Il, symbol: crate::SymbolId,
 ) -> Result<(String, CAbiInt), CodegenError> {
@@ -1052,6 +1067,11 @@ fn scalar_lvalue(
     }
     if let Some(index) = locals.iter().position(|v| v.symbol == symbol) {
         let ty = cfg_local_type(il,locals[index])?;
+        if scalar_memory_access(il,locals[index].ty)?!=MemoryAccess::Ordinary {
+            // A qualified automatic local is an addressable object. Route
+            // writes and RMW through the shared qualified lvalue operations.
+            return Err(invalid("qualified automatic local must use memory lvalue"));
+        }
         return Ok((ScalarPlace::Ssa(index),ty));
     }
     let (_,ty) = scalar_global(il,symbol)?;
@@ -1826,12 +1846,17 @@ fn lower_c_expression(
                 Expr::Local(locals.len()+i)
             } else {
                 if let Some(i) = locals.iter().position(|v| v.symbol == symbol) {
-                    cfg_local_type(il, locals[i])?;
+                    let local_ty=cfg_local_type(il,locals[i])?;
                     let canonical=canonical_abi_type(il,locals[i].ty)?;
                     if il.types.iter().any(|d|d.id==canonical
                            && semantic(4,d.kind)==6) {
                         Expr::AddressLocal(i)
-                    } else {Expr::Local(i)}
+                    } else {
+                        let access=scalar_memory_access(il,locals[i].ty)?;
+                        if access==MemoryAccess::Ordinary {Expr::Local(i)}
+                        else {Expr::LoadQualified(local_ty,access,
+                            Box::new(Expr::AddressLocal(i)))}
+                    }
                 } else {
                     let (_,ty)=global_value_type(il,symbol)?;
                     if ty.is_none() { Expr::AddressGlobal(symbol) }
@@ -1964,7 +1989,7 @@ fn lower_c_expression(
                             Some(ScalarPlace::Ssa(i)) => Expr::PostLocal(i,ty,delta),
                             Some(ScalarPlace::Memory(s)) => Expr::PostGlobal(s,ty,delta),
                             None => {
-                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                let access=lvalue_memory_access(graph,operands[0],locals,il)?;
                                 if access==MemoryAccess::Ordinary {
                                     Expr::PostAddress(ty,delta,address.unwrap())
                                 } else {
@@ -1982,7 +2007,7 @@ fn lower_c_expression(
                             Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,
                                 promoted_integer_type(ty),op,amount),
                             None => {
-                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                let access=lvalue_memory_access(graph,operands[0],locals,il)?;
                                 if access==MemoryAccess::Ordinary {
                                     Expr::CompoundAddress(ty,promoted_integer_type(ty),
                                         op,address.unwrap(),amount)
@@ -2049,7 +2074,7 @@ fn lower_c_expression(
                             if let Some(layout)=selected_bitfield(graph,operands[0],il)? {
                                 Expr::StoreBitField(layout,address.unwrap(),rhs)
                             } else {
-                                let access=indirect_lvalue_access(graph,operands[0],il)?;
+                                let access=lvalue_memory_access(graph,operands[0],locals,il)?;
                                 if access==MemoryAccess::Ordinary {
                                     Expr::StoreAddress(ty,address.unwrap(),rhs)
                                 } else {
@@ -2077,7 +2102,7 @@ fn lower_c_expression(
                         Some(ScalarPlace::Ssa(i)) => Expr::CompoundLocal(i,ty,compute_ty,kind,rhs),
                         Some(ScalarPlace::Memory(s)) => Expr::CompoundGlobal(s,ty,compute_ty,kind,rhs),
                         None => {
-                            let access=indirect_lvalue_access(graph,operands[0],il)?;
+                            let access=lvalue_memory_access(graph,operands[0],locals,il)?;
                             if access==MemoryAccess::Ordinary {
                                 Expr::CompoundAddress(ty,compute_ty,kind,address.unwrap(),rhs)
                             } else {
@@ -2210,6 +2235,42 @@ fn lower_c_expression(
     Ok(wrap(inner))
 }
 
+/// Initialization statements are checked with their original local-store
+/// definite-assignment semantics, then lowered to effectful qualified memory
+/// accesses. This retains observable initialization without treating a
+/// volatile/atomic local as an ordinary Cranelift SSA variable.
+fn lower_qualified_initializers(
+    body:&mut [Stmt],locals:&[&crate::LocalVariable],il:&Il,
+) -> Result<(),CodegenError> {
+    for stmt in body {
+        match stmt {
+            Stmt::Store(index,value) if *index<locals.len() => {
+                let index=*index;
+                let access=scalar_memory_access(il,locals[index].ty)?;
+                if access!=MemoryAccess::Ordinary {
+                    let ty=cfg_local_type(il,locals[index])?;
+                    *stmt=Stmt::Eval(Expr::StoreQualified(
+                        ty,access,Box::new(Expr::AddressLocal(index)),
+                        Box::new(value.clone())));
+                }
+            }
+            Stmt::If(_,yes,no) => {
+                lower_qualified_initializers(yes,locals,il)?;
+                lower_qualified_initializers(no,locals,il)?;
+            }
+            Stmt::While(_,inner) | Stmt::DoWhile(inner,_) |
+            Stmt::Switch(_,inner) =>
+                lower_qualified_initializers(inner,locals,il)?,
+            Stmt::For {init,increment,body,..} => {
+                lower_qualified_initializers(init,locals,il)?;
+                lower_qualified_initializers(increment,locals,il)?;
+                lower_qualified_initializers(body,locals,il)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
     let graph = Graph::from_il(il).map_err(|e| invalid(format!("EDG graph: {e:?}")))?;
     let mut out = Vec::new();
@@ -2246,7 +2307,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             storage_alignment(il,arg.ty).map(|a|a.trailing_zeros() as u8))
             .collect::<Result<Vec<_>,_>>()?);
         local_types.extend(abi.parameters.iter().copied());
-        let body = lower(&graph, roots[0], &ids, &locals, il)?;
+        let mut body = lower(&graph, roots[0], &ids, &locals, il)?;
         let labels=source_labels(&body)?;
         let initialized: HashSet<usize> =
             (locals.len()..(locals.len()+ids.len())).collect();
@@ -2261,6 +2322,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         if has_fallthrough && abi.result.is_some() {
             return Err(invalid(format!("{name}: some path has no return")));
         }
+        lower_qualified_initializers(&mut body,&locals,il)?;
         out.push(Routine { name: name.clone(), parameters: ids.len(),
             locals: locals.len(), body, abi: Some(abi),
             local_types: Some(local_types),local_storage:Some(local_storage),
