@@ -6,7 +6,7 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 use super::*;
-use cranelift_codegen::ir::{immediates::{Ieee32,Ieee64}, Value};
+use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64}, Value};
 use cranelift_frontend::Variable;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -37,9 +37,35 @@ pub struct FloatFunction {
     pub result:FloatType,
     pub expression:FloatExpr,
 }
-/// Checked straight-line FP local assignments and final return.
+/// C comparison truth tables: all except Ne are ordered. Ne also matches NaN.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum FloatPredicate { Eq,Ne,Lt,Le,Gt,Ge }
+impl FloatPredicate {
+    fn cranelift(self)->FloatCC {
+        match self {
+            Self::Eq=>FloatCC::Equal,
+            Self::Ne=>FloatCC::NotEqual,
+            Self::Lt=>FloatCC::LessThan,
+            Self::Le=>FloatCC::LessThanOrEqual,
+            Self::Gt=>FloatCC::GreaterThan,
+            Self::Ge=>FloatCC::GreaterThanOrEqual,
+        }
+    }
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
-pub enum FloatStmt { Assign(usize,FloatExpr), Return(FloatExpr) }
+pub struct FloatCondition {
+    pub op:FloatPredicate,
+    pub left:FloatExpr,
+    pub right:FloatExpr,
+}
+/// Ordered scalar assignments, a final return, or an if whose arms both
+/// return. Mutating or merging locals across branches remains unsupported.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum FloatStmt {
+    Assign(usize,FloatExpr),
+    Return(FloatExpr),
+    IfReturn(FloatCondition,FloatExpr,FloatExpr),
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct FloatBodyFunction {
     pub name:String,
@@ -145,6 +171,26 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         }
     }
 }
+fn check_condition(
+    cond:&FloatCondition,params:&[FloatType],locals:&[FloatType],
+    defined:&[bool],
+)->Result<(),CodegenError> {
+    check_local_reads(&cond.left,defined,0)?;
+    check_local_reads(&cond.right,defined,0)?;
+    let left=expression_type(&cond.left,params,locals,0)?;
+    let right=expression_type(&cond.right,params,locals,0)?;
+    if left!=right {return Err(reject("unconverted mixed FP comparison"));}
+    Ok(())
+}
+fn emit_condition(
+    cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
+    params_ty:&[FloatType],locals:&[Variable],locals_ty:&[FloatType],
+)->Result<Value,CodegenError> {
+    let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty)?;
+    let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty)?;
+    if t!=u {return Err(reject("unconverted mixed FP comparison"));}
+    Ok(fb.ins().fcmp(cond.op.cranelift(),x,y))
+}
 /// Keep the original pure-return reference API, sharing the same typed
 /// statement emitter and ABI classification as local-bearing FP functions.
 pub fn emit_float_routines(functions:&[FloatFunction])
@@ -179,32 +225,42 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
             return Err(reject("invalid FP function name or variable count"));
         }
         if f.statements.is_empty() || f.statements.len()>10000 ||
-            !matches!(f.statements.last(),Some(FloatStmt::Return(_))) {
-            return Err(reject("FP body must end in exactly one return"));
+            !matches!(f.statements.last(),
+                Some(FloatStmt::Return(_)|FloatStmt::IfReturn(..))) {
+            return Err(reject("FP body must end in one return or returning if"));
         }
         let mut defined=vec![false;f.locals.len()];
         for (i,stmt) in f.statements.iter().enumerate() {
-            let (expr,expected)=match stmt {
-                FloatStmt::Assign(n,e)=>{
-                    if i==f.statements.len()-1 {
-                        return Err(reject("FP function ends in assignment"));
-                    }
+            let last=i+1==f.statements.len();
+            match stmt {
+                FloatStmt::Assign(n,expr)=>{
+                    if last {return Err(reject("FP function ends in assignment"));}
                     let ty=*f.locals.get(*n)
                         .ok_or_else(||reject("FP local index out of range"))?;
-                    (e,ty)
-                }
-                FloatStmt::Return(e)=>{
-                    if i!=f.statements.len()-1 {
-                        return Err(reject("FP return before end of body"));
+                    check_local_reads(expr,&defined,0)?;
+                    if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+                        return Err(reject("FP assignment has an unconverted type"));
                     }
-                    (e,f.result)
+                    defined[*n]=true;
                 }
-            };
-            check_local_reads(expr,&defined,0)?;
-            if expression_type(expr,&f.parameters,&f.locals,0)?!=expected {
-                return Err(reject("FP assignment/return has an unconverted type"));
+                FloatStmt::Return(expr)=>{
+                    if !last {return Err(reject("FP return before end of body"));}
+                    check_local_reads(expr,&defined,0)?;
+                    if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                        return Err(reject("FP return has an unconverted type"));
+                    }
+                }
+                FloatStmt::IfReturn(cond,yes,no)=>{
+                    if !last {return Err(reject("returning FP if must terminate the body"));}
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    for expr in [yes,no] {
+                        check_local_reads(expr,&defined,0)?;
+                        if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                            return Err(reject("FP conditional arm has an unconverted return type"));
+                        }
+                    }
+                }
             }
-            if let FloatStmt::Assign(n,_)=stmt {defined[*n]=true;}
         }
         let mut sig=module.make_signature();
         for ty in &f.parameters {sig.params.push(AbiParam::new(ty.machine()));}
@@ -233,14 +289,34 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                 var
             }).collect();
             for stmt in &f.statements {
-                let expr=match stmt {
-                    FloatStmt::Assign(_,e)|FloatStmt::Return(e)=>e,
-                };
-                let (value,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
-                    &vars,&f.locals)?;
                 match stmt {
-                    FloatStmt::Assign(n,_)=>fb.def_var(vars[*n],value),
-                    FloatStmt::Return(_)=>{fb.ins().return_(&[value]);}
+                    FloatStmt::Assign(n,expr)=>{
+                        let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        fb.def_var(vars[*n],v);
+                    }
+                    FloatStmt::Return(expr)=>{
+                        let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        fb.ins().return_(&[v]);
+                    }
+                    FloatStmt::IfReturn(cond,yes,no)=>{
+                        let flag=emit_condition(cond,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        let yes_block=fb.create_block();
+                        let no_block=fb.create_block();
+                        fb.ins().brif(flag,yes_block,&[],no_block,&[]);
+                        fb.seal_block(yes_block);
+                        fb.seal_block(no_block);
+                        fb.switch_to_block(yes_block);
+                        let (value,_) = emit_expr(yes,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        fb.ins().return_(&[value]);
+                        fb.switch_to_block(no_block);
+                        let (value,_) = emit_expr(no,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        fb.ins().return_(&[value]);
+                    }
                 }
             }
             fb.finalize();
