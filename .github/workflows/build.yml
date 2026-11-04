@@ -878,7 +878,44 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            for variant in TEST_FLOAT_RETURN; do
+            # FP return is now supported. Assert the earlier negative
+            # fixture actually compiles as a C++20 SysV SSE ELF definition.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
               rm -f rejected.o rejected.log
               if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
                 echo "Unexpectedly accepted unsupported construct: $variant"
