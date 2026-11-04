@@ -400,7 +400,11 @@ jobs:
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_sb.o --c11 m12_seq_cst_litmus.c
             objdump -dr edg_m12_sb.o > m12_seqcst_disasm.txt
             # Seq-cst stores must be effectful / not plain relaxed MOV.
-            grep -Eiq '(xchg|lock)' m12_seqcst_disasm.txt
+            if ! grep -Eiq '(xchg|lock|mfence)' m12_seqcst_disasm.txt; then
+              echo "No x86 seq-cst store/load ordering primitive in EDG-generated object"
+              cat m12_seqcst_disasm.txt
+              exit 1
+            fi
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_seq_cst_litmus.c m12_seq_cst_litmus_driver.c -o gcc_m12_sb
             gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread edg_m12_sb.o m12_seq_cst_litmus_driver.c -o cranelift_m12_sb
             ./gcc_m12_sb
