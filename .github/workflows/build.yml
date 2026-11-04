@@ -317,6 +317,41 @@ jobs:
             grep -q '^routine m14_float_mul' m14_fp_il.log
           )
 
+      - name: M14 native EDG scalar floating-point GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_basic.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_bad_int.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_bad_local.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m14_fp.o --c11 m14_fp_basic.c
+            nm -u edg_m14_fp.o
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_basic.c m14_fp_driver.c -o gcc_m14_fp
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_fp.o m14_fp_driver.c -o cranelift_m14_fp
+            ./gcc_m14_fp
+            ./cranelift_m14_fp
+            for source in m14_fp_bad_int.c m14_fp_bad_local.c; do
+              rm -f m14_bad.o m14_bad.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen m14_bad.o --c11 "$source" >m14_bad.log 2>&1; then
+                echo "Unsupported FP construct compiled without implementation: $source"
+                exit 1
+              fi
+              grep -E 'FP |floating|unsupported|EDG IL lowering failed' m14_bad.log
+              test ! -e m14_bad.o
+            done
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
