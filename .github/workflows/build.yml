@@ -381,6 +381,32 @@ jobs:
             test ! -e m12_bad_pointer.o
           )
 
+      - name: M12 seq-cst store-buffering litmus (GCC and Cranelift)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m12_seq_cst_litmus.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_seq_cst_litmus_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_sb.o --c11 m12_seq_cst_litmus.c
+            objdump -dr edg_m12_sb.o > m12_seqcst_disasm.txt
+            # Seq-cst stores must be effectful / not plain relaxed MOV.
+            grep -Eiq '(xchg|lock)' m12_seqcst_disasm.txt
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread m12_seq_cst_litmus.c m12_seq_cst_litmus_driver.c -o gcc_m12_sb
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread edg_m12_sb.o m12_seq_cst_litmus_driver.c -o cranelift_m12_sb
+            ./gcc_m12_sb
+            ./cranelift_m12_sb
+          )
+
       - name: Test optional Cranelift ELF backend (targeted)
         working-directory: edgcpp-rust
         env:
