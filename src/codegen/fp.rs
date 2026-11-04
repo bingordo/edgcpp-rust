@@ -58,13 +58,16 @@ pub struct FloatCondition {
     pub left:FloatExpr,
     pub right:FloatExpr,
 }
-/// Ordered scalar assignments, a final return, or an if whose arms both
-/// return. Mutating or merging locals across branches remains unsupported.
+/// Checked FP SSA statements. IfAssign branches both fall through to a
+/// merge block; the Cranelift SSA builder materializes block parameters for
+/// locals whose values differ by predecessor. No loop or nested branch yet.
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
     Return(FloatExpr),
     IfReturn(FloatCondition,FloatExpr,FloatExpr),
+    /// Two nonempty straight-line assignment arms, joined before a later return.
+    IfAssign(FloatCondition,Vec<(usize,FloatExpr)>,Vec<(usize,FloatExpr)>),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct FloatBodyFunction {
@@ -191,6 +194,26 @@ fn emit_condition(
     if t!=u {return Err(reject("unconverted mixed FP comparison"));}
     Ok(fb.ins().fcmp(cond.op.cranelift(),x,y))
 }
+/// Validate one sequential assignment arm against a copy of the incoming
+/// definitely-initialized set. Each RHS sees preceding assignments in its
+/// own arm; the other arm's effects are never visible during verification.
+fn validate_fp_arm(
+    writes:&[(usize,FloatExpr)],f:&FloatBodyFunction,mut defined:Vec<bool>,
+)->Result<Vec<bool>,CodegenError> {
+    if writes.is_empty() || writes.len()>10000 {
+        return Err(reject("FP conditional assignment arm is empty or oversized"));
+    }
+    for (n,expr) in writes {
+        let ty=*f.locals.get(*n)
+            .ok_or_else(||reject("FP branch local index out of range"))?;
+        check_local_reads(expr,&defined,0)?;
+        if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+            return Err(reject("FP branch assignment has an unconverted type"));
+        }
+        defined[*n]=true;
+    }
+    Ok(defined)
+}
 /// Keep the original pure-return reference API, sharing the same typed
 /// statement emitter and ABI classification as local-bearing FP functions.
 pub fn emit_float_routines(functions:&[FloatFunction])
@@ -260,6 +283,15 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                         }
                     }
                 }
+                FloatStmt::IfAssign(cond,yes,no)=>{
+                    if last {return Err(reject("FP merging if must have a later return"));}
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    let yes=validate_fp_arm(yes,f,defined.clone())?;
+                    let no=validate_fp_arm(no,f,defined.clone())?;
+                    for i in 0..defined.len() {
+                        defined[i]=yes[i] && no[i];
+                    }
+                }
             }
         }
         let mut sig=module.make_signature();
@@ -316,6 +348,34 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                         let (value,_) = emit_expr(no,&mut fb,&params,&f.parameters,
                             &vars,&f.locals)?;
                         fb.ins().return_(&[value]);
+                    }
+                    FloatStmt::IfAssign(cond,yes,no)=>{
+                        let flag=emit_condition(cond,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals)?;
+                        let yes_block=fb.create_block();
+                        let no_block=fb.create_block();
+                        let join_block=fb.create_block();
+                        fb.ins().brif(flag,yes_block,&[],no_block,&[]);
+                        fb.seal_block(yes_block);
+                        fb.seal_block(no_block);
+                        fb.switch_to_block(yes_block);
+                        for (n,expr) in yes {
+                            let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
+                                &vars,&f.locals)?;
+                            fb.def_var(vars[*n],v);
+                        }
+                        fb.ins().jump(join_block,&[]);
+                        fb.switch_to_block(no_block);
+                        for (n,expr) in no {
+                            let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
+                                &vars,&f.locals)?;
+                            fb.def_var(vars[*n],v);
+                        }
+                        fb.ins().jump(join_block,&[]);
+                        // Seal only after both incoming CFG edges are known:
+                        // Cranelift then inserts the proper SSA merge parameters.
+                        fb.seal_block(join_block);
+                        fb.switch_to_block(join_block);
                     }
                 }
             }
@@ -482,9 +542,9 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
     }
     Err(reject("cyclic FP local type aliases"))
 }
-/// Accept a narrow ordered C body with typed FP locals and a final
-/// returning if/else. Branches must each return without mutations; no local
-/// merge, cleanup, pointer access, or loop is silently synthesized.
+/// Accept a narrow ordered C body with typed FP locals, returning if/else,
+/// and straight-line conditional FP assignments with later SSA joins.
+/// Nested conditions, loops, cleanup and pointer access are rejected.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
     output:&mut Vec<FloatStmt>,depth:usize,
@@ -517,21 +577,39 @@ fn lower_fp_body(
                 }
             }
             let extract=|arm:Option<crate::graph::StatementId>|->
-                Result<FloatExpr,CodegenError> {
+                Result<Vec<FloatStmt>,CodegenError> {
                 let arm=arm.ok_or_else(||reject("FP if requires both branches"))?;
                 let mut statements=Vec::new();
                 lower_fp_body(ctx,arm,&mut statements,depth+1)?;
-                if statements.len()!=1 {
-                    return Err(reject("FP if arm must have exactly one return"));
+                if statements.is_empty() || statements.len()>10000 {
+                    return Err(reject("FP if arm must be nonempty and bounded"));
                 }
-                match statements.pop().unwrap() {
-                    FloatStmt::Return(value)=>Ok(value),
-                    _=>Err(reject("FP if arm must directly return")),
-                }
+                Ok(statements)
             };
             let yes=extract(then_stmt)?;
             let no=extract(else_stmt)?;
-            output.push(FloatStmt::IfReturn(cond,yes,no));
+            if yes.len()==1 && no.len()==1 &&
+                matches!(yes[0],FloatStmt::Return(_)) &&
+                matches!(no[0],FloatStmt::Return(_)) {
+                let (FloatStmt::Return(yes),FloatStmt::Return(no))=
+                    (yes.into_iter().next().unwrap(),no.into_iter().next().unwrap())
+                    else {unreachable!()};
+                output.push(FloatStmt::IfReturn(cond,yes,no));
+            } else if yes.iter().all(|s|matches!(s,FloatStmt::Assign(..))) &&
+                      no.iter().all(|s|matches!(s,FloatStmt::Assign(..))) {
+                // Only straight-line assignment branches can join; there is
+                // no general nested CFG, branch termination or memory effect.
+                let assignments=|stmts:Vec<FloatStmt>|->Vec<(usize,FloatExpr)> {
+                    stmts.into_iter().map(|s|match s {
+                        FloatStmt::Assign(n,e)=>(n,e),
+                        _=>unreachable!(),
+                    }).collect()
+                };
+                output.push(FloatStmt::IfAssign(
+                    cond,assignments(yes),assignments(no)));
+            } else {
+                return Err(reject("FP if arms must both return or both assign locals"));
+            }
         }
         2 if node.expression.is_none()=>{
             for child in &node.children {
