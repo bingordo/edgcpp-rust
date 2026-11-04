@@ -44,6 +44,19 @@ pub enum Expr {
     /// increment/decrement. C11 atomics require an indivisible RMW.
     PostQualified(CAbiInt, MemoryAccess, i64, Box<Expr>),
     CompoundQualified(CAbiInt, CAbiInt, MemoryAccess, CCompoundOp, Box<Expr>, Box<Expr>),
+    /// C11 atomic compare_exchange: object and expected designate storage;
+    /// desired is evaluated exactly once. Success/failure orders are retained
+    /// for validation; this x86-64 reference backend strengthens to seq-cst.
+    /// A weak CAS may be implemented by strong CAS (no spurious failures).
+    AtomicCompareExchange {
+        ty: CAbiInt,
+        success: crate::memory_order::MemoryOrder,
+        failure: crate::memory_order::MemoryOrder,
+        weak: bool,
+        object: Box<Expr>,
+        expected: Box<Expr>,
+        desired: Box<Expr>,
+    },
     /// Pack up to eight native bytes into one SysV INTEGER-class GPR.
     PackAggregate(u8, Box<Expr>),
     /// Typed native C bitfield access. Only exact overlapping bits are
@@ -207,6 +220,7 @@ fn emit_expr(
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::LoadQualified(..) | Expr::StoreQualified(..) |
         Expr::PostQualified(..) | Expr::CompoundQualified(..) |
+        Expr::AtomicCompareExchange {..} |
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
@@ -460,6 +474,7 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::StoreQualified(..) |
         Expr::PostQualified(..) | Expr::CompoundQualified(..) |
+        Expr::AtomicCompareExchange {..} |
         Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
         Expr::CopyStruct(..) | Expr::CopyBytes(..) |
