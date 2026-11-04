@@ -104,7 +104,7 @@ pub(super) fn lower(
             if byte_size(il,expected_ty)?!=bytes as u64 ||
                 storage_alignment(il,expected_ty)?<(bytes as u64) ||
                 scalar_memory_access(il,expected_ty)?!=MemoryAccess::Ordinary ||
-                canonical_abi_type(il,expected_ty)?!=canonical_abi_type(il,pointee)? {
+                call_type_abi(il,expected_ty)?!=ty {
                 return Err(invalid("atomic expected pointer needs plain, aligned matching integer"));
             }
             Ok(Expr::AtomicCompareExchange {ty,success,failure,weak,
