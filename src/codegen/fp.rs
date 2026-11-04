@@ -393,7 +393,7 @@ mod tests {
         use std::process::Command;
         let root=std::env::temp_dir().join(format!(
             "edg_m14_float_{}_{}",std::process::id(),
-            std::thread::current().name().unwrap_or("test").replace(' ','_')));
+            std::thread::current().name().unwrap_or("test").replace(' ',"_")));
         std::fs::create_dir_all(&root).unwrap();
         let obj=root.join("float.o");
         let src=root.join("driver.c");
