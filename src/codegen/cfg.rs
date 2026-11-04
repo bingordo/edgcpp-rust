@@ -543,6 +543,11 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             vars.insert(*index);
             Ok(())
         },
+        Expr::AtomicCompareExchange{object,expected,desired,..} => {
+            check_expr(object,vars,params)?;
+            check_expr(expected,vars,params)?;
+            check_expr(desired,vars,params)
+        }
         Expr::LoadAddress(_,a) | Expr::LoadQualified(_,_,a) |
         Expr::LoadBitField(_,a) |
         Expr::PackAggregate(_,a) =>
@@ -2391,6 +2396,11 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             for effect in effects {addressed_expr(effect,found);}
             addressed_expr(result,found);
         },
+        Expr::AtomicCompareExchange{object,expected,desired,..} => {
+            addressed_expr(object,found);
+            addressed_expr(expected,found);
+            addressed_expr(desired,found);
+        },
         Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
         Expr::CompoundQualified(_,_,_,_,a,b) |
         Expr::StoreBitField(_,a,b) |
@@ -2733,6 +2743,16 @@ fn emit_expr(
         Expr::PackAggregate(bytes,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             target::ABI.pack_result(fb,address,*bytes)?
+        }
+        Expr::AtomicCompareExchange{ty,success,failure,weak,object,expected,desired} => {
+            // The checked source expression supplies evaluated object, expected
+            // and desired in source order; compare-exchange never reevaluates
+            // any of them while performing the machine CAS.
+            let object=emit_expr(object,fb,params,vars,globals,stack,local_types,calls)?;
+            let expected=emit_expr(expected,fb,params,vars,globals,stack,local_types,calls)?;
+            let desired=emit_expr(desired,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::atomic_compare_exchange_integer(
+                fb,object,expected,desired,*ty,*success,*failure,*weak)?
         }
         Expr::LoadBitField(layout,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
