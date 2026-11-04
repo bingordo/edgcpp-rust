@@ -8,10 +8,13 @@ extern "C" int rejected(int (*callee)(int), int a) { return callee(a); }
 // M14 positive control: a plain FP return is now supported.
 extern "C" double rejected(double a) { return a; }
 #elif defined(TEST_FLOAT_LOCAL)
-// Branch-dependent FP local update still needs typed FP control-flow SSA.
+// Nested FP conditionals still require general typed control flow.
 extern "C" double rejected(double a) {
     double value = a + 1.0;
-    if (a > 0.0) value = value + 2.0;
+    if (a > 0.0) {
+        if (a > 1.0) value = value + 2.0;
+        else value = value - 2.0;
+    }
     return value;
 }
 #elif defined(TEST_VOLATILE_GLOBAL)
