@@ -22,6 +22,48 @@ fn order(
         .map_err(|e|invalid(format!("invalid source atomic order: {e}")))?;
     Ok(order)
 }
+/// EDG's generated __atomic_N declarations accept void*/const void*.
+/// Those argument conversion nodes deliberately erase the C pointee type.
+/// Walk ONLY the owned unary conversion chain, consulting original symbol
+/// declarations and typed expressions. Never infer the type from width alone.
+fn source_pointee(
+    graph:&Graph,id:ExpressionId,il:&Il,
+    access:MemoryAccess,bytes:usize,
+) -> Result<crate::TypeId,CodegenError> {
+    let mut current=id;
+    for _ in 0..24 {
+        let node=graph.expression(current)
+            .ok_or_else(||invalid("missing native atomic pointer operand"))?;
+        let mut candidates=Vec::new();
+        if let Some(sym)=node.data.symbol_id {
+            if let Some(declared)=il.symbol_types.iter().find(|t|t.symbol==sym) {
+                candidates.push(declared.ty);
+            }
+        }
+        if let Some(ty)=node.data.type_id {candidates.push(ty);}
+        for candidate in candidates {
+            let Ok(base)=canonical_abi_type(il,candidate) else {continue};
+            let Some(def)=il.types.iter().find(|t|t.id==base &&
+                semantic(4,t.kind)==5) else {continue};
+            let Some(element)=def.related else {continue};
+            if scalar_memory_access(il,element).ok()!=Some(access) {continue;}
+            if byte_size(il,element).ok()!=Some(bytes as u64) {continue;}
+            if storage_alignment(il,element).ok().is_none_or(|a|a<bytes as u64) {
+                continue;
+            }
+            let Ok(ty)=call_type_abi(il,element) else {continue};
+            if ty.is_bool || usize::from(ty.bits)!=8*bytes {continue;}
+            return Ok(element);
+        }
+        if semantic(2,node.data.kind)!=3 || node.operands.len()!=1 {
+            break;
+        }
+        // A native unary conversion or address-of is fine; a binary
+        // expression requires a separately checked pointer/alias analysis.
+        current=node.operands[0];
+    }
+    Err(invalid("cannot recover typed, aligned atomic builtin source pointer"))
+}
 pub(super) fn lower(
     graph:&Graph,name:&str,args:&[ExpressionId],
     params:&[crate::SymbolId],locals:&[&crate::LocalVariable],il:&Il,
@@ -47,15 +89,7 @@ pub(super) fn lower(
         return Err(invalid("native atomic builtin width must be 1/2/4/8 bytes"));
     }
     let object=arg(0)?;
-    let object_pointer=expression_type_id(graph,object)?;
-    let ptr=canonical_abi_type(il,object_pointer)?;
-    let ptr_def=il.types.iter().find(|t|t.id==ptr &&
-        semantic(4,t.kind)==5)
-        .ok_or_else(||invalid("atomic object must be typed pointer"))?;
-    let pointee=ptr_def.related.ok_or_else(||invalid("atomic pointer has no element"))?;
-    if pointee_memory_access(il,object_pointer)?!=MemoryAccess::Atomic {
-        return Err(invalid("source atomic builtin requires _Atomic integer pointee"));
-    }
+    let pointee=source_pointee(graph,object,il,MemoryAccess::Atomic,bytes)?;
     let ty=call_type_abi(il,pointee)?;
     if ty.is_bool || usize::from(ty.bits)!=bytes*8 {
         return Err(invalid("source atomic builtin pointee width/type mismatch"));
@@ -95,17 +129,10 @@ pub(super) fn lower(
             validate_compare_exchange(success,failure)
                 .map_err(|e|invalid(format!("invalid atomic compare-exchange order pair: {e}")))?;
             let expected=arg(1)?;
-            let expected_ptr=canonical_abi_type(il,expression_type_id(graph,expected)?)?;
-            let expected_def=il.types.iter().find(|t|t.id==expected_ptr &&
-                semantic(4,t.kind)==5)
-                .ok_or_else(||invalid("atomic expected argument must be pointer"))?;
-            let expected_ty=expected_def.related
-                .ok_or_else(||invalid("atomic expected pointer has no target"))?;
-            if byte_size(il,expected_ty)?!=bytes as u64 ||
-                storage_alignment(il,expected_ty)?<(bytes as u64) ||
-                scalar_memory_access(il,expected_ty)?!=MemoryAccess::Ordinary ||
-                call_type_abi(il,expected_ty)?!=ty {
-                return Err(invalid("atomic expected pointer needs plain, aligned matching integer"));
+            let expected_ty=source_pointee(graph,expected,il,
+                MemoryAccess::Ordinary,bytes)?;
+            if call_type_abi(il,expected_ty)?!=ty {
+                return Err(invalid("atomic expected pointer has wrong scalar type"));
             }
             Ok(Expr::AtomicCompareExchange {ty,success,failure,weak,
                 object:lower(object)?,expected:lower(expected)?,desired:lower(arg(2)?)?})
