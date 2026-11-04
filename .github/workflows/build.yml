@@ -296,6 +296,37 @@ jobs:
             fi
           )
 
+      - name: M12 characterize GCC atomic builtin lowering (probe only)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m12_gnu_atomic_probe.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ../../../edgcpp-rust/target/debug/examples/parse --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_il.log 2>&1; then
+              echo "EDG decoded GNU atomic builtin syntax (probe only)"
+              grep -E '^(expression m12_probe_|reference m12_probe_|type id=|symbol type name=|statement declaration m12_probe_)' m12_gnu_atomic_il.log | head -n 180 || true
+              # Native object generation is diagnostic: do not silently
+              # consider an external unresolved builtin a supported atomic.
+              if ../../../edgcpp-rust/target/debug/examples/codegen m12_gnu_atomic_probe.o --c11 --gcc m12_gnu_atomic_probe.c >m12_gnu_atomic_codegen.log 2>&1; then
+                echo "Diagnostic native ELF emitted; unresolved symbols:"
+                nm -u m12_gnu_atomic_probe.o || true
+              else
+                echo "GNU atomic lowering currently rejects: "
+                tail -n 15 m12_gnu_atomic_codegen.log
+              fi
+            else
+              echo "EDG cannot parse GNU atomic builtins; backend work not yet possible"
+              tail -n 35 m12_gnu_atomic_il.log
+            fi
+          )
+
       - name: M12 qualified scalar C11 native GCC differential
         working-directory: edgcpp-rust
         env:
