@@ -266,34 +266,48 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
     }
 }
+/// Source expressions are checked using exact EDG symbol IDs and widths.
+struct FpSourceCtx<'a> {
+    il:&'a Il,
+    graph:&'a crate::graph::Graph,
+    params:&'a [crate::SymbolId],
+    locals:&'a [crate::SymbolId],
+    param_types:&'a [FloatType],
+    local_types:&'a [FloatType],
+}
 fn expression_from_edg(
-    il:&Il,graph:&crate::graph::Graph,id:crate::graph::ExpressionId,
-    params:&[crate::SymbolId],depth:usize,
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
 )->Result<FloatExpr,CodegenError> {
     if depth>64 {return Err(reject("native EDG FP expression too deep"));}
-    let node=graph.expression(id).ok_or_else(||reject("missing EDG FP expression"))?;
-    let ty=type_from_edg(il,node.data.type_id.ok_or_else(||
+    let node=ctx.graph.expression(id)
+        .ok_or_else(||reject("missing EDG FP expression"))?;
+    let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
     if kind==2 && node.operands.is_empty() {
         let symbol=node.data.symbol_id
             .ok_or_else(||reject("FP variable missing native identity"))?;
-        let i=params.iter().position(|p|*p==symbol)
-            .ok_or_else(||reject("FP local/global rvalue requires memory lowering"))?;
-        return Ok(FloatExpr::Parameter(i));
+        if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+            if ctx.param_types[i]!=ty {return Err(reject("FP formal rvalue type mismatch"));}
+            return Ok(FloatExpr::Parameter(i));
+        }
+        if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+            if ctx.local_types[i]!=ty {return Err(reject("FP local rvalue type mismatch"));}
+            return Ok(FloatExpr::Local(i));
+        }
+        return Err(reject("FP global/address-taken rvalue requires memory lowering"));
     }
     if kind!=3 {return Err(reject("unsupported FP source expression form"));}
     let op=node.data.operator.map(|v|super::semantic(3,v))
         .ok_or_else(||reject("missing native FP operation"))?;
     let arg=|i:usize|->Result<FloatExpr,CodegenError> {
-        expression_from_edg(il,graph,*node.operands.get(i)
-            .ok_or_else(||reject("missing native FP operand"))?,params,depth+1)
+        expression_from_edg(ctx,*node.operands.get(i)
+            .ok_or_else(||reject("missing native FP operand"))?,depth+1)
     };
     let out=if node.operands.len()==1 {
         match op {
             4=>FloatExpr::Neg(Box::new(arg(0)?)),
-            // A native EDG cast/implicit conversion is the sole place
-            // where f32->f64 and f64->f32 may change machine class.
+            // All type changes must be introduced by actual EDG nodes.
             11|12|16=>FloatExpr::Convert(ty,Box::new(arg(0)?)),
             _=>return Err(reject(format!("unsupported unary EDG FP operator {op}"))),
         }
@@ -310,28 +324,106 @@ fn expression_from_edg(
     } else {
         return Err(reject("unsupported native EDG FP operation arity"));
     };
-    let checked=expression_type(&out,&params.iter().map(|sym|{
-        let type_id=il.function_parameters.iter().find(|p|p.symbol==*sym)
-            .map(|p|p.ty).ok_or_else(||reject("missing native FP formal"))?;
-        type_from_edg(il,type_id)
-    }).collect::<Result<Vec<_>,_>>()?,&[],0)?;
-    if checked!=ty {return Err(reject("EDG FP expression result type differs from operands"));}
+    if expression_type(&out,ctx.param_types,ctx.local_types,0)?!=ty {
+        return Err(reject("EDG FP expression result type differs from operands"));
+    }
     Ok(out)
 }
-fn return_expression(
-    il:&Il,graph:&crate::graph::Graph,
-    root:crate::graph::StatementId,params:&[crate::SymbolId],
-)->Result<FloatExpr,CodegenError> {
-    let node=graph.statement(root).ok_or_else(||reject("missing FP statement"))?;
-    match super::semantic(1,node.data.kind) {
-        1 if node.children.is_empty()=>{
-            let expr=node.expression.ok_or_else(||reject("FP return has no value"))?;
-            expression_from_edg(il,graph,expr,params,0)
-        },
-        2 if node.expression.is_none() && node.children.len()==1=>
-            return_expression(il,graph,node.children[0],params),
-        _=>Err(reject("FP reference slice needs a single return statement")),
+/// EDG typedef wrappers may conceal qualifiers. No ordinary SSA value may
+/// represent an observable volatile or atomic local, or a C++ reference.
+fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
+    for _ in 0..=il.types.len() {
+        if let Some(detail)=il.type_details.iter().find(|d|d.owner==ty) {
+            if detail.is_reference || detail.is_rvalue_reference ||
+                detail.qualifiers.unwrap_or(0)!=0 {
+                return Err(reject("qualified/reference FP local needs memory effects"));
+            }
+        }
+        let t=il.types.iter().find(|t|t.id==ty)
+            .ok_or_else(||reject("missing native FP local type"))?;
+        if super::semantic(4,t.kind)!=3 {return Ok(());}
+        ty=t.related.ok_or_else(||reject("unresolved FP local type alias"))?;
     }
+    Err(reject("cyclic FP local type aliases"))
+}
+/// Accept a deliberately narrow straight-line C body. Declaration order,
+/// initializer evaluation and assignments are preserved. Anything requiring
+/// control-flow merges, exception cleanup, pointers or compound writes
+/// fails before object emission.
+fn lower_fp_body(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
+    output:&mut Vec<FloatStmt>,depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP source statement nesting too deep"));}
+    let node=ctx.graph.statement(id).ok_or_else(||reject("missing FP statement"))?;
+    let path=&node.data.path;
+    let function=&node.data.function;
+    let simple_children=node.children.is_empty();
+    match super::semantic(1,node.data.kind) {
+        2 if node.expression.is_none()=>{
+            for child in &node.children {
+                lower_fp_body(ctx,*child,output,depth+1)?;
+            }
+        }
+        4 if node.expression.is_none() && simple_children=>{
+            let mut found=false;
+            for decl in ctx.graph.declarations_at(function,path) {
+                found=true;
+                if decl.is_vla || !ctx.locals.contains(&decl.symbol) {
+                    return Err(reject("FP declaration is not a checked automatic scalar"));
+                }
+                if type_from_edg(ctx.il,decl.ty).is_err() {
+                    return Err(reject("FP declaration has unsupported source type"));
+                }
+            }
+            if !found {return Err(reject("FP declaration missing native symbol"));}
+        }
+        5 if simple_children=>{
+            let init=ctx.graph.statement_initialization(function,path)
+                .ok_or_else(||reject("FP initializer missing native statement metadata"))?;
+            if init.role!=0 || init.braced || init.kind!=3 {
+                return Err(reject("unsupported FP initializer kind"));
+            }
+            let symbol=init.symbol.ok_or_else(||reject("FP initializer has no local"))?;
+            let local=ctx.locals.iter().position(|p|*p==symbol)
+                .ok_or_else(||reject("FP initializer target is not an automatic local"))?;
+            let source=node.expression
+                .ok_or_else(||reject("FP local initializer has no expression"))?;
+            let value=expression_from_edg(ctx,source,0)?;
+            output.push(FloatStmt::Assign(local,value));
+        }
+        6 if simple_children=>{
+            let expr=node.expression
+                .ok_or_else(||reject("FP expression statement has no expression"))?;
+            let operation=ctx.graph.expression(expr)
+                .ok_or_else(||reject("missing FP assignment expression"))?;
+            if super::semantic(2,operation.data.kind)!=3 ||
+                operation.data.operator.map(|v|super::semantic(3,v))!=Some(18) ||
+                operation.operands.len()!=2 {
+                return Err(reject("FP side-effect expression needs simple local assignment"));
+            }
+            let left=ctx.graph.expression(operation.operands[0])
+                .ok_or_else(||reject("FP assignment has no lvalue"))?;
+            if super::semantic(2,left.data.kind)!=2 || !left.operands.is_empty() {
+                return Err(reject("FP assignment target is not a direct local"));
+            }
+            let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
+                .ok_or_else(||reject("FP assignment target is not a checked local"))?;
+            if type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native FP lvalue type"))?)?!=ctx.local_types[local] {
+                return Err(reject("FP lvalue type mismatch"));
+            }
+            let value=expression_from_edg(ctx,operation.operands[1],0)?;
+            output.push(FloatStmt::Assign(local,value));
+        }
+        1 if simple_children=>{
+            let source=node.expression.ok_or_else(||reject("FP return has no value"))?;
+            output.push(FloatStmt::Return(expression_from_edg(ctx,source,0)?));
+        }
+        _=>return Err(reject("unsupported FP control flow or statement form")),
+    }
+    if output.len()>10000 {return Err(reject("FP statement count exceeds limit"));}
+    Ok(())
 }
 /// Only a module consisting entirely of simple floating-point routines is
 /// handled here. Ordinary integer C follows the established CFG; mixed FP and
@@ -409,21 +501,36 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 return Err(reject("FP prototype type mismatch"));
             }
         }
-        if il.local_variables.iter().any(|v|v.routine==routine) {
-            return Err(reject("FP locals require typed scalar CFG integration"));
+        let locals:Vec<_>=il.local_variables.iter()
+            .filter(|v|v.routine==routine).collect();
+        if locals.len()>4096 {return Err(reject("too many FP locals"));}
+        let mut local_syms=Vec::with_capacity(locals.len());
+        let mut local_types=Vec::with_capacity(locals.len());
+        for local in locals {
+            if local.static_storage || local.compiler_generated ||
+                local.structured_binding || local.handler_parameter ||
+                local_syms.contains(&local.symbol) {
+                return Err(reject("unsupported FP local storage class"));
+            }
+            check_plain_fp_local(il,local.ty)?;
+            local_types.push(type_from_edg(il,local.ty)?);
+            local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
         if roots.len()!=1 {return Err(reject("FP function must have one root"));}
         let params_syms=args.iter().map(|p|p.symbol).collect::<Vec<_>>();
-        let expression=return_expression(il,&graph,roots[0],&params_syms)?;
-        if expression_type(&expression,&params,&[],0)?!=ret {
-            return Err(reject("FP return value missing native conversion"));
-        }
-        functions.push(FloatFunction {
-            name:name.to_string(),parameters:params,result:ret,expression,
+        let ctx=FpSourceCtx {
+            il,graph:&graph,params:&params_syms,locals:&local_syms,
+            param_types:&params,local_types:&local_types,
+        };
+        let mut statements=Vec::new();
+        lower_fp_body(&ctx,roots[0],&mut statements,0)?;
+        functions.push(FloatBodyFunction {
+            name:name.to_string(),parameters:params,result:ret,
+            locals:local_types,statements,
         });
     }
-    emit_float_routines(&functions).map(Some)
+    emit_float_bodies(&functions).map(Some)
 }
 
 #[cfg(test)]
