@@ -280,6 +280,14 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
     }
     if !found_float {return Ok(None);}
+    // This reference emitter only defines functions. A module that owns
+    // global storage or executable initialization must not silently drop
+    // its data section when switched from the general integer CFG.
+    if il.global_variables.iter().any(|g|
+        g.linkage!=1 || g.explicit_initializer || g.thread_local ||
+        g.local_to_function) {
+        return Err(reject("FP source module defines global/TLS storage without FP data lowering"));
+    }
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
         let routine=graph.routine_for_function(name)
