@@ -312,6 +312,14 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
                        num(type->variant.integer.bool_type ? 1 : 0)});
     }
   }
+  // M14: export *only* the two standard binary FP source types. Width is
+  // confirmed by EDG's native target layout and the exact float_kind,
+  // never inferred from the spelling of an unrelated extended FP type.
+  if (type->kind == tk_float && !type->incomplete &&
+      ((type->variant.float_kind == fk_float && type->size == 4) ||
+       (type->variant.float_kind == fk_double && type->size == 8))) {
+    emit_record(56, {num(id), num(type->size * 8)});
+  }
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {
