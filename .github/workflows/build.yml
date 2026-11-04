@@ -344,6 +344,26 @@ jobs:
             grep -q '^routine m14_local_assign' m14_locals_il.log
           )
 
+      - name: M14 inspect native EDG floating compare and if-return projection
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --example parse
+          cp tests/fixtures/m14_fp_comparison_probe.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 m14_fp_comparison_probe.c > m14_cmp_probe.log 2>&1
+            grep -E '^(statement m14_cmp_|expression m14_cmp_|reference m14_cmp_|type id=)' m14_cmp_probe.log | head -n 170 || true
+            grep -q '^routine m14_cmp_ne' m14_cmp_probe.log
+          )
+
       - name: M14 native EDG scalar floating-point GCC differential
         working-directory: edgcpp-rust
         env:
