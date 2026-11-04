@@ -76,3 +76,16 @@ ordered writes and sequentially consistent atomic scalar reads/writes.
 Full M12 completion requires native target and `bingordo/compiler` support
 for precise ordering, true volatile load/store primitives, and concurrent
 atomic RMW litmus/stress tests.
+
+## Source memory-order validation groundwork (2026-11-03)
+
+The public `memory_order` Rust module now defines all six C11 orders, operation
+categories, and checked load/store/RMW/fence and compare-exchange ordering
+contracts, including the failure-order constraints. Unit tests enumerate all
+36 success/failure combinations. This is a **semantic validation API only**:
+there is currently no EDG builtin extraction, `_explicit` lowering, native
+compare-exchange expected-value writeback, or backend mapping of those orders.
+Do not infer runtime support from the presence of this module. The seq-cst-only
+reference subset described above is unchanged, and source-visible explicit
+orders must still be rejected until properly decoded and emitted. M12 remains
+open under issue #58.
