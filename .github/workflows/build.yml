@@ -313,6 +313,39 @@ jobs:
             test ! -e m12_rejected.o
           )
 
+      - name: M12 qualified automatic scalar GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m12_qualified_locals.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_qualified_locals_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_qualified_local_rejected.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_locals.o --c11 m12_qualified_locals.c
+            objdump -dr edg_m12_locals.o > m12_local_disasm.txt
+            grep -Eiq '(xchg|xadd|cmpxchg)' m12_local_disasm.txt
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m12_qualified_locals.c m12_qualified_locals_driver.c -o gcc_m12_locals
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m12_locals.o m12_qualified_locals_driver.c -o cranelift_m12_locals
+            ./gcc_m12_locals
+            ./cranelift_m12_locals
+            rm -f m12_bad_local.o m12_bad_local.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen m12_bad_local.o --c11 m12_qualified_local_rejected.c >m12_bad_local.log 2>&1; then
+              echo "Unsupported atomic pointer local unexpectedly accepted"
+              exit 1
+            fi
+            grep -E 'qualified automatic local needs naturally aligned integer scalar|unsupported EDG operation' m12_bad_local.log
+            test ! -e m12_bad_local.o
+          )
+
       - name: M12 qualified indirect lvalue GCC differential
         working-directory: edgcpp-rust
         env:
