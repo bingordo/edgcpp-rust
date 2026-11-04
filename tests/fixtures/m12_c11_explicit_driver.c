@@ -9,6 +9,7 @@ int m12_explicit_fetch(_Atomic int *,int);
 int m12_explicit_cas(_Atomic int *,int *,int);
 int m12_explicit_weak_cas(_Atomic int *,int *,int);
 void m12_explicit_fence(void);
+void m12_explicit_signal_fence(void);
 void m12_explicit_publish(_Atomic int *,int *,int);
 int m12_explicit_read(_Atomic int *,int *,int);
 static void check(const char *name,int got,int expected) {
@@ -40,6 +41,7 @@ int main(void) {
     check("weak cas",m12_explicit_weak_cas(&value,&expected,33),1);
     check("weak cas value",atomic_load(&value),33);
     m12_explicit_fence();
+    m12_explicit_signal_fence();
     int before=atomic_load(&value);
     int result=m12_explicit_fetch(&value,3);
     int a=before,b=before+3,c=b-2,d=c^0x13,e=d&255;
