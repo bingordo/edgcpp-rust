@@ -89,3 +89,49 @@ Do not infer runtime support from the presence of this module. The seq-cst-only
 reference subset described above is unchanged, and source-visible explicit
 orders must still be rejected until properly decoded and emitted. M12 remains
 open under issue #58.
+
+## M12 follow-up checkpoint — qualified automatic storage and builtin boundary (2026-11-03)
+
+**Passing end-to-end CI:** [run 41752951126](https://github.com/bingordo/edgcpp-rust/actions/runs/41752951126).
+
+The x86-64 Cranelift reference now accepts naturally aligned **scalar integer**
+volatile and C11 atomic automatic locals and formal parameters, preserving
+the declared qualifiers rather than silently sinking them to ordinary SSA.
+Locals are addressable; qualified formals receive an effectful entry store.
+Direct reads, assignments, increments and compound arithmetic use qualified
+memory operations, including initialization in GNU statement expressions.
+Tests compare generated ELF with GCC for locals/formals, indirect addressing,
+and both signed and unsigned 1/2/4/8-byte scalars. Unsupported atomic pointer
+objects remain rejected before ELF emission.
+
+The runtime seq-cst **store-buffering** litmus has a two-thread GCC and
+generated-ELF differential and an x86 machine-effect assertion accepting
+either an exchange/LOCK sequence or an ordering fence. The standalone
+backend also has a checked native compare-exchange expression with
+conditional expected-value update only on failure, validated by executing a
+native object from a GCC caller. Success/failure orders are checked with the
+public `memory_order` module; this reference backend currently strengthens
+accepted orders to seq-cst. This compare-exchange expression is **not yet
+extracted from EDG's source-level C11 builtins** and is **not** a claim of a
+working source-visible compare-exchange API.
+
+**Native EDG builtin probe:**
+- The pinned native EDG configuration cannot find `stdatomic.h`; a normal
+  source-visible C11 API fixture therefore fails at header resolution.
+- Header-independent GCC `__atomic_*_n` expressions parse in GNU mode,
+  but EDG rewrites them to external calls such as `__atomic_load_4`,
+  `__atomic_compare_exchange_4`, and `__atomic_thread_fence`.
+- The old codegen path emitted an ELF with undefined atomic references.
+  This is now an explicit **fail-closed error** instead of an accidental
+  claim of complete source memory-order semantics. CI verifies no object
+  exists after the rejection. It is not a linkable implementation of those
+  builtins.
+
+**Still blocking M12 completion (issue #58):** a validated C11 header and
+native builtin-to-semantic decoding, explicit source-order propagation across
+all atomic operations, source-visible exchange/fetch/CAS/fence with failure
+readback, qualified aggregates/field and bitfield semantics, genuine MMIO
+volatile lowering or a documented runtime/target alternative, and the
+portable `bingordo/compiler` adapter carrying those memory effects to its
+SSA/backend. Continue to fail closed until these are verified. This checkpoint
+is intentionally not a declaration that M12 is complete.
