@@ -30,6 +30,9 @@ int m12_explicit_weak_cas(_Atomic int *p,int *expected,int desired) {
 void m12_explicit_fence(void) {
     atomic_thread_fence(memory_order_seq_cst);
 }
+void m12_explicit_signal_fence(void) {
+    atomic_signal_fence(memory_order_acquire);
+}
 void m12_explicit_publish(_Atomic int *ready,int *payload,int value) {
     *payload=value;
     atomic_store_explicit(ready,value,memory_order_release);
