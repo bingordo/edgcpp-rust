@@ -341,8 +341,8 @@ jobs:
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/codegen edg_m14_fp.o --c11 m14_fp_basic.c
             nm -u edg_m14_fp.o
-            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_basic.c m14_fp_driver.c -o gcc_m14_fp
-            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_fp.o m14_fp_driver.c -o cranelift_m14_fp
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter m14_fp_basic.c m14_fp_driver.c -o gcc_m14_fp
+            gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter edg_m14_fp.o m14_fp_driver.c -o cranelift_m14_fp
             ./gcc_m14_fp
             ./cranelift_m14_fp
             for source in m14_fp_bad_int.c m14_fp_bad_local.c; do
