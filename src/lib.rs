@@ -1707,6 +1707,23 @@ mod tests {
     }
 
     #[test]
+    fn m14_standard_float_wire_is_additive_and_strict() {
+        let number = |value| WireField {
+            data: std::ptr::null(), length:0, value, tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let valid=[number(7),number(32)];
+        unsafe { collect((&mut state as *mut Collector).cast(),57,
+            valid.as_ptr(),valid.len(),0); }
+        assert!(!state.malformed);
+        assert_eq!(state.il.c_float_types,vec![CFloatType{id:TypeId(7),bits:32}]);
+        let invalid=[number(8),number(80)];
+        unsafe { collect((&mut state as *mut Collector).cast(),57,
+            invalid.as_ptr(),invalid.len(),0); }
+        assert!(state.malformed);
+        assert_eq!(state.il.c_float_types.len(),1);
+    }
+    #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
