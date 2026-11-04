@@ -746,6 +746,34 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     }
   }
   const uint32_t type_id = emit_type(node->type, 0);
+  // M14 event 58: native C binary32/binary64 bits, not a decimal string.
+  // EDG stores fk_float/fk_double in the first 4/8 bytes of the internal
+  // float-value image (see float_pt.c store_host_fp_value).  Reading with
+  // memcpy avoids alignment and strict-aliasing UB.  Only export when
+  // both the configured target and the host representation are IEEE 754.
+  if (has_constant && type_id != 0 && node->type != nullptr &&
+      node->type->kind == tk_float &&
+      node->variant.constant.ptr->kind == ck_float &&
+      TARG_HAS_IEEE_FLOATING_POINT &&
+      std::numeric_limits<float>::is_iec559 &&
+      std::numeric_limits<double>::is_iec559) {
+    const auto &value = node->variant.constant.ptr->variant.float_value;
+    if (node->type->variant.float_kind == fk_float &&
+        node->type->size == 4 && TARG_SIZEOF_FLOAT == 4 &&
+        sizeof(float) == 4) {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      emit_record(58, {txt(function), txt(stmt_path), txt(path),
+                       num(type_id), num(32), num(bits)});
+    } else if (node->type->variant.float_kind == fk_double &&
+               node->type->size == 8 && TARG_SIZEOF_DOUBLE == 8 &&
+               sizeof(double) == 8) {
+      uint64_t bits = 0;
+      std::memcpy(&bits, &value, sizeof(bits));
+      emit_record(58, {txt(function), txt(stmt_path), txt(path),
+                       num(type_id), num(64), num(bits)});
+    }
+  }
   if (has_constant &&
       node->variant.constant.ptr->kind == ck_address &&
       node->variant.constant.ptr->variant.address.kind == abk_variable) {
