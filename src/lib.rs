@@ -7,6 +7,7 @@
 //! native IL is far richer; this crate intentionally does not expose dangling
 //! raw EDG pointers after `edg_main` returns.
 pub mod graph;
+pub mod memory_order;
 #[cfg(feature = "codegen")]
 pub mod codegen;
 
