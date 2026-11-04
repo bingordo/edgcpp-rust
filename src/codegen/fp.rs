@@ -430,6 +430,41 @@ fn expression_from_edg(
     }
     Ok(out)
 }
+/// A C floating-point comparison has an integer/bool result, but its
+/// operands must both have verified native FP widths. Never lower it by
+/// first interpreting the result as a floating-point expression.
+fn comparison_from_edg(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+)->Result<FloatCondition,CodegenError> {
+    let node=ctx.graph.expression(id).ok_or_else(||
+        reject("missing EDG floating comparison"))?;
+    if super::semantic(2,node.data.kind)!=3 || node.operands.len()!=2 ||
+        node.data.constant_kind.is_some() {
+        return Err(reject("FP condition requires a binary comparison"));
+    }
+    let integer=super::canonical_abi_type(ctx.il,
+        node.data.type_id.ok_or_else(||
+            reject("FP condition has no native result type"))?)?;
+    if !ctx.il.c_integer_types.iter().any(|ty|
+        ty.id==integer && (ty.is_bool || ty.bits==32)) {
+        return Err(reject("FP comparison must produce C int or bool"));
+    }
+    let op=match node.data.operator.map(|v|super::semantic(3,v)) {
+        Some(5)=>FloatPredicate::Eq,
+        Some(6)=>FloatPredicate::Ne,
+        Some(7)=>FloatPredicate::Lt,
+        Some(8)=>FloatPredicate::Le,
+        Some(9)=>FloatPredicate::Gt,
+        Some(10)=>FloatPredicate::Ge,
+        _=>return Err(reject("unsupported EDG FP comparison predicate")),
+    };
+    let left=expression_from_edg(ctx,node.operands[0],0)?;
+    let right=expression_from_edg(ctx,node.operands[1],0)?;
+    let cond=FloatCondition {op,left,right};
+    check_condition(&cond,ctx.param_types,ctx.local_types,
+        &vec![true;ctx.local_types.len()])?;
+    Ok(cond)
+}
 /// EDG typedef wrappers may conceal qualifiers. No ordinary SSA value may
 /// represent an observable volatile or atomic local, or a C++ reference.
 fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
@@ -447,10 +482,9 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
     }
     Err(reject("cyclic FP local type aliases"))
 }
-/// Accept a deliberately narrow straight-line C body. Declaration order,
-/// initializer evaluation and assignments are preserved. Anything requiring
-/// control-flow merges, exception cleanup, pointers or compound writes
-/// fails before object emission.
+/// Accept a narrow ordered C body with typed FP locals and a final
+/// returning if/else. Branches must each return without mutations; no local
+/// merge, cleanup, pointer access, or loop is silently synthesized.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
     output:&mut Vec<FloatStmt>,depth:usize,
@@ -461,6 +495,44 @@ fn lower_fp_body(
     let function=&node.data.function;
     let simple_children=node.children.is_empty();
     match super::semantic(1,node.data.kind) {
+        3 if node.expression.is_some() && node.children.len()==2=>{
+            let cond=comparison_from_edg(ctx,node.expression.unwrap())?;
+            let mut then_stmt=None;
+            let mut else_stmt=None;
+            let then_prefix=format!("{path}.then.");
+            let else_prefix=format!("{path}.else.");
+            for child in &node.children {
+                let arm=ctx.graph.statement(*child)
+                    .ok_or_else(||reject("missing FP if arm"))?;
+                if arm.data.path.starts_with(&then_prefix) {
+                    if then_stmt.replace(*child).is_some() {
+                        return Err(reject("duplicate FP then branch"));
+                    }
+                } else if arm.data.path.starts_with(&else_prefix) {
+                    if else_stmt.replace(*child).is_some() {
+                        return Err(reject("duplicate FP else branch"));
+                    }
+                } else {
+                    return Err(reject("unexpected FP if branch edge"));
+                }
+            }
+            let extract=|arm:Option<crate::graph::StatementId>|->
+                Result<FloatExpr,CodegenError> {
+                let arm=arm.ok_or_else(||reject("FP if requires both branches"))?;
+                let mut statements=Vec::new();
+                lower_fp_body(ctx,arm,&mut statements,depth+1)?;
+                if statements.len()!=1 {
+                    return Err(reject("FP if arm must have exactly one return"));
+                }
+                match statements.pop().unwrap() {
+                    FloatStmt::Return(value)=>Ok(value),
+                    _=>Err(reject("FP if arm must directly return")),
+                }
+            };
+            let yes=extract(then_stmt)?;
+            let no=extract(else_stmt)?;
+            output.push(FloatStmt::IfReturn(cond,yes,no));
+        }
         2 if node.expression.is_none()=>{
             for child in &node.children {
                 lower_fp_body(ctx,*child,output,depth+1)?;
