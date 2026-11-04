@@ -17,6 +17,20 @@ pub enum MemoryOrder {
     SeqCst,
 }
 
+/// The GCC/Clang atomic builtin order encoding. Never accept unknown
+/// values, dynamic order expressions, or backend-specific modifier bits.
+pub fn from_gnu_builtin_constant(raw:i64) -> Result<MemoryOrder,String> {
+    match raw {
+        0=>Ok(MemoryOrder::Relaxed),
+        1=>Ok(MemoryOrder::Consume),
+        2=>Ok(MemoryOrder::Acquire),
+        3=>Ok(MemoryOrder::Release),
+        4=>Ok(MemoryOrder::AcqRel),
+        5=>Ok(MemoryOrder::SeqCst),
+        _=>Err(format!("invalid/dynamic GNU C11 atomic memory order {raw}")),
+    }
+}
+
 /// A C11 atomic operation's ordering constraints, independent of the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AtomicOperation {
@@ -81,6 +95,18 @@ mod tests {
     use MemoryOrder::*;
     const ORDERS: [MemoryOrder; 6] = [Relaxed, Consume, Acquire, Release, AcqRel, SeqCst];
 
+    #[test]
+    fn gnu_order_literals_are_checked_without_masking_unknown_bits() {
+        assert_eq!(from_gnu_builtin_constant(0),Ok(Relaxed));
+        assert_eq!(from_gnu_builtin_constant(1),Ok(Consume));
+        assert_eq!(from_gnu_builtin_constant(2),Ok(Acquire));
+        assert_eq!(from_gnu_builtin_constant(3),Ok(Release));
+        assert_eq!(from_gnu_builtin_constant(4),Ok(AcqRel));
+        assert_eq!(from_gnu_builtin_constant(5),Ok(SeqCst));
+        for raw in [-1,6,7,0x100,0x2000,i64::MAX] {
+            assert!(from_gnu_builtin_constant(raw).is_err(),"{raw}");
+        }
+    }
     #[test]
     fn operation_table_is_exhaustive() {
         for order in ORDERS {
