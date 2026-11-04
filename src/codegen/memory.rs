@@ -48,6 +48,54 @@ pub(super) fn store_integer_access(
     normalized
 }
 
+/// C11 compare-exchange with expected-value readback. The reference x86
+/// backend implements both accepted source orders as seq-cst, a legal
+/// strengthening. An allowed weak operation is implemented using strong CAS.
+/// The expected pointer is ordinary (non-atomic) memory, and receives the
+/// observed value ONLY when CAS failed. Never replay desired evaluation.
+pub(super) fn atomic_compare_exchange_integer(
+    fb:&mut FunctionBuilder<'_>,
+    object:cranelift_codegen::ir::Value,
+    expected_address:cranelift_codegen::ir::Value,
+    desired:cranelift_codegen::ir::Value,
+    ty:CAbiInt,
+    success:crate::memory_order::MemoryOrder,
+    failure:crate::memory_order::MemoryOrder,
+    _weak:bool,
+)->Result<cranelift_codegen::ir::Value,CodegenError> {
+    crate::memory_order::validate_compare_exchange(success,failure)
+        .map_err(|err|CodegenError::InvalidFunction(format!(
+            "invalid C11 compare-exchange ordering: {err}")))?;
+    if !matches!(ty.bits,8|16|32|64) || ty.is_bool {
+        return Err(CodegenError::InvalidFunction(
+            "unsupported C11 compare-exchange scalar width/type".into()));
+    }
+    let expected=load_integer(fb,expected_address,ty);
+    let desired=normalize_c_value(fb,desired,ty);
+    let raw_expected=if ty.bits==64 {expected}
+        else {fb.ins().ireduce(ty.cranelift(),expected)};
+    let raw_desired=if ty.bits==64 {desired}
+        else {fb.ins().ireduce(ty.cranelift(),desired)};
+    let observed=fb.ins().atomic_cas(MemFlags::new(),object,raw_expected,raw_desired);
+    let equal=fb.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal,
+        observed,raw_expected);
+    let failure_block=fb.create_block();
+    let continuation=fb.create_block();
+    fb.ins().brif(equal,continuation,&[],failure_block,&[]);
+    fb.switch_to_block(failure_block);
+    let observed=if ty.bits==64 {observed}
+        else if ty.signed {fb.ins().sextend(types::I64,observed)}
+        else {fb.ins().uextend(types::I64,observed)};
+    store_integer(fb,expected_address,observed,ty);
+    fb.ins().jump(continuation,&[]);
+    fb.seal_block(failure_block);
+    fb.switch_to_block(continuation);
+    fb.seal_block(continuation);
+    let one=fb.ins().iconst(types::I64,1);
+    let zero=fb.ins().iconst(types::I64,0);
+    Ok(fb.ins().select(equal,one,zero))
+}
+
 /// Read a C integer scalar from an address, preserving native width and
 /// canonicalizing it to the I64 representation used by the CFG IR.
 /// The address must refer to valid, suitably aligned nonvolatile storage.
