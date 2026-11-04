@@ -135,3 +135,58 @@ volatile lowering or a documented runtime/target alternative, and the
 portable `bingordo/compiler` adapter carrying those memory effects to its
 SSA/backend. Continue to fail closed until these are verified. This checkpoint
 is intentionally not a declaration that M12 is complete.
+
+## M12 continuation — source atomic operations, qualified fields (2026-11-04)
+
+**Latest full green run:** [41781275228](https://github.com/bingordo/edgcpp-rust/actions/runs/41781275228).
+This supersedes the earlier *unresolved builtin* status for the checked
+integer subset; it does not supersede the remaining completion gates.
+
+**Implemented, source-visible in EDG GNU mode:** The native EDG bridge
+projects width-suffixed `__atomic_load_N`, `__atomic_store_N`,
+`__atomic_exchange_N`, `__atomic_fetch_{add,sub,and,or,xor}_N`,
+`__atomic_compare_exchange_N`, `__atomic_thread_fence` and
+`__atomic_signal_fence` (N=1,2,4,8). A dedicated projection follows
+source expression identities through EDG's void-pointer conversion nodes,
+recovers the original qualified integer declaration, validates layout,
+literal source orders, compare-exchange success/failure combinations and
+weak flags, then emits native atomic instructions. This backend conservatively
+strengthens all accepted operations to sequential consistency; its weak
+compare-exchange implementation is strong, which C11 permits. Exchange/fetch
+return the old value, CAS returns success and writes `*expected` only when
+unsuccessful. Explicit invalid/dynamic order, wrong/misaligned source pointer,
+noninteger atomics, and unsupported builtin arities fail closed **before ELF**.
+`compile_calls` never emits unresolved `__atomic_*` references for this subset.
+
+The pinned EDG configuration still does not locate a system `stdatomic.h`.
+The test-only `m12_atomic_compat.h` maps C11 `*_explicit` spellings to
+those native GNU builtins; it is not an installed standard library header
+and does not claim complete C11 `stdatomic.h` API support.
+
+**Qualified fields:** Source-qualified volatile and atomic integer members
+of ordinary struct/union object lvalues use the same effectful scalar access
+path. EDG field identities and native offsets/alignments are mandatory;
+packed/misaligned atomic members and qualified bitfields are rejected. This
+does not yet allow volatile-qualified aggregate bases, atomic aggregate copies,
+or volatile bitfield storage-unit semantics. Existing array, ordinary member
+and scalar behavior remains covered by the full regression suite.
+
+**Checks:** Native/GCC differential for explicit load/store/exchange/fetch,
+strong/weak CAS and expected-value updates, relaxed/acquire/release/acq_rel/SC
+orders, thread/signal fences, cross-thread release/acquire publication,
+failure-order violations and dynamic order rejection. Separate tests cover
+1/2/4/8-byte signed/unsigned qualified scalar RAM, qualified locals/formals,
+records, concurrency and store buffering. ELF is scanned to prevent unresolved
+`__atomic_*` imports in the implemented subset.
+
+**M12 issue #58 is still OPEN:** (1) a proper system C11 atomic-header and
+full native API integration, including other types/runtime orders;
+(2) a real volatile-MMIO primitive or verified runtime fallback, preserving
+device access count/width without treating device registers as cache-coherent
+RAM atomics; (3) qualified bitfield and aggregate operations, and inherited
+qualifiers where legal; (4) a complete EDG→`bingordo/compiler` SSA producer
+and backend legalization. The `compiler` repository now has a checked
+`crates/ir/src/source_memory.rs` contract with conservative target preflight
+([compiler CI 41781136545](https://github.com/bingordo/compiler/actions/runs/41781136545)),
+but that semantic contract is not a functioning adapter. None of these
+remaining items should be marked finished without native verification.
