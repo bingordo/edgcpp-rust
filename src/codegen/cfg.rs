@@ -1013,6 +1013,41 @@ fn indirect_lvalue_access(graph:&Graph,id:ExpressionId,il:&Il)
         _=>Ok(MemoryAccess::Ordinary),
     }
 }
+/// Recover a field's source qualifiers by EDG field-symbol identity;
+/// the expression's converted rvalue type is not authoritative. This
+/// supports only direct, naturally aligned scalar fields. Qualified aggregate
+/// bases and bitfield updates have different effective-lvalue rules.
+fn selected_field_access(
+    graph:&Graph,id:ExpressionId,il:&Il,
+) -> Result<MemoryAccess,CodegenError> {
+    let node=graph.expression(id).ok_or_else(||invalid("missing field access"))?;
+    if semantic(2,node.data.kind)!=3 || node.operands.len()!=2 {
+        return Ok(MemoryAccess::Ordinary);
+    }
+    let op=node.data.operator.map(|v|semantic(3,v)).unwrap_or(0);
+    if !matches!(op,52|53) {return Ok(MemoryAccess::Ordinary);}
+    let member=graph.expression(node.operands[1])
+        .ok_or_else(||invalid("missing native member symbol"))?;
+    if semantic(2,member.data.kind)!=5 {
+        return Err(invalid("member operand is not native EDG field"));
+    }
+    let symbol=member.data.symbol_id
+        .ok_or_else(||invalid("native member lacks symbol identity"))?;
+    let base=canonical_abi_type(il,expression_type_id(graph,node.operands[0])?)?;
+    let owner=if op==52 {base} else {
+        let ptr=il.types.iter().find(|t|t.id==base && semantic(4,t.kind)==5)
+            .ok_or_else(||invalid("qualified member arrow needs record pointer"))?;
+        let source=ptr.related.ok_or_else(||invalid("qualified member pointer lacks target"))?;
+        if scalar_memory_access(il,source)?!=MemoryAccess::Ordinary {
+            return Err(invalid("qualified aggregate base propagation unsupported"));
+        }
+        canonical_abi_type(il,source)?
+    };
+    let fields=checked_record_fields(il,owner)?;
+    let field=fields.into_iter().find(|f|f.symbol==symbol)
+        .ok_or_else(||invalid("member identity not in native record"))?;
+    scalar_memory_access(il,field.ty)
+}
 /// Preserve a direct automatic object's declared qualifiers even when
 /// EDG converts its expression type to an unqualified rvalue type.
 fn lvalue_memory_access(
@@ -1033,6 +1068,10 @@ fn lvalue_memory_access(
                 return parameter_memory_access(il,sym);
             }
         }
+    }
+    if semantic(2,node.data.kind)==3 {
+        let op=node.data.operator.map(|o|semantic(3,o)).unwrap_or(0);
+        if matches!(op,52|53) {return selected_field_access(graph,id,il);}
     }
     indirect_lvalue_access(graph,id,il)
 }
@@ -1243,12 +1282,27 @@ fn checked_record_fields_depth<'a>(
         if field.position != index as u32 {
             return Err(invalid("record field positions are not contiguous"));
         }
-        check_plain_storage_type(il,field.ty)?;
+        let access=scalar_memory_access(il,field.ty)?;
         let field_type=canonical_abi_type(il,field.ty)?;
         let def=il.types.iter().find(|t|t.id==field_type)
             .ok_or_else(||invalid("record field type missing"))?;
         let field_kind=semantic(4,def.kind);
         let is_bitfield=field.bit_width!=0 || field.bit_offset!=0;
+        if access==MemoryAccess::Ordinary {
+            check_plain_storage_type(il,field.ty)?;
+        } else {
+            // C volatile bitfields need exact-width volatile unit access;
+            // atomic bitfield operations are not supported by this target.
+            if is_bitfield {
+                return Err(invalid("qualified bitfield RMW unsupported"));
+            }
+            let size=byte_size(il,field.ty)?;
+            if field_kind!=1 || !matches!(size,1|2|4|8) ||
+                native_alignment<size || field.byte_offset%size!=0 ||
+                storage_alignment(il,field.ty)?<size {
+                return Err(invalid("qualified field needs naturally aligned integer storage"));
+            }
+        }
         let (end,bit_start,bit_end)=if is_bitfield {
             if field_kind!=1 {
                 return Err(invalid("bitfield must have an integer type"));
@@ -1543,7 +1597,9 @@ fn lower_address(
                     let fields=checked_record_fields(il,owner)?;
                     let field=fields.into_iter().find(|f|f.symbol==symbol)
                         .ok_or_else(||invalid("field does not belong to selected struct"))?;
-                    check_plain_storage_type(il,expression_type_id(graph,id)?)?;
+                    if scalar_memory_access(il,field.ty)?==MemoryAccess::Ordinary {
+                        check_plain_storage_type(il,expression_type_id(graph,id)?)?;
+                    }
                     if canonical_abi_type(il,field.ty)? !=
                         canonical_abi_type(il,expression_type_id(graph,id)?)? {
                         return Err(invalid("field reference type disagrees with EDG record layout"));
@@ -1960,7 +2016,12 @@ fn lower_c_expression(
                             // C array member designators decay to an address.
                             address
                         } else {
-                            Expr::LoadAddress(output,Box::new(address))
+                            let access=selected_field_access(graph,id,il)?;
+                            if access==MemoryAccess::Ordinary {
+                                Expr::LoadAddress(output,Box::new(address))
+                            } else {
+                                Expr::LoadQualified(output,access,Box::new(address))
+                            }
                         }
                     }
                     43 if operands.len()==1 => {
