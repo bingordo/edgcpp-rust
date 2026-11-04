@@ -129,13 +129,38 @@ fn emit_expr(
     };
     Ok((value,ty))
 }
-/// Produce a directly GCC-linkable x86-64 ELF. A complete source module can
-/// also contain integer functions, but this initial path deliberately rejects
-/// unsupported mixed machine-class functions rather than guessing register
-/// assignments. F32/F64 function signatures use separate SSE registers.
+/// Reject uninitialized local reads before passing values to Cranelift.
+/// No source expression may observe an undefined local, even speculatively.
+fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
+    use FloatExpr::*;
+    match expr {
+        Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
+            Err(reject("read of uninitialized or invalid FP local")),
+        Local(_)|Parameter(_)|Constant32(_)|Constant64(_)=>Ok(()),
+        Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
+        Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
+            check_local_reads(a,defined,depth+1)?;
+            check_local_reads(b,defined,depth+1)
+        }
+    }
+}
+/// Keep the original pure-return reference API, sharing the same typed
+/// statement emitter and ABI classification as local-bearing FP functions.
 pub fn emit_float_routines(functions:&[FloatFunction])
     ->Result<Vec<u8>,CodegenError> {
-    if functions.is_empty() {return Err(reject("empty FP function set"));}
+    let bodies:Vec<_>=functions.iter().map(|f|FloatBodyFunction {
+        name:f.name.clone(),parameters:f.parameters.clone(),result:f.result,
+        locals:Vec::new(),statements:vec![FloatStmt::Return(f.expression.clone())],
+    }).collect();
+    emit_float_bodies(&bodies)
+}
+/// Emit typed SSE values and ordered straight-line FP local updates.
+/// Local arithmetic is evaluated once and kept in explicit Cranelift SSA
+/// variables, rather than substituting or repeating the source expressions.
+pub fn emit_float_bodies(functions:&[FloatBodyFunction])
+    ->Result<Vec<u8>,CodegenError> {
+    if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
     flags.set("opt_level","speed")
         .map_err(|e|CodegenError::Backend(e.to_string()))?;
@@ -150,11 +175,36 @@ pub fn emit_float_routines(functions:&[FloatFunction])
     let mut exports=Vec::new();
     for f in functions {
         if f.name.is_empty()||f.name.contains('\0') ||
-            f.parameters.len()>256 {
-            return Err(reject("invalid FP function name or argument count"));
+            f.parameters.len()>256 || f.locals.len()>4096 {
+            return Err(reject("invalid FP function name or variable count"));
         }
-        if expression_type(&f.expression,&f.parameters,0)?!=f.result {
-            return Err(reject("FP source expression/return type mismatch"));
+        if f.statements.is_empty() || f.statements.len()>10000 ||
+            !matches!(f.statements.last(),Some(FloatStmt::Return(_))) {
+            return Err(reject("FP body must end in exactly one return"));
+        }
+        let mut defined=vec![false;f.locals.len()];
+        for (i,stmt) in f.statements.iter().enumerate() {
+            let (expr,expected)=match stmt {
+                FloatStmt::Assign(n,e)=>{
+                    if i==f.statements.len()-1 {
+                        return Err(reject("FP function ends in assignment"));
+                    }
+                    let ty=*f.locals.get(*n)
+                        .ok_or_else(||reject("FP local index out of range"))?;
+                    (e,ty)
+                }
+                FloatStmt::Return(e)=>{
+                    if i!=f.statements.len()-1 {
+                        return Err(reject("FP return before end of body"));
+                    }
+                    (e,f.result)
+                }
+            };
+            check_local_reads(expr,&defined,0)?;
+            if expression_type(expr,&f.parameters,&f.locals,0)?!=expected {
+                return Err(reject("FP assignment/return has an unconverted type"));
+            }
+            if let FloatStmt::Assign(n,_)=stmt {defined[*n]=true;}
         }
         let mut sig=module.make_signature();
         for ty in &f.parameters {sig.params.push(AbiParam::new(ty.machine()));}
@@ -177,11 +227,22 @@ pub fn emit_float_routines(functions:&[FloatFunction])
             fb.switch_to_block(entry);
             fb.seal_block(entry);
             let params=fb.block_params(entry).to_vec();
-            let (value,ty)=emit_expr(&f.expression,&mut fb,&params,&f.parameters)?;
-            if ty!=f.result {
-                return Err(reject("unconverted FP return type"));
+            let vars:Vec<_>=f.locals.iter().enumerate().map(|(i,ty)|{
+                let var=Variable::from_u32(i as u32);
+                fb.declare_var(var,ty.machine());
+                var
+            }).collect();
+            for stmt in &f.statements {
+                let expr=match stmt {
+                    FloatStmt::Assign(_,e)|FloatStmt::Return(e)=>e,
+                };
+                let (value,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
+                    &vars,&f.locals)?;
+                match stmt {
+                    FloatStmt::Assign(n,_)=>fb.def_var(vars[*n],value),
+                    FloatStmt::Return(_)=>{fb.ins().return_(&[value]);}
+                }
             }
-            fb.ins().return_(&[value]);
             fb.finalize();
         }
         module.define_function(id,&mut ctx)
@@ -253,7 +314,7 @@ fn expression_from_edg(
         let type_id=il.function_parameters.iter().find(|p|p.symbol==*sym)
             .map(|p|p.ty).ok_or_else(||reject("missing native FP formal"))?;
         type_from_edg(il,type_id)
-    }).collect::<Result<Vec<_>,_>>()?,0)?;
+    }).collect::<Result<Vec<_>,_>>()?,&[],0)?;
     if checked!=ty {return Err(reject("EDG FP expression result type differs from operands"));}
     Ok(out)
 }
@@ -355,7 +416,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         if roots.len()!=1 {return Err(reject("FP function must have one root"));}
         let params_syms=args.iter().map(|p|p.symbol).collect::<Vec<_>>();
         let expression=return_expression(il,&graph,roots[0],&params_syms)?;
-        if expression_type(&expression,&params,0)?!=ret {
+        if expression_type(&expression,&params,&[],0)?!=ret {
             return Err(reject("FP return value missing native conversion"));
         }
         functions.push(FloatFunction {
