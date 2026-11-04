@@ -5,6 +5,8 @@ use std::cell::Cell;
 use cranelift_codegen::ir::{Block,StackSlot,StackSlotData,StackSlotKind,MemFlags};
 use cranelift_frontend::Variable;
 
+mod atomic_builtin;
+
 #[derive(Debug, Clone)]
 enum Stmt {
     Store(usize, Expr),
@@ -548,6 +550,12 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
             check_expr(expected,vars,params)?;
             check_expr(desired,vars,params)
         }
+        Expr::AtomicFence(_) => Ok(()),
+        Expr::AtomicLoad(_,_,a) => check_expr(a,vars,params),
+        Expr::AtomicStore(_,_,a,b) | Expr::AtomicFetch(_,_,_,a,b) => {
+            check_expr(a,vars,params)?;
+            check_expr(b,vars,params)
+        },
         Expr::LoadAddress(_,a) | Expr::LoadQualified(_,_,a) |
         Expr::LoadBitField(_,a) |
         Expr::PackAggregate(_,a) =>
@@ -1681,6 +1689,10 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
     for symbol in symbols {
+        // The pinned EDG projection uses intrinsic-looking routine identities.
+        // These are handled in atomic_builtin, never ELF libatomic imports.
+        if il.symbols.iter().any(|s|s.id==symbol &&
+            s.name.starts_with("__atomic_")) {continue;}
         let decl=direct_call_decl(il,symbol)?;
         if let Some(previous)=found.get(&symbol) {
             if previous.abi!=decl.abi || previous.name!=decl.name {
@@ -1716,6 +1728,16 @@ fn lower_c_expression(
         let callee=graph.expression(node.operands[0])
             .ok_or_else(||invalid("call missing callee expression"))?;
         let direct=semantic(2,callee.data.kind)==6;
+        if direct {
+            let symbol=callee.data.symbol_id
+                .ok_or_else(||invalid("direct atomic callee without native symbol"))?;
+            if let Some(name)=il.symbols.iter().find(|s|s.id==symbol)
+                .map(|s|s.name.as_str()) {
+                if name.starts_with("__atomic_") {
+                    return atomic_builtin::lower(graph,name,&node.operands[1..],params,locals,il);
+                }
+            }
+        }
         let (symbol,abi)=if direct {
             let symbol=callee.data.symbol_id
                 .ok_or_else(||invalid("direct routine without symbol"))?;
@@ -2411,6 +2433,13 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
             addressed_expr(expected,found);
             addressed_expr(desired,found);
         },
+        Expr::AtomicFence(_) => {},
+        Expr::AtomicLoad(_,_,address) => addressed_expr(address,found),
+        Expr::AtomicStore(_,_,address,value) |
+        Expr::AtomicFetch(_,_,_,address,value) => {
+            addressed_expr(address,found);
+            addressed_expr(value,found);
+        },
         Expr::StoreAddress(_,a,b) | Expr::StoreQualified(_,_,a,b) |
         Expr::CompoundQualified(_,_,_,_,a,b) |
         Expr::StoreBitField(_,a,b) |
@@ -2749,6 +2778,51 @@ fn emit_expr(
         Expr::LoadQualified(ty,access,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
             super::memory::load_integer_access(fb,address,*ty,*access)
+        }
+        Expr::AtomicLoad(ty,order,address) => {
+            crate::memory_order::validate_order(
+                crate::memory_order::AtomicOperation::Load,*order)
+                .map_err(|e|invalid(format!("atomic load order: {e}")))?;
+            let address=emit_expr(address,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::load_integer_access(fb,address,*ty,MemoryAccess::Atomic)
+        }
+        Expr::AtomicStore(ty,order,address,value) => {
+            crate::memory_order::validate_order(
+                crate::memory_order::AtomicOperation::Store,*order)
+                .map_err(|e|invalid(format!("atomic store order: {e}")))?;
+            let address=emit_expr(address,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            super::memory::store_integer_access(fb,address,value,*ty,MemoryAccess::Atomic);
+            fb.ins().iconst(types::I64,0)
+        }
+        Expr::AtomicFetch(ty,order,operation,address,value) => {
+            crate::memory_order::validate_order(
+                crate::memory_order::AtomicOperation::ReadModifyWrite,*order)
+                .map_err(|e|invalid(format!("atomic fetch order: {e}")))?;
+            let address=emit_expr(address,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=emit_expr(value,fb,params,vars,globals,stack,local_types,calls)?;
+            let value=normalize_c_value(fb,value,*ty);
+            let narrow=if ty.bits==64 {value} else {fb.ins().ireduce(ty.cranelift(),value)};
+            let op=match operation {
+                AtomicFetchOp::Exchange=>cranelift_codegen::ir::AtomicRmwOp::Xchg,
+                AtomicFetchOp::Add=>cranelift_codegen::ir::AtomicRmwOp::Add,
+                AtomicFetchOp::Sub=>cranelift_codegen::ir::AtomicRmwOp::Sub,
+                AtomicFetchOp::And=>cranelift_codegen::ir::AtomicRmwOp::And,
+                AtomicFetchOp::Or=>cranelift_codegen::ir::AtomicRmwOp::Or,
+                AtomicFetchOp::Xor=>cranelift_codegen::ir::AtomicRmwOp::Xor,
+            };
+            let old=fb.ins().atomic_rmw(ty.cranelift(),MemFlags::new(),op,address,narrow);
+            let old=if ty.bits==64 {old}
+                else if ty.signed {fb.ins().sextend(types::I64,old)}
+                else {fb.ins().uextend(types::I64,old)};
+            normalize_c_value(fb,old,*ty)
+        }
+        Expr::AtomicFence(order) => {
+            crate::memory_order::validate_order(
+                crate::memory_order::AtomicOperation::Fence,*order)
+                .map_err(|e|invalid(format!("atomic fence order: {e}")))?;
+            fb.ins().fence();
+            fb.ins().iconst(types::I64,0)
         }
         Expr::PackAggregate(bytes,pointer) => {
             let address=emit_expr(pointer,fb,params,vars,globals,stack,local_types,calls)?;
