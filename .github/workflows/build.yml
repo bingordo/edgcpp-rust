@@ -411,7 +411,7 @@ jobs:
               echo "Unsupported volatile bitfield access silently accepted"
               exit 1
             fi
-            grep -E 'qualified/reference aggregate field unsupported|unsupported EDG operation|unsupported record/union' m12_rejected.log
+            grep -E 'qualified bitfield RMW unsupported|qualified/reference aggregate field unsupported|unsupported EDG operation|unsupported record/union' m12_rejected.log
             test ! -e m12_rejected.o
           )
 
