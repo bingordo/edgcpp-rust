@@ -1048,6 +1048,9 @@ mod tests {
 }
 
 // Structured blocks/loops use their own SSA-generating backend.
+pub mod fp;
+pub use fp::{FloatType,FloatExpr,FloatFunction,emit_float_routines};
+
 mod target;
 use target::TargetAbi;
 mod cfg;
