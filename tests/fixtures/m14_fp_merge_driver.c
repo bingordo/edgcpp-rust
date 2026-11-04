@@ -7,6 +7,11 @@ double m14_join_sequential(double,double,double);
 float m14_join_f32(float,float);
 double m14_join_existing(double,double);
 double m14_join_nan(double,double);
+double m14_if_no_else(double,double);
+double m14_if_no_else_chain(double,double,double);
+float m14_if_no_else_f32(float,float);
+double m14_if_empty_else(double,double);
+double m14_if_empty_then(double,double);
 static void check(int yes,const char *where) {
     if (!yes) {fprintf(stderr,"M14 FP SSA merge mismatch: %s\n",where);exit(1);}
 }
@@ -47,6 +52,26 @@ int main(void) {
         eqd(m14_join_existing(a,b),existing_x+existing_y,
             "one sided update of initialized locals");
         eqd(m14_join_nan(a,b),a!=b ? 10.0 : 20.0,"NaN unordered");
+        double expected_no_else=b;
+        if (a>b) expected_no_else=a+2.0;
+        eqd(m14_if_no_else(a,b),expected_no_else,"no else live-in join");
+        double chain_x=a,chain_y=b;
+        if(a>b) {
+            chain_x=chain_x+b;
+            chain_y=chain_x*2.0;
+        }
+        if(chain_x<1.25) chain_x=chain_x-1.25;
+        eqd(m14_if_no_else_chain(a,b,1.25),chain_x+chain_y,
+            "sequential no-else joins");
+        float expected_f32=y;
+        if(x!=y) expected_f32=x;
+        eqf(m14_if_no_else_f32(x,y),expected_f32,"f32 no-else merge");
+        double empty_else=b;
+        if(a<b) empty_else=a+b;
+        eqd(m14_if_empty_else(a,b),empty_else,"explicit empty else");
+        double empty_then=a;
+        if(!(a>b)) empty_then=b+1.0;
+        eqd(m14_if_empty_then(a,b),empty_then,"explicit empty then");
     }
     return 0;
 }
