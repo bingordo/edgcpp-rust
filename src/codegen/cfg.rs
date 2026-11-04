@@ -1582,6 +1582,16 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
     let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
         .ok_or_else(||invalid("call callee is not a direct named routine"))?;
     let name=sym.name.clone();
+    // Pinned EDG recognizes GCC __atomic_* builtins, but currently exports
+    // them as calls to libatomic-style symbols. Silently emitting undefined
+    // externals loses our source memory-order validation and can make an ELF
+    // appear supported even if it cannot link correctly. Reject until the
+    // checked builtin semantics are represented and the backend implements
+    // or explicitly selects a verified runtime fallback.
+    if name.starts_with("__atomic_") || name.starts_with("__sync_") {
+        return Err(invalid(format!(
+            "source atomic builtin {name} requires checked memory-order lowering")));
+    }
     if name.is_empty() ||
        !name.bytes().next().is_some_and(|c|c.is_ascii_alphabetic()||c==b'_') ||
        !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
