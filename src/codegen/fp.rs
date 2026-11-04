@@ -541,6 +541,46 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn fp_local_definite_assignment_and_type_checks() {
+        let valid=FloatBodyFunction {
+            name:"m14_let".into(),
+            parameters:vec![FloatType::F32,FloatType::F32],
+            result:FloatType::F32,
+            locals:vec![FloatType::F32],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::Assign(0,FloatExpr::Add(
+                    Box::new(FloatExpr::Local(0)),
+                    Box::new(FloatExpr::Parameter(1)))),
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        let object=emit_float_bodies(&[valid.clone()]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        let mut bad=valid.clone();
+        bad.statements=vec![FloatStmt::Return(FloatExpr::Local(0))];
+        assert!(emit_float_bodies(&[bad]).is_err());
+        let mut bad=valid.clone();
+        bad.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Local(0)),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[bad]).is_err());
+        let mut bad=valid.clone();
+        bad.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Constant64(1.5f64.to_bits())),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[bad]).is_err());
+        let mut bad=valid;
+        bad.statements=vec![
+            FloatStmt::Return(FloatExpr::Parameter(0)),
+            FloatStmt::Return(FloatExpr::Parameter(1)),
+        ];
+        assert!(emit_float_bodies(&[bad]).is_err());
+    }
+
+    #[test]
     fn rejects_mixed_fp_without_explicit_conversion() {
         let f=FloatFunction{name:"bad".into(),parameters:vec![FloatType::F32,FloatType::F64],
             result:FloatType::F64,expression:bin(0,1)};
