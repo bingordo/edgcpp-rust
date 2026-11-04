@@ -311,8 +311,12 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            ../../../edgcpp-rust/target/debug/examples/parse --c11 m14_fp_probe.c > m14_fp_il.log 2>&1
-            grep -E '^(type id=|expression m14_|reference m14_|integer constant m14_|type detail id=|symbol type name=m14_)' m14_fp_il.log | head -n 250
+            if ! ../../../edgcpp-rust/target/debug/examples/parse --c11 m14_fp_probe.c > m14_fp_il.log 2>&1; then
+              echo "Pinned EDG native FP probe diagnostics:"
+              tail -n 180 m14_fp_il.log
+              exit 1
+            fi
+            grep -E '^(type id=|expression m14_|reference m14_|integer constant m14_|type detail id=|symbol type name=m14_)' m14_fp_il.log | head -n 250 || true
             grep -q '^routine m14_double_add' m14_fp_il.log
             grep -q '^routine m14_float_mul' m14_fp_il.log
           )
