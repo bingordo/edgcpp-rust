@@ -169,6 +169,172 @@ pub fn emit_float_routines(functions:&[FloatFunction])
     module.finish().emit().map_err(|e|CodegenError::Backend(e.to_string()))
 }
 
+/// EDG's native standard-float metadata is authoritative. A same-sized
+/// extended or long-double type must never enter this SSE ABI path.
+fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
+    let canonical=super::canonical_abi_type(il,id)?;
+    let info=il.c_float_types.iter().find(|t|t.id==canonical)
+        .ok_or_else(||reject("EDG type is not standard C float/double"))?;
+    let layout=il.type_object_sizes.iter().find(|t|t.owner==canonical)
+        .ok_or_else(||reject("EDG FP type has no native layout"))?;
+    match (info.bits,layout.bytes,layout.alignment) {
+        (32,4,4)=>Ok(FloatType::F32),
+        (64,8,8)=>Ok(FloatType::F64),
+        _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
+    }
+}
+fn expression_from_edg(
+    il:&Il,graph:&crate::graph::Graph,id:crate::graph::ExpressionId,
+    params:&[crate::SymbolId],depth:usize,
+)->Result<FloatExpr,CodegenError> {
+    if depth>64 {return Err(reject("native EDG FP expression too deep"));}
+    let node=graph.expression(id).ok_or_else(||reject("missing EDG FP expression"))?;
+    let ty=type_from_edg(il,node.data.type_id.ok_or_else(||
+        reject("EDG FP expression has no type"))?)?;
+    let kind=super::semantic(2,node.data.kind);
+    if kind==2 && node.operands.is_empty() {
+        let symbol=node.data.symbol_id
+            .ok_or_else(||reject("FP variable missing native identity"))?;
+        let i=params.iter().position(|p|*p==symbol)
+            .ok_or_else(||reject("FP local/global rvalue requires memory lowering"))?;
+        return Ok(FloatExpr::Parameter(i));
+    }
+    if kind!=3 {return Err(reject("unsupported FP source expression form"));}
+    let op=node.data.operator.map(|v|super::semantic(3,v))
+        .ok_or_else(||reject("missing native FP operation"))?;
+    let arg=|i:usize|->Result<FloatExpr,CodegenError> {
+        expression_from_edg(il,graph,*node.operands.get(i)
+            .ok_or_else(||reject("missing native FP operand"))?,params,depth+1)
+    };
+    let out=if node.operands.len()==1 {
+        match op {
+            4=>FloatExpr::Neg(Box::new(arg(0)?)),
+            // A native EDG cast/implicit conversion is the sole place
+            // where f32->f64 and f64->f32 may change machine class.
+            11|12|16=>FloatExpr::Convert(ty,Box::new(arg(0)?)),
+            _=>return Err(reject(format!("unsupported unary EDG FP operator {op}"))),
+        }
+    } else if node.operands.len()==2 {
+        let x=Box::new(arg(0)?);
+        let y=Box::new(arg(1)?);
+        match op {
+            1=>FloatExpr::Add(x,y),
+            2=>FloatExpr::Sub(x,y),
+            3=>FloatExpr::Mul(x,y),
+            19=>FloatExpr::Div(x,y),
+            _=>return Err(reject(format!("unsupported binary EDG FP operator {op}"))),
+        }
+    } else {
+        return Err(reject("unsupported native EDG FP operation arity"));
+    };
+    let checked=expression_type(&out,&params.iter().map(|sym|{
+        let type_id=il.function_parameters.iter().find(|p|p.symbol==*sym)
+            .map(|p|p.ty).ok_or_else(||reject("missing native FP formal"))?;
+        type_from_edg(il,type_id)
+    }).collect::<Result<Vec<_>,_>>()?,0)?;
+    if checked!=ty {return Err(reject("EDG FP expression result type differs from operands"));}
+    Ok(out)
+}
+fn return_expression(
+    il:&Il,graph:&crate::graph::Graph,
+    root:crate::graph::StatementId,params:&[crate::SymbolId],
+)->Result<FloatExpr,CodegenError> {
+    let node=graph.statement(root).ok_or_else(||reject("missing FP statement"))?;
+    match super::semantic(1,node.data.kind) {
+        1 if node.children.is_empty()=>{
+            let expr=node.expression.ok_or_else(||reject("FP return has no value"))?;
+            expression_from_edg(il,graph,expr,params,0)
+        },
+        2 if node.expression.is_none() && node.children.len()==1=>
+            return_expression(il,graph,node.children[0],params),
+        _=>Err(reject("FP reference slice needs a single return statement")),
+    }
+}
+/// Only a module consisting entirely of simple floating-point routines is
+/// handled here. Ordinary integer C follows the established CFG; mixed FP and
+/// integer statements/functions fail closed rather than truncating an ELF.
+pub(super) fn maybe_emit_edg_float_object(il:&Il)
+    ->Result<Option<Vec<u8>>,CodegenError> {
+    let definitions:Vec<_>=il.entities.iter().filter_map(|e|match e {
+        crate::Entity::Routine{name,has_definition:true}=>Some(name.as_str()),
+        _=>None,
+    }).collect();
+    if definitions.is_empty() {return Ok(None);}
+    let graph=crate::graph::Graph::from_il(il)
+        .map_err(|e|reject(format!("invalid EDG graph: {e:?}")))?;
+    let mut found_float=false;
+    for name in &definitions {
+        let routine=graph.routine_for_function(name)
+            .ok_or_else(||reject("missing EDG routine identity"))?;
+        let sym_type=il.symbol_types.iter().find(|s|s.symbol==routine)
+            .ok_or_else(||reject("missing native routine type"))?;
+        let func_ty=super::canonical_abi_type(il,sym_type.ty)?;
+        let func=il.types.iter().find(|t|t.id==func_ty)
+            .ok_or_else(||reject("missing native function type"))?;
+        if let Some(ret)=func.related {
+            if type_from_edg(il,ret).is_ok() {found_float=true;}
+        }
+        if il.function_parameters.iter().any(|p|
+            p.routine==routine && type_from_edg(il,p.ty).is_ok()) {
+            found_float=true;
+        }
+    }
+    if !found_float {return Ok(None);}
+    let mut functions=Vec::with_capacity(definitions.len());
+    for name in definitions {
+        let routine=graph.routine_for_function(name)
+            .ok_or_else(||reject("missing FP routine"))?;
+        let sym_type=il.symbol_types.iter().find(|s|s.symbol==routine)
+            .ok_or_else(||reject("missing FP function declaration"))?;
+        let func_ty=super::canonical_abi_type(il,sym_type.ty)?;
+        let func=il.types.iter().find(|t|t.id==func_ty &&
+            super::semantic(4,t.kind)==2)
+            .ok_or_else(||reject("FP function type not a routine"))?;
+        let sig=il.function_signatures.iter().find(|s|s.owner==func_ty)
+            .ok_or_else(||reject("missing FP function prototype"))?;
+        if sig.variadic || !sig.prototyped {
+            return Err(reject("FP variadic/unprototyped ABI unsupported"));
+        }
+        let ret=type_from_edg(il,func.related.ok_or_else(||
+            reject("missing FP return type"))?)?;
+        let mut args:Vec<_>=il.function_parameters.iter()
+            .filter(|p|p.routine==routine).collect();
+        args.sort_by_key(|p|p.position);
+        if args.iter().enumerate().any(|(i,p)|
+            p.position!=Some(i as u32) || p.implicit_this || p.compiler_generated) {
+            return Err(reject("invalid FP explicit parameter list"));
+        }
+        let params=args.iter().map(|p|type_from_edg(il,p.ty))
+            .collect::<Result<Vec<_>,_>>()?;
+        let declared:Vec<_>=il.type_parameters.iter()
+            .filter(|p|p.owner==func_ty).collect();
+        if declared.len()!=args.len() {
+            return Err(reject("FP prototype/definition arity mismatch"));
+        }
+        for arg in &args {
+            let d=declared.iter().find(|d|Some(d.position)==arg.position)
+                .ok_or_else(||reject("FP prototype position missing"))?;
+            if type_from_edg(il,d.ty)?!=type_from_edg(il,arg.ty)? {
+                return Err(reject("FP prototype type mismatch"));
+            }
+        }
+        if il.local_variables.iter().any(|v|v.routine==routine) {
+            return Err(reject("FP locals require typed scalar CFG integration"));
+        }
+        let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
+        if roots.len()!=1 {return Err(reject("FP function must have one root"));}
+        let params_syms=args.iter().map(|p|p.symbol).collect::<Vec<_>>();
+        let expression=return_expression(il,&graph,roots[0],&params_syms)?;
+        if expression_type(&expression,&params,0)?!=ret {
+            return Err(reject("FP return value missing native conversion"));
+        }
+        functions.push(FloatFunction {
+            name:name.to_string(),parameters:params,result:ret,expression,
+        });
+    }
+    emit_float_routines(&functions).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
