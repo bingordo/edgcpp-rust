@@ -21,4 +21,5 @@ typedef enum {
 #define atomic_fetch_or_explicit(P,V,O) __atomic_fetch_or((P),(V),(O))
 #define atomic_fetch_xor_explicit(P,V,O) __atomic_fetch_xor((P),(V),(O))
 #define atomic_thread_fence(O) __atomic_thread_fence((O))
+#define atomic_signal_fence(O) __atomic_signal_fence((O))
 #endif
