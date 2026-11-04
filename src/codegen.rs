@@ -919,6 +919,12 @@ pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
 
 /// Translate an owned EDG compilation snapshot directly into a relocatable ELF.
 pub fn emit_edg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
+    // Keep ordinary integer C on the existing tested CFG. A translation
+    // unit with source-verified FP signatures uses the separate typed
+    // XMM path, or fails closed if it contains mixed/unsupported features.
+    if let Some(object)=fp::maybe_emit_edg_float_object(il)? {
+        return Ok(object);
+    }
     cfg::emit_edg_cfg_object(il)
 }
 
