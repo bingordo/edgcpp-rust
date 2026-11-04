@@ -112,7 +112,7 @@ pub struct Il {
     pub signed_i64_types: Vec<TypeId>,
     /// Native C integer width and sign, independent of host compiler ABI.
     pub c_integer_types: Vec<CIntegerType>,
-    /// Source-verified standard C binary FP metadata (native wire event 56).
+    /// Source-verified standard C binary FP metadata (native wire event 57).
     pub c_float_types: Vec<CFloatType>,
     pub global_variables: Vec<GlobalVariable>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
@@ -877,7 +877,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         54 => Some(il.statement_routine_initializers.len()),
         55 => Some(il.constant_routine_addresses.len()),
         46 => Some(il.c_integer_types.len()),
-        56 => Some(il.c_float_types.len()),
+        57 => Some(il.c_float_types.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
@@ -1049,7 +1049,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
                 is_bool: boolean == 1,
             });
         }
-        56 => {
+        57 => {
             let (Some(id),Some(bits))=(n(0),n(1)) else {return;};
             if id==0 || !matches!(bits,32|64) {return;}
             output.c_float_types.push(CFloatType{id:TypeId(id),bits:bits as u8});
