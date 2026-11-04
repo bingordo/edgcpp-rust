@@ -405,15 +405,49 @@ fn lower_fp_body(
         5 if simple_children=>{
             let init=ctx.graph.statement_initialization(function,path)
                 .ok_or_else(||reject("FP initializer missing native statement metadata"))?;
-            if init.role!=0 || init.braced || init.kind!=3 {
+            if init.role!=0 || init.braced {
                 return Err(reject("unsupported FP initializer kind"));
             }
             let symbol=init.symbol.ok_or_else(||reject("FP initializer has no local"))?;
             let local=ctx.locals.iter().position(|p|*p==symbol)
                 .ok_or_else(||reject("FP initializer target is not an automatic local"))?;
-            let source=node.expression
-                .ok_or_else(||reject("FP local initializer has no expression"))?;
-            let value=expression_from_edg(ctx,source,0)?;
+            let value=match init.kind {
+                // EDG dik_expression: an actual expression executes at this site.
+                3=>{
+                    let source=node.expression
+                        .ok_or_else(||reject("FP local initializer has no expression"))?;
+                    expression_from_edg(ctx,source,0)?
+                }
+                // EDG dik_constant: no expression exists, so use exactly the
+                // original constant's IEEE image, not a decimal conversion.
+                2=>{
+                    if node.expression.is_some() {
+                        return Err(reject("FP constant initializer has unexpected expression"));
+                    }
+                    let mut matches=ctx.il.float_initializers.iter().filter(|v|
+                        v.function==*function && v.statement_path==*path &&
+                        v.symbol==symbol);
+                    let exact=matches.next().ok_or_else(||
+                        reject("FP constant initializer has no exact native image"))?;
+                    if matches.next().is_some() {
+                        return Err(reject("ambiguous FP constant initializer"));
+                    }
+                    let source_type=ctx.il.local_variables.iter().find(|v|
+                        v.routine==ctx.graph.routine_for_function(function)
+                            .unwrap_or(crate::SymbolId(0)) && v.symbol==symbol)
+                        .map(|v|v.ty).ok_or_else(||
+                            reject("missing FP initializer target type"))?;
+                    if exact.ty!=source_type {
+                        return Err(reject("FP initializer native target type mismatch"));
+                    }
+                    match (ctx.local_types[local],exact.width) {
+                        (FloatType::F32,32)=>FloatExpr::Constant32(exact.bits as u32),
+                        (FloatType::F64,64)=>FloatExpr::Constant64(exact.bits),
+                        _=>return Err(reject("FP initializer width/type mismatch")),
+                    }
+                }
+                _=>return Err(reject("unsupported FP initializer kind")),
+            };
             output.push(FloatStmt::Assign(local,value));
         }
         6 if simple_children=>{
