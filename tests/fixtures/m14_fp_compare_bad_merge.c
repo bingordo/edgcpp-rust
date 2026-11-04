@@ -1,6 +1,7 @@
-/* Not supported: local assignments in a conditional need typed CFG merges. */
+/* Reject a read after a merge unless every predecessor initialized it. */
 double m14_cmp_bad_merge(double a,double b) {
-    double local = a;
-    if (a > b) local=a+1.0; else local=b+1.0;
-    return local;
+    double x;
+    double y;
+    if (a > b) x = a + 1.0; else y = b + 1.0;
+    return x;
 }
