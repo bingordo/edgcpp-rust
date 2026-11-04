@@ -825,6 +825,85 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn fp_if_assignment_merge_is_typed_and_definitely_initialized() {
+        let cond=FloatCondition {
+            op:FloatPredicate::Lt,
+            left:FloatExpr::Parameter(0),
+            right:FloatExpr::Parameter(1),
+        };
+        let valid=FloatBodyFunction {
+            name:"m14_merge_unit".into(),
+            parameters:vec![FloatType::F64,FloatType::F64],
+            result:FloatType::F64,
+            locals:vec![FloatType::F64,FloatType::F64],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::IfAssign(cond.clone(),
+                    vec![
+                        (1,FloatExpr::Add(
+                            Box::new(FloatExpr::Local(0)),
+                            Box::new(FloatExpr::Parameter(1)))),
+                        (0,FloatExpr::Local(1)),
+                    ],
+                    vec![
+                        (1,FloatExpr::Sub(
+                            Box::new(FloatExpr::Local(0)),
+                            Box::new(FloatExpr::Parameter(1)))),
+                        (0,FloatExpr::Local(1)),
+                    ],
+                ),
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        let elf=emit_float_bodies(&[valid.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        // An initialized local modified in just one branch remains defined
+        // because its prior value is live along the other predecessor.
+        let mut one_side=valid.clone();
+        one_side.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            FloatStmt::IfAssign(cond.clone(),
+                vec![(0,FloatExpr::Parameter(1))],
+                vec![(1,FloatExpr::Parameter(0))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[one_side]).is_ok());
+        // But a value defined on only one predecessor is not initialized
+        // after the merge; another local's assignment cannot fix it.
+        let mut uninit=valid.clone();
+        uninit.statements=vec![
+            FloatStmt::IfAssign(cond.clone(),
+                vec![(0,FloatExpr::Parameter(0))],
+                vec![(1,FloatExpr::Parameter(1))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[uninit]).is_err());
+        let mut uninit_in_arm=valid.clone();
+        uninit_in_arm.statements=vec![
+            FloatStmt::IfAssign(cond.clone(),
+                vec![(0,FloatExpr::Local(0))],
+                vec![(0,FloatExpr::Parameter(1))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[uninit_in_arm]).is_err());
+        let mut wrong_type=valid.clone();
+        wrong_type.statements=vec![
+            FloatStmt::IfAssign(cond.clone(),
+                vec![(0,FloatExpr::Constant32(0))],
+                vec![(0,FloatExpr::Parameter(0))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[wrong_type]).is_err());
+        let mut empty_arm=valid;
+        empty_arm.statements=vec![
+            FloatStmt::IfAssign(cond,
+                vec![(0,FloatExpr::Parameter(0))],vec![]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[empty_arm]).is_err());
+    }
+
+    #[test]
     fn fp_predicates_check_nan_correctly_and_fail_closed() {
         let condition=FloatCondition {
             op:FloatPredicate::Ne,
