@@ -270,6 +270,7 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
 struct FpSourceCtx<'a> {
     il:&'a Il,
     graph:&'a crate::graph::Graph,
+    routine:crate::SymbolId,
     params:&'a [crate::SymbolId],
     locals:&'a [crate::SymbolId],
     param_types:&'a [FloatType],
@@ -433,8 +434,7 @@ fn lower_fp_body(
                         return Err(reject("ambiguous FP constant initializer"));
                     }
                     let source_type=ctx.il.local_variables.iter().find(|v|
-                        v.routine==ctx.graph.routine_for_function(function)
-                            .unwrap_or(crate::SymbolId(0)) && v.symbol==symbol)
+                        v.routine==ctx.routine && v.symbol==symbol)
                         .map(|v|v.ty).ok_or_else(||
                             reject("missing FP initializer target type"))?;
                     if exact.ty!=source_type {
@@ -578,7 +578,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         if roots.len()!=1 {return Err(reject("FP function must have one root"));}
         let params_syms=args.iter().map(|p|p.symbol).collect::<Vec<_>>();
         let ctx=FpSourceCtx {
-            il,graph:&graph,params:&params_syms,locals:&local_syms,
+            il,graph:&graph,routine,params:&params_syms,locals:&local_syms,
             param_types:&params,local_types:&local_types,
         };
         let mut statements=Vec::new();
