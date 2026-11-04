@@ -972,7 +972,7 @@ jobs:
                 echo "Unexpectedly accepted unsupported construct: $variant"
                 exit 1
               fi
-              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement' rejected.log || {
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1
