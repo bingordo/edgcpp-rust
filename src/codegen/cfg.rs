@@ -3679,7 +3679,7 @@ mod tests {
         // Reject an invalid source failure order before emitting an ELF object.
         assert!(emit_routines(&[make(MemoryOrder::Release)]).is_err());
         let object=emit_routines(&[make(MemoryOrder::Acquire)]).unwrap();
-        assert_eq!(&object[..4],b"\\x7fELF");
+        assert_eq!(&object[..4],b"\x7fELF");
         // This native GCC caller verifies BOTH CAS paths. On failure, C11
         // writes the observed value into *expected, not into the object.
         let dir=std::env::temp_dir().join(format!(
