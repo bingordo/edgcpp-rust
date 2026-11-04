@@ -12,21 +12,25 @@ enum { ITERATIONS=10000 };
 static void *worker(void *context) {
     int right=(int)(long)context;
     for(int i=0;i<ITERATIONS;i++) {
-        if (pthread_barrier_wait(&before)<0) abort();
+        int status=pthread_barrier_wait(&before);
+        if(status!=0 && status!=PTHREAD_BARRIER_SERIAL_THREAD) abort();
         result[right]=right ? m12_sb_right(&x,&y) : m12_sb_left(&x,&y);
-        if (pthread_barrier_wait(&after)<0) abort();
+        status=pthread_barrier_wait(&after);
+        if(status!=0 && status!=PTHREAD_BARRIER_SERIAL_THREAD) abort();
     }
     return NULL;
 }
 static void barrier(void) {
-    if(pthread_barrier_wait(&before)<0) abort();
+    int status=pthread_barrier_wait(&before);
+    if(status!=0 && status!=PTHREAD_BARRIER_SERIAL_THREAD) abort();
 }
 static void finish(void) {
-    if(pthread_barrier_wait(&after)<0) abort();
+    int status=pthread_barrier_wait(&after);
+    if(status!=0 && status!=PTHREAD_BARRIER_SERIAL_THREAD) abort();
 }
 int main(void) {
-    /* pthread_barrier_wait may return the special positive SERIAL_THREAD
-     * value; negative return values indicate errors on this platform. */
+    /* pthread_barrier_wait may return PTHREAD_BARRIER_SERIAL_THREAD, which
+     * need not be positive; use an explicit status check. */
     if(pthread_barrier_init(&before,NULL,3)!=0 ||
        pthread_barrier_init(&after,NULL,3)!=0) abort();
     pthread_t threads[2];
