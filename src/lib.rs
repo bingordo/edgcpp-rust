@@ -1754,6 +1754,43 @@ mod tests {
         assert_eq!(state.il.c_float_types.len(),1);
     }
     #[test]
+    fn m14_ieee_constant_wire_preserves_full_bits_and_rejects_bad_width() {
+        let string = |bytes: &[u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:1,
+        };
+        let number = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let negative_zero=[
+            string(b"fp"),string(b"0.block.1"),string(b"0.1"),
+            number(44),number(32),number(0x8000_0000),
+        ];
+        unsafe {collect((&mut state as *mut Collector).cast(),58,
+            negative_zero.as_ptr(),negative_zero.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.float_constants,vec![FloatConstant {
+            function:"fp".into(),statement_path:"0.block.1".into(),
+            path:"0.1".into(),ty:TypeId(44),width:32,bits:0x8000_0000,
+        }]);
+        let quiet_nan=[
+            string(b"fp"),string(b"0.block.2"),string(b"0"),
+            number(45),number(64),number(0x7ff8_1234_abcd_0001),
+        ];
+        unsafe {collect((&mut state as *mut Collector).cast(),58,
+            quiet_nan.as_ptr(),quiet_nan.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.float_constants[1].bits,0x7ff8_1234_abcd_0001);
+        let invalid=[
+            string(b"fp"),string(b"0.block.3"),string(b"0"),
+            number(44),number(32),number(0x1_0000_0000),
+        ];
+        unsafe {collect((&mut state as *mut Collector).cast(),58,
+            invalid.as_ptr(),invalid.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.float_constants.len(),2);
+    }
+    #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
