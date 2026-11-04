@@ -677,6 +677,34 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
 // sequence-indexed, so parents can be recovered without exporting IL pointers.
 // Each expression receives a local path and parent path. Operation operands
 // are traversed in EDG list order. Non-operation kinds remain opaque.
+// Copy the exact EDG-host IEEE image, not the approximate value returned by
+// floating conversion routines. EDG's float_pt.c stores standard binary32
+// and binary64 values in the first bytes of an_internal_float_value.
+static bool standard_float_image(a_constant_ptr c, a_type_ptr ty,
+                                 uint32_t &width, uint64_t &bits)
+{
+  if (c == nullptr || ty == nullptr || c->kind != ck_float ||
+      ty->kind != tk_float || !TARG_HAS_IEEE_FLOATING_POINT ||
+      !std::numeric_limits<float>::is_iec559 ||
+      !std::numeric_limits<double>::is_iec559) return false;
+  if (ty->variant.float_kind == fk_float && ty->size == 4 &&
+      sizeof(float) == 4) {
+    uint32_t raw = 0;
+    std::memcpy(&raw, &c->variant.float_value, sizeof(raw));
+    width = 32;
+    bits = raw;
+    return true;
+  }
+  if (ty->variant.float_kind == fk_double && ty->size == 8 &&
+      sizeof(double) == 8) {
+    uint64_t raw = 0;
+    std::memcpy(&raw, &c->variant.float_value, sizeof(raw));
+    width = 64;
+    bits = raw;
+    return true;
+  }
+  return false;
+}
 static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       const std::string &stmt_path, const std::string &path,
                       const std::string &parent, unsigned depth)
@@ -746,33 +774,14 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     }
   }
   const uint32_t type_id = emit_type(node->type, 0);
-  // M14 event 58: native C binary32/binary64 bits, not a decimal string.
-  // EDG stores fk_float/fk_double in the first 4/8 bytes of the internal
-  // float-value image (see float_pt.c store_host_fp_value).  Reading with
-  // memcpy avoids alignment and strict-aliasing UB.  Only export when
-  // both the configured target and the host representation are IEEE 754.
-  if (has_constant && type_id != 0 && node->type != nullptr &&
-      node->type->kind == tk_float &&
-      node->variant.constant.ptr->kind == ck_float &&
-      TARG_HAS_IEEE_FLOATING_POINT &&
-      std::numeric_limits<float>::is_iec559 &&
-      std::numeric_limits<double>::is_iec559) {
-    const auto &value = node->variant.constant.ptr->variant.float_value;
-    if (node->type->variant.float_kind == fk_float &&
-        node->type->size == 4 &&
-        sizeof(float) == 4) {
-      uint32_t bits = 0;
-      std::memcpy(&bits, &value, sizeof(bits));
-      emit_record(58, {txt(function), txt(stmt_path), txt(path),
-                       num(type_id), num(32), num(bits)});
-    } else if (node->type->variant.float_kind == fk_double &&
-               node->type->size == 8 &&
-               sizeof(double) == 8) {
-      uint64_t bits = 0;
-      std::memcpy(&bits, &value, sizeof(bits));
-      emit_record(58, {txt(function), txt(stmt_path), txt(path),
-                       num(type_id), num(64), num(bits)});
-    }
+  // M14: path-keyed constant-expression IEEE image (wire event 58).
+  uint32_t fp_width = 0;
+  uint64_t fp_bits = 0;
+  if (has_constant && type_id != 0 &&
+      standard_float_image(node->variant.constant.ptr, node->type,
+                           fp_width, fp_bits)) {
+    emit_record(58, {txt(function), txt(stmt_path), txt(path),
+                     num(type_id), num(fp_width), num(fp_bits)});
   }
   if (has_constant &&
       node->variant.constant.ptr->kind == ck_address &&
@@ -1225,6 +1234,24 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       }
 
       if (stmt->kind == stmk_init) {
+        // M14: constant-initialized FP locals have no expression tree.
+        // Preserve their exact IEEE image at the native execution site,
+        // keyed by the initialized symbol and its authoritative EDG type.
+        if (variable_symbol != 0 && init->variable != nullptr &&
+            init->kind == dik_constant &&
+            init->variant.constant.ptr != nullptr) {
+          uint32_t width = 0;
+          uint64_t bits = 0;
+          a_type_ptr ty = init->variable->type;
+          const uint32_t type_id = emit_type(ty, 0);
+          if (type_id != 0 &&
+              standard_float_image(init->variant.constant.ptr, ty,
+                                   width, bits)) {
+            emit_record(59, {txt(function), txt(path),
+                             num(variable_symbol), num(type_id),
+                             num(width), num(bits)});
+          }
+        }
         // Constant scalar initializers do not own an expression tree.
         // Export their exact i64 value at this execution site; never guess
         // zero when a constant cannot be represented.
