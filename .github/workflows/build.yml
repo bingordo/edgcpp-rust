@@ -296,6 +296,27 @@ jobs:
             fi
           )
 
+      - name: M14 inspect pinned EDG floating-point projection
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --example parse
+          cp tests/fixtures/m14_fp_probe.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 m14_fp_probe.c > m14_fp_il.log 2>&1
+            grep -E '^(type id=|expression m14_|reference m14_|integer constant m14_|type detail id=|symbol type name=m14_)' m14_fp_il.log | head -n 250
+            grep -q '^routine m14_double_add' m14_fp_il.log
+            grep -q '^routine m14_float_mul' m14_fp_il.log
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
