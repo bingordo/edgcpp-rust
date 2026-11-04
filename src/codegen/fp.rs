@@ -59,14 +59,15 @@ pub struct FloatCondition {
     pub right:FloatExpr,
 }
 /// Checked FP SSA statements. IfAssign branches both fall through to a
-/// merge block; the Cranelift SSA builder materializes block parameters for
-/// locals whose values differ by predecessor. No loop or nested branch yet.
+/// merge block; absent or empty else arms mean the false predecessor preserves
+/// live-in locals. No loop or nested branch yet.
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
     Return(FloatExpr),
     IfReturn(FloatCondition,FloatExpr,FloatExpr),
-    /// Two nonempty straight-line assignment arms, joined before a later return.
+    /// Straight-line conditional updates joined before a later return.
+    /// Either arm may be empty; at least one must update a local.
     IfAssign(FloatCondition,Vec<(usize,FloatExpr)>,Vec<(usize,FloatExpr)>),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
@@ -200,8 +201,8 @@ fn emit_condition(
 fn validate_fp_arm(
     writes:&[(usize,FloatExpr)],f:&FloatBodyFunction,mut defined:Vec<bool>,
 )->Result<Vec<bool>,CodegenError> {
-    if writes.is_empty() || writes.len()>10000 {
-        return Err(reject("FP conditional assignment arm is empty or oversized"));
+    if writes.len()>10000 {
+        return Err(reject("FP conditional assignment arm is oversized"));
     }
     for (n,expr) in writes {
         let ty=*f.locals.get(*n)
@@ -285,6 +286,9 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                 }
                 FloatStmt::IfAssign(cond,yes,no)=>{
                     if last {return Err(reject("FP merging if must have a later return"));}
+                    if yes.is_empty() && no.is_empty() {
+                        return Err(reject("FP conditional has no assignment on either path"));
+                    }
                     check_condition(cond,&f.parameters,&f.locals,&defined)?;
                     let yes=validate_fp_arm(yes,f,defined.clone())?;
                     let no=validate_fp_arm(no,f,defined.clone())?;
@@ -544,6 +548,7 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
 }
 /// Accept a narrow ordered C body with typed FP locals, returning if/else,
 /// and straight-line conditional FP assignments with later SSA joins.
+/// An absent else is an implicit empty false branch, not an undefined value.
 /// Nested conditions, loops, cleanup and pointer access are rejected.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
@@ -555,7 +560,7 @@ fn lower_fp_body(
     let function=&node.data.function;
     let simple_children=node.children.is_empty();
     match super::semantic(1,node.data.kind) {
-        3 if node.expression.is_some() && node.children.len()==2=>{
+        3 if node.expression.is_some() && (1..=2).contains(&node.children.len())=>{
             let cond=comparison_from_edg(ctx,node.expression.unwrap())?;
             let mut then_stmt=None;
             let mut else_stmt=None;
@@ -578,14 +583,17 @@ fn lower_fp_body(
             }
             let extract=|arm:Option<crate::graph::StatementId>|->
                 Result<Vec<FloatStmt>,CodegenError> {
-                let arm=arm.ok_or_else(||reject("FP if requires both branches"))?;
+                let Some(arm)=arm else {return Ok(Vec::new());};
                 let mut statements=Vec::new();
                 lower_fp_body(ctx,arm,&mut statements,depth+1)?;
-                if statements.is_empty() || statements.len()>10000 {
-                    return Err(reject("FP if arm must be nonempty and bounded"));
+                if statements.len()>10000 {
+                    return Err(reject("FP if arm is oversized"));
                 }
                 Ok(statements)
             };
+            // EDG omits a null else statement entirely. It must remain an
+            // explicit no-op CFG predecessor, inheriting live-in locals.
+            if then_stmt.is_none() {return Err(reject("FP if missing then branch"));}
             let yes=extract(then_stmt)?;
             let no=extract(else_stmt)?;
             if yes.len()==1 && no.len()==1 &&
@@ -597,8 +605,9 @@ fn lower_fp_body(
                 output.push(FloatStmt::IfReturn(cond,yes,no));
             } else if yes.iter().all(|s|matches!(s,FloatStmt::Assign(..))) &&
                       no.iter().all(|s|matches!(s,FloatStmt::Assign(..))) {
-                // Only straight-line assignment branches can join; there is
-                // no general nested CFG, branch termination or memory effect.
+                // Either side may do no work. An absent else and an explicit
+                // empty else both keep the incoming values on that CFG edge.
+                // No general nested CFG, branch termination or memory effect.
                 let assignments=|stmts:Vec<FloatStmt>|->Vec<(usize,FloatExpr)> {
                     stmts.into_iter().map(|s|match s {
                         FloatStmt::Assign(n,e)=>(n,e),
