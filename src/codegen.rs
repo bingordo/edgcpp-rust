@@ -20,6 +20,11 @@ pub struct Function {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryAccess { Ordinary, Volatile, Atomic }
 
+/// Supported integer GNU/C11 fetch operations. All are emitted atomically;
+/// the source order is retained separately for validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicFetchOp { Exchange, Add, Sub, And, Or, Xor }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Constant(i64),
@@ -40,6 +45,14 @@ pub enum Expr {
     /// from the pointer's pointee, never the converted EDG rvalue type.
     LoadQualified(CAbiInt, MemoryAccess, Box<Expr>),
     StoreQualified(CAbiInt, MemoryAccess, Box<Expr>, Box<Expr>),
+    /// Source-visible C11/GNU explicit-order integer operations. On this
+    /// reference x86-64 backend supported orders strengthen to seq-cst.
+    AtomicLoad(CAbiInt, crate::memory_order::MemoryOrder, Box<Expr>),
+    AtomicStore(CAbiInt, crate::memory_order::MemoryOrder, Box<Expr>, Box<Expr>),
+    /// Fetch variants return the OLD value; exchange has the same convention.
+    AtomicFetch(CAbiInt, crate::memory_order::MemoryOrder, AtomicFetchOp,
+                Box<Expr>,Box<Expr>),
+    AtomicFence(crate::memory_order::MemoryOrder),
     /// Evaluate the lvalue address once, then perform a qualified C
     /// increment/decrement. C11 atomics require an indivisible RMW.
     PostQualified(CAbiInt, MemoryAccess, i64, Box<Expr>),
@@ -219,6 +232,8 @@ fn emit_expr(
         Expr::Global(..) | Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::AddressFunction(..) | Expr::BlockValue(..) | Expr::AddressGlobal(..) | Expr::AddressLocal(..) |
         Expr::LoadAddress(..) | Expr::StoreAddress(..) |
         Expr::LoadQualified(..) | Expr::StoreQualified(..) |
+        Expr::AtomicLoad(..) | Expr::AtomicStore(..) |
+        Expr::AtomicFetch(..) | Expr::AtomicFence(..) |
         Expr::PostQualified(..) | Expr::CompoundQualified(..) |
         Expr::AtomicCompareExchange {..} |
         Expr::PackAggregate(..) |
@@ -473,6 +488,8 @@ fn contains_local_write(expr: &Expr) -> bool {
     match expr {
         Expr::Call(..) | Expr::CallIndirect(..) | Expr::VlaAlloc(..) | Expr::BlockValue(..) |
         Expr::StoreAddress(..) | Expr::StoreQualified(..) |
+        Expr::AtomicLoad(..) | Expr::AtomicStore(..) |
+        Expr::AtomicFetch(..) | Expr::AtomicFence(..) |
         Expr::PostQualified(..) | Expr::CompoundQualified(..) |
         Expr::AtomicCompareExchange {..} |
         Expr::StoreBitField(..) |
