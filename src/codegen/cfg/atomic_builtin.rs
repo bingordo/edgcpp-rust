@@ -76,10 +76,12 @@ pub(super) fn lower(
         if args.len()!=1 {return Err(invalid("wrong atomic_thread_fence arity"));}
         return Ok(Expr::AtomicFence(order(graph,arg(0)?,AtomicOperation::Fence)?));
     }
-    // A signal fence requires a compiler-barrier contract, not a hardware
-    // atomic on a RAM address. Reject independently.
+    // Cranelift's effectful fence is a compiler barrier and a full hardware
+    // fence. The extra runtime ordering is a legal strengthening of C11
+    // signal-fence semantics on this x86-64 reference backend.
     if name=="__atomic_signal_fence" {
-        return Err(invalid("atomic_signal_fence compiler-barrier unsupported"));
+        if args.len()!=1 {return Err(invalid("wrong atomic_signal_fence arity"));}
+        return Ok(Expr::AtomicFence(order(graph,arg(0)?,AtomicOperation::Fence)?));
     }
     let (family,width)=name.rsplit_once('_')
         .ok_or_else(||invalid(format!("unknown atomic builtin {name}")))?;
