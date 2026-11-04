@@ -284,6 +284,30 @@ fn expression_from_edg(
     let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
+    if node.data.constant_kind.is_some() {
+        if !node.operands.is_empty() || node.data.symbol_id.is_some() {
+            return Err(reject("FP constant cannot carry operands or symbol identity"));
+        }
+        let mut literals=ctx.il.float_constants.iter().filter(|c|
+            c.function==node.data.function &&
+            c.statement_path==node.data.statement_path &&
+            c.path==node.data.path);
+        let exact=literals.next()
+            .ok_or_else(||reject("EDG floating-point constant has no exact bit image"))?;
+        if literals.next().is_some() {
+            return Err(reject("ambiguous duplicate EDG floating-point constant"));
+        }
+        if Some(exact.ty)!=node.data.type_id {
+            return Err(reject("EDG FP literal native type identity mismatch"));
+        }
+        return match (ty,exact.width) {
+            (FloatType::F32,32)=>
+                Ok(FloatExpr::Constant32(exact.bits as u32)),
+            (FloatType::F64,64)=>
+                Ok(FloatExpr::Constant64(exact.bits)),
+            _=>Err(reject("EDG FP literal width/source type mismatch")),
+        };
+    }
     if kind==2 && node.operands.is_empty() {
         let symbol=node.data.symbol_id
             .ok_or_else(||reject("FP variable missing native identity"))?;
