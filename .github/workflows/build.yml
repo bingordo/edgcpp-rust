@@ -399,6 +399,29 @@ jobs:
             test ! -e m12_bad_local.o
           )
 
+      - name: M12 1/2/4/8-byte signed and unsigned qualified scalar GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m12_qualified_widths.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m12_qualified_widths_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m12_widths.o --c11 m12_qualified_widths.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m12_qualified_widths.c m12_qualified_widths_driver.c -o gcc_m12_widths
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m12_widths.o m12_qualified_widths_driver.c -o cranelift_m12_widths
+            ./gcc_m12_widths
+            ./cranelift_m12_widths
+          )
+
       - name: M12 qualified formal parameter GCC differential
         working-directory: edgcpp-rust
         env:
