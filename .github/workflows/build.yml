@@ -321,6 +321,29 @@ jobs:
             grep -q '^routine m14_float_mul' m14_fp_il.log
           )
 
+      - name: M14 inspect EDG FP locals, initializers and assignments
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --example parse
+          cp tests/fixtures/m14_fp_locals_probe.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 m14_fp_locals_probe.c > m14_locals_il.log 2>&1 || {
+              tail -n 160 m14_locals_il.log
+              exit 1
+            }
+            grep -E '^(statement m14_|expression m14_|reference m14_|statement declaration m14_|statement initialization m14_|local variable routine=m14_|symbol reference |type id=)' m14_locals_il.log | head -n 230 || true
+            grep -q '^routine m14_local_assign' m14_locals_il.log
+          )
+
       - name: M14 native EDG scalar floating-point GCC differential
         working-directory: edgcpp-rust
         env:
