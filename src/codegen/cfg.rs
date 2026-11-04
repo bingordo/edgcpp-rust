@@ -45,6 +45,8 @@ struct Routine {
     local_storage: Option<Vec<u32>>,
     /// Cranelift stack-slot alignment shifts, one per local/parameter.
     local_alignments: Option<Vec<u8>>,
+    /// Qualified function parameters have automatic C storage semantics.
+    parameter_accesses: Vec<MemoryAccess>,
 }
 fn invalid(msg: impl Into<String>) -> CodegenError { CodegenError::InvalidFunction(msg.into()) }
 
@@ -110,6 +112,27 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid(format!("local {} has unsupported scalar type",local.symbol.0)))?;
     Ok(CAbiInt { bits: info.bits, signed: info.signed, is_bool: info.is_bool })
+}
+/// The ABI erases top-level parameter qualifiers, but their automatic
+/// object reads/writes must still obey the source declaration.
+fn parameter_memory_access(
+    il:&Il,symbol:crate::SymbolId,
+) -> Result<MemoryAccess,CodegenError> {
+    let arg=il.function_parameters.iter().find(|p|p.symbol==symbol)
+        .ok_or_else(||invalid("function parameter missing native declaration type"))?;
+    let access=scalar_memory_access(il,arg.ty)?;
+    if access!=MemoryAccess::Ordinary {
+        let base=canonical_abi_type(il,arg.ty)?;
+        let kind=il.types.iter().find(|t|t.id==base)
+            .map(|t|semantic(4,t.kind))
+            .ok_or_else(||invalid("missing qualified parameter type"))?;
+        let bytes=byte_size(il,arg.ty)?;
+        let alignment=storage_alignment(il,arg.ty)?;
+        if kind!=1 || !matches!(bytes,1|2|4|8) || alignment<bytes {
+            return Err(invalid("qualified formal requires naturally aligned integer scalar"));
+        }
+    }
+    Ok(access)
 }
 fn cfg_checked_local(
     il: &Il, locals: &[&crate::LocalVariable], symbol: crate::SymbolId,
@@ -991,6 +1014,13 @@ fn lvalue_memory_access(
             }
         }
     }
+    if semantic(2,node.data.kind)==2 {
+        if let Some(sym)=node.data.symbol_id {
+            if il.function_parameters.iter().any(|p|p.symbol==sym) {
+                return parameter_memory_access(il,sym);
+            }
+        }
+    }
     indirect_lvalue_access(graph,id,il)
 }
 fn scalar_global(
@@ -1071,6 +1101,9 @@ fn scalar_lvalue(
     }
     let symbol = n.data.symbol_id.ok_or_else(|| invalid("missing assignment symbol"))?;
     if let Some(i) = params.iter().position(|p| *p == symbol) {
+        if parameter_memory_access(il,symbol)?!=MemoryAccess::Ordinary {
+            return Err(invalid("qualified formal must use memory lvalue"));
+        }
         return Ok((ScalarPlace::Ssa(locals.len()+i),integer_expression_type(il,graph,id)?));
     }
     if let Some(index) = locals.iter().position(|v| v.symbol == symbol) {
@@ -1851,7 +1884,10 @@ fn lower_c_expression(
         2 => {
             let symbol = node.data.symbol_id.ok_or_else(|| invalid("unresolved scalar variable"))?;
             if let Some(i) = params.iter().position(|p| *p == symbol) {
-                Expr::Local(locals.len()+i)
+                let access=parameter_memory_access(il,symbol)?;
+                if access==MemoryAccess::Ordinary {Expr::Local(locals.len()+i)}
+                else {Expr::LoadQualified(output,access,
+                    Box::new(Expr::AddressLocal(locals.len()+i)))}
             } else {
                 if let Some(i) = locals.iter().position(|v| v.symbol == symbol) {
                     let local_ty=cfg_local_type(il,locals[i])?;
@@ -2298,6 +2334,8 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         }
         let abi = cfg_routine_abi(il, name, routine, &args)?;
         let ids: Vec<_> = args.iter().map(|p| p.symbol).collect();
+        let parameter_accesses=ids.iter().map(|sym|
+            parameter_memory_access(il,*sym)).collect::<Result<Vec<_>,_>>()?;
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
         if locals.len() > 10_000 { return Err(invalid("too many locals")); }
         let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
@@ -2334,7 +2372,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
         out.push(Routine { name: name.clone(), parameters: ids.len(),
             locals: locals.len(), body, abi: Some(abi),
             local_types: Some(local_types),local_storage:Some(local_storage),
-            local_alignments:Some(local_alignments) });
+            local_alignments:Some(local_alignments),parameter_accesses });
     }
     Ok(out)
 }
@@ -3525,6 +3563,15 @@ fn emit_routines_with_globals(
             for (index,aggregate) in abi.aggregate_parameters.iter().enumerate() {
                 if aggregate.is_some() {addressed.insert(func.locals+index);}
             }
+            if !func.parameter_accesses.is_empty() &&
+               func.parameter_accesses.len()!=func.parameters {
+                return Err(invalid("qualified formal access metadata count mismatch"));
+            }
+            for (index,access) in func.parameter_accesses.iter().enumerate() {
+                if *access!=MemoryAccess::Ordinary {
+                    addressed.insert(func.locals+index);
+                }
+            }
             let storage=func.local_storage.clone().unwrap_or_else(||
                 local_types.iter().map(|t|u32::from(t.bits/8)).collect());
             if storage.len()!=local_types.len() {
@@ -3550,8 +3597,17 @@ fn emit_routines_with_globals(
                         target::ABI.materialize_aggregate(
                             &mut fb,address,bytes,values)?;
                     } else {
-                        local_write(&mut fb,&vars,&stack,&local_types,
-                            func.locals+i,first)?;
+                        let access=func.parameter_accesses.get(i).copied()
+                            .unwrap_or(MemoryAccess::Ordinary);
+                        if access==MemoryAccess::Ordinary {
+                            local_write(&mut fb,&vars,&stack,&local_types,
+                                func.locals+i,first)?;
+                        } else {
+                            let index=func.locals+i;
+                            let address=local_address(&mut fb,&stack,index)?;
+                            super::memory::store_integer_access(
+                                &mut fb,address,first,local_types[index],access);
+                        }
                     }
                 }
             }
@@ -3596,7 +3652,7 @@ mod tests {
             body:vec![Stmt::Return(Expr::CallIndirect(
                 Box::new(Expr::Parameter(0)),callback_abi,
                 vec![Expr::Parameter(1)]))],
-            abi:None,local_types:None,local_storage:None,local_alignments:None,
+            abi:None,local_types:None,local_storage:None,local_alignments:None,parameter_accesses:vec![],
         };
         assert!(!emit_routines(&[routine]).unwrap().is_empty());
     }
@@ -3619,7 +3675,7 @@ mod tests {
         ];
         assert!(!check(&body,&mut HashSet::new(),2,1,0).unwrap());
         let object = emit_routines(&[Routine {
-            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
+            name: "cfg_unit".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,parameter_accesses:vec![],
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -3644,7 +3700,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 2, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
+            name: "for_and_do".into(), parameters: 2, locals: 2, body, abi: None, local_types: None, local_storage: None, local_alignments: None,parameter_accesses:vec![],
         }]).unwrap()[..4], b"\x7fELF");
     }
     #[test]
@@ -3671,7 +3727,7 @@ mod tests {
         ];
         assert!(!check(&body, &mut HashSet::new(), 2, 1, 0).unwrap());
         assert_eq!(&emit_routines(&[Routine {
-            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,
+            name: "loop_jumps".into(), parameters: 2, locals: 1, body, abi: None, local_types: None, local_storage: None, local_alignments: None,parameter_accesses:vec![],
         }]).unwrap()[..4], b"\x7fELF");
     }
 
@@ -3682,7 +3738,7 @@ mod tests {
         let obj=emit_routines(&[Routine {
             name:"zero_aggregate_unit".into(),parameters:0,locals:1,body,
             abi:None,local_types:None,local_storage:Some(vec![14]),
-            local_alignments:Some(vec![1]),
+            local_alignments:Some(vec![1]),parameter_accesses:vec![],
         }]).unwrap();
         assert_eq!(&obj[..4],b"\x7fELF");
         assert!(check(&[Stmt::ZeroAggregate(0,4097)],
@@ -3707,7 +3763,7 @@ mod tests {
         assert!(!check(&returns,&mut HashSet::new(),1,0,0).unwrap());
         let object=emit_routines(&[Routine {
             name:"forever_return_unit".into(),parameters:1,locals:0,body:returns,
-            abi:None,local_types:None,local_storage:None,local_alignments:None,
+            abi:None,local_types:None,local_storage:None,local_alignments:None,parameter_accesses:vec![],
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
 
@@ -3723,7 +3779,7 @@ mod tests {
         let object=emit_routines(&[Routine {
             name:"forever_break_unit".into(),parameters:1,locals:0,
             body:with_break,abi:None,local_types:None,
-            local_storage:None,local_alignments:None,
+            local_storage:None,local_alignments:None,parameter_accesses:vec![],
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
@@ -3778,7 +3834,7 @@ mod tests {
         let object=emit_routines(&[Routine {
             name:"test_source_label_jump".into(),parameters:0,locals:1,
             body,abi:None,local_types:None,
-            local_storage:None,local_alignments:None,
+            local_storage:None,local_alignments:None,parameter_accesses:vec![],
         }]).unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
     }
