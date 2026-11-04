@@ -1819,6 +1819,36 @@ mod tests {
         assert_eq!(state.il.float_constants.len(),2);
     }
     #[test]
+    fn m14_constant_fp_initializer_wire_preserves_bits_and_rejects_bad_sizes() {
+        let string = |bytes: &[u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:1,
+        };
+        let number = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let valid=[
+            string(b"m14_test"),string(b"0.block.1"),number(17),
+            number(23),number(64),number(0x8000_0000_0000_0000),
+        ];
+        unsafe {collect((&mut state as *mut Collector).cast(),59,
+            valid.as_ptr(),valid.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.float_initializers,vec![FloatInitializer {
+            function:"m14_test".into(),statement_path:"0.block.1".into(),
+            symbol:SymbolId(17),ty:TypeId(23),width:64,
+            bits:0x8000_0000_0000_0000,
+        }]);
+        let invalid=[
+            string(b"m14_test"),string(b"0.block.2"),number(17),
+            number(23),number(32),number(0x1_0000_0000),
+        ];
+        unsafe {collect((&mut state as *mut Collector).cast(),59,
+            invalid.as_ptr(),invalid.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.float_initializers.len(),1);
+    }
+    #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
