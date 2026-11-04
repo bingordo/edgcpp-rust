@@ -7,6 +7,7 @@
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 use super::*;
 use cranelift_codegen::ir::{immediates::{Ieee32,Ieee64}, Value};
+use cranelift_frontend::Variable;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum FloatType { F32,F64 }
@@ -18,6 +19,7 @@ impl FloatType {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatExpr {
     Parameter(usize),
+    Local(usize),
     Constant32(u32),
     Constant64(u64),
     Neg(Box<Self>),
@@ -35,28 +37,41 @@ pub struct FloatFunction {
     pub result:FloatType,
     pub expression:FloatExpr,
 }
+/// Checked straight-line FP local assignments and final return.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum FloatStmt { Assign(usize,FloatExpr), Return(FloatExpr) }
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct FloatBodyFunction {
+    pub name:String,
+    pub parameters:Vec<FloatType>,
+    pub result:FloatType,
+    pub locals:Vec<FloatType>,
+    pub statements:Vec<FloatStmt>,
+}
 fn reject(message:impl Into<String>)->CodegenError {
     CodegenError::InvalidFunction(message.into())
 }
 fn expression_type(
-    expr:&FloatExpr,params:&[FloatType],depth:usize,
+    expr:&FloatExpr,params:&[FloatType],locals:&[FloatType],depth:usize,
 )->Result<FloatType,CodegenError> {
     if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
     use FloatExpr::*;
     match expr {
         Parameter(n)=>params.get(*n).copied()
             .ok_or_else(||reject("FP parameter out of range")),
+        Local(n)=>locals.get(*n).copied()
+            .ok_or_else(||reject("FP local out of range")),
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
-        Neg(e)=>expression_type(e,params,depth+1),
+        Neg(e)=>expression_type(e,params,locals,depth+1),
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let a=expression_type(a,params,depth+1)?;
-            let b=expression_type(b,params,depth+1)?;
+            let a=expression_type(a,params,locals,depth+1)?;
+            let b=expression_type(b,params,locals,depth+1)?;
             if a!=b {return Err(reject("FP binary operation operands differ in type"));}
             Ok(a)
         }
         Convert(to,e)=>{
-            let _=expression_type(e,params,depth+1)?;
+            let _=expression_type(e,params,locals,depth+1)?;
             Ok(*to)
         }
     }
@@ -66,6 +81,8 @@ fn emit_expr(
     fb:&mut FunctionBuilder<'_>,
     params:&[Value],
     params_ty:&[FloatType],
+    locals:&[Variable],
+    locals_ty:&[FloatType],
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
     let (value,ty)=match expr {
@@ -76,14 +93,19 @@ fn emit_expr(
                 .ok_or_else(||reject("missing source FP type"))?;
             (value,ty)
         }
+        Local(n)=>{
+            let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
+            let ty=*locals_ty.get(*n).ok_or_else(||reject("missing FP local type"))?;
+            (fb.use_var(var),ty)
+        }
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
         Constant64(bits)=>(fb.ins().f64const(Ieee64::with_bits(*bits)),FloatType::F64),
         Neg(e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty)?;
             (fb.ins().fneg(v),t)
         }
         Convert(to,e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty)?;
             let value=match (t,*to) {
                 (FloatType::F32,FloatType::F64)=>fb.ins().fpromote(types::F64,v),
                 (FloatType::F64,FloatType::F32)=>fb.ins().fdemote(types::F32,v),
@@ -92,8 +114,8 @@ fn emit_expr(
             (value,*to)
         }
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let (x,t)=emit_expr(a,fb,params,params_ty)?;
-            let (y,u)=emit_expr(b,fb,params,params_ty)?;
+            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty)?;
+            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty)?;
             if t!=u {return Err(reject("unconverted mixed FP arithmetic"));}
             let value=match expr {
                 Add(..)=>fb.ins().fadd(x,y),
