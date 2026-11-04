@@ -747,6 +747,36 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn fp_predicates_check_nan_correctly_and_fail_closed() {
+        let condition=FloatCondition {
+            op:FloatPredicate::Ne,
+            left:FloatExpr::Parameter(0),
+            right:FloatExpr::Parameter(1),
+        };
+        let valid=FloatBodyFunction {
+            name:"m14_unit_compare".into(),
+            parameters:vec![FloatType::F64,FloatType::F64],
+            result:FloatType::F64,locals:vec![],
+            statements:vec![FloatStmt::IfReturn(condition.clone(),
+                FloatExpr::Constant64(11.0f64.to_bits()),
+                FloatExpr::Constant64(22.0f64.to_bits()))],
+        };
+        let object=emit_float_bodies(&[valid.clone()]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        let mut bad=valid.clone();
+        bad.parameters[1]=FloatType::F32;
+        assert!(emit_float_bodies(&[bad]).is_err());
+        let mut bad=valid.clone();
+        bad.statements=vec![FloatStmt::IfReturn(condition,
+            FloatExpr::Parameter(0),
+            FloatExpr::Constant32(0))];
+        assert!(emit_float_bodies(&[bad]).is_err());
+        let mut bad=valid;
+        bad.statements.push(FloatStmt::Return(FloatExpr::Parameter(0)));
+        assert!(emit_float_bodies(&[bad]).is_err());
+    }
+
+    #[test]
     fn fp_local_definite_assignment_and_type_checks() {
         let valid=FloatBodyFunction {
             name:"m14_let".into(),
