@@ -461,6 +461,41 @@ jobs:
             ./cranelift_m14_constants
           )
 
+      - name: M14 native FP comparison if-return GCC/NaN differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_compare.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_compare_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_compare_bad_merge.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_compare_bad_result.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m14_compare.o --c11 m14_fp_compare.c
+            nm -g --defined-only edg_m14_compare.o | grep -q m14_cmp_local
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_compare.c m14_fp_compare_driver.c -lm -o gcc_m14_compare
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_compare.o m14_fp_compare_driver.c -lm -o cranelift_m14_compare
+            ./gcc_m14_compare
+            ./cranelift_m14_compare
+            for source in m14_fp_compare_bad_merge.c m14_fp_compare_bad_result.c; do
+              rm -f bad_m14_cmp.o bad_m14_cmp.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_cmp.o --c11 "$source" >bad_m14_cmp.log 2>&1; then
+                echo "Unsupported FP comparison construct silently compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |unsupported|EDG IL lowering failed' bad_m14_cmp.log
+              test ! -e bad_m14_cmp.o
+            done
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
