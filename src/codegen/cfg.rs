@@ -3661,6 +3661,62 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 mod tests {
     use super::*;
     #[test]
+    fn m12_atomic_compare_exchange_returns_status_and_updates_expected_on_failure() {
+        use crate::memory_order::MemoryOrder;
+        let ty=CAbiInt{bits:32,signed:true,is_bool:false};
+        let make=|failure| Routine {
+            name:"m12_cas_native_test".to_owned(),
+            parameters:3,locals:0,
+            body:vec![Stmt::Return(Expr::AtomicCompareExchange {
+                ty,success:MemoryOrder::SeqCst,failure,weak:false,
+                object:Box::new(Expr::Parameter(0)),
+                expected:Box::new(Expr::Parameter(1)),
+                desired:Box::new(Expr::Parameter(2)),
+            })],
+            abi:None,local_types:None,local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        };
+        // Reject an invalid source failure order before emitting an ELF object.
+        assert!(emit_routines(&[make(MemoryOrder::Release)]).is_err());
+        let object=emit_routines(&[make(MemoryOrder::Acquire)]).unwrap();
+        assert_eq!(&object[..4],b"\\x7fELF");
+        // This native GCC caller verifies BOTH CAS paths. On failure, C11
+        // writes the observed value into *expected, not into the object.
+        let dir=std::env::temp_dir().join(format!(
+            "edg-m12-cas-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj=dir.join("m12_cas.o");
+        let driver=dir.join("driver.c");
+        let executable=dir.join("cas-test");
+        std::fs::write(&obj,&object).unwrap();
+        std::fs::write(&driver,r#"
+            #include <stdlib.h>
+            extern long long m12_cas_native_test(int *, int *, long long);
+            int main(void) {
+                int object=4, expected=4;
+                if(m12_cas_native_test(&object,&expected,7)!=1 ||
+                   object!=7 || expected!=4) abort();
+                expected=4;
+                if(m12_cas_native_test(&object,&expected,9)!=0 ||
+                   object!=7 || expected!=7) abort();
+                expected=7;
+                if(m12_cas_native_test(&object,&expected,9)!=1 ||
+                   object!=9 || expected!=7) abort();
+                return 0;
+            }
+        "#).unwrap();
+        let compile=std::process::Command::new("gcc")
+            .arg("-std=c11").arg("-O2")
+            .arg(&obj).arg(&driver).arg("-o").arg(&executable)
+            .output().unwrap();
+        assert!(compile.status.success(),"GCC link: {}",
+            String::from_utf8_lossy(&compile.stderr));
+        let run=std::process::Command::new(&executable).output().unwrap();
+        assert!(run.status.success(),"native CAS: {}",
+            String::from_utf8_lossy(&run.stderr));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn m10_indirect_callback_object_has_native_call_signature() {
         let word=CAbiInt{bits:64,signed:true,is_bool:false};
         let callback_abi=CAbi {
