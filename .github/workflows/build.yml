@@ -496,7 +496,7 @@ jobs:
             done
           )
 
-      - name: M14 native FP SSA if-assignment merge GCC differential
+      - name: M14 native FP SSA nested conditional merge GCC differential
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
@@ -511,6 +511,7 @@ jobs:
           cp tests/fixtures/m14_fp_merge_driver.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_merge_bad_one_sided.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_merge_bad_nested.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m14_fp_merge_bad_nested_uninit.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_merge_bad_return.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
@@ -520,11 +521,12 @@ jobs:
               exit 1
             fi
             nm -g --defined-only edg_m14_merge.o | grep -q m14_join_ordered
+            nm -g --defined-only edg_m14_merge.o | grep -q m14_join_nested_both_arms
             gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_merge.c m14_fp_merge_driver.c -lm -o gcc_m14_merge
             gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_merge.o m14_fp_merge_driver.c -lm -o cranelift_m14_merge
             ./gcc_m14_merge
             ./cranelift_m14_merge
-            for source in m14_fp_merge_bad_one_sided.c m14_fp_merge_bad_nested.c m14_fp_merge_bad_return.c; do
+            for source in m14_fp_merge_bad_one_sided.c m14_fp_merge_bad_nested.c m14_fp_merge_bad_nested_uninit.c m14_fp_merge_bad_return.c; do
               rm -f bad_m14_join.o bad_m14_join.log
               if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_join.o --c11 "$source" >bad_m14_join.log 2>&1; then
                 echo "Unsafe FP SSA merge unexpectedly accepted: $source"
@@ -1066,7 +1068,7 @@ jobs:
                 echo "Unexpectedly accepted unsupported construct: $variant"
                 exit 1
               fi
-              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|FP if arms must both return or both assign locals' rejected.log || {
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
                 echo "Wrong rejection reason for $variant"
                 cat rejected.log
                 exit 1

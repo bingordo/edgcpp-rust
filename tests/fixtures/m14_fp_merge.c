@@ -70,3 +70,28 @@ double m14_if_empty_then(double a,double b) {
     if (a > b) {} else v = b+1.0;
     return v;
 }
+
+/* Nested assignment-only conditions use two levels of SSA joins. */
+double m14_join_nested(double a,double b) {
+    double v=a;
+    if (a>b) {
+        if (a>0.0) v=a+1.0; else v=a-1.0;
+    } else v=b;
+    return v;
+}
+double m14_join_nested_no_else(double a,double b) {
+    double v=b;
+    if (a>b) {
+        if (a>0.0) v=a+2.0;
+    }
+    return v;
+}
+double m14_join_nested_both_arms(double a,double b) {
+    double v=a;
+    if (a!=b) {
+        if (a<b) v=b-a; else v=a-b;
+    } else {
+        if (a>0.0) v=a+1.0; else v=b-1.0;
+    }
+    return v;
+}
