@@ -6,7 +6,8 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 use super::*;
-use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,Value};
+use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
+use std::collections::HashMap;
 use std::cell::Cell;
 use cranelift_frontend::Variable;
 
@@ -43,11 +44,25 @@ struct ScalarFloatBody {
     statements:Vec<FloatStmt>,
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
+pub enum ScalarCallArg {
+    Float(FloatExpr),
+    /// A native EDG direct INTEGER formal passed to the same scalar class.
+    IntegerParameter(usize),
+}
+#[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatExpr {
     Parameter(usize),
     /// Exact EDG integer formal converted to FP by a native cast node.
     /// Never reinterpret GPR argument bits as an XMM value.
     IntegerParameterCast {parameter:usize,to:FloatType},
+    /// An EDG-verified direct call to a definition in this compilation unit.
+    /// Indirect and external calls require a separate declaration contract.
+    Call {
+        callee:String,
+        parameters:Vec<ScalarType>,
+        return_type:FloatType,
+        arguments:Vec<ScalarCallArg>,
+    },
     Local(usize),
     Constant32(u32),
     Constant64(u64),
@@ -142,6 +157,25 @@ fn expression_type(
                 Err(reject("FP integer cast source is not a checked integer formal"))
             }
         },
+        Call {parameters,return_type,arguments,..}=>{
+            if arguments.len()!=parameters.len() || arguments.len()>256 {
+                return Err(reject("FP direct call argument count does not match prototype"));
+            }
+            for (arg,target) in arguments.iter().zip(parameters) {
+                let source=match arg {
+                    ScalarCallArg::Float(e)=>
+                        ScalarType::Float(expression_type(e,params,locals,depth+1)?),
+                    ScalarCallArg::IntegerParameter(n)=>match params.get(*n) {
+                        Some(ScalarType::Int {..})=>params[*n],
+                        _=>return Err(reject("FP call's integer source is not a formal")),
+                    },
+                };
+                if source!=*target {
+                    return Err(reject("FP direct call argument class/type mismatch"));
+                }
+            }
+            Ok(*return_type)
+        }
         Local(n)=>locals.get(*n).copied()
             .ok_or_else(||reject("FP local out of range")),
         Constant32(_)=>Ok(FloatType::F32),
@@ -166,6 +200,7 @@ fn emit_expr(
     params_ty:&[ScalarType],
     locals:&[Variable],
     locals_ty:&[FloatType],
+    refs:&HashMap<String,FuncRef>,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
     let (value,ty)=match expr {
@@ -192,6 +227,38 @@ fn emit_expr(
             };
             (converted,*to)
         }
+        Call {callee,parameters,return_type,arguments}=>{
+            if arguments.len()!=parameters.len() {
+                return Err(reject("invalid direct call argument count"));
+            }
+            let reference=*refs.get(callee)
+                .ok_or_else(||reject("FP call target has no defined function ref"))?;
+            let mut values=Vec::with_capacity(arguments.len());
+            for (arg,expected) in arguments.iter().zip(parameters) {
+                let value=match (arg,expected) {
+                    (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
+                        let (v,actual)=emit_expr(e,fb,params,params_ty,
+                            locals,locals_ty,refs)?;
+                        if actual!=*t {
+                            return Err(reject("FP direct call argument is not converted"));
+                        }
+                        v
+                    }
+                    (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
+                        if params_ty.get(*n)!=Some(expected) {
+                            return Err(reject("direct call INTEGER formal ABI mismatch"));
+                        }
+                        *params.get(*n).ok_or_else(||reject("missing direct call formal"))?
+                    }
+                    _=>return Err(reject("direct call crosses incompatible ABI classes")),
+                };
+                values.push(value);
+            }
+            let inst=fb.ins().call(reference,&values);
+            let result=*fb.inst_results(inst).first()
+                .ok_or_else(||reject("FP direct call has no return value"))?;
+            (result,*return_type)
+        }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
             let ty=*locals_ty.get(*n).ok_or_else(||reject("missing FP local type"))?;
@@ -200,11 +267,11 @@ fn emit_expr(
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
         Constant64(bits)=>(fb.ins().f64const(Ieee64::with_bits(*bits)),FloatType::F64),
         Neg(e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
             (fb.ins().fneg(v),t)
         }
         Convert(to,e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
             let value=match (t,*to) {
                 (FloatType::F32,FloatType::F64)=>fb.ins().fpromote(types::F64,v),
                 (FloatType::F64,FloatType::F32)=>fb.ins().fdemote(types::F32,v),
@@ -213,8 +280,8 @@ fn emit_expr(
             (value,*to)
         }
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty)?;
-            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty)?;
+            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty,refs)?;
+            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty,refs)?;
             if t!=u {return Err(reject("unconverted mixed FP arithmetic"));}
             let value=match expr {
                 Add(..)=>fb.ins().fadd(x,y),
@@ -238,6 +305,14 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
+        Call {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(expr)=arg {
+                    check_local_reads(expr,defined,depth+1)?;
+                }
+            }
+            Ok(())
+        },
         Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
             check_local_reads(a,defined,depth+1)?;
@@ -259,9 +334,10 @@ fn check_condition(
 fn emit_condition(
     cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
+    refs:&HashMap<String,FuncRef>,
 )->Result<Value,CodegenError> {
-    let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty)?;
-    let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty)?;
+    let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty,refs)?;
+    let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty,refs)?;
     if t!=u {return Err(reject("unconverted mixed FP comparison"));}
     Ok(fb.ins().fcmp(cond.op.cranelift(),x,y))
 }
@@ -460,7 +536,8 @@ struct FpLoopTargets<'a> {
 fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
-    outer:Option<FpLoopTargets<'_>>,depth:usize,
+    outer:Option<FpLoopTargets<'_>>,
+    refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
     if depth>64 {return Err(reject("FP CFG emission exceeds recursion limit"));}
     let mut live=true;
@@ -468,16 +545,16 @@ fn emit_fp_statements(
         if !live {break;}
         match stmt {
             FloatStmt::Assign(n,expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.def_var(locals[*n],v);
             }
             FloatStmt::Return(expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.ins().return_(&[v]);
                 live=false;
             }
             FloatStmt::ReturnInteger(expr,to)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
                 let converted=match to {
                     ScalarType::Int {signed:true,..}=>
                         fb.ins().fcvt_to_sint(to.machine(),v),
@@ -489,23 +566,23 @@ fn emit_fp_statements(
                 live=false;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
-                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
                 let t=fb.create_block();
                 let f=fb.create_block();
                 fb.ins().brif(flag,t,&[],f,&[]);
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty)?;
+                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.ins().return_(&[v]);
                 fb.switch_to_block(f);
-                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty)?;
+                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.ins().return_(&[v]);
                 live=false;
             }
             FloatStmt::IfBlock(cond,yes,no)=>{
                 live=emit_fp_if(cond,yes,no,fb,params,params_ty,
-                    locals,locals_ty,outer,depth+1)?;
+                    locals,locals_ty,outer,refs,depth+1)?;
             }
             FloatStmt::IfAssign(cond,yes,no)=>{
                 let a:Vec<_>=yes.iter().map(|(n,e)|
@@ -513,7 +590,7 @@ fn emit_fp_statements(
                 let b:Vec<_>=no.iter().map(|(n,e)|
                     FloatStmt::Assign(*n,e.clone())).collect();
                 live=emit_fp_if(cond,&a,&b,fb,params,params_ty,
-                    locals,locals_ty,outer,depth+1)?;
+                    locals,locals_ty,outer,refs,depth+1)?;
             }
             FloatStmt::While(cond,body)=>{
                 let head=fb.create_block();
@@ -521,7 +598,7 @@ fn emit_fp_statements(
                 let exit=fb.create_block();
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
-                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.ins().brif(test,body_block,&[],exit,&[]);
                 fb.seal_block(body_block);
                 fb.switch_to_block(body_block);
@@ -530,7 +607,7 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:head,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 if emit_fp_statements(body,fb,params,params_ty,locals,
-                    locals_ty,Some(inner),depth+1)? {
+                    locals_ty,Some(inner),refs,depth+1)? {
                     fb.ins().jump(head,&[]);
                 }
                 fb.seal_block(head);
@@ -539,7 +616,7 @@ fn emit_fp_statements(
             }
             FloatStmt::For {init,condition,increment,body}=>{
                 if !emit_fp_statements(init,fb,params,params_ty,locals,
-                    locals_ty,outer,depth+1)? {live=false;continue;}
+                    locals_ty,outer,refs,depth+1)? {live=false;continue;}
                 let head=fb.create_block();
                 let body_block=fb.create_block();
                 let step=fb.create_block();
@@ -547,7 +624,7 @@ fn emit_fp_statements(
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
                 if let Some(cond)=condition {
-                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
                     fb.ins().brif(test,body_block,&[],exit,&[]);
                 } else {fb.ins().jump(body_block,&[]);}
                 fb.seal_block(body_block);
@@ -557,13 +634,13 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:step,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),depth+1)?;
+                    locals,locals_ty,Some(inner),refs,depth+1)?;
                 if body_live {fb.ins().jump(step,&[]);}
                 fb.seal_block(step);
                 if body_live||saw_continue.get() {
                     fb.switch_to_block(step);
                     if emit_fp_statements(increment,fb,params,params_ty,
-                        locals,locals_ty,Some(inner),depth+1)? {
+                        locals,locals_ty,Some(inner),refs,depth+1)? {
                         fb.ins().jump(head,&[]);
                     }
                 }
@@ -584,12 +661,12 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:test_block,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),depth+1)?;
+                    locals,locals_ty,Some(inner),refs,depth+1)?;
                 if body_live {fb.ins().jump(test_block,&[]);}
                 fb.seal_block(test_block);
                 if body_live||saw_continue.get() {
                     fb.switch_to_block(test_block);
-                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
                     fb.ins().brif(test,body_block,&[],exit,&[]);
                 }
                 fb.seal_block(body_block);
@@ -619,10 +696,11 @@ fn emit_fp_if(
     cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
     locals:&[Variable],locals_ty:&[FloatType],
-    outer:Option<FpLoopTargets<'_>>,depth:usize,
+    outer:Option<FpLoopTargets<'_>>,
+    refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
     if depth>64 {return Err(reject("FP nested if exceeds recursion limit"));}
-    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
     let t=fb.create_block();
     let f=fb.create_block();
     fb.ins().brif(test,t,&[],f,&[]);
@@ -630,7 +708,7 @@ fn emit_fp_if(
     fb.seal_block(f);
     fb.switch_to_block(t);
     let t_live=emit_fp_statements(yes,fb,params,params_ty,
-        locals,locals_ty,outer,depth+1)?;
+        locals,locals_ty,outer,refs,depth+1)?;
     let join=if t_live {
         let b=fb.create_block();
         fb.ins().jump(b,&[]);
@@ -638,7 +716,7 @@ fn emit_fp_if(
     } else {None};
     fb.switch_to_block(f);
     let f_live=emit_fp_statements(no,fb,params,params_ty,
-        locals,locals_ty,outer,depth+1)?;
+        locals,locals_ty,outer,refs,depth+1)?;
     let join=if f_live {
         let b=join.unwrap_or_else(||fb.create_block());
         fb.ins().jump(b,&[]);
@@ -673,6 +751,100 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
     }).collect();
     emit_scalar_float_bodies(&scalar)
 }
+
+/// Verify that every call resolves to a definition in the same module with
+/// the precise native ABI signature. Unsupported external or indirect calls
+/// are rejected before any ELF object is produced.
+fn validate_fp_calls_expr(
+    expr:&FloatExpr,
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP call expression exceeds depth limit"));}
+    match expr {
+        FloatExpr::Call {callee,parameters,return_type,arguments}=>{
+            let declared=declarations.get(callee)
+                .ok_or_else(||reject("FP direct call has no defined routine"))?;
+            if declared.0!=*parameters ||
+                declared.1!=ScalarType::Float(*return_type) ||
+                arguments.len()!=parameters.len() {
+                return Err(reject("FP direct call signature differs from defined routine"));
+            }
+            for arg in arguments {
+                if let ScalarCallArg::Float(arg)=arg {
+                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                }
+            }
+        }
+        FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
+            validate_fp_calls_expr(e,declarations,depth+1)?,
+        FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
+        FloatExpr::Mul(a,b)|FloatExpr::Div(a,b)=>{
+            validate_fp_calls_expr(a,declarations,depth+1)?;
+            validate_fp_calls_expr(b,declarations,depth+1)?;
+        }
+        FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
+        FloatExpr::Local(_)|FloatExpr::Constant32(_)|
+        FloatExpr::Constant64(_)=>{},
+    }
+    Ok(())
+}
+fn validate_fp_calls_cond(
+    cond:&FloatCondition,
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    validate_fp_calls_expr(&cond.left,declarations,depth)?;
+    validate_fp_calls_expr(&cond.right,declarations,depth)
+}
+fn validate_fp_calls_stmts(
+    stmts:&[FloatStmt],
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP call statements exceed depth limit"));}
+    for stmt in stmts {
+        match stmt {
+            FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
+            FloatStmt::ReturnInteger(e,_)=>
+                validate_fp_calls_expr(e,declarations,depth+1)?,
+            FloatStmt::IfReturn(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_expr(yes,declarations,depth+1)?;
+                validate_fp_calls_expr(no,declarations,depth+1)?;
+            }
+            FloatStmt::IfAssign(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                for (_,e) in yes.iter().chain(no) {
+                    validate_fp_calls_expr(e,declarations,depth+1)?;
+                }
+            }
+            FloatStmt::IfBlock(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_stmts(yes,declarations,depth+1)?;
+                validate_fp_calls_stmts(no,declarations,depth+1)?;
+            }
+            FloatStmt::While(cond,body)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+            }
+            FloatStmt::DoWhile(body,cond)=>{
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+            }
+            FloatStmt::For {init,condition,increment,body}=>{
+                validate_fp_calls_stmts(init,declarations,depth+1)?;
+                if let Some(cond)=condition {
+                    validate_fp_calls_cond(cond,declarations,depth+1)?;
+                }
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+                validate_fp_calls_stmts(increment,declarations,depth+1)?;
+            }
+            FloatStmt::Break|FloatStmt::Continue=>{},
+        }
+    }
+    Ok(())
+}
 fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
     ->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
@@ -687,8 +859,16 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
         cranelift_module::default_libcall_names())
         .map_err(|e|CodegenError::Backend(e.to_string()))?;
     let mut module=ObjectModule::new(obj);
+    let mut declared=HashMap::new();
+    for f in functions {
+        if declared.insert(f.name.clone(),
+            (f.parameters.clone(),f.result)).is_some() {
+            return Err(reject("duplicate scalar routine definition"));
+        }
+    }
     let mut exports=Vec::new();
     for f in functions {
+        validate_fp_calls_stmts(&f.statements,&declared,0)?;
         if f.name.is_empty()||f.name.contains('\0') ||
             f.parameters.len()>256 || f.locals.len()>4096 {
             return Err(reject("invalid FP function name or variable count"));
@@ -708,12 +888,19 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         exports.push(id);
     }
-    for (f,id) in functions.iter().zip(exports) {
+    for (f,id) in functions.iter().zip(exports.iter().copied()) {
         let mut ctx=module.make_context();
         for ty in &f.parameters {
             ctx.func.signature.params.push(AbiParam::new(ty.machine()));
         }
         ctx.func.signature.returns.push(AbiParam::new(f.result.machine()));
+        // Import every definition before lowering its body; this supports
+        // forward calls and checked recursive direct calls.
+        let mut refs=HashMap::new();
+        for (other,other_id) in functions.iter().zip(&exports) {
+            let reference=module.declare_func_in_func(*other_id,&mut ctx.func);
+            refs.insert(other.name.clone(),reference);
+        }
         let mut fctx=FunctionBuilderContext::new();
         {
             let mut fb=FunctionBuilder::new(&mut ctx.func,&mut fctx);
@@ -728,7 +915,7 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
                 var
             }).collect();
             if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
-                &vars,&f.locals,None,0)? {
+                &vars,&f.locals,None,&refs,0)? {
                 return Err(reject("FP emission ended with a reachable fallthrough"));
             }
             fb.finalize();
@@ -791,6 +978,93 @@ fn expression_from_edg(
     let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
+    if let Some(site)=ctx.graph.calls.iter().find(|site|
+        site.function==node.data.function &&
+        site.statement_path==node.data.statement_path &&
+        site.path==node.data.path) {
+        if site.first_argument!=1 || node.operands.is_empty() {
+            return Err(reject("FP direct call has unsupported implicit/member arguments"));
+        }
+        let callee=ctx.graph.expression(node.operands[0])
+            .ok_or_else(||reject("FP direct call has no callee expression"))?;
+        if super::semantic(2,callee.data.kind)!=6 ||
+            !callee.operands.is_empty() {
+            return Err(reject("FP indirect/function-pointer call unsupported"));
+        }
+        let symbol=callee.data.symbol_id.ok_or_else(||
+            reject("FP direct callee has no native symbol"))?;
+        let named=ctx.il.symbols.iter().find(|s|
+            s.id==symbol && s.kind==1)
+            .ok_or_else(||reject("FP direct call target is not a named routine"))?;
+        let callee_name=named.name.clone();
+        if !ctx.il.entities.iter().any(|e|matches!(e,
+            crate::Entity::Routine{name,has_definition:true}
+                if name==&callee_name)) {
+            return Err(reject("FP direct call requires a definition in this source module"));
+        }
+        let callee_ty=ctx.il.symbol_types.iter()
+            .find(|p|p.symbol==symbol)
+            .ok_or_else(||reject("FP direct callee has no native function type"))?;
+        let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+        let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
+            super::semantic(4,p.kind)==2 && p.related_role==Some(3))
+            .ok_or_else(||reject("FP direct call needs an exact function prototype"))?;
+        let proto=ctx.il.function_signatures.iter()
+            .find(|p|p.owner==fn_ty)
+            .ok_or_else(||reject("FP direct callee missing prototype metadata"))?;
+        if !proto.prototyped || proto.variadic {
+            return Err(reject("unprototyped/variadic FP direct call unsupported"));
+        }
+        let returned=scalar_type_from_edg(ctx.il,func.related
+            .ok_or_else(||reject("FP direct callee has no return type"))?)?;
+        if returned!=ScalarType::Float(ty) {
+            return Err(reject("FP direct-call result type/ABI differs from expression"));
+        }
+        let mut declared:Vec<_>=ctx.il.type_parameters.iter()
+            .filter(|p|p.owner==fn_ty).collect();
+        declared.sort_by_key(|p|p.position);
+        if declared.iter().enumerate().any(|(i,p)|p.position!=i as u32) ||
+            declared.len()!=node.operands.len()-1 {
+            return Err(reject("FP direct call argument count/position mismatch"));
+        }
+        let mut parameters=Vec::with_capacity(declared.len());
+        let mut arguments=Vec::with_capacity(declared.len());
+        for (param,&operand) in declared.iter().zip(&node.operands[1..]) {
+            let target=scalar_type_from_edg(ctx.il,param.ty)?;
+            let value=match target {
+                ScalarType::Float(t)=>{
+                    let e=expression_from_edg(ctx,operand,depth+1)?;
+                    if expression_type(&e,ctx.param_types,ctx.local_types,0)?!=t {
+                        return Err(reject("FP direct argument has unconverted type"));
+                    }
+                    ScalarCallArg::Float(e)
+                }
+                ScalarType::Int {..}=>{
+                    let e=ctx.graph.expression(operand).ok_or_else(||
+                        reject("FP direct INTEGER arg has no native expression"))?;
+                    if super::semantic(2,e.data.kind)!=2 ||
+                        e.data.constant_kind.is_some() || !e.operands.is_empty() {
+                        return Err(reject("FP direct INTEGER argument must be a formal"));
+                    }
+                    let id=e.data.symbol_id.ok_or_else(||
+                        reject("FP direct INTEGER argument lacks symbol"))?;
+                    let index=ctx.params.iter().position(|s|*s==id)
+                        .ok_or_else(||reject("FP direct INTEGER argument not a formal"))?;
+                    let actual=scalar_type_from_edg(ctx.il,e.data.type_id
+                        .ok_or_else(||reject("FP direct INTEGER argument type missing"))?)?;
+                    if actual!=target || ctx.param_types[index]!=target {
+                        return Err(reject("FP direct INTEGER argument has wrong type"));
+                    }
+                    ScalarCallArg::IntegerParameter(index)
+                }
+            };
+            parameters.push(target);
+            arguments.push(value);
+        }
+        return Ok(FloatExpr::Call {
+            callee:callee_name,parameters,return_type:ty,arguments,
+        });
+    }
     if node.data.constant_kind.is_some() {
         if !node.operands.is_empty() || node.data.symbol_id.is_some() {
             return Err(reject("FP constant cannot carry operands or symbol identity"));
@@ -1327,6 +1601,80 @@ mod tests {
     fn bin(a:usize,b:usize)->FloatExpr {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
+    #[test]
+    fn mixed_intra_module_direct_calls_check_full_typed_abi() {
+        let signature=vec![
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Float(FloatType::F64),
+        ];
+        let base=ScalarFloatBody {
+            name:"m14_call_target".into(),
+            parameters:signature.clone(),
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(FloatExpr::Add(
+                Box::new(FloatExpr::IntegerParameterCast {
+                    parameter:0,to:FloatType::F64,
+                }),
+                Box::new(FloatExpr::Parameter(1)),
+            ))],
+        };
+        let call=FloatExpr::Call {
+            callee:base.name.clone(),
+            parameters:signature.clone(),
+            return_type:FloatType::F64,
+            arguments:vec![
+                ScalarCallArg::IntegerParameter(0),
+                ScalarCallArg::Float(FloatExpr::Parameter(1)),
+            ],
+        };
+        let caller=ScalarFloatBody {
+            name:"m14_call_caller".into(),
+            parameters:signature,
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(call.clone())],
+        };
+        let elf=emit_scalar_float_bodies(&[caller.clone(),base.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=caller.clone();
+        let mut unknown=call.clone();
+        if let FloatExpr::Call {callee,..}=&mut unknown {
+            *callee="missing".into();
+        }
+        bad.statements=vec![FloatStmt::Return(unknown)];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=caller.clone();
+        let mut swapped=call.clone();
+        if let FloatExpr::Call {parameters,..}=&mut swapped {
+            *parameters=vec![ScalarType::Float(FloatType::F64),
+                ScalarType::Int {bits:32,signed:true}];
+        }
+        bad.statements=vec![FloatStmt::Return(swapped)];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=caller;
+        let mut mistyped=call.clone();
+        if let FloatExpr::Call {arguments,..}=&mut mistyped {
+            *arguments=vec![ScalarCallArg::IntegerParameter(0),
+                ScalarCallArg::IntegerParameter(0)];
+        }
+        bad.statements=vec![FloatStmt::Return(mistyped)];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=base.clone();
+        bad.result=ScalarType::Int {bits:32,signed:true};
+        bad.statements=vec![FloatStmt::ReturnInteger(
+            FloatExpr::Parameter(1),bad.result,
+        )];
+        let caller=ScalarFloatBody {
+            name:"caller_int_result".into(),
+            parameters:vec![],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(call)],
+        };
+        assert!(emit_scalar_float_bodies(&[caller,bad]).is_err());
+    }
+
     #[test]
     fn scalar_fp_to_integer_returns_type_check_and_emit_rax() {
         let types=[
