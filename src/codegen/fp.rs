@@ -1300,7 +1300,7 @@ mod tests {
             locals:vec![],statements:vec![FloatStmt::Return(expr)],
         };
         let elf=emit_scalar_float_bodies(&[func.clone()]).unwrap();
-        assert_eq!(&elf[..4],b"\\x7fELF");
+        assert_eq!(&elf[..4],b"\x7fELF");
         // Integers may not masquerade as the float arguments with which
         // they share source order, nor can an FP argument be cast as integer.
         let mut bad=func.clone();
