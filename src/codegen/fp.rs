@@ -6,7 +6,8 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 use super::*;
-use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,Value};
+use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
+use std::collections::HashMap;
 use std::cell::Cell;
 use cranelift_frontend::Variable;
 
@@ -43,11 +44,25 @@ struct ScalarFloatBody {
     statements:Vec<FloatStmt>,
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
+pub enum ScalarCallArg {
+    Float(FloatExpr),
+    /// A native EDG direct INTEGER formal passed to the same scalar class.
+    IntegerParameter(usize),
+}
+#[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatExpr {
     Parameter(usize),
     /// Exact EDG integer formal converted to FP by a native cast node.
     /// Never reinterpret GPR argument bits as an XMM value.
     IntegerParameterCast {parameter:usize,to:FloatType},
+    /// An EDG-verified direct call to a definition in this compilation unit.
+    /// Indirect and external calls require a separate declaration contract.
+    Call {
+        callee:String,
+        parameters:Vec<ScalarType>,
+        return_type:FloatType,
+        arguments:Vec<ScalarCallArg>,
+    },
     Local(usize),
     Constant32(u32),
     Constant64(u64),
@@ -142,6 +157,25 @@ fn expression_type(
                 Err(reject("FP integer cast source is not a checked integer formal"))
             }
         },
+        Call {parameters,return_type,arguments,..}=>{
+            if arguments.len()!=parameters.len() || arguments.len()>256 {
+                return Err(reject("FP direct call argument count does not match prototype"));
+            }
+            for (arg,target) in arguments.iter().zip(parameters) {
+                let source=match arg {
+                    ScalarCallArg::Float(e)=>
+                        ScalarType::Float(expression_type(e,params,locals,depth+1)?),
+                    ScalarCallArg::IntegerParameter(n)=>match params.get(*n) {
+                        Some(ScalarType::Int {..})=>params[*n],
+                        _=>return Err(reject("FP call's integer source is not a formal")),
+                    },
+                };
+                if source!=*target {
+                    return Err(reject("FP direct call argument class/type mismatch"));
+                }
+            }
+            Ok(*return_type)
+        }
         Local(n)=>locals.get(*n).copied()
             .ok_or_else(||reject("FP local out of range")),
         Constant32(_)=>Ok(FloatType::F32),
@@ -166,6 +200,7 @@ fn emit_expr(
     params_ty:&[ScalarType],
     locals:&[Variable],
     locals_ty:&[FloatType],
+    refs:&HashMap<String,FuncRef>,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
     let (value,ty)=match expr {
@@ -191,6 +226,38 @@ fn emit_expr(
                 fb.ins().fcvt_from_uint(to.machine(),value)
             };
             (converted,*to)
+        }
+        Call {callee,parameters,return_type,arguments}=>{
+            if arguments.len()!=parameters.len() {
+                return Err(reject("invalid direct call argument count"));
+            }
+            let reference=*refs.get(callee)
+                .ok_or_else(||reject("FP call target has no defined function ref"))?;
+            let mut values=Vec::with_capacity(arguments.len());
+            for (arg,expected) in arguments.iter().zip(parameters) {
+                let value=match (arg,expected) {
+                    (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
+                        let (v,actual)=emit_expr(e,fb,params,params_ty,
+                            locals,locals_ty,refs)?;
+                        if actual!=*t {
+                            return Err(reject("FP direct call argument is not converted"));
+                        }
+                        v
+                    }
+                    (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
+                        if params_ty.get(*n)!=Some(expected) {
+                            return Err(reject("direct call INTEGER formal ABI mismatch"));
+                        }
+                        *params.get(*n).ok_or_else(||reject("missing direct call formal"))?
+                    }
+                    _=>return Err(reject("direct call crosses incompatible ABI classes")),
+                };
+                values.push(value);
+            }
+            let inst=fb.ins().call(reference,&values);
+            let result=*fb.inst_results(inst).first()
+                .ok_or_else(||reject("FP direct call has no return value"))?;
+            (result,*return_type)
         }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
@@ -238,6 +305,14 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
+        Call {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(expr)=arg {
+                    check_local_reads(expr,defined,depth+1)?;
+                }
+            }
+            Ok(())
+        },
         Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
             check_local_reads(a,defined,depth+1)?;
