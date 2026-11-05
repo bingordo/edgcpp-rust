@@ -265,7 +265,7 @@ fn check_fp_statements(
         let Some(mut defined)=flow.normal.take() else {
             return Err(reject("unreachable trailing FP statement"));
         };
-        let mut next=Some(defined.clone());
+        let next;
         match stmt {
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
