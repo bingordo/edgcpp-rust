@@ -801,11 +801,10 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
     }
     Err(reject("cyclic FP local type aliases"))
 }
-/// Accept a narrow ordered C body with typed FP locals, returning if/else,
-/// and straight-line conditional FP assignments with later SSA joins.
-/// An absent else is an implicit empty false branch, not an undefined value.
-/// Nested assignment-only conditions are supported; loops, nested early
-/// returns, cleanup and pointer access remain rejected.
+/// Lower EDG source into checked typed FP CFG. Loop bodies and for increment
+/// use EDG-owned source statement identities, including its synthetic
+/// increment statement; no condition is fabricated for for(;;).
+/// Memory effects, unverified nonloop gotos and mixed ABI remain rejected.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
     output:&mut Vec<FloatStmt>,depth:usize,
@@ -872,18 +871,94 @@ fn lower_fp_body(
                 };
                 output.push(FloatStmt::IfAssign(
                     cond,assignments(yes),assignments(no)));
-            } else if yes.iter().all(|s|matches!(s,
-                    FloatStmt::Assign(..)|FloatStmt::IfAssign(..)|FloatStmt::IfBlock(..))) &&
-                      no.iter().all(|s|matches!(s,
-                    FloatStmt::Assign(..)|FloatStmt::IfAssign(..)|FloatStmt::IfBlock(..))) {
-                output.push(FloatStmt::IfBlock(cond,yes,no));
             } else {
-                return Err(reject("FP if arms must both return or contain assignment-only control flow"));
+                // The general CFG validator checks return/break/continue
+                // reachability independently for each branch.
+                output.push(FloatStmt::IfBlock(cond,yes,no));
             }
         }
         2 if node.expression.is_none()=>{
             for child in &node.children {
                 lower_fp_body(ctx,*child,output,depth+1)?;
+            }
+        }
+
+        7|8=>{
+            let condition=comparison_from_edg(ctx,node.expression
+                .ok_or_else(||reject("FP loop missing comparison"))?)?;
+            if node.children.len()!=1 {
+                return Err(reject("FP while/do body must have one source child"));
+            }
+            let child=node.children[0];
+            let body_node=ctx.graph.statement(child)
+                .ok_or_else(||reject("FP loop missing child statement"))?;
+            if !body_node.data.path.starts_with(&format!("{path}.body.")) {
+                return Err(reject("FP loop body source path mismatch"));
+            }
+            let mut body=Vec::new();
+            lower_fp_body(ctx,child,&mut body,depth+1)?;
+            if super::semantic(1,node.data.kind)==8 {
+                output.push(FloatStmt::DoWhile(body,condition));
+            } else {
+                output.push(FloatStmt::While(condition,body));
+            }
+        }
+        9=>{
+            let condition=node.expression
+                .map(|e|comparison_from_edg(ctx,e)).transpose()?;
+            let mut init=None;
+            let mut body=None;
+            let mut increment=None;
+            for &child in &node.children {
+                let found=ctx.graph.statement(child)
+                    .ok_or_else(||reject("FP for missing child"))?;
+                let source=&found.data.path;
+                if source.starts_with(&format!("{path}.init.")) {
+                    if init.replace(child).is_some() {
+                        return Err(reject("duplicate FP for initializer"));
+                    }
+                } else if source.starts_with(&format!("{path}.body.")) {
+                    if body.replace(child).is_some() {
+                        return Err(reject("duplicate FP for body"));
+                    }
+                } else if source==&format!("{path}.increment.0") {
+                    if increment.replace(child).is_some() {
+                        return Err(reject("duplicate FP for increment"));
+                    }
+                } else {
+                    return Err(reject("unexpected FP for source child"));
+                }
+            }
+            let mut init_stmts=Vec::new();
+            if let Some(id)=init {
+                lower_fp_body(ctx,id,&mut init_stmts,depth+1)?;
+            }
+            let mut body_stmts=Vec::new();
+            lower_fp_body(ctx,body.ok_or_else(||
+                reject("FP for has no body"))?,&mut body_stmts,depth+1)?;
+            let mut step_stmts=Vec::new();
+            if let Some(id)=increment {
+                lower_fp_body(ctx,id,&mut step_stmts,depth+1)?;
+            }
+            output.push(FloatStmt::For {
+                init:init_stmts,condition,increment:step_stmts,
+                body:body_stmts,
+            });
+        }
+        10|11=>{
+            let transfer:Vec<_>=ctx.il.loop_transfers.iter()
+                .filter(|t|t.function==*function && t.statement_path==*path)
+                .collect();
+            // Only native compiler-classified structured transfers. User
+            // gotos and ordinary labels are not guessed from name or path.
+            if transfer.len()!=1 || ctx.graph.statement_label(id).is_none() {
+                return Err(reject("unsupported FP user goto/label"));
+            }
+            match (super::semantic(1,node.data.kind),transfer[0].kind) {
+                (10,1)=>output.push(FloatStmt::Break),
+                (10,2)=>output.push(FloatStmt::Continue),
+                (11,3|4|6)=>{},
+                _=>return Err(reject("inconsistent FP loop transfer metadata")),
             }
         }
         4 if node.expression.is_none() && simple_children=>{
