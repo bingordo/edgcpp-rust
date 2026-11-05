@@ -1,6 +1,7 @@
-/* Mixed conditional-return and fallthrough require a general CFG.
- * Keep rejected until that control-flow shape is correctly implemented. */
+/* A returning if without else still has a fallthrough edge.
+ * This edge must not invent an initialized local. */
 double m14_bad_if_return_fallthrough(double a,double b) {
-    if (a > b) return a;
-    return b;
+    double v;
+    if (a>b) return a;
+    return v;
 }
