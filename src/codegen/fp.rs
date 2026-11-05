@@ -306,7 +306,7 @@ fn emit_nested_fp_arm(
             }
             FloatStmt::IfBlock(cond,yes,no)=>
                 emit_nested_fp_if(cond,yes,no,fb,params,params_ty,
-                    locals,locals_ty,depth+1)?,
+                    locals,locals_ty,depth)?,
             FloatStmt::IfAssign(cond,yes,no)=>{
                 // Legacy straight-line arms share the recursive CFG emitter.
                 let y:Vec<_>=yes.iter().map(|(n,e)|
@@ -314,7 +314,7 @@ fn emit_nested_fp_arm(
                 let n:Vec<_>=no.iter().map(|(i,e)|
                     FloatStmt::Assign(*i,e.clone())).collect();
                 emit_nested_fp_if(cond,&y,&n,fb,params,params_ty,
-                    locals,locals_ty,depth+1)?;
+                    locals,locals_ty,depth)?;
             }
             FloatStmt::Return(_)|FloatStmt::IfReturn(..)=>
                 return Err(reject("nested FP early return requires general CFG lowering")),
