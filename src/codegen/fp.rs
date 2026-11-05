@@ -1328,6 +1328,46 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn scalar_fp_to_integer_returns_type_check_and_emit_rax() {
+        let types=[
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Int {bits:32,signed:false},
+            ScalarType::Int {bits:64,signed:true},
+            ScalarType::Int {bits:64,signed:false},
+        ];
+        for (index,result) in types.iter().copied().enumerate() {
+            let f=ScalarFloatBody {
+                name:format!("m14_integer_result_{index}"),
+                parameters:vec![ScalarType::Int {bits:32,signed:true},
+                                ScalarType::Float(FloatType::F64)],
+                result,locals:vec![],
+                statements:vec![FloatStmt::ReturnInteger(
+                    FloatExpr::Add(
+                        Box::new(FloatExpr::IntegerParameterCast {
+                            parameter:0,to:FloatType::F64,
+                        }),
+                        Box::new(FloatExpr::Parameter(1))),
+                    result,
+                )],
+            };
+            assert!(emit_scalar_float_bodies(&[f.clone()]).is_ok());
+            let mut bad=f.clone();
+            bad.statements=vec![FloatStmt::Return(FloatExpr::Parameter(1))];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=f.clone();
+            bad.statements=vec![FloatStmt::ReturnInteger(
+                FloatExpr::Parameter(1),ScalarType::Float(FloatType::F64))];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=f;
+            bad.statements=vec![FloatStmt::ReturnInteger(
+                FloatExpr::IntegerParameterCast {
+                    parameter:1,to:FloatType::F64,
+                },result)];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        }
+    }
+
+    #[test]
     fn mixed_integer_sse_formals_are_checked_and_explicitly_converted() {
         use ScalarType::*;
         let params=vec![Int {bits:32,signed:true},Float(FloatType::F64),
@@ -1345,7 +1385,7 @@ mod tests {
             Box::new(FloatExpr::Add(Box::new(i2.clone()),Box::new(rhs))));
         let func=ScalarFloatBody {
             name:"m14_mixed_unit".into(),
-            parameters:params.clone(),result:FloatType::F64,
+            parameters:params.clone(),result:ScalarType::Float(FloatType::F64),
             locals:vec![],statements:vec![FloatStmt::Return(expr)],
         };
         let elf=emit_scalar_float_bodies(&[func.clone()]).unwrap();
