@@ -6,7 +6,8 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 use super::*;
-use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64}, Value};
+use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,Value};
+use std::cell::Cell;
 use cranelift_frontend::Variable;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -58,10 +59,9 @@ pub struct FloatCondition {
     pub left:FloatExpr,
     pub right:FloatExpr,
 }
-/// Checked FP SSA statements. IfAssign branches both fall through to a
-/// merge block; absent or empty else arms mean the false predecessor preserves
-/// live-in locals. Nested assignment-only branches use IfBlock; loops are
-/// not yet supported.
+/// Checked FP SSA statements. The same path-sensitive flow checker validates
+/// straight-line assignments, branches, and loop-carried scalar SSA values.
+/// Source expressions are restricted to checked, side-effect-free FP arithmetic.
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
@@ -70,9 +70,18 @@ pub enum FloatStmt {
     /// Straight-line conditional updates joined before a later return.
     /// Either arm may be empty; at least one must update a local.
     IfAssign(FloatCondition,Vec<(usize,FloatExpr)>,Vec<(usize,FloatExpr)>),
-    /// Recursive, fallthrough-only branches: no early returns or side effects.
-    /// Definite initialization is intersected at every nested join.
+    /// General structured branch, including loop transfers and early returns.
     IfBlock(FloatCondition,Vec<FloatStmt>,Vec<FloatStmt>),
+    While(FloatCondition,Vec<FloatStmt>),
+    For {
+        init:Vec<FloatStmt>,
+        condition:Option<FloatCondition>,
+        increment:Vec<FloatStmt>,
+        body:Vec<FloatStmt>,
+    },
+    DoWhile(Vec<FloatStmt>,FloatCondition),
+    Break,
+    Continue,
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct FloatBodyFunction {
@@ -220,107 +229,343 @@ fn validate_fp_arm(
     Ok(defined)
 }
 
-/// Check each nested arm independently. Incoming initialization is inherited,
-/// but a newly assigned local is live after the join only if both paths assign.
-fn validate_fp_block(
-    stmts:&[FloatStmt],f:&FloatBodyFunction,mut defined:Vec<bool>,depth:usize,
-)->Result<Vec<bool>,CodegenError> {
-    if depth>64 || stmts.len()>10000 {
-        return Err(reject("nested FP block exceeds size or depth limit"));
+
+/// A control-flow join intersects only reachable predecessors. Never infer
+/// initialization from an unreachable return/break/continue branch.
+fn fp_join(a:Option<Vec<bool>>,b:Option<Vec<bool>>)->Option<Vec<bool>> {
+    match (a,b) {
+        (None,other)|(other,None)=>other,
+        (Some(mut a),Some(b))=>{
+            for (x,y) in a.iter_mut().zip(b) {*x &= y;}
+            Some(a)
+        }
     }
+}
+#[derive(Default)]
+struct FpFlow {
+    normal:Option<Vec<bool>>,
+    breaks:Option<Vec<bool>>,
+    continues:Option<Vec<bool>>,
+}
+/// Loop-header facts are those established before the first iteration.
+/// Assignments cannot invalidate them, so they are also sound on backedges.
+/// In particular, a while/for test may execute before *any* body assignment.
+/// For do-while, the test can use the intersection of every normal/continue
+/// path through the first body execution.
+fn check_fp_statements(
+    stmts:&[FloatStmt],f:&FloatBodyFunction,entry:Vec<bool>,
+    loop_depth:usize,depth:usize,
+)->Result<FpFlow,CodegenError> {
+    if depth>64 || stmts.len()>10000 {
+        return Err(reject("FP CFG exceeds statement depth or size limit"));
+    }
+    let mut flow=FpFlow {normal:Some(entry),..FpFlow::default()};
     for stmt in stmts {
+        let Some(mut defined)=flow.normal.take() else {break;};
+        let mut next=Some(defined.clone());
         match stmt {
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
-                    .ok_or_else(||reject("nested FP local index out of range"))?;
+                    .ok_or_else(||reject("FP local index out of range"))?;
                 check_local_reads(expr,&defined,0)?;
                 if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
-                    return Err(reject("nested FP assignment has an unconverted type"));
+                    return Err(reject("FP assignment has an unconverted type"));
                 }
                 defined[*n]=true;
+                next=Some(defined);
+            }
+            FloatStmt::Return(expr)=>{
+                check_local_reads(expr,&defined,0)?;
+                if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                    return Err(reject("FP return has an unconverted type"));
+                }
+                next=None;
+            }
+            FloatStmt::IfReturn(cond,yes,no)=>{
+                check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                for expr in [yes,no] {
+                    check_local_reads(expr,&defined,0)?;
+                    if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                        return Err(reject("FP conditional return has an unconverted type"));
+                    }
+                }
+                next=None;
             }
             FloatStmt::IfAssign(cond,yes,no)=>{
                 if yes.is_empty() && no.is_empty() {
-                    return Err(reject("nested FP conditional has no assignments"));
+                    return Err(reject("FP conditional has no assignment on either path"));
                 }
                 check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                let a=validate_fp_arm(yes,f,defined.clone())?;
-                let b=validate_fp_arm(no,f,defined.clone())?;
-                for i in 0..defined.len() {defined[i]=a[i] && b[i];}
+                next=fp_join(
+                    Some(validate_fp_arm(yes,f,defined.clone())?),
+                    Some(validate_fp_arm(no,f,defined)?),
+                );
             }
             FloatStmt::IfBlock(cond,yes,no)=>{
                 if yes.is_empty() && no.is_empty() {
-                    return Err(reject("nested FP conditional has no statements"));
+                    return Err(reject("FP conditional has no statements"));
                 }
                 check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                let a=validate_fp_block(yes,f,defined.clone(),depth+1)?;
-                let b=validate_fp_block(no,f,defined.clone(),depth+1)?;
-                for i in 0..defined.len() {defined[i]=a[i] && b[i];}
+                let y=check_fp_statements(yes,f,defined.clone(),loop_depth,depth+1)?;
+                let n=check_fp_statements(no,f,defined,loop_depth,depth+1)?;
+                next=fp_join(y.normal,n.normal);
+                flow.breaks=fp_join(flow.breaks,fp_join(y.breaks,n.breaks));
+                flow.continues=fp_join(flow.continues,fp_join(y.continues,n.continues));
             }
-            FloatStmt::Return(_)|FloatStmt::IfReturn(..)=>
-                return Err(reject("nested FP early return requires general CFG lowering")),
+            FloatStmt::While(cond,body)=>{
+                check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                let exits=check_fp_statements(body,f,defined.clone(),loop_depth+1,depth+1)?;
+                // The header may exit before executing the loop once.
+                // Break edges may have additional writes but cannot make
+                // anything defined on the zero-iteration path.
+                next=fp_join(Some(defined),exits.breaks);
+            }
+            FloatStmt::For {init,condition,increment,body}=>{
+                let init_flow=check_fp_statements(init,f,defined,loop_depth,depth+1)?;
+                if init_flow.breaks.is_some()||init_flow.continues.is_some() {
+                    return Err(reject("FP for initializer cannot transfer loop control"));
+                }
+                let Some(at_header)=init_flow.normal else {
+                    next=None;
+                    flow.normal=next;
+                    continue;
+                };
+                if let Some(c)=condition {
+                    check_condition(c,&f.parameters,&f.locals,&at_header)?;
+                }
+                let body_flow=check_fp_statements(body,f,at_header.clone(),
+                    loop_depth+1,depth+1)?;
+                let at_increment=fp_join(body_flow.normal,body_flow.continues);
+                if let Some(state)=at_increment {
+                    let step_flow=check_fp_statements(increment,f,state,
+                        loop_depth+1,depth+1)?;
+                    if step_flow.breaks.is_some()||step_flow.continues.is_some() {
+                        return Err(reject("FP for increment cannot transfer loop control"));
+                    }
+                }
+                // A for(;;) has no test-false exit. Only a break reaches
+                // the successor; otherwise it is an infinite/returning loop.
+                next=if condition.is_some() {
+                    fp_join(Some(at_header),body_flow.breaks)
+                } else {body_flow.breaks};
+            }
+            FloatStmt::DoWhile(body,cond)=>{
+                let body_flow=check_fp_statements(body,f,defined,
+                    loop_depth+1,depth+1)?;
+                let at_test=fp_join(body_flow.normal,body_flow.continues);
+                if let Some(state)=&at_test {
+                    check_condition(cond,&f.parameters,&f.locals,state)?;
+                }
+                // First test happens after at least one body execution,
+                // unless an early break bypasses it. Every arriving edge
+                // participates in the definite-assignment intersection.
+                next=fp_join(at_test,body_flow.breaks);
+            }
+            FloatStmt::Break=>{
+                if loop_depth==0 {return Err(reject("FP break outside loop"));}
+                flow.breaks=fp_join(flow.breaks,Some(defined));
+                next=None;
+            }
+            FloatStmt::Continue=>{
+                if loop_depth==0 {return Err(reject("FP continue outside loop"));}
+                flow.continues=fp_join(flow.continues,Some(defined));
+                next=None;
+            }
         }
+        flow.normal=next;
     }
-    Ok(defined)
+    Ok(flow)
 }
-
-/// Each nested conditional has exactly two fallthrough predecessors.
-/// Seal the join only after both edges are emitted so Cranelift constructs
-/// SSA block parameters, even if a child contains another conditional.
-#[allow(clippy::too_many_arguments)]
-fn emit_nested_fp_if(
-    cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
-    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[FloatType],
-    locals:&[Variable],locals_ty:&[FloatType],depth:usize,
-)->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("nested FP emission exceeds recursion limit"));}
-    let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
-    let true_block=fb.create_block();
-    let false_block=fb.create_block();
-    let join_block=fb.create_block();
-    fb.ins().brif(flag,true_block,&[],false_block,&[]);
-    fb.seal_block(true_block);
-    fb.seal_block(false_block);
-    fb.switch_to_block(true_block);
-    emit_nested_fp_arm(yes,fb,params,params_ty,locals,locals_ty,depth+1)?;
-    fb.ins().jump(join_block,&[]);
-    fb.switch_to_block(false_block);
-    emit_nested_fp_arm(no,fb,params,params_ty,locals,locals_ty,depth+1)?;
-    fb.ins().jump(join_block,&[]);
-    fb.seal_block(join_block);
-    fb.switch_to_block(join_block);
-    Ok(())
+#[derive(Clone,Copy)]
+struct FpLoopTargets<'a> {
+    break_to:Block,
+    continue_to:Block,
+    saw_break:&'a Cell<bool>,
+    saw_continue:&'a Cell<bool>,
 }
+/// Loops leave their headers unsealed until every continue/backedge exists.
+/// The Cranelift SSA builder then inserts the required F32/F64 block params.
 #[allow(clippy::too_many_arguments)]
-fn emit_nested_fp_arm(
+fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[FloatType],locals:&[Variable],locals_ty:&[FloatType],
-    depth:usize,
-)->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("nested FP emission exceeds recursion limit"));}
+    outer:Option<FpLoopTargets<'_>>,depth:usize,
+)->Result<bool,CodegenError> {
+    if depth>64 {return Err(reject("FP CFG emission exceeds recursion limit"));}
+    let mut live=true;
     for stmt in stmts {
+        if !live {break;}
         match stmt {
             FloatStmt::Assign(n,expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
                 fb.def_var(locals[*n],v);
             }
-            FloatStmt::IfBlock(cond,yes,no)=>
-                emit_nested_fp_if(cond,yes,no,fb,params,params_ty,
-                    locals,locals_ty,depth)?,
-            FloatStmt::IfAssign(cond,yes,no)=>{
-                // Legacy straight-line arms share the recursive CFG emitter.
-                let y:Vec<_>=yes.iter().map(|(n,e)|
-                    FloatStmt::Assign(*n,e.clone())).collect();
-                let n:Vec<_>=no.iter().map(|(i,e)|
-                    FloatStmt::Assign(*i,e.clone())).collect();
-                emit_nested_fp_if(cond,&y,&n,fb,params,params_ty,
-                    locals,locals_ty,depth)?;
+            FloatStmt::Return(expr)=>{
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                fb.ins().return_(&[v]);
+                live=false;
             }
-            FloatStmt::Return(_)|FloatStmt::IfReturn(..)=>
-                return Err(reject("nested FP early return requires general CFG lowering")),
+            FloatStmt::IfReturn(cond,yes,no)=>{
+                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                let t=fb.create_block();
+                let f=fb.create_block();
+                fb.ins().brif(flag,t,&[],f,&[]);
+                fb.seal_block(t);
+                fb.seal_block(f);
+                fb.switch_to_block(t);
+                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty)?;
+                fb.ins().return_(&[v]);
+                fb.switch_to_block(f);
+                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty)?;
+                fb.ins().return_(&[v]);
+                live=false;
+            }
+            FloatStmt::IfBlock(cond,yes,no)=>{
+                live=emit_fp_if(cond,yes,no,fb,params,params_ty,
+                    locals,locals_ty,outer,depth+1)?;
+            }
+            FloatStmt::IfAssign(cond,yes,no)=>{
+                let a:Vec<_>=yes.iter().map(|(n,e)|
+                    FloatStmt::Assign(*n,e.clone())).collect();
+                let b:Vec<_>=no.iter().map(|(n,e)|
+                    FloatStmt::Assign(*n,e.clone())).collect();
+                live=emit_fp_if(cond,&a,&b,fb,params,params_ty,
+                    locals,locals_ty,outer,depth+1)?;
+            }
+            FloatStmt::While(cond,body)=>{
+                let head=fb.create_block();
+                let body_block=fb.create_block();
+                let exit=fb.create_block();
+                fb.ins().jump(head,&[]);
+                fb.switch_to_block(head);
+                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                fb.ins().brif(test,body_block,&[],exit,&[]);
+                fb.seal_block(body_block);
+                fb.switch_to_block(body_block);
+                let saw_break=Cell::new(false);
+                let saw_continue=Cell::new(false);
+                let inner=FpLoopTargets {break_to:exit,continue_to:head,
+                    saw_break:&saw_break,saw_continue:&saw_continue};
+                if emit_fp_statements(body,fb,params,params_ty,locals,
+                    locals_ty,Some(inner),depth+1)? {
+                    fb.ins().jump(head,&[]);
+                }
+                fb.seal_block(head);
+                fb.seal_block(exit);
+                fb.switch_to_block(exit);
+            }
+            FloatStmt::For {init,condition,increment,body}=>{
+                if !emit_fp_statements(init,fb,params,params_ty,locals,
+                    locals_ty,outer,depth+1)? {live=false;continue;}
+                let head=fb.create_block();
+                let body_block=fb.create_block();
+                let step=fb.create_block();
+                let exit=fb.create_block();
+                fb.ins().jump(head,&[]);
+                fb.switch_to_block(head);
+                if let Some(cond)=condition {
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                    fb.ins().brif(test,body_block,&[],exit,&[]);
+                } else {fb.ins().jump(body_block,&[]);}
+                fb.seal_block(body_block);
+                fb.switch_to_block(body_block);
+                let saw_break=Cell::new(false);
+                let saw_continue=Cell::new(false);
+                let inner=FpLoopTargets {break_to:exit,continue_to:step,
+                    saw_break:&saw_break,saw_continue:&saw_continue};
+                let body_live=emit_fp_statements(body,fb,params,params_ty,
+                    locals,locals_ty,Some(inner),depth+1)?;
+                if body_live {fb.ins().jump(step,&[]);}
+                fb.seal_block(step);
+                if body_live||saw_continue.get() {
+                    fb.switch_to_block(step);
+                    if emit_fp_statements(increment,fb,params,params_ty,
+                        locals,locals_ty,Some(inner),depth+1)? {
+                        fb.ins().jump(head,&[]);
+                    }
+                }
+                fb.seal_block(head);
+                fb.seal_block(exit);
+                if condition.is_some()||saw_break.get() {
+                    fb.switch_to_block(exit);
+                } else {live=false;}
+            }
+            FloatStmt::DoWhile(body,cond)=>{
+                let body_block=fb.create_block();
+                let test_block=fb.create_block();
+                let exit=fb.create_block();
+                fb.ins().jump(body_block,&[]);
+                fb.switch_to_block(body_block);
+                let saw_break=Cell::new(false);
+                let saw_continue=Cell::new(false);
+                let inner=FpLoopTargets {break_to:exit,continue_to:test_block,
+                    saw_break:&saw_break,saw_continue:&saw_continue};
+                let body_live=emit_fp_statements(body,fb,params,params_ty,
+                    locals,locals_ty,Some(inner),depth+1)?;
+                if body_live {fb.ins().jump(test_block,&[]);}
+                fb.seal_block(test_block);
+                if body_live||saw_continue.get() {
+                    fb.switch_to_block(test_block);
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+                    fb.ins().brif(test,body_block,&[],exit,&[]);
+                }
+                fb.seal_block(body_block);
+                fb.seal_block(exit);
+                if body_live||saw_continue.get()||saw_break.get() {
+                    fb.switch_to_block(exit);
+                } else {live=false;}
+            }
+            FloatStmt::Break=>{
+                let target=outer.ok_or_else(||reject("FP break outside loop"))?;
+                fb.ins().jump(target.break_to,&[]);
+                target.saw_break.set(true);
+                live=false;
+            }
+            FloatStmt::Continue=>{
+                let target=outer.ok_or_else(||reject("FP continue outside loop"))?;
+                fb.ins().jump(target.continue_to,&[]);
+                target.saw_continue.set(true);
+                live=false;
+            }
         }
     }
-    Ok(())
+    Ok(live)
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_fp_if(
+    cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
+    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[FloatType],
+    outer:Option<FpLoopTargets<'_>>,depth:usize,
+)->Result<bool,CodegenError> {
+    if depth>64 {return Err(reject("FP nested if exceeds recursion limit"));}
+    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+    let t=fb.create_block();
+    let f=fb.create_block();
+    fb.ins().brif(test,t,&[],f,&[]);
+    fb.seal_block(t);
+    fb.seal_block(f);
+    fb.switch_to_block(t);
+    let t_live=emit_fp_statements(yes,fb,params,params_ty,
+        locals,locals_ty,outer,depth+1)?;
+    let join=if t_live {
+        let b=fb.create_block();
+        fb.ins().jump(b,&[]);
+        Some(b)
+    } else {None};
+    fb.switch_to_block(f);
+    let f_live=emit_fp_statements(no,fb,params,params_ty,
+        locals,locals_ty,outer,depth+1)?;
+    let join=if f_live {
+        let b=join.unwrap_or_else(||fb.create_block());
+        fb.ins().jump(b,&[]);
+        Some(b)
+    } else {join};
+    if let Some(b)=join {
+        fb.seal_block(b);
+        fb.switch_to_block(b);
+        Ok(true)
+    } else {Ok(false)}
 }
 /// Keep the original pure-return reference API, sharing the same typed
 /// statement emitter and ABI classification as local-bearing FP functions.
@@ -355,65 +600,13 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
             f.parameters.len()>256 || f.locals.len()>4096 {
             return Err(reject("invalid FP function name or variable count"));
         }
-        if f.statements.is_empty() || f.statements.len()>10000 ||
-            !matches!(f.statements.last(),
-                Some(FloatStmt::Return(_)|FloatStmt::IfReturn(..))) {
-            return Err(reject("FP body must end in one return or returning if"));
+        if f.statements.is_empty() || f.statements.len()>10000 {
+            return Err(reject("FP function body is empty or oversized"));
         }
-        let mut defined=vec![false;f.locals.len()];
-        for (i,stmt) in f.statements.iter().enumerate() {
-            let last=i+1==f.statements.len();
-            match stmt {
-                FloatStmt::Assign(n,expr)=>{
-                    if last {return Err(reject("FP function ends in assignment"));}
-                    let ty=*f.locals.get(*n)
-                        .ok_or_else(||reject("FP local index out of range"))?;
-                    check_local_reads(expr,&defined,0)?;
-                    if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
-                        return Err(reject("FP assignment has an unconverted type"));
-                    }
-                    defined[*n]=true;
-                }
-                FloatStmt::Return(expr)=>{
-                    if !last {return Err(reject("FP return before end of body"));}
-                    check_local_reads(expr,&defined,0)?;
-                    if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
-                        return Err(reject("FP return has an unconverted type"));
-                    }
-                }
-                FloatStmt::IfReturn(cond,yes,no)=>{
-                    if !last {return Err(reject("returning FP if must terminate the body"));}
-                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                    for expr in [yes,no] {
-                        check_local_reads(expr,&defined,0)?;
-                        if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
-                            return Err(reject("FP conditional arm has an unconverted return type"));
-                        }
-                    }
-                }
-                FloatStmt::IfBlock(cond,yes,no)=>{
-                    if last {return Err(reject("nested FP if must have a later return"));}
-                    if yes.is_empty() && no.is_empty() {
-                        return Err(reject("nested FP conditional has no statements"));
-                    }
-                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                    let a=validate_fp_block(yes,f,defined.clone(),1)?;
-                    let b=validate_fp_block(no,f,defined.clone(),1)?;
-                    for i in 0..defined.len() {defined[i]=a[i] && b[i];}
-                }
-                FloatStmt::IfAssign(cond,yes,no)=>{
-                    if last {return Err(reject("FP merging if must have a later return"));}
-                    if yes.is_empty() && no.is_empty() {
-                        return Err(reject("FP conditional has no assignment on either path"));
-                    }
-                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                    let yes=validate_fp_arm(yes,f,defined.clone())?;
-                    let no=validate_fp_arm(no,f,defined.clone())?;
-                    for i in 0..defined.len() {
-                        defined[i]=yes[i] && no[i];
-                    }
-                }
-            }
+        let checked=check_fp_statements(&f.statements,f,
+            vec![false;f.locals.len()],0,0)?;
+        if checked.normal.is_some() {
+            return Err(reject("FP function has reachable fallthrough without return"));
         }
         let mut sig=module.make_signature();
         for ty in &f.parameters {sig.params.push(AbiParam::new(ty.machine()));}
@@ -441,68 +634,9 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                 fb.declare_var(var,ty.machine());
                 var
             }).collect();
-            for stmt in &f.statements {
-                match stmt {
-                    FloatStmt::Assign(n,expr)=>{
-                        let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        fb.def_var(vars[*n],v);
-                    }
-                    FloatStmt::Return(expr)=>{
-                        let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        fb.ins().return_(&[v]);
-                    }
-                    FloatStmt::IfReturn(cond,yes,no)=>{
-                        let flag=emit_condition(cond,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        let yes_block=fb.create_block();
-                        let no_block=fb.create_block();
-                        fb.ins().brif(flag,yes_block,&[],no_block,&[]);
-                        fb.seal_block(yes_block);
-                        fb.seal_block(no_block);
-                        fb.switch_to_block(yes_block);
-                        let (value,_) = emit_expr(yes,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        fb.ins().return_(&[value]);
-                        fb.switch_to_block(no_block);
-                        let (value,_) = emit_expr(no,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        fb.ins().return_(&[value]);
-                    }
-                    FloatStmt::IfBlock(cond,yes,no)=>{
-                        emit_nested_fp_if(cond,yes,no,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals,0)?;
-                    }
-                    FloatStmt::IfAssign(cond,yes,no)=>{
-                        let flag=emit_condition(cond,&mut fb,&params,&f.parameters,
-                            &vars,&f.locals)?;
-                        let yes_block=fb.create_block();
-                        let no_block=fb.create_block();
-                        let join_block=fb.create_block();
-                        fb.ins().brif(flag,yes_block,&[],no_block,&[]);
-                        fb.seal_block(yes_block);
-                        fb.seal_block(no_block);
-                        fb.switch_to_block(yes_block);
-                        for (n,expr) in yes {
-                            let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
-                                &vars,&f.locals)?;
-                            fb.def_var(vars[*n],v);
-                        }
-                        fb.ins().jump(join_block,&[]);
-                        fb.switch_to_block(no_block);
-                        for (n,expr) in no {
-                            let (v,_) = emit_expr(expr,&mut fb,&params,&f.parameters,
-                                &vars,&f.locals)?;
-                            fb.def_var(vars[*n],v);
-                        }
-                        fb.ins().jump(join_block,&[]);
-                        // Seal only after both incoming CFG edges are known:
-                        // Cranelift then inserts the proper SSA merge parameters.
-                        fb.seal_block(join_block);
-                        fb.switch_to_block(join_block);
-                    }
-                }
+            if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
+                &vars,&f.locals,None,0)? {
+                return Err(reject("FP emission ended with a reachable fallthrough"));
             }
             fb.finalize();
         }
