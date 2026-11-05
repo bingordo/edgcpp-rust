@@ -727,6 +727,24 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
     }
 }
+/// Reject a nonstandard ABI class, unsupported integer width, or synthetic
+/// type before generating code. Only standard signed/unsigned 32/64 bit C
+/// integer formals and native F32/F64 values enter this first mixed ABI slice.
+fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
+    ->Result<ScalarType,CodegenError> {
+    if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
+    let canonical=super::canonical_abi_type(il,id)?;
+    let info=il.c_integer_types.iter().find(|x|x.id==canonical)
+        .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
+    let layout=il.type_object_sizes.iter().find(|x|x.owner==canonical)
+        .ok_or_else(||reject("mixed INTEGER formal lacks native size/alignment"))?;
+    if info.is_bool || !matches!(info.bits,32|64) ||
+        layout.bytes!=u64::from(info.bits/8) ||
+        layout.alignment!=u64::from(info.bits/8) {
+        return Err(reject("unsupported mixed integer width or alignment"));
+    }
+    Ok(ScalarType::Int {bits:info.bits,signed:info.signed})
+}
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
     il:&'a Il,
@@ -774,7 +792,9 @@ fn expression_from_edg(
         let symbol=node.data.symbol_id
             .ok_or_else(||reject("FP variable missing native identity"))?;
         if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
-            if ctx.param_types[i]!=ty {return Err(reject("FP formal rvalue type mismatch"));}
+            if ctx.param_types[i]!=ScalarType::Float(ty) {
+                return Err(reject("FP formal rvalue type mismatch"));
+            }
             return Ok(FloatExpr::Parameter(i));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
@@ -786,6 +806,29 @@ fn expression_from_edg(
     if kind!=3 {return Err(reject("unsupported FP source expression form"));}
     let op=node.data.operator.map(|v|super::semantic(3,v))
         .ok_or_else(||reject("missing native FP operation"))?;
+    // Only an EDG-authoritative conversion from a direct integer formal is
+    // accepted. Integer expressions, local memory and implicit bitcasting
+    // are *not* silently accepted as scalar floating point values.
+    if node.operands.len()==1 && matches!(op,11|12|16) {
+        let source=ctx.graph.expression(node.operands[0])
+            .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
+        let source_ty=source.data.type_id.ok_or_else(||
+            reject("integer-to-FP cast operand has no native type"))?;
+        if let ScalarType::Int {..}=scalar_type_from_edg(ctx.il,source_ty)? {
+            if super::semantic(2,source.data.kind)!=2 ||
+                !source.operands.is_empty() || source.data.constant_kind.is_some() {
+                return Err(reject("integer-to-FP cast requires a direct integer formal"));
+            }
+            let symbol=source.data.symbol_id.ok_or_else(||
+                reject("integer-to-FP cast operand lacks native symbol"))?;
+            let index=ctx.params.iter().position(|s|*s==symbol)
+                .ok_or_else(||reject("integer-to-FP cast does not reference a formal"))?;
+            if ctx.param_types[index]!=scalar_type_from_edg(ctx.il,source_ty)? {
+                return Err(reject("integer-to-FP formal's native type differs"));
+            }
+            return Ok(FloatExpr::IntegerParameterCast {parameter:index,to:ty});
+        }
+    }
     let arg=|i:usize|->Result<FloatExpr,CodegenError> {
         expression_from_edg(ctx,*node.operands.get(i)
             .ok_or_else(||reject("missing native FP operand"))?,depth+1)
@@ -1182,7 +1225,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             p.position!=Some(i as u32) || p.implicit_this || p.compiler_generated) {
             return Err(reject("invalid FP explicit parameter list"));
         }
-        let params=args.iter().map(|p|type_from_edg(il,p.ty))
+        let params=args.iter().map(|p|scalar_type_from_edg(il,p.ty))
             .collect::<Result<Vec<_>,_>>()?;
         let declared:Vec<_>=il.type_parameters.iter()
             .filter(|p|p.owner==func_ty).collect();
@@ -1192,7 +1235,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         for arg in &args {
             let d=declared.iter().find(|d|Some(d.position)==arg.position)
                 .ok_or_else(||reject("FP prototype position missing"))?;
-            if type_from_edg(il,d.ty)?!=type_from_edg(il,arg.ty)? {
+            if scalar_type_from_edg(il,d.ty)?!=scalar_type_from_edg(il,arg.ty)? {
                 return Err(reject("FP prototype type mismatch"));
             }
         }
@@ -1220,12 +1263,12 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         };
         let mut statements=Vec::new();
         lower_fp_body(&ctx,roots[0],&mut statements,0)?;
-        functions.push(FloatBodyFunction {
+        functions.push(ScalarFloatBody {
             name:name.to_string(),parameters:params,result:ret,
             locals:local_types,statements,
         });
     }
-    emit_float_bodies(&functions).map(Some)
+    emit_scalar_float_bodies(&functions).map(Some)
 }
 
 #[cfg(test)]
