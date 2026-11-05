@@ -1273,6 +1273,168 @@ mod tests {
     }
 
     #[test]
+    fn fp_while_for_do_while_loop_phi_and_flow_safety() {
+        let lt=FloatCondition {
+            op:FloatPredicate::Lt,
+            left:FloatExpr::Local(0),
+            right:FloatExpr::Parameter(1),
+        };
+        let plus_one=FloatExpr::Add(Box::new(FloatExpr::Local(0)),
+            Box::new(FloatExpr::Constant64(1.0f64.to_bits())));
+        let mut f=FloatBodyFunction {
+            name:"m14_while_phi".into(),
+            parameters:vec![FloatType::F64,FloatType::F64],
+            locals:vec![FloatType::F64,FloatType::F64],
+            result:FloatType::F64,
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::Assign(1,FloatExpr::Constant64(0.0f64.to_bits())),
+                FloatStmt::While(lt.clone(),vec![
+                    FloatStmt::Assign(1,FloatExpr::Add(
+                        Box::new(FloatExpr::Local(1)),
+                        Box::new(FloatExpr::Local(0)))),
+                    FloatStmt::Assign(0,plus_one.clone()),
+                ]),
+                FloatStmt::Return(FloatExpr::Local(1)),
+            ],
+        };
+        let object=emit_float_bodies(&[f.clone()]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        f.name="m14_for_phi".into();
+        f.statements=vec![
+            FloatStmt::Assign(1,FloatExpr::Constant64(0.0f64.to_bits())),
+            FloatStmt::For {
+                init:vec![FloatStmt::Assign(0,FloatExpr::Parameter(0))],
+                condition:Some(lt.clone()),
+                increment:vec![FloatStmt::Assign(0,plus_one.clone())],
+                body:vec![FloatStmt::IfBlock(FloatCondition {
+                    op:FloatPredicate::Lt,
+                    left:FloatExpr::Local(0),
+                    right:FloatExpr::Constant64(0.0f64.to_bits()),
+                },vec![FloatStmt::Continue],vec![
+                    FloatStmt::Assign(1,FloatExpr::Add(
+                        Box::new(FloatExpr::Local(1)),
+                        Box::new(FloatExpr::Local(0)))),
+                ])],
+            },
+            FloatStmt::Return(FloatExpr::Local(1)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_ok());
+        f.name="m14_do_phi".into();
+        f.statements=vec![
+            FloatStmt::DoWhile(vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::Assign(1,FloatExpr::Parameter(1)),
+            ],FloatCondition {
+                op:FloatPredicate::Lt,
+                left:FloatExpr::Local(0),
+                right:FloatExpr::Local(1),
+            }),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_ok());
+        // A while/for may execute zero times: body-only definitions are
+        // *not* live after the normal false edge.
+        f.statements=vec![
+            FloatStmt::While(FloatCondition {
+                op:FloatPredicate::Lt,left:FloatExpr::Parameter(0),
+                right:FloatExpr::Parameter(1),
+            },vec![FloatStmt::Assign(0,FloatExpr::Parameter(0))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_err());
+        // A loop header is evaluated before its first body execution.
+        f.statements=vec![
+            FloatStmt::While(lt.clone(),vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            ]),
+            FloatStmt::Return(FloatExpr::Parameter(0)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_err());
+        // Continue routes directly to the for increment, bypassing v's
+        // assignment on some paths. The increment must fail before codegen.
+        f.statements=vec![
+            FloatStmt::For {
+                init:vec![FloatStmt::Assign(0,FloatExpr::Parameter(0))],
+                condition:Some(lt.clone()),
+                increment:vec![FloatStmt::Assign(0,FloatExpr::Local(1))],
+                body:vec![FloatStmt::IfBlock(lt,
+                    vec![FloatStmt::Continue],
+                    vec![FloatStmt::Assign(1,plus_one.clone())])],
+            },
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_err());
+        // Even do-while's first test is unsafe if a branch can skip the
+        // assignment, including by continue.
+        f.statements=vec![
+            FloatStmt::DoWhile(vec![FloatStmt::IfBlock(FloatCondition {
+                op:FloatPredicate::Lt,left:FloatExpr::Parameter(0),
+                right:FloatExpr::Parameter(1),
+            },vec![FloatStmt::Continue],
+              vec![FloatStmt::Assign(0,FloatExpr::Parameter(0))])],
+            FloatCondition {
+                op:FloatPredicate::Lt,left:FloatExpr::Local(0),
+                right:FloatExpr::Parameter(1),
+            }),
+            FloatStmt::Return(FloatExpr::Parameter(0)),
+        ];
+        assert!(emit_float_bodies(&[f]).is_err());
+    }
+
+    #[test]
+    fn fp_loop_break_edges_and_nested_returns() {
+        let cond=FloatCondition {
+            op:FloatPredicate::Gt,
+            left:FloatExpr::Local(0),right:FloatExpr::Parameter(0),
+        };
+        let mut f=FloatBodyFunction {
+            name:"m14_loop_break".into(),
+            parameters:vec![FloatType::F64],
+            result:FloatType::F64,
+            locals:vec![FloatType::F64,FloatType::F64],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::For {init:vec![],condition:None,increment:vec![],
+                    body:vec![
+                        FloatStmt::IfBlock(cond.clone(),
+                            vec![FloatStmt::Break],vec![]),
+                        FloatStmt::Assign(0,FloatExpr::Add(
+                            Box::new(FloatExpr::Local(0)),
+                            Box::new(FloatExpr::Constant64(1.0f64.to_bits())))),
+                    ]},
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        assert!(emit_float_bodies(&[f.clone()]).is_ok());
+        // A break from the inner loop targets only its own exit.
+        f.statements=vec![
+            FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+            FloatStmt::While(cond.clone(),vec![
+                FloatStmt::For {init:vec![],condition:None,increment:vec![],
+                    body:vec![FloatStmt::Break]},
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[f.clone()]).is_ok());
+        // A break route must not promote a one-sided local assignment.
+        f.statements=vec![
+            FloatStmt::For {init:vec![],condition:None,increment:vec![],
+                body:vec![FloatStmt::IfBlock(FloatCondition {
+                    op:FloatPredicate::Gt,
+                    left:FloatExpr::Parameter(0),
+                    right:FloatExpr::Constant64(0.0f64.to_bits()),
+                },vec![FloatStmt::Break],vec![
+                    FloatStmt::Assign(1,FloatExpr::Parameter(0)),
+                    FloatStmt::Break,
+                ])]},
+            FloatStmt::Return(FloatExpr::Local(1)),
+        ];
+        assert!(emit_float_bodies(&[f]).is_err());
+    }
+
+    #[test]
     fn fp_nested_joins_preserve_live_ins_and_reject_partial_initialization() {
         let outer=FloatCondition {op:FloatPredicate::Gt,
             left:FloatExpr::Parameter(0),right:FloatExpr::Parameter(1)};
