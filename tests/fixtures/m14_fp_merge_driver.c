@@ -12,6 +12,9 @@ double m14_if_no_else_chain(double,double,double);
 float m14_if_no_else_f32(float,float);
 double m14_if_empty_else(double,double);
 double m14_if_empty_then(double,double);
+double m14_join_nested(double,double);
+double m14_join_nested_no_else(double,double);
+double m14_join_nested_both_arms(double,double);
 static void check(int yes,const char *where) {
     if (!yes) {fprintf(stderr,"M14 FP SSA merge mismatch: %s\n",where);exit(1);}
 }
@@ -72,6 +75,25 @@ int main(void) {
         double empty_then=a;
         if(!(a>b)) empty_then=b+1.0;
         eqd(m14_if_empty_then(a,b),empty_then,"explicit empty then");
+        double nested=a;
+        if(a>b) {
+            if(a>0.0) nested=a+1.0; else nested=a-1.0;
+        } else nested=b;
+        eqd(m14_join_nested(a,b),nested,"nested SSA two-way join");
+        double nested_missing=b;
+        if(a>b) {
+            if(a>0.0) nested_missing=a+2.0;
+        }
+        eqd(m14_join_nested_no_else(a,b),nested_missing,
+            "nested SSA no-else live-in joins");
+        double nested_both=a;
+        if(a!=b) {
+            if(a<b) nested_both=b-a; else nested_both=a-b;
+        } else {
+            if(a>0.0) nested_both=a+1.0; else nested_both=b-1.0;
+        }
+        eqd(m14_join_nested_both_arms(a,b),nested_both,
+            "nested SSA branches on both paths");
     }
     return 0;
 }
