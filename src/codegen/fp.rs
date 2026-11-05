@@ -1602,6 +1602,75 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn mixed_intra_module_direct_calls_check_full_typed_abi() {
+        let signature=vec![
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Float(FloatType::F64),
+        ];
+        let base=ScalarFloatBody {
+            name:"m14_call_target".into(),
+            parameters:signature.clone(),
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(FloatExpr::Add(
+                Box::new(FloatExpr::IntegerParameterCast {
+                    parameter:0,to:FloatType::F64,
+                }),
+                Box::new(FloatExpr::Parameter(1)),
+            ))],
+        };
+        let call=FloatExpr::Call {
+            callee:base.name.clone(),
+            parameters:signature.clone(),
+            return_type:FloatType::F64,
+            arguments:vec![
+                ScalarCallArg::IntegerParameter(0),
+                ScalarCallArg::Float(FloatExpr::Parameter(1)),
+            ],
+        };
+        let caller=ScalarFloatBody {
+            name:"m14_call_caller".into(),
+            parameters:signature,
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(call.clone())],
+        };
+        let elf=emit_scalar_float_bodies(&[caller.clone(),base.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=caller.clone();
+        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
+            callee:"missing".into(),..call.clone()
+        })];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=caller.clone();
+        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
+            parameters:vec![ScalarType::Float(FloatType::F64),
+                ScalarType::Int {bits:32,signed:true}],
+            ..call.clone()
+        })];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=caller;
+        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
+            arguments:vec![ScalarCallArg::IntegerParameter(0),
+                ScalarCallArg::IntegerParameter(0)],..call.clone()
+        })];
+        assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
+        let mut bad=base.clone();
+        bad.result=ScalarType::Int {bits:32,signed:true};
+        bad.statements=vec![FloatStmt::ReturnInteger(
+            FloatExpr::Parameter(1),bad.result,
+        )];
+        let caller=ScalarFloatBody {
+            name:"caller_int_result".into(),
+            parameters:vec![],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(call)],
+        };
+        assert!(emit_scalar_float_bodies(&[caller,bad]).is_err());
+    }
+
+    #[test]
     fn scalar_fp_to_integer_returns_type_check_and_emit_rax() {
         let types=[
             ScalarType::Int {bits:32,signed:true},
