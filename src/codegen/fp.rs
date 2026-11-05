@@ -616,7 +616,7 @@ fn emit_fp_statements(
             }
             FloatStmt::For {init,condition,increment,body}=>{
                 if !emit_fp_statements(init,fb,params,params_ty,locals,
-                    locals_ty,outer,depth+1)? {live=false;continue;}
+                    locals_ty,outer,refs,depth+1)? {live=false;continue;}
                 let head=fb.create_block();
                 let body_block=fb.create_block();
                 let step=fb.create_block();
@@ -751,6 +751,100 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
     }).collect();
     emit_scalar_float_bodies(&scalar)
 }
+
+/// Verify that every call resolves to a definition in the same module with
+/// the precise native ABI signature. Unsupported external or indirect calls
+/// are rejected before any ELF object is produced.
+fn validate_fp_calls_expr(
+    expr:&FloatExpr,
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP call expression exceeds depth limit"));}
+    match expr {
+        FloatExpr::Call {callee,parameters,return_type,arguments}=>{
+            let declared=declarations.get(callee)
+                .ok_or_else(||reject("FP direct call has no defined routine"))?;
+            if declared.0!=*parameters ||
+                declared.1!=ScalarType::Float(*return_type) ||
+                arguments.len()!=parameters.len() {
+                return Err(reject("FP direct call signature differs from defined routine"));
+            }
+            for arg in arguments {
+                if let ScalarCallArg::Float(arg)=arg {
+                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                }
+            }
+        }
+        FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
+            validate_fp_calls_expr(e,declarations,depth+1)?,
+        FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
+        FloatExpr::Mul(a,b)|FloatExpr::Div(a,b)=>{
+            validate_fp_calls_expr(a,declarations,depth+1)?;
+            validate_fp_calls_expr(b,declarations,depth+1)?;
+        }
+        FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
+        FloatExpr::Local(_)|FloatExpr::Constant32(_)|
+        FloatExpr::Constant64(_)=>{},
+    }
+    Ok(())
+}
+fn validate_fp_calls_cond(
+    cond:&FloatCondition,
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    validate_fp_calls_expr(&cond.left,declarations,depth)?;
+    validate_fp_calls_expr(&cond.right,declarations,depth)
+}
+fn validate_fp_calls_stmts(
+    stmts:&[FloatStmt],
+    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("FP call statements exceed depth limit"));}
+    for stmt in stmts {
+        match stmt {
+            FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
+            FloatStmt::ReturnInteger(e,_)=>
+                validate_fp_calls_expr(e,declarations,depth+1)?,
+            FloatStmt::IfReturn(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_expr(yes,declarations,depth+1)?;
+                validate_fp_calls_expr(no,declarations,depth+1)?;
+            }
+            FloatStmt::IfAssign(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                for (_,e) in yes.iter().chain(no) {
+                    validate_fp_calls_expr(e,declarations,depth+1)?;
+                }
+            }
+            FloatStmt::IfBlock(cond,yes,no)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_stmts(yes,declarations,depth+1)?;
+                validate_fp_calls_stmts(no,declarations,depth+1)?;
+            }
+            FloatStmt::While(cond,body)=>{
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+            }
+            FloatStmt::DoWhile(body,cond)=>{
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,depth+1)?;
+            }
+            FloatStmt::For {init,condition,increment,body}=>{
+                validate_fp_calls_stmts(init,declarations,depth+1)?;
+                if let Some(cond)=condition {
+                    validate_fp_calls_cond(cond,declarations,depth+1)?;
+                }
+                validate_fp_calls_stmts(body,declarations,depth+1)?;
+                validate_fp_calls_stmts(increment,declarations,depth+1)?;
+            }
+            FloatStmt::Break|FloatStmt::Continue=>{},
+        }
+    }
+    Ok(())
+}
 fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
     ->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
@@ -765,8 +859,16 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
         cranelift_module::default_libcall_names())
         .map_err(|e|CodegenError::Backend(e.to_string()))?;
     let mut module=ObjectModule::new(obj);
+    let mut declared=HashMap::new();
+    for f in functions {
+        if declared.insert(f.name.clone(),
+            (f.parameters.clone(),f.result)).is_some() {
+            return Err(reject("duplicate scalar routine definition"));
+        }
+    }
     let mut exports=Vec::new();
     for f in functions {
+        validate_fp_calls_stmts(&f.statements,&declared,0)?;
         if f.name.is_empty()||f.name.contains('\0') ||
             f.parameters.len()>256 || f.locals.len()>4096 {
             return Err(reject("invalid FP function name or variable count"));
