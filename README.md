@@ -71,6 +71,19 @@ See [the M14 loop/SSA contract](docs/M14_FP_LOOP_SSA.md) for scope and
 limitations. **This does not complete the broader mixed INTEGER/SSE ABI,
 FP memory or independent compiler-adapter milestones.**
 
+**M14 source-checked mixed INTEGER/SSE scalar arguments (first slice, November 5, 2026):**
+The Cranelift reference path now accepts native EDG FP-returning routines
+with interleaved standard 32/64-bit signed/unsigned integer and
+`float`/`double` formals, including independent GPR/XMM exhaustion
+and stack spills. Only *explicit native EDG cast nodes from direct
+integer parameters* can form integer-to-FP source expressions; unmodeled
+integer arithmetic, integer results, mixed calls and FP memory still
+reject. The existing F32/F64 SSA and loop safety checks remain active.
+Native GCC differential and full CI
+[run #42040987090](https://github.com/bingordo/edgcpp-rust/actions/runs/42040987090)
+passed. See the
+[M14 mixed-scalar ABI contract](docs/M14_MIXED_SCALAR_ABI.md).
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
