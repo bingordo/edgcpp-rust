@@ -261,7 +261,10 @@ fn check_fp_statements(
     }
     let mut flow=FpFlow {normal:Some(entry),..FpFlow::default()};
     for stmt in stmts {
-        let Some(mut defined)=flow.normal.take() else {break;};
+        // Preserve fail-closed rejection of unreachable trailing statements.
+        let Some(mut defined)=flow.normal.take() else {
+            return Err(reject("unreachable trailing FP statement"));
+        };
         let mut next=Some(defined.clone());
         match stmt {
             FloatStmt::Assign(n,expr)=>{
