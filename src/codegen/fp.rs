@@ -17,9 +17,37 @@ impl FloatType {
         match self {Self::F32=>types::F32,Self::F64=>types::F64}
     }
 }
+/// Native scalar argument ABI classes; GPR and SSE registers are allocated
+/// independently by Cranelift's x86-64 SysV call-convention lowering.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum ScalarType {
+    Float(FloatType),
+    Int { bits:u8,signed:bool },
+}
+impl ScalarType {
+    fn machine(self)->cranelift_codegen::ir::Type {
+        match self {
+            Self::Float(t)=>t.machine(),
+            Self::Int {bits:32,..}=>types::I32,
+            Self::Int {bits:64,..}=>types::I64,
+            _=>unreachable!("integer width was checked at source boundary"),
+        }
+    }
+}
+#[derive(Debug,Clone,PartialEq,Eq)]
+struct ScalarFloatBody {
+    name:String,
+    parameters:Vec<ScalarType>,
+    result:FloatType,
+    locals:Vec<FloatType>,
+    statements:Vec<FloatStmt>,
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatExpr {
     Parameter(usize),
+    /// Exact EDG integer formal converted to FP by a native cast node.
+    /// Never reinterpret GPR argument bits as an XMM value.
+    IntegerParameterCast {parameter:usize,to:FloatType},
     Local(usize),
     Constant32(u32),
     Constant64(u64),
@@ -95,13 +123,22 @@ fn reject(message:impl Into<String>)->CodegenError {
     CodegenError::InvalidFunction(message.into())
 }
 fn expression_type(
-    expr:&FloatExpr,params:&[FloatType],locals:&[FloatType],depth:usize,
+    expr:&FloatExpr,params:&[ScalarType],locals:&[FloatType],depth:usize,
 )->Result<FloatType,CodegenError> {
     if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
     use FloatExpr::*;
     match expr {
-        Parameter(n)=>params.get(*n).copied()
-            .ok_or_else(||reject("FP parameter out of range")),
+        Parameter(n)=>match params.get(*n).copied() {
+            Some(ScalarType::Float(t))=>Ok(t),
+            _=>Err(reject("FP parameter missing or has integer ABI class")),
+        },
+        IntegerParameterCast {parameter,to}=>{
+            if matches!(params.get(*parameter),Some(ScalarType::Int {..})) {
+                Ok(*to)
+            } else {
+                Err(reject("FP integer cast source is not a checked integer formal"))
+            }
+        },
         Local(n)=>locals.get(*n).copied()
             .ok_or_else(||reject("FP local out of range")),
         Constant32(_)=>Ok(FloatType::F32),
@@ -123,7 +160,7 @@ fn emit_expr(
     expr:&FloatExpr,
     fb:&mut FunctionBuilder<'_>,
     params:&[Value],
-    params_ty:&[FloatType],
+    params_ty:&[ScalarType],
     locals:&[Variable],
     locals_ty:&[FloatType],
 ) -> Result<(Value,FloatType),CodegenError> {
@@ -132,9 +169,25 @@ fn emit_expr(
         Parameter(n)=>{
             let value=*params.get(*n)
                 .ok_or_else(||reject("missing physical FP parameter"))?;
-            let ty=*params_ty.get(*n)
-                .ok_or_else(||reject("missing source FP type"))?;
+            let ty=match params_ty.get(*n) {
+                Some(ScalarType::Float(t))=>*t,
+                _=>return Err(reject("FP value uses non-floating parameter")),
+            };
             (value,ty)
+        }
+        IntegerParameterCast {parameter,to}=>{
+            let input=match params_ty.get(*parameter) {
+                Some(ScalarType::Int {bits:32|64,signed})=>*signed,
+                _=>return Err(reject("invalid integer cast formal ABI")),
+            };
+            let value=*params.get(*parameter)
+                .ok_or_else(||reject("missing integer formal ABI value"))?;
+            let converted=if input {
+                fb.ins().fcvt_from_sint(to.machine(),value)
+            } else {
+                fb.ins().fcvt_from_uint(to.machine(),value)
+            };
+            (converted,*to)
         }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
@@ -180,7 +233,8 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     match expr {
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
-        Local(_)|Parameter(_)|Constant32(_)|Constant64(_)=>Ok(()),
+        Local(_)|Parameter(_)|IntegerParameterCast {..}|
+        Constant32(_)|Constant64(_)=>Ok(()),
         Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
             check_local_reads(a,defined,depth+1)?;
@@ -189,7 +243,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     }
 }
 fn check_condition(
-    cond:&FloatCondition,params:&[FloatType],locals:&[FloatType],
+    cond:&FloatCondition,params:&[ScalarType],locals:&[FloatType],
     defined:&[bool],
 )->Result<(),CodegenError> {
     check_local_reads(&cond.left,defined,0)?;
@@ -201,7 +255,7 @@ fn check_condition(
 }
 fn emit_condition(
     cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[FloatType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
 )->Result<Value,CodegenError> {
     let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty)?;
     let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty)?;
@@ -212,7 +266,7 @@ fn emit_condition(
 /// definitely-initialized set. Each RHS sees preceding assignments in its
 /// own arm; the other arm's effects are never visible during verification.
 fn validate_fp_arm(
-    writes:&[(usize,FloatExpr)],f:&FloatBodyFunction,mut defined:Vec<bool>,
+    writes:&[(usize,FloatExpr)],f:&ScalarFloatBody,mut defined:Vec<bool>,
 )->Result<Vec<bool>,CodegenError> {
     if writes.len()>10000 {
         return Err(reject("FP conditional assignment arm is oversized"));
@@ -253,7 +307,7 @@ struct FpFlow {
 /// For do-while, the test can use the intersection of every normal/continue
 /// path through the first body execution.
 fn check_fp_statements(
-    stmts:&[FloatStmt],f:&FloatBodyFunction,entry:Vec<bool>,
+    stmts:&[FloatStmt],f:&ScalarFloatBody,entry:Vec<bool>,
     loop_depth:usize,depth:usize,
 )->Result<FpFlow,CodegenError> {
     if depth>64 || stmts.len()>10000 {
@@ -391,7 +445,7 @@ struct FpLoopTargets<'a> {
 #[allow(clippy::too_many_arguments)]
 fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[FloatType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
     outer:Option<FpLoopTargets<'_>>,depth:usize,
 )->Result<bool,CodegenError> {
     if depth>64 {return Err(reject("FP CFG emission exceeds recursion limit"));}
@@ -537,7 +591,7 @@ fn emit_fp_statements(
 #[allow(clippy::too_many_arguments)]
 fn emit_fp_if(
     cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
-    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[FloatType],
+    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
     locals:&[Variable],locals_ty:&[FloatType],
     outer:Option<FpLoopTargets<'_>>,depth:usize,
 )->Result<bool,CodegenError> {
@@ -584,6 +638,15 @@ pub fn emit_float_routines(functions:&[FloatFunction])
 /// Local arithmetic is evaluated once and kept in explicit Cranelift SSA
 /// variables, rather than substituting or repeating the source expressions.
 pub fn emit_float_bodies(functions:&[FloatBodyFunction])
+    ->Result<Vec<u8>,CodegenError> {
+    let scalar:Vec<_>=functions.iter().map(|f|ScalarFloatBody {
+        name:f.name.clone(),
+        parameters:f.parameters.iter().copied().map(ScalarType::Float).collect(),
+        result:f.result,locals:f.locals.clone(),statements:f.statements.clone(),
+    }).collect();
+    emit_scalar_float_bodies(&scalar)
+}
+fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
     ->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
@@ -671,7 +734,7 @@ struct FpSourceCtx<'a> {
     routine:crate::SymbolId,
     params:&'a [crate::SymbolId],
     locals:&'a [crate::SymbolId],
-    param_types:&'a [FloatType],
+    param_types:&'a [ScalarType],
     local_types:&'a [FloatType],
 }
 fn expression_from_edg(
