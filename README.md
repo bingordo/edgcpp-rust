@@ -84,6 +84,21 @@ Native GCC differential and full CI
 passed. See the
 [M14 mixed-scalar ABI contract](docs/M14_MIXED_SCALAR_ABI.md).
 
+**M14 scalar integer-return and checked in-module direct-call slices (November 5, 2026):**
+The native EDG/Cranelift reference emitter now supports explicit,
+source-verified FP→signed/unsigned 32/64-bit INTEGER returns
+([PR #64](https://github.com/bingordo/edgcpp-rust/pull/64),
+[green CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42065227613))
+and EDG-resolved direct calls to functions **defined in the same module**
+with F32/F64 returns, mixed INTEGER/SSE arguments, forward and nested
+calls, and calls inside checked SSA loops
+([PR #65](https://github.com/bingordo/edgcpp-rust/pull/65),
+[green CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42067347502)).
+See [the direct-call safety contract](docs/M14_DIRECT_SCALAR_CALLS.md).
+External/indirect calls, general integer expression trees, native FP
+memory, mixed INTEGER-returning callees and the production compiler
+adapter remain unsupported and fail closed.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
