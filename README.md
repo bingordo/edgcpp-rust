@@ -57,6 +57,20 @@ supported and concurrent native retry tests are included; unsupported
 cases reject rather than becoming ordinary loads/stores. See
 [the M12 qualified memory contract](docs/M12_QUALIFIED_MEMORY.md).
 
+**M14 scalar FP loop CFG/SSA (loop slice complete, 2026-11-05):**
+the optional Cranelift reference backend supports source-verified C
+`float`/`double` loops (`while`, `for`, `do/while`), nested branches
+and loops, structured `break`/`continue`, and early returns.
+Typed F32/F64 loop-carried SSA values use unsealed loop headers until
+backedges are constructed. Path-sensitive definite-assignment checks
+reject invalid zero-iteration reads, unsafe loop tests and
+continue/break-dependent uninitialized values. Native EDG/GCC
+differential and full CI passed in
+[run #42037880876](https://github.com/bingordo/edgcpp-rust/actions/runs/42037880876).
+See [the M14 loop/SSA contract](docs/M14_FP_LOOP_SSA.md) for scope and
+limitations. **This does not complete the broader mixed INTEGER/SSE ABI,
+FP memory or independent compiler-adapter milestones.**
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
