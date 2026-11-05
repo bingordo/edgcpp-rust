@@ -12,6 +12,8 @@ double m14_do_break_continue(double,double);
 double m14_for_infinite_break(double,double);
 double m14_do_definite_init(double,double);
 double m14_loop_early_return(double,double);
+float m14_while_f32(float,float);
+float m14_for_f32(float,float);
 
 static void eq(double actual,double expected,const char *test) {
     if(!(isnan(expected) ? isnan(actual) : actual==expected)) {
@@ -27,6 +29,18 @@ int main(void) {
         {1.25,3.25},{-1.0,2.0},{0.5,1.5},
     };
     for(size_t k=0;k<sizeof(pairs)/sizeof(pairs[0]);++k) {
+        const float fa=(float)pairs[k][0],fb=(float)pairs[k][1];
+        float fx=fa,fsum=0.0f;
+        while(fx<fb) {fsum=fsum+fx;fx=fx+1.0f;}
+        eq((double)m14_while_f32(fa,fb),(double)fsum,
+            "F32 while loop-carried phi");
+        fx=fa;fsum=0.0f;
+        for(;fx<fb;fx=fx+1.0f) {
+            if(fx>0.0f) fsum=fsum+fx;
+        }
+        eq((double)m14_for_f32(fa,fb),(double)fsum,
+            "F32 for loop-carried phi");
+
         const double a=pairs[k][0],b=pairs[k][1];
         double x=a,sum=0.0;
         while(x<b) {sum+=x;x+=1.0;}
