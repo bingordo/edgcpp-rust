@@ -53,6 +53,21 @@ Negative EDG fixtures verify that 16-bit formals, nontrivial integer expression
 trees, and integer-result FP routines still reject and leave no object.
 The prior M14 FP-only and loop differential tests run unchanged.
 
+## Follow-on slices validated after PR #63
+
+- [PR #64](https://github.com/bingordo/edgcpp-rust/pull/64) added
+  explicit source-verified F32/F64→signed/unsigned 32/64-bit INTEGER
+  **return** conversions, including branches/loops; the native
+  [GCC differential run](https://github.com/bingordo/edgcpp-rust/actions/runs/42065227613)
+  passed. Arbitrary integer arithmetic and comparisons as return values
+  are still rejected.
+- [PR #65](https://github.com/bingordo/edgcpp-rust/pull/65) added
+  [native in-module scalar direct calls](M14_DIRECT_SCALAR_CALLS.md)
+  with verified EDG symbol identities/prototypes and typed INTEGER/SSE
+  argument classes. The native
+  [GCC differential run](https://github.com/bingordo/edgcpp-rust/actions/runs/42067347502)
+  passed. External or indirect calls remain unsupported.
+
 ## Next gates
 
 1. General scalar typed expression/ABI plan shared by integer and FP CFG
