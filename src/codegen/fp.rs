@@ -1279,6 +1279,45 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn mixed_integer_sse_formals_are_checked_and_explicitly_converted() {
+        use ScalarType::*;
+        let params=vec![Int {bits:32,signed:true},Float(FloatType::F64),
+            Int {bits:64,signed:false},Float(FloatType::F32)];
+        let i0=FloatExpr::IntegerParameterCast {
+            parameter:0,to:FloatType::F64,
+        };
+        let i2=FloatExpr::IntegerParameterCast {
+            parameter:2,to:FloatType::F64,
+        };
+        let rhs=FloatExpr::Convert(FloatType::F64,
+            Box::new(FloatExpr::Parameter(3)));
+        let expr=FloatExpr::Add(Box::new(FloatExpr::Add(
+            Box::new(i0.clone()),Box::new(FloatExpr::Parameter(1)))),
+            Box::new(FloatExpr::Add(Box::new(i2.clone()),Box::new(rhs))));
+        let func=ScalarFloatBody {
+            name:"m14_mixed_unit".into(),
+            parameters:params.clone(),result:FloatType::F64,
+            locals:vec![],statements:vec![FloatStmt::Return(expr)],
+        };
+        let elf=emit_scalar_float_bodies(&[func.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\\x7fELF");
+        // Integers may not masquerade as the float arguments with which
+        // they share source order, nor can an FP argument be cast as integer.
+        let mut bad=func.clone();
+        bad.statements=vec![FloatStmt::Return(FloatExpr::Parameter(0))];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=func.clone();
+        bad.statements=vec![FloatStmt::Return(FloatExpr::IntegerParameterCast {
+            parameter:1,to:FloatType::F64,
+        })];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=func;
+        bad.parameters[0]=Float(FloatType::F64);
+        bad.statements=vec![FloatStmt::Return(i0)];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+
+    #[test]
     fn fp_if_assignment_merge_is_typed_and_definitely_initialized() {
         let cond=FloatCondition {
             op:FloatPredicate::Lt,
