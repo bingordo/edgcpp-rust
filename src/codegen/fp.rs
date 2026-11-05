@@ -888,7 +888,7 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         exports.push(id);
     }
-    for (f,id) in functions.iter().zip(exports) {
+    for (f,id) in functions.iter().zip(exports.iter().copied()) {
         let mut ctx=module.make_context();
         for ty in &f.parameters {
             ctx.func.signature.params.push(AbiParam::new(ty.machine()));
@@ -1638,22 +1638,27 @@ mod tests {
         let elf=emit_scalar_float_bodies(&[caller.clone(),base.clone()]).unwrap();
         assert_eq!(&elf[..4],b"\x7fELF");
         let mut bad=caller.clone();
-        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
-            callee:"missing".into(),..call.clone()
-        })];
+        let mut unknown=call.clone();
+        if let FloatExpr::Call {callee,..}=&mut unknown {
+            *callee="missing".into();
+        }
+        bad.statements=vec![FloatStmt::Return(unknown)];
         assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
         let mut bad=caller.clone();
-        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
-            parameters:vec![ScalarType::Float(FloatType::F64),
-                ScalarType::Int {bits:32,signed:true}],
-            ..call.clone()
-        })];
+        let mut swapped=call.clone();
+        if let FloatExpr::Call {parameters,..}=&mut swapped {
+            *parameters=vec![ScalarType::Float(FloatType::F64),
+                ScalarType::Int {bits:32,signed:true}];
+        }
+        bad.statements=vec![FloatStmt::Return(swapped)];
         assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
         let mut bad=caller;
-        bad.statements=vec![FloatStmt::Return(FloatExpr::Call {
-            arguments:vec![ScalarCallArg::IntegerParameter(0),
-                ScalarCallArg::IntegerParameter(0)],..call.clone()
-        })];
+        let mut mistyped=call.clone();
+        if let FloatExpr::Call {arguments,..}=&mut mistyped {
+            *arguments=vec![ScalarCallArg::IntegerParameter(0),
+                ScalarCallArg::IntegerParameter(0)];
+        }
+        bad.statements=vec![FloatStmt::Return(mistyped)];
         assert!(emit_scalar_float_bodies(&[bad,base.clone()]).is_err());
         let mut bad=base.clone();
         bad.result=ScalarType::Int {bits:32,signed:true};
