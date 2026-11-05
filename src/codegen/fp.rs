@@ -978,6 +978,93 @@ fn expression_from_edg(
     let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
+    if let Some(site)=ctx.graph.calls.iter().find(|site|
+        site.function==node.data.function &&
+        site.statement_path==node.data.statement_path &&
+        site.path==node.data.path) {
+        if site.first_argument!=1 || node.operands.is_empty() {
+            return Err(reject("FP direct call has unsupported implicit/member arguments"));
+        }
+        let callee=ctx.graph.expression(node.operands[0])
+            .ok_or_else(||reject("FP direct call has no callee expression"))?;
+        if super::semantic(2,callee.data.kind)!=6 ||
+            !callee.operands.is_empty() {
+            return Err(reject("FP indirect/function-pointer call unsupported"));
+        }
+        let symbol=callee.data.symbol_id.ok_or_else(||
+            reject("FP direct callee has no native symbol"))?;
+        let named=ctx.il.symbols.iter().find(|s|
+            s.id==symbol && s.kind==1)
+            .ok_or_else(||reject("FP direct call target is not a named routine"))?;
+        let callee_name=named.name.clone();
+        if !ctx.il.entities.iter().any(|e|matches!(e,
+            crate::Entity::Routine{name,has_definition:true}
+                if name==&callee_name)) {
+            return Err(reject("FP direct call requires a definition in this source module"));
+        }
+        let callee_ty=ctx.il.symbol_types.iter()
+            .find(|p|p.symbol==symbol)
+            .ok_or_else(||reject("FP direct callee has no native function type"))?;
+        let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+        let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
+            super::semantic(4,p.kind)==2 && p.related_role==Some(3))
+            .ok_or_else(||reject("FP direct call needs an exact function prototype"))?;
+        let proto=ctx.il.function_signatures.iter()
+            .find(|p|p.owner==fn_ty)
+            .ok_or_else(||reject("FP direct callee missing prototype metadata"))?;
+        if !proto.prototyped || proto.variadic {
+            return Err(reject("unprototyped/variadic FP direct call unsupported"));
+        }
+        let returned=scalar_type_from_edg(ctx.il,func.related
+            .ok_or_else(||reject("FP direct callee has no return type"))?)?;
+        if returned!=ScalarType::Float(ty) {
+            return Err(reject("FP direct-call result type/ABI differs from expression"));
+        }
+        let mut declared:Vec<_>=ctx.il.type_parameters.iter()
+            .filter(|p|p.owner==fn_ty).collect();
+        declared.sort_by_key(|p|p.position);
+        if declared.iter().enumerate().any(|(i,p)|p.position!=i as u32) ||
+            declared.len()!=node.operands.len()-1 {
+            return Err(reject("FP direct call argument count/position mismatch"));
+        }
+        let mut parameters=Vec::with_capacity(declared.len());
+        let mut arguments=Vec::with_capacity(declared.len());
+        for (param,&operand) in declared.iter().zip(&node.operands[1..]) {
+            let target=scalar_type_from_edg(ctx.il,param.ty)?;
+            let value=match target {
+                ScalarType::Float(t)=>{
+                    let e=expression_from_edg(ctx,operand,depth+1)?;
+                    if expression_type(&e,ctx.param_types,ctx.local_types,0)?!=t {
+                        return Err(reject("FP direct argument has unconverted type"));
+                    }
+                    ScalarCallArg::Float(e)
+                }
+                ScalarType::Int {..}=>{
+                    let e=ctx.graph.expression(operand).ok_or_else(||
+                        reject("FP direct INTEGER arg has no native expression"))?;
+                    if super::semantic(2,e.data.kind)!=2 ||
+                        e.data.constant_kind.is_some() || !e.operands.is_empty() {
+                        return Err(reject("FP direct INTEGER argument must be a formal"));
+                    }
+                    let id=e.data.symbol_id.ok_or_else(||
+                        reject("FP direct INTEGER argument lacks symbol"))?;
+                    let index=ctx.params.iter().position(|s|*s==id)
+                        .ok_or_else(||reject("FP direct INTEGER argument not a formal"))?;
+                    let actual=scalar_type_from_edg(ctx.il,e.data.type_id
+                        .ok_or_else(||reject("FP direct INTEGER argument type missing"))?)?;
+                    if actual!=target || ctx.param_types[index]!=target {
+                        return Err(reject("FP direct INTEGER argument has wrong type"));
+                    }
+                    ScalarCallArg::IntegerParameter(index)
+                }
+            };
+            parameters.push(target);
+            arguments.push(value);
+        }
+        return Ok(FloatExpr::Call {
+            callee:callee_name,parameters,return_type:ty,arguments,
+        });
+    }
     if node.data.constant_kind.is_some() {
         if !node.operands.is_empty() || node.data.symbol_id.is_some() {
             return Err(reject("FP constant cannot carry operands or symbol identity"));
