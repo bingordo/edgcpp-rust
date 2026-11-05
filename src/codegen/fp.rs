@@ -38,7 +38,7 @@ impl ScalarType {
 struct ScalarFloatBody {
     name:String,
     parameters:Vec<ScalarType>,
-    result:FloatType,
+    result:ScalarType,
     locals:Vec<FloatType>,
     statements:Vec<FloatStmt>,
 }
@@ -94,6 +94,9 @@ pub struct FloatCondition {
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
     Return(FloatExpr),
+    /// EDG-verified conversion of an FP expression to a native C INTEGER
+    /// return class. Out-of-range/NaN are undefined in C and not normalized.
+    ReturnInteger(FloatExpr,ScalarType),
     IfReturn(FloatCondition,FloatExpr,FloatExpr),
     /// Straight-line conditional updates joined before a later return.
     /// Either arm may be empty; at least one must update a local.
@@ -333,16 +336,27 @@ fn check_fp_statements(
             }
             FloatStmt::Return(expr)=>{
                 check_local_reads(expr,&defined,0)?;
-                if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                if f.result!=ScalarType::Float(
+                    expression_type(expr,&f.parameters,&f.locals,0)?) {
                     return Err(reject("FP return has an unconverted type"));
                 }
+                next=None;
+            }
+            FloatStmt::ReturnInteger(expr,to)=>{
+                if !matches!(to,ScalarType::Int {bits:32|64,..}) ||
+                    *to!=f.result {
+                    return Err(reject("FP-to-integer return class/signature mismatch"));
+                }
+                check_local_reads(expr,&defined,0)?;
+                expression_type(expr,&f.parameters,&f.locals,0)?;
                 next=None;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
                 check_condition(cond,&f.parameters,&f.locals,&defined)?;
                 for expr in [yes,no] {
                     check_local_reads(expr,&defined,0)?;
-                    if expression_type(expr,&f.parameters,&f.locals,0)?!=f.result {
+                    if ScalarType::Float(
+                        expression_type(expr,&f.parameters,&f.locals,0)?)!=f.result {
                         return Err(reject("FP conditional return has an unconverted type"));
                     }
                 }
@@ -460,6 +474,18 @@ fn emit_fp_statements(
             FloatStmt::Return(expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
                 fb.ins().return_(&[v]);
+                live=false;
+            }
+            FloatStmt::ReturnInteger(expr,to)=>{
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                let converted=match to {
+                    ScalarType::Int {signed:true,..}=>
+                        fb.ins().fcvt_to_sint(to.machine(),v),
+                    ScalarType::Int {signed:false,..}=>
+                        fb.ins().fcvt_to_uint(to.machine(),v),
+                    _=>return Err(reject("non-integer FP conversion return")),
+                };
+                fb.ins().return_(&[converted]);
                 live=false;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
@@ -642,7 +668,8 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
     let scalar:Vec<_>=functions.iter().map(|f|ScalarFloatBody {
         name:f.name.clone(),
         parameters:f.parameters.iter().copied().map(ScalarType::Float).collect(),
-        result:f.result,locals:f.locals.clone(),statements:f.statements.clone(),
+        result:ScalarType::Float(f.result),
+        locals:f.locals.clone(),statements:f.statements.clone(),
     }).collect();
     emit_scalar_float_bodies(&scalar)
 }
@@ -1156,7 +1183,29 @@ fn lower_fp_body(
         }
         1 if simple_children=>{
             let source=node.expression.ok_or_else(||reject("FP return has no value"))?;
-            output.push(FloatStmt::Return(expression_from_edg(ctx,source,0)?));
+            let native=ctx.graph.expression(source)
+                .ok_or_else(||reject("missing native FP return expression"))?;
+            let ty=native.data.type_id.ok_or_else(||
+                reject("FP return expression has no native type"))?;
+            match scalar_type_from_edg(ctx.il,ty)? {
+                ScalarType::Float(_)=>
+                    output.push(FloatStmt::Return(expression_from_edg(ctx,source,0)?)),
+                result @ ScalarType::Int {..}=>{
+                    // Only a unary, source-recorded cast from a standard FP
+                    // expression has a defined lowering here. Never turn
+                    // FP comparisons, integer arithmetic or implicit symbol
+                    // reinterpretation into a native integer return.
+                    if super::semantic(2,native.data.kind)!=3 ||
+                        native.operands.len()!=1 ||
+                        !matches!(native.data.operator.map(|v|
+                            super::semantic(3,v)),Some(11|12|16)) {
+                        return Err(reject("integer return requires EDG FP conversion node"));
+                    }
+                    let operand=native.operands[0];
+                    let value=expression_from_edg(ctx,operand,0)?;
+                    output.push(FloatStmt::ReturnInteger(value,result));
+                }
+            }
         }
         _=>return Err(reject("unsupported FP control flow or statement form")),
     }
@@ -1216,7 +1265,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         if sig.variadic || !sig.prototyped {
             return Err(reject("FP variadic/unprototyped ABI unsupported"));
         }
-        let ret=type_from_edg(il,func.related.ok_or_else(||
+        let ret=scalar_type_from_edg(il,func.related.ok_or_else(||
             reject("missing FP return type"))?)?;
         let mut args:Vec<_>=il.function_parameters.iter()
             .filter(|p|p.routine==routine).collect();
@@ -1279,6 +1328,46 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn scalar_fp_to_integer_returns_type_check_and_emit_rax() {
+        let types=[
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Int {bits:32,signed:false},
+            ScalarType::Int {bits:64,signed:true},
+            ScalarType::Int {bits:64,signed:false},
+        ];
+        for (index,result) in types.iter().copied().enumerate() {
+            let f=ScalarFloatBody {
+                name:format!("m14_integer_result_{index}"),
+                parameters:vec![ScalarType::Int {bits:32,signed:true},
+                                ScalarType::Float(FloatType::F64)],
+                result,locals:vec![],
+                statements:vec![FloatStmt::ReturnInteger(
+                    FloatExpr::Add(
+                        Box::new(FloatExpr::IntegerParameterCast {
+                            parameter:0,to:FloatType::F64,
+                        }),
+                        Box::new(FloatExpr::Parameter(1))),
+                    result,
+                )],
+            };
+            assert!(emit_scalar_float_bodies(&[f.clone()]).is_ok());
+            let mut bad=f.clone();
+            bad.statements=vec![FloatStmt::Return(FloatExpr::Parameter(1))];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=f.clone();
+            bad.statements=vec![FloatStmt::ReturnInteger(
+                FloatExpr::Parameter(1),ScalarType::Float(FloatType::F64))];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=f;
+            bad.statements=vec![FloatStmt::ReturnInteger(
+                FloatExpr::IntegerParameterCast {
+                    parameter:1,to:FloatType::F64,
+                },result)];
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        }
+    }
+
+    #[test]
     fn mixed_integer_sse_formals_are_checked_and_explicitly_converted() {
         use ScalarType::*;
         let params=vec![Int {bits:32,signed:true},Float(FloatType::F64),
@@ -1296,7 +1385,7 @@ mod tests {
             Box::new(FloatExpr::Add(Box::new(i2.clone()),Box::new(rhs))));
         let func=ScalarFloatBody {
             name:"m14_mixed_unit".into(),
-            parameters:params.clone(),result:FloatType::F64,
+            parameters:params.clone(),result:ScalarType::Float(FloatType::F64),
             locals:vec![],statements:vec![FloatStmt::Return(expr)],
         };
         let elf=emit_scalar_float_bodies(&[func.clone()]).unwrap();
