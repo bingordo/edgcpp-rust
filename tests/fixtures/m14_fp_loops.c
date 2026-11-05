@@ -77,3 +77,17 @@ double m14_loop_early_return(double a,double b) {
     }
     return x;
 }
+
+/* Check F32 phi nodes rather than relying on F64-only coverage. */
+float m14_while_f32(float a,float b) {
+    float x=a, sum=0.0f;
+    while(x<b) {sum=sum+x; x=x+1.0f;}
+    return sum;
+}
+float m14_for_f32(float a,float b) {
+    float sum=0.0f;
+    for(float x=a;x<b;x=x+1.0f) {
+        if(x>0.0f) sum=sum+x;
+    }
+    return sum;
+}
