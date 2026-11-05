@@ -60,7 +60,8 @@ pub struct FloatCondition {
 }
 /// Checked FP SSA statements. IfAssign branches both fall through to a
 /// merge block; absent or empty else arms mean the false predecessor preserves
-/// live-in locals. No loop or nested branch yet.
+/// live-in locals. Nested assignment-only branches use IfBlock; loops are
+/// not yet supported.
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
@@ -69,6 +70,9 @@ pub enum FloatStmt {
     /// Straight-line conditional updates joined before a later return.
     /// Either arm may be empty; at least one must update a local.
     IfAssign(FloatCondition,Vec<(usize,FloatExpr)>,Vec<(usize,FloatExpr)>),
+    /// Recursive, fallthrough-only branches: no early returns or side effects.
+    /// Definite initialization is intersected at every nested join.
+    IfBlock(FloatCondition,Vec<FloatStmt>,Vec<FloatStmt>),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct FloatBodyFunction {
@@ -215,6 +219,109 @@ fn validate_fp_arm(
     }
     Ok(defined)
 }
+
+/// Check each nested arm independently. Incoming initialization is inherited,
+/// but a newly assigned local is live after the join only if both paths assign.
+fn validate_fp_block(
+    stmts:&[FloatStmt],f:&FloatBodyFunction,mut defined:Vec<bool>,depth:usize,
+)->Result<Vec<bool>,CodegenError> {
+    if depth>64 || stmts.len()>10000 {
+        return Err(reject("nested FP block exceeds size or depth limit"));
+    }
+    for stmt in stmts {
+        match stmt {
+            FloatStmt::Assign(n,expr)=>{
+                let ty=*f.locals.get(*n)
+                    .ok_or_else(||reject("nested FP local index out of range"))?;
+                check_local_reads(expr,&defined,0)?;
+                if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+                    return Err(reject("nested FP assignment has an unconverted type"));
+                }
+                defined[*n]=true;
+            }
+            FloatStmt::IfAssign(cond,yes,no)=>{
+                if yes.is_empty() && no.is_empty() {
+                    return Err(reject("nested FP conditional has no assignments"));
+                }
+                check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                let a=validate_fp_arm(yes,f,defined.clone())?;
+                let b=validate_fp_arm(no,f,defined.clone())?;
+                for i in 0..defined.len() {defined[i]=a[i] && b[i];}
+            }
+            FloatStmt::IfBlock(cond,yes,no)=>{
+                if yes.is_empty() && no.is_empty() {
+                    return Err(reject("nested FP conditional has no statements"));
+                }
+                check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                let a=validate_fp_block(yes,f,defined.clone(),depth+1)?;
+                let b=validate_fp_block(no,f,defined.clone(),depth+1)?;
+                for i in 0..defined.len() {defined[i]=a[i] && b[i];}
+            }
+            FloatStmt::Return(_)|FloatStmt::IfReturn(..)=>
+                return Err(reject("nested FP early return requires general CFG lowering")),
+        }
+    }
+    Ok(defined)
+}
+
+/// Each nested conditional has exactly two fallthrough predecessors.
+/// Seal the join only after both edges are emitted so Cranelift constructs
+/// SSA block parameters, even if a child contains another conditional.
+#[allow(clippy::too_many_arguments)]
+fn emit_nested_fp_if(
+    cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
+    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[FloatType],depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("nested FP emission exceeds recursion limit"));}
+    let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty)?;
+    let true_block=fb.create_block();
+    let false_block=fb.create_block();
+    let join_block=fb.create_block();
+    fb.ins().brif(flag,true_block,&[],false_block,&[]);
+    fb.seal_block(true_block);
+    fb.seal_block(false_block);
+    fb.switch_to_block(true_block);
+    emit_nested_fp_arm(yes,fb,params,params_ty,locals,locals_ty,depth+1)?;
+    fb.ins().jump(join_block,&[]);
+    fb.switch_to_block(false_block);
+    emit_nested_fp_arm(no,fb,params,params_ty,locals,locals_ty,depth+1)?;
+    fb.ins().jump(join_block,&[]);
+    fb.seal_block(join_block);
+    fb.switch_to_block(join_block);
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_nested_fp_arm(
+    stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
+    params_ty:&[FloatType],locals:&[Variable],locals_ty:&[FloatType],
+    depth:usize,
+)->Result<(),CodegenError> {
+    if depth>64 {return Err(reject("nested FP emission exceeds recursion limit"));}
+    for stmt in stmts {
+        match stmt {
+            FloatStmt::Assign(n,expr)=>{
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty)?;
+                fb.def_var(locals[*n],v);
+            }
+            FloatStmt::IfBlock(cond,yes,no)=>
+                emit_nested_fp_if(cond,yes,no,fb,params,params_ty,
+                    locals,locals_ty,depth+1)?,
+            FloatStmt::IfAssign(cond,yes,no)=>{
+                // Legacy straight-line arms share the recursive CFG emitter.
+                let y:Vec<_>=yes.iter().map(|(n,e)|
+                    FloatStmt::Assign(*n,e.clone())).collect();
+                let n:Vec<_>=no.iter().map(|(i,e)|
+                    FloatStmt::Assign(*i,e.clone())).collect();
+                emit_nested_fp_if(cond,&y,&n,fb,params,params_ty,
+                    locals,locals_ty,depth+1)?;
+            }
+            FloatStmt::Return(_)|FloatStmt::IfReturn(..)=>
+                return Err(reject("nested FP early return requires general CFG lowering")),
+        }
+    }
+    Ok(())
+}
 /// Keep the original pure-return reference API, sharing the same typed
 /// statement emitter and ABI classification as local-bearing FP functions.
 pub fn emit_float_routines(functions:&[FloatFunction])
@@ -284,6 +391,16 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                         }
                     }
                 }
+                FloatStmt::IfBlock(cond,yes,no)=>{
+                    if last {return Err(reject("nested FP if must have a later return"));}
+                    if yes.is_empty() && no.is_empty() {
+                        return Err(reject("nested FP conditional has no statements"));
+                    }
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    let a=validate_fp_block(yes,f,defined.clone(),1)?;
+                    let b=validate_fp_block(no,f,defined.clone(),1)?;
+                    for i in 0..defined.len() {defined[i]=a[i] && b[i];}
+                }
                 FloatStmt::IfAssign(cond,yes,no)=>{
                     if last {return Err(reject("FP merging if must have a later return"));}
                     if yes.is_empty() && no.is_empty() {
@@ -352,6 +469,10 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
                         let (value,_) = emit_expr(no,&mut fb,&params,&f.parameters,
                             &vars,&f.locals)?;
                         fb.ins().return_(&[value]);
+                    }
+                    FloatStmt::IfBlock(cond,yes,no)=>{
+                        emit_nested_fp_if(cond,yes,no,&mut fb,&params,&f.parameters,
+                            &vars,&f.locals,0)?;
                     }
                     FloatStmt::IfAssign(cond,yes,no)=>{
                         let flag=emit_condition(cond,&mut fb,&params,&f.parameters,
@@ -549,7 +670,8 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
 /// Accept a narrow ordered C body with typed FP locals, returning if/else,
 /// and straight-line conditional FP assignments with later SSA joins.
 /// An absent else is an implicit empty false branch, not an undefined value.
-/// Nested conditions, loops, cleanup and pointer access are rejected.
+/// Nested assignment-only conditions are supported; loops, nested early
+/// returns, cleanup and pointer access remain rejected.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
     output:&mut Vec<FloatStmt>,depth:usize,
@@ -616,8 +738,13 @@ fn lower_fp_body(
                 };
                 output.push(FloatStmt::IfAssign(
                     cond,assignments(yes),assignments(no)));
+            } else if yes.iter().all(|s|matches!(s,
+                    FloatStmt::Assign(..)|FloatStmt::IfAssign(..)|FloatStmt::IfBlock(..))) &&
+                      no.iter().all(|s|matches!(s,
+                    FloatStmt::Assign(..)|FloatStmt::IfAssign(..)|FloatStmt::IfBlock(..))) {
+                output.push(FloatStmt::IfBlock(cond,yes,no));
             } else {
-                return Err(reject("FP if arms must both return or both assign locals"));
+                return Err(reject("FP if arms must both return or contain assignment-only control flow"));
             }
         }
         2 if node.expression.is_none()=>{
@@ -934,6 +1061,45 @@ mod tests {
             FloatStmt::Return(FloatExpr::Local(0)),
         ];
         assert!(emit_float_bodies(&[no_effect]).is_err());
+    }
+
+    #[test]
+    fn fp_nested_joins_preserve_live_ins_and_reject_partial_initialization() {
+        let outer=FloatCondition {op:FloatPredicate::Gt,
+            left:FloatExpr::Parameter(0),right:FloatExpr::Parameter(1)};
+        let inner=FloatCondition {op:FloatPredicate::Lt,
+            left:FloatExpr::Parameter(0),
+            right:FloatExpr::Constant64(0.0f64.to_bits())};
+        let mut f=FloatBodyFunction {
+            name:"m14_nested_unit".into(),
+            parameters:vec![FloatType::F64,FloatType::F64],
+            result:FloatType::F64,locals:vec![FloatType::F64],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(1)),
+                FloatStmt::IfBlock(outer.clone(),
+                    vec![FloatStmt::IfAssign(inner.clone(),
+                        vec![(0,FloatExpr::Parameter(0))],vec![])],
+                    vec![(FloatStmt::Assign(0,FloatExpr::Parameter(1)))]),
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        assert!(emit_float_bodies(&[f.clone()]).is_ok());
+        // A nested branch may not initialize a previously undefined value
+        // on only one of its predecessors, even if the outer else does.
+        f.statements.remove(0);
+        assert!(emit_float_bodies(&[f.clone()]).is_err());
+        // Inner conditions are checked on the active path, not with an
+        // overoptimistic union of values from the outer branches.
+        f.statements=vec![
+            FloatStmt::IfBlock(outer,
+                vec![FloatStmt::IfAssign(FloatCondition {
+                    op:FloatPredicate::Gt,left:FloatExpr::Local(0),
+                    right:FloatExpr::Parameter(0),
+                },vec![(0,FloatExpr::Parameter(0))],vec![])],
+                vec![FloatStmt::Assign(0,FloatExpr::Parameter(1))]),
+            FloatStmt::Return(FloatExpr::Local(0)),
+        ];
+        assert!(emit_float_bodies(&[f]).is_err());
     }
 
     #[test]
