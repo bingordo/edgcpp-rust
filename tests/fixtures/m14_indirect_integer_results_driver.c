@@ -26,6 +26,15 @@ static unsigned long cb_u64(unsigned long a,double x) {
 }
 static int cb_branch(double x) {return (int)x+7;}
 static long cb_loop(double x) {return (long)x+40L;}
+static long cb_many(int a0,double x0,unsigned int a1,float x1,
+    long a2,double x2,unsigned long a3,float x3,
+    int a4,double x4,unsigned int a5,float x5,
+    long a6,double x6,double x7,double x8) {
+    return (long)a0+(long)x0+(long)a1+(long)x1+
+        a2+(long)x2+(long)a3+(long)x3+
+        (long)a4+(long)x4+(long)a5+(long)x5+
+        a6+(long)x6+(long)x7+(long)x8;
+}
 #define CHECK(GOT,WANT) do { \
     if ((GOT)!=(WANT)) { \
         fprintf(stderr,"indirect INTEGER return ABI mismatch at line %d\n",__LINE__); \
@@ -55,7 +64,8 @@ int main(void) {
     CHECK(m14_indirect_loop(cb_loop,-2.0,3.0),cb_loop(3.0));
     CHECK(m14_indirect_loop(cb_loop,4.0,3.0),cb_loop(4.0));
     CHECK(m14_indirect_spilled(-1,1.0,2U,3.0f,4L,5.0,6UL,7.0f,
-           8,9.0,10U,11.0f,12L,13.0,14.0,15.0,cb_i64),
-          cb_i64(12L,15.0));
+           8,9.0,10U,11.0f,12L,13.0,14.0,15.0,cb_many),
+          cb_many(-1,1.0,2U,3.0f,4L,5.0,6UL,7.0f,
+           8,9.0,10U,11.0f,12L,13.0,14.0,15.0));
     return 0;
 }
