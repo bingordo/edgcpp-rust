@@ -137,6 +137,21 @@ values from memory. The full
 passed. See the
 [INTEGER-result indirect-call ABI contract](docs/M14_INDIRECT_INTEGER_RESULTS.md).
 
+**M14 checked automatic callable-pointer locals (November 6, 2026):**
+[PR #69](https://github.com/bingordo/edgcpp-rust/pull/69)
+adds nonescaping, source-verified **automatic function-pointer
+locals** initialized or reassigned from checked pointer formals or
+other definitely initialized pointer locals. Cranelift represents
+these as typed SSA values; FP and INTEGER-returning indirect calls
+can use them across branches and FP loops. The compiler compares
+complete native callable prototypes even when EDG uses different
+type IDs for equivalent pointer types. All Rust, native EDG and GCC
+differential tests
+[passed in workflow #42295385457](https://github.com/bingordo/edgcpp-rust/actions/runs/42295385457).
+See the [pointer-local SSA safety contract](docs/M14_AUTOMATIC_POINTER_LOCALS.md).
+Address-taken/memory-backed pointer storage, pointer globals/fields,
+aliases and computed call targets remain unsupported.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
