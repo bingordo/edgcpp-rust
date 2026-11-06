@@ -28,10 +28,18 @@ This is a **bounded Cranelift reference slice**, not general C indirect-call low
 - Rust unit checks reject raw integer and floating-point values substituted as callees, different function-pointer native type IDs, wrong argument classes and wrong formal indices.
 - All prior FP SSA, mixed argument, integer-return and direct-call regression suites passed in [CI #42147086671](https://github.com/bingordo/edgcpp-rust/actions/runs/42147086671).
 
+## Follow-on external-call slice
+
+[PR #67](https://github.com/bingordo/edgcpp-rust/pull/67)
+added [source-checked external C scalar calls](M14_EXTERNAL_SCALAR_IMPORTS.md),
+verified by [full native GCC CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42264148108).
+Those are *named direct calls*, not arbitrary indirect function pointers
+or general dynamic linking.
+
 ## Not included
 
 - Function pointers stored in locals, fields, globals or memory, and function-pointer expressions produced by loads, casts, arithmetic, conditional selection or returned by other calls.
-- Passing function pointers as arguments to other callbacks, arbitrary external direct imports, indirect callbacks returning C INTEGER values, varargs, narrow integer promotions, aggregate SSE/SSEUP or C++ member ABI rules.
+- Passing function pointers as arguments to other callbacks, arbitrary external direct imports beyond the checked C scalar slice, indirect callbacks returning C INTEGER values, varargs, narrow integer promotions, aggregate SSE/SSEUP or C++ member ABI rules.
 - General integer expression trees, arbitrary FP memory and volatile/atomic effects, and the production `bingordo/compiler` adapter.
 
 The next M14 integration choices are **checked external direct-call imports** and expanded memory-backed function-pointer values, followed by sharing the integer and FP typed ABI/CFG plan. Atomic expansion remains a separately deferred task under [issue #59](https://github.com/bingordo/edgcpp-rust/issues/59).
