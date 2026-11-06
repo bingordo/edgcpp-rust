@@ -1697,8 +1697,11 @@ fn comparison_from_edg(
     // those belong to the integer CFG rather than guessing from FP bits.
     let kind=super::semantic(2,node.data.kind);
     let operator=node.data.operator.map(|v|super::semantic(3,v));
-    if kind==2 && node.operands.is_empty() &&
-        node.data.type_id.is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok()) {
+    // EDG may preserve the original floating expression (including pure
+    // arithmetic, not just a variable) directly as the condition. The
+    // strict expression decoder below rejects calls/side effects we do not
+    // model, but all verified F32/F64 values have C scalar truthiness.
+    if node.data.type_id.is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok()) {
         return truthiness_from_edg(ctx,id,false);
     }
     let boolean_kind=kind==3 &&
