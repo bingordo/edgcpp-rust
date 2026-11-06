@@ -2150,6 +2150,22 @@ fn lower_fp_body(
             if super::semantic(2,left.data.kind)!=2 || !left.operands.is_empty() {
                 return Err(reject("FP assignment target is not a direct local"));
             }
+            if let Some(symbol)=left.data.symbol_id {
+                if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+                    let (_,ty,_)=source_fp_global(ctx.il,symbol)?;
+                    if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                        reject("FP global store lvalue has no native type"))?)?!=
+                        ScalarType::Float(ty) {
+                        return Err(reject("FP global store ABI type mismatch"));
+                    }
+                    let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                    if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                        return Err(reject("FP global store RHS needs conversion"));
+                    }
+                    output.push(FloatStmt::StoreGlobal {symbol,ty,value});
+                    return Ok(());
+                }
+            }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
             if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
