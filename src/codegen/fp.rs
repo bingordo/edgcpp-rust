@@ -1874,6 +1874,52 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn source_authorized_external_scalar_imports_are_typed_and_restricted() {
+        let params=vec![ScalarType::Float(FloatType::F64)];
+        let external=FloatExpr::CallExternal {
+            callee:"m14_foreign_lib".into(),
+            parameters:params.clone(),
+            return_type:FloatType::F64,
+            arguments:vec![ScalarCallArg::Float(FloatExpr::Parameter(0))],
+        };
+        let build=|name:&str,expr:FloatExpr|ScalarFloatBody {
+            name:name.into(),parameters:params.clone(),
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],statements:vec![FloatStmt::Return(expr)],
+        };
+        let caller=build("m14_import_caller",external.clone());
+        // Public FloatExpr reference API is *never* permission to import.
+        assert!(emit_scalar_float_bodies(&[caller.clone()]).is_err());
+        let bytes=emit_scalar_float_bodies_internal(&[caller.clone()],true).unwrap();
+        assert_eq!(&bytes[..4],b"\x7fELF");
+        // Identical multiple call sites share the same exact declaration.
+        let same=build("m14_second_caller",external.clone());
+        assert!(emit_scalar_float_bodies_internal(&[caller.clone(),same],true).is_ok());
+        let mut conflict=external.clone();
+        if let FloatExpr::CallExternal {parameters,arguments,..}=&mut conflict {
+            *parameters=vec![ScalarType::Float(FloatType::F32)];
+            *arguments=vec![ScalarCallArg::Float(FloatExpr::Constant32(0))];
+        }
+        assert!(emit_scalar_float_bodies_internal(
+            &[caller.clone(),build("m14_conflicting_caller",conflict)],true).is_err());
+        let defined=build("m14_foreign_lib",FloatExpr::Parameter(0));
+        assert!(emit_scalar_float_bodies_internal(
+            &[caller.clone(),defined],true).is_err());
+        let mut builtin=external.clone();
+        if let FloatExpr::CallExternal {callee,..}=&mut builtin {
+            *callee="__atomic_fake".into();
+        }
+        assert!(emit_scalar_float_bodies_internal(
+            &[build("m14_builtin_caller",builtin)],true).is_err());
+        let mut name=external;
+        if let FloatExpr::CallExternal {callee,..}=&mut name {
+            *callee="namespace::not_a_C_symbol".into();
+        }
+        assert!(emit_scalar_float_bodies_internal(
+            &[build("m14_non_c_caller",name)],true).is_err());
+    }
+
+    #[test]
     fn function_pointer_formal_indirect_call_checks_abi_classes_and_target_identity() {
         let ptr=crate::TypeId(987);
         let signature=vec![
