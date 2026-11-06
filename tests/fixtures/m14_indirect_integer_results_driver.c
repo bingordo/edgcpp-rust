@@ -12,7 +12,9 @@ int m14_indirect_branch(int(*)(double),double,double);
 long m14_indirect_loop(long(*)(double),double,double);
 long m14_indirect_spilled(int,double,unsigned int,float,long,double,
     unsigned long,float,int,double,unsigned int,float,long,double,
-    double,double,long(*)(long,double));
+    double,double,long(*)(int,double,unsigned int,float,long,double,
+        unsigned long,float,int,double,unsigned int,float,long,double,
+        double,double));
 static int cb_i32(int a,double x) {return a+(int)x;}
 static int cb_i32_other(int a,double x) {return a-(int)x;}
 static unsigned int cb_u32(unsigned int a,float x) {
