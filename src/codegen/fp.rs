@@ -44,8 +44,13 @@ struct ScalarFloatBody {
     name:String,
     parameters:Vec<ScalarType>,
     result:ScalarType,
-    locals:Vec<FloatType>,
+    locals:Vec<ScalarType>,
     statements:Vec<FloatStmt>,
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum PointerSource {
+    Parameter(usize),
+    Local(usize),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
@@ -80,7 +85,7 @@ pub enum FloatExpr {
     /// address or an unchecked C cast. The native pointee prototype is
     /// validated during EDG lowering.
     CallIndirect {
-        pointer_parameter:usize,
+        pointer:PointerSource,
         pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:FloatType,
@@ -131,6 +136,13 @@ pub struct FloatCondition {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
+    /// A nonescaping, native EDG-verified callable pointer value in a
+    /// typed automatic local. Definite assignment is tracked across CFG.
+    AssignPointer {
+        local:usize,
+        pointer_type:crate::TypeId,
+        source:PointerSource,
+    },
     Return(FloatExpr),
     /// EDG-verified conversion of an FP expression to a native C INTEGER
     /// return class. Out-of-range/NaN are undefined in C and not normalized.
@@ -139,7 +151,7 @@ pub enum FloatStmt {
     /// call. Unlike FP-to-int conversion this preserves the callee's native
     /// INTEGER return register and exact 32/64-bit width/signature.
     ReturnIndirectInteger {
-        pointer_parameter:usize,
+        pointer:PointerSource,
         pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:ScalarType,
@@ -175,7 +187,7 @@ fn reject(message:impl Into<String>)->CodegenError {
 }
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
-    params:&[ScalarType],locals:&[FloatType],depth:usize,
+    params:&[ScalarType],locals:&[ScalarType],depth:usize,
 )->Result<(),CodegenError> {
     if depth>64 || arguments.len()!=target_types.len() ||
         arguments.len()>256 {
@@ -207,7 +219,7 @@ fn check_scalar_call_local_reads(
     Ok(())
 }
 fn expression_type(
-    expr:&FloatExpr,params:&[ScalarType],locals:&[FloatType],depth:usize,
+    expr:&FloatExpr,params:&[ScalarType],locals:&[ScalarType],depth:usize,
 )->Result<FloatType,CodegenError> {
     if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
     use FloatExpr::*;
@@ -235,8 +247,10 @@ fn expression_type(
             check_scalar_call_args(arguments,parameters,params,locals,depth+1)?;
             Ok(*return_type)
         }
-        Local(n)=>locals.get(*n).copied()
-            .ok_or_else(||reject("FP local out of range")),
+        Local(n)=>match locals.get(*n).copied() {
+            Some(ScalarType::Float(t))=>Ok(t),
+            _=>Err(reject("FP local out of range or is a callable pointer")),
+        },
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
         Neg(e)=>expression_type(e,params,locals,depth+1),
@@ -258,7 +272,7 @@ fn expression_type(
 fn emit_scalar_call_arguments(
     arguments:&[ScalarCallArg],parameters:&[ScalarType],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
-    locals:&[Variable],locals_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 )->Result<Vec<Value>,CodegenError> {
     if arguments.len()!=parameters.len() || arguments.len()>256 {
@@ -290,7 +304,7 @@ fn emit_expr(
     params:&[Value],
     params_ty:&[ScalarType],
     locals:&[Variable],
-    locals_ty:&[FloatType],
+    locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
@@ -361,7 +375,10 @@ fn emit_expr(
         }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
-            let ty=*locals_ty.get(*n).ok_or_else(||reject("missing FP local type"))?;
+            let ty=match locals_ty.get(*n) {
+                Some(ScalarType::Float(t))=>*t,
+                _=>return Err(reject("FP local is not a typed FP value")),
+            };
             (fb.use_var(var),ty)
         }
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
@@ -422,7 +439,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     }
 }
 fn check_condition(
-    cond:&FloatCondition,params:&[ScalarType],locals:&[FloatType],
+    cond:&FloatCondition,params:&[ScalarType],locals:&[ScalarType],
     defined:&[bool],
 )->Result<(),CodegenError> {
     check_local_reads(&cond.left,defined,0)?;
@@ -434,7 +451,7 @@ fn check_condition(
 }
 fn emit_condition(
     cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 )->Result<Value,CodegenError> {
     let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty,refs)?;
@@ -455,7 +472,7 @@ fn validate_fp_arm(
         let ty=*f.locals.get(*n)
             .ok_or_else(||reject("FP branch local index out of range"))?;
         check_local_reads(expr,&defined,0)?;
-        if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+        if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
             return Err(reject("FP branch assignment has an unconverted type"));
         }
         defined[*n]=true;
@@ -505,7 +522,7 @@ fn check_fp_statements(
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
                 check_local_reads(expr,&defined,0)?;
-                if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+                if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
                     return Err(reject("FP assignment has an unconverted type"));
                 }
                 defined[*n]=true;
@@ -651,7 +668,7 @@ struct FpLoopTargets<'a> {
 #[allow(clippy::too_many_arguments)]
 fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
     refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
@@ -838,7 +855,7 @@ fn emit_fp_statements(
 fn emit_fp_if(
     cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
-    locals:&[Variable],locals_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
     refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
@@ -890,7 +907,8 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
         name:f.name.clone(),
         parameters:f.parameters.iter().copied().map(ScalarType::Float).collect(),
         result:ScalarType::Float(f.result),
-        locals:f.locals.clone(),statements:f.statements.clone(),
+        locals:f.locals.iter().copied().map(ScalarType::Float).collect(),
+        statements:f.statements.clone(),
     }).collect();
     emit_scalar_float_bodies(&scalar)
 }
@@ -1245,7 +1263,7 @@ struct FpSourceCtx<'a> {
     params:&'a [crate::SymbolId],
     locals:&'a [crate::SymbolId],
     param_types:&'a [ScalarType],
-    local_types:&'a [FloatType],
+    local_types:&'a [ScalarType],
 }
 fn expression_from_edg(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
@@ -1447,7 +1465,9 @@ fn expression_from_edg(
             return Ok(FloatExpr::Parameter(i));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
-            if ctx.local_types[i]!=ty {return Err(reject("FP local rvalue type mismatch"));}
+            if ctx.local_types[i]!=ScalarType::Float(ty) {
+                return Err(reject("FP local rvalue type mismatch"));
+            }
             return Ok(FloatExpr::Local(i));
         }
         return Err(reject("FP global/address-taken rvalue requires memory lowering"));
@@ -1770,8 +1790,10 @@ fn lower_fp_body(
                         return Err(reject("FP initializer native target type mismatch"));
                     }
                     match (ctx.local_types[local],exact.width) {
-                        (FloatType::F32,32)=>FloatExpr::Constant32(exact.bits as u32),
-                        (FloatType::F64,64)=>FloatExpr::Constant64(exact.bits),
+                        (ScalarType::Float(FloatType::F32),32)=>
+                            FloatExpr::Constant32(exact.bits as u32),
+                        (ScalarType::Float(FloatType::F64),64)=>
+                            FloatExpr::Constant64(exact.bits),
                         _=>return Err(reject("FP initializer width/type mismatch")),
                     }
                 }
@@ -1796,8 +1818,8 @@ fn lower_fp_body(
             }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            if type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
-                reject("missing native FP lvalue type"))?)?!=ctx.local_types[local] {
+            if ScalarType::Float(type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native FP lvalue type"))?)?)!=ctx.local_types[local] {
                 return Err(reject("FP lvalue type mismatch"));
             }
             let value=expression_from_edg(ctx,operation.operands[1],0)?;
@@ -2036,7 +2058,11 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 return Err(reject("unsupported FP local storage class"));
             }
             check_plain_fp_local(il,local.ty)?;
-            local_types.push(type_from_edg(il,local.ty)?);
+            let ty=scalar_type_from_edg(il,local.ty)?;
+            if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)) {
+                return Err(reject("non-FP, non-function-pointer automatic local unsupported"));
+            }
+            local_types.push(ty);
             local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
