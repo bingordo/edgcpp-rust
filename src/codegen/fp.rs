@@ -2286,7 +2286,7 @@ mod tests {
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
             let mut bad=function.clone();
-            bad.locals.push(FloatType::F64);
+            bad.locals.push(ScalarType::Float(FloatType::F64));
             if let FloatStmt::ReturnIndirectInteger {arguments,..}=
                 &mut bad.statements[0] {
                 arguments[1]=ScalarCallArg::Float(FloatExpr::Local(0));
