@@ -68,8 +68,9 @@ fail before object emission.
 
 ## Remaining M14 work
 
-- General memory-backed function pointers, dynamic pointer selection and
-  indirect calls whose **callee** returns an integer or pointer.
+- General memory-backed function pointers and dynamic pointer selection;
+  indirect INTEGER-result calls beyond the [checked direct-return subset](M14_INDIRECT_INTEGER_RESULTS.md);
+  function-pointer calls returning pointer or aggregate results.
 - Full scalar integer expression trees (instead of direct formal-only
   integer argument values), 8-/16-bit promotions, bool, C conversions
   and general integer/FP mixed expression lowering.
