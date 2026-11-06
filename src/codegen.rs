@@ -752,7 +752,62 @@ impl CAbi {
     /// The selected target constructs one plan for signatures, calls, and
     /// function entry. The generic C frontend never counts hardware registers.
     fn passing_plan(&self) -> Result<target::PassingPlan,CodegenError> {
-        target::ABI.passing_plan(self)
+        let plan=target::ABI.passing_plan(self)?;
+        // When the CFG is in the same 32/64-bit C scalar subset as the FP
+        // path, both independently built plans must agree on every register
+        // and stack position. Aggregate/narrow/bool ABI handling remains
+        // under the existing target-specific classifier.
+        let common=|ty:CAbiInt|matches!(ty.bits,32|64) && !ty.is_bool;
+        if self.aggregate_result.is_none() &&
+            self.aggregate_parameters.iter().all(Option::is_none) &&
+            self.parameters.iter().copied().all(common) &&
+            self.result.is_some_and(common) {
+            use crate::scalar_abi::{ScalarKind as K,Signature,Location as L,
+                RegisterClass as C};
+            let kind=|t:CAbiInt|->K {
+                match (t.bits,t.signed) {
+                    (32,true)=>K::Signed32,(32,false)=>K::Unsigned32,
+                    (64,true)=>K::Signed64,(64,false)=>K::Unsigned64,
+                    _=>unreachable!("only checked ABI subset reaches this mapping"),
+                }
+            };
+            let shared=Signature {
+                parameters:self.parameters.iter().copied().map(kind).collect(),
+                result:kind(self.result.unwrap()),
+                prototyped:true,variadic:false,
+            }.plan_sysv_x86_64().map_err(|err|
+                CodegenError::InvalidFunction(format!(
+                    "scalar source ABI plan rejected integer CFG: {err:?}")))?;
+            if shared.parameters.len()!=plan.parameters.len() ||
+                plan.result.len()!=1 ||
+                !matches!(shared.result,L::Register{class:C::Integer,index:0}) {
+                return Err(CodegenError::InvalidFunction(
+                    "shared scalar result ABI disagrees with integer target plan".into()));
+            }
+            for (shared,integer) in shared.parameters.iter().zip(&plan.parameters) {
+                let Some(piece)=integer.pieces.first() else {
+                    return Err(CodegenError::InvalidFunction(
+                        "integer ABI omitted a scalar argument".into()));
+                };
+                if integer.pieces.len()!=1 || shared.source_index!=integer.source_index ||
+                    !matches!(integer.mode,target::PassingMode::Scalar) {
+                    return Err(CodegenError::InvalidFunction(
+                        "scalar source/physical argument count differs".into()));
+                }
+                let expected=match shared.location {
+                    L::Register {class:C::Integer,index}=>target::PieceLocation::Register {
+                        class:target::RegisterClass::Integer,index},
+                    L::Stack{slot}=>target::PieceLocation::Stack{slot},
+                    _=>return Err(CodegenError::InvalidFunction(
+                        "unexpected SSE class in INTEGER-only CFG signature".into())),
+                };
+                if piece.location!=expected {
+                    return Err(CodegenError::InvalidFunction(
+                        "mixed scalar ABI and integer CFG placement differ".into()));
+                }
+            }
+        }
+        Ok(plan)
     }
 }
 fn cfg_routine_abi(
