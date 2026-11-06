@@ -1137,8 +1137,14 @@ fn expression_from_edg(
                     let designator=super::canonical_abi_type(ctx.il,
                         callee.data.type_id.ok_or_else(||
                             reject("indirect FP designator lacks type"))?)?;
-                    if designator!=fn_ty {
-                        return Err(reject("indirect FP designator type differs from target"));
+                    // Pinned EDG may preserve the pointer type for the
+                    // dereference expression, even when it denotes the
+                    // function designator. Only the two native identities
+                    // tied to the verified callable formal are valid.
+                    if designator!=fn_ty && designator!=pointer_type {
+                        return Err(reject(format!(
+                            "indirect FP designator type {} differs from function {} and pointer {}",
+                            designator.0,fn_ty.0,pointer_type.0)));
                     }
                 }
                 (None,Some(index),Some(pointer_type),fn_ty)
