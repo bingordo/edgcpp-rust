@@ -1481,13 +1481,13 @@ fn pointer_source_from_edg(
 /// Source-owned named C FP object import, never an arbitrary memory address.
 fn source_fp_global(
     il:&Il,symbol:crate::SymbolId,
-)->Result<(String,FloatType),CodegenError> {
+)->Result<(String,FloatType,Linkage),CodegenError> {
     let meta=il.global_variables.iter().find(|g|g.symbol==symbol)
         .ok_or_else(||reject("FP global is not an EDG-classified file-scope object"))?;
-    if meta.linkage!=1 || meta.explicit_initializer ||
+    if !matches!(meta.linkage,1|2|3) || meta.explicit_initializer ||
         meta.thread_local || meta.local_to_function ||
         il.static_local_owners.iter().any(|s|s.symbol==symbol) {
-        return Err(reject("FP globals must be external ordinary C declarations"));
+        return Err(reject("FP globals need uninitialized ordinary C storage"));
     }
     let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
         .map(|s|s.name.clone())
@@ -1499,7 +1499,11 @@ fn source_fp_global(
         .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
     check_plain_fp_local(il,declared)?;
     let ty=type_from_edg(il,declared)?;
-    Ok((name,ty))
+    let linkage=match meta.linkage {
+        1=>Linkage::Import,2=>Linkage::Local,3=>Linkage::Export,
+        _=>return Err(reject("unknown FP global storage linkage")),
+    };
+    Ok((name,ty,linkage))
 }
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
@@ -1712,7 +1716,7 @@ fn expression_from_edg(
             return Ok(FloatExpr::Local(i));
         }
         if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
-            let (_,actual)=source_fp_global(ctx.il,symbol)?;
+            let (_,actual,_)=source_fp_global(ctx.il,symbol)?;
             if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
                     reject("FP external global expression lacks native type"))?)?!=
                     ScalarType::Float(actual) {
@@ -2333,13 +2337,13 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
     }
     if !found_float {return Ok(None);}
-    // This reference emitter only defines functions. A module that owns
-    // global storage or executable initialization must not silently drop
-    // its data section when switched from the general integer CFG.
+    // Allow only native C FP zero-initialized data definitions or extern
+    // imports. Explicit initializers, TLS and function-local statics need
+    // independent byte-image and lifetime support.
     if il.global_variables.iter().any(|g|
-        g.linkage!=1 || g.explicit_initializer || g.thread_local ||
-        g.local_to_function) {
-        return Err(reject("FP source module defines global/TLS storage without FP data lowering"));
+        !matches!(g.linkage,1|2|3) || g.explicit_initializer ||
+        g.thread_local || g.local_to_function) {
+        return Err(reject("FP source module has unsupported initialized/TLS globals"));
     }
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
@@ -2422,8 +2426,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         let Some(symbol)=expr.symbol_id else {continue;};
         if il.global_variables.iter().any(|g|g.symbol==symbol) &&
             seen.insert(symbol) {
-            let (name,ty)=source_fp_global(il,symbol)?;
-            fp_globals.push(FpImportedGlobal {symbol,name,ty});
+            let (name,ty,linkage)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage});
         }
     }
     emit_scalar_float_bodies_with_globals(&functions,true,&fp_globals).map(Some)
