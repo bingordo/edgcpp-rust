@@ -2471,6 +2471,15 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     // under the existing memory-backed integration gate.
     let mut fp_globals=Vec::new();
     let mut seen=std::collections::HashSet::new();
+    // Native owned C file-scope globals are externally observable even
+    // when no function in this TU reads them.
+    for g in &il.global_variables {
+        if (g.linkage!=1 || g.explicit_initializer) && seen.insert(g.symbol) {
+            let symbol=g.symbol;
+            let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
+        }
+    }
     for expr in &il.expressions {
         if super::semantic(2,expr.kind)!=2 {continue;}
         let Some(symbol)=expr.symbol_id else {continue;};
