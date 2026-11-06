@@ -17,6 +17,7 @@ struct FpScalarGlobal {
     name:String,
     ty:FloatType,
     linkage:Linkage,
+    initializer:Option<Vec<u8>>,
 }
 use cranelift_frontend::Variable;
 
@@ -1221,16 +1222,29 @@ fn emit_scalar_float_bodies_with_globals(
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         global_ids.insert(g.symbol,(id,g.ty));
     }
-    // C tentative/static definitions without explicit initializers must
-    // allocate actual zero-initialized .bss, never fake imported storage.
+    // Each source-owned FP definition is a genuine ELF storage object.
+    // Exact EDG-native IEEE images become .data; tentative/uninitialized
+    // definitions become .bss. No source text or guessed float conversion.
     for g in globals {
-        if g.linkage==Linkage::Import {continue;}
+        if g.linkage==Linkage::Import {
+            if g.initializer.is_some() {
+                return Err(reject("imported FP global cannot own initializer"));
+            }
+            continue;
+        }
         let id=global_ids.get(&g.symbol).ok_or_else(||
-            reject("FP zero-initialized data was not declared"))?.0;
+            reject("FP defined data symbol was not declared"))?.0;
         let mut data=cranelift_module::DataDescription::new();
         let bytes=match g.ty {FloatType::F32=>4usize,FloatType::F64=>8usize};
         data.set_align(bytes as u64);
-        data.define_zeroinit(bytes);
+        if let Some(image)=&g.initializer {
+            if image.len()!=bytes {
+                return Err(reject("EDG native FP global image width mismatch"));
+            }
+            data.define(image.clone().into_boxed_slice());
+        } else {
+            data.define_zeroinit(bytes);
+        }
         module.define_data(id,&data)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
     }
