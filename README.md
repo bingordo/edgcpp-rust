@@ -152,6 +152,18 @@ See the [pointer-local SSA safety contract](docs/M14_AUTOMATIC_POINTER_LOCALS.md
 Address-taken/memory-backed pointer storage, pointer globals/fields,
 aliases and computed call targets remain unsupported.
 
+**M14 shared scalar SysV passing contract (November 6, 2026):**
+`src/scalar_abi.rs` now exposes a **Cranelift-independent** source-order
+argument/return planner for verified C signed/unsigned 32/64-bit INTEGER,
+F32/F64 SSE and callable pointer values on Linux x86-64. Both the
+Cranelift FP reference path and the INTEGER CFG's eligible scalar
+subset cross-check against this common plan; pure Rust tests verify
+independent GPR/XMM exhaustion and source-order stack spills.
+See [the shared ABI contract and completion audit](docs/M14_SHARED_SCALAR_ABI.md).
+This does **not** claim that aggregate SSE/MEMORY ABI, FP globals,
+general memory effects or the native `bingordo/compiler` adapter
+are implemented.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
