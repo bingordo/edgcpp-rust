@@ -96,7 +96,7 @@ calls, and calls inside checked SSA loops
 [green CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42067347502)).
 See [the direct-call safety contract](docs/M14_DIRECT_SCALAR_CALLS.md).
 Unrestricted external/indirect calls, general integer expression trees, native FP
-memory, mixed INTEGER-returning callees and the production compiler
+memory, arbitrary INTEGER-valued call expressions and the production compiler
 adapter remain unsupported and fail closed.
 
 **M14 native EDG function-pointer formal calls (November 5, 2026):**
@@ -124,6 +124,18 @@ passed. See the
 [external import contract](docs/M14_EXTERNAL_SCALAR_IMPORTS.md).
 This does not add external data symbols, pointer-valued parameters,
 varargs, C++ ABI, or general mixed scalar expression support.
+
+**M14 INTEGER-returning typed indirect callbacks (November 6, 2026):**
+[PR #68](https://github.com/bingordo/edgcpp-rust/pull/68)
+adds source-checked function-pointer calls that return signed/unsigned
+32/64-bit C INTEGER values directly in EAX/RAX, including
+callbacks in branches and FP SSA loops. The implementation requires an
+exact whole-return callback expression and an EDG-verified function-pointer
+formal; it does not interpret arbitrary INTEGER expressions or load pointer
+values from memory. The full
+[native GCC CI run #42269395175](https://github.com/bingordo/edgcpp-rust/actions/runs/42269395175)
+passed. See the
+[INTEGER-result indirect-call ABI contract](docs/M14_INDIRECT_INTEGER_RESULTS.md).
 
 ## Reused, not reimplemented
 
