@@ -712,6 +712,43 @@ jobs:
             done
           )
 
+      - name: M14 checked source external scalar imports GCC linkage and differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_external_scalar*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen edg_m14_external.o --c11 m14_external_scalar_calls.c >m14_external.log 2>&1; then
+              cat m14_external.log
+              exit 1
+            fi
+            nm -g --defined-only edg_m14_external.o | grep -q m14_wrap_external_many
+            nm -u edg_m14_external.o | grep -q m14_ext_adjust
+            nm -u edg_m14_external.o | grep -q m14_ext_many
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_external_scalar_calls.c m14_external_scalar_defs.c m14_external_scalar_calls_driver.c -lm -o gcc_m14_external
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_external.o m14_external_scalar_defs.c m14_external_scalar_calls_driver.c -lm -o cranelift_m14_external
+            ./gcc_m14_external
+            ./cranelift_m14_external
+            for source in m14_external_scalar_bad_varargs.c m14_external_scalar_bad_pointer.c m14_external_scalar_bad_data.c m14_external_scalar_bad_unprototyped.c; do
+              rm -f bad_m14_external.o bad_m14_external.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_external.o --c11 "$source" >bad_m14_external.log 2>&1; then
+                echo "Unsupported FP external ABI unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |external|unsupported|pointer|prototype|EDG IL lowering failed|EDG reported compilation failure' bad_m14_external.log
+              test ! -e bad_m14_external.o
+            done
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
