@@ -8,6 +8,7 @@
 //! raw EDG pointers after `edg_main` returns.
 pub mod graph;
 pub mod memory_order;
+pub mod scalar_abi;
 #[cfg(feature = "codegen")]
 pub mod codegen;
 

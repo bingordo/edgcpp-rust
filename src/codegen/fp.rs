@@ -225,6 +225,30 @@ fn emit_pointer_source(
             .ok_or_else(||reject("call pointer local has no SSA variable")),
     }
 }
+/// Common source ABI plan shared by the FP Cranelift reference and the
+/// integer CFG. All type identity/provenance checks occur before this step.
+fn checked_scalar_passing_plan(
+    parameters:&[ScalarType],result:ScalarType,
+)->Result<crate::scalar_abi::PassingPlan,CodegenError> {
+    use crate::scalar_abi::{ScalarKind as K,Signature};
+    let convert=|ty:ScalarType|->Result<K,CodegenError> {
+        match ty {
+            ScalarType::Float(FloatType::F32)=>Ok(K::Float32),
+            ScalarType::Float(FloatType::F64)=>Ok(K::Float64),
+            ScalarType::Int {bits:32,signed:true}=>Ok(K::Signed32),
+            ScalarType::Int {bits:32,signed:false}=>Ok(K::Unsigned32),
+            ScalarType::Int {bits:64,signed:true}=>Ok(K::Signed64),
+            ScalarType::Int {bits:64,signed:false}=>Ok(K::Unsigned64),
+            ScalarType::FunctionPointer(_)=>Ok(K::CallablePointer),
+            _=>Err(reject("scalar ABI requires source-verified native 32/64-bit types")),
+        }
+    };
+    let parameters=parameters.iter().copied()
+        .map(convert).collect::<Result<Vec<_>,_>>()?;
+    Signature {parameters,result:convert(result)?,
+        prototyped:true,variadic:false}.plan_sysv_x86_64()
+        .map_err(|err|reject(format!("unsupported source-checked scalar ABI: {err:?}")))
+}
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
     params:&[ScalarType],locals:&[ScalarType],depth:usize,
@@ -283,6 +307,7 @@ fn expression_type(
                     return Err(reject("FP indirect call requires exact native callable type"));
                 }
             }
+            checked_scalar_passing_plan(parameters,ScalarType::Float(*return_type))?;
             check_scalar_call_args(arguments,parameters,params,locals,depth+1)?;
             Ok(*return_type)
         }
@@ -608,6 +633,7 @@ fn check_fp_statements(
                    parameters.iter().any(|t|matches!(t,ScalarType::FunctionPointer(_))) {
                     return Err(reject("indirect INTEGER return ABI/formal mismatch"));
                 }
+                checked_scalar_passing_plan(parameters,*return_type)?;
                 check_scalar_call_args(arguments,parameters,
                     &f.parameters,&f.locals,0)?;
                 check_scalar_call_local_reads(arguments,&defined)?;
@@ -1153,6 +1179,7 @@ fn emit_scalar_float_bodies_internal(
     }
     let mut exports=Vec::new();
     for f in functions {
+        checked_scalar_passing_plan(&f.parameters,f.result)?;
         if f.name.is_empty()||f.name.contains('\0') ||
             f.parameters.len()>256 || f.locals.len()>4096 {
             return Err(reject("invalid FP function name or variable count"));
