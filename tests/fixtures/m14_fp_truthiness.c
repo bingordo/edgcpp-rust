@@ -16,18 +16,20 @@ double m14_truth_if_expr(double x) {
     return 7.0;
 }
 double m14_truth_while(double x) {
+    double value=x;
     double sum=0.0;
-    while(x) {
+    while(value) {
         sum=sum+1.0;
-        x=x-1.0;
+        value=value-1.0;
     }
     return sum;
 }
 double m14_truth_do_while(double x) {
+    double value=x;
     double sum=0.0;
     do {
         sum=sum+1.0;
-        x=x-1.0;
-    } while(x);
+        value=value-1.0;
+    } while(value);
     return sum;
 }
