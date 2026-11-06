@@ -12,10 +12,11 @@ use std::cell::Cell;
 use cranelift_codegen::ir::{GlobalValue,MemFlags};
 type FpGlobalRefs=HashMap<crate::SymbolId,(GlobalValue,FloatType)>;
 #[derive(Debug,Clone,PartialEq,Eq)]
-struct FpImportedGlobal {
+struct FpScalarGlobal {
     symbol:crate::SymbolId,
     name:String,
     ty:FloatType,
+    linkage:Linkage,
 }
 use cranelift_frontend::Variable;
 
@@ -147,6 +148,8 @@ pub struct FloatCondition {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
+    /// Real source-verified ordinary F32/F64 data store (not SSA).
+    StoreGlobal {symbol:crate::SymbolId,ty:FloatType,value:FloatExpr},
     /// A nonescaping, native EDG-verified callable pointer value in a
     /// typed automatic local. Definite assignment is tracked across CFG.
     AssignPointer {
@@ -620,6 +623,13 @@ fn check_fp_statements(
                 defined[*local]=true;
                 next=Some(defined);
             }
+            FloatStmt::StoreGlobal {ty,value,..}=>{
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP global store RHS native type mismatch"));
+                }
+                next=Some(defined);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
@@ -786,6 +796,16 @@ fn emit_fp_statements(
                 let var=*locals.get(*local).ok_or_else(||
                     reject("pointer local has no SSA slot"))?;
                 fb.def_var(var,value);
+            }
+            FloatStmt::StoreGlobal {symbol,ty,value}=>{
+                let (data,actual)=*global_refs.get(symbol).ok_or_else(||
+                    reject("FP global store lacks verified data symbol"))?;
+                if *ty!=actual {return Err(reject("FP global store native type mismatch"));}
+                let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                    refs,global_refs)?;
+                if source!=*ty {return Err(reject("FP global store RHS type differs"));}
+                let address=fb.ins().global_value(types::I64,data);
+                fb.ins().store(MemFlags::new(),v,address,0);
             }
             FloatStmt::Assign(n,expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
@@ -1113,6 +1133,8 @@ fn validate_fp_calls_stmts(
             FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
             FloatStmt::ReturnInteger(e,_)=>
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
+            FloatStmt::StoreGlobal {value,..}=>
+                validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
                     if let ScalarCallArg::Float(e)=arg {
@@ -1169,7 +1191,7 @@ fn emit_scalar_float_bodies_internal(
 }
 fn emit_scalar_float_bodies_with_globals(
     functions:&[ScalarFloatBody],source_imports:bool,
-    globals:&[FpImportedGlobal],
+    globals:&[FpScalarGlobal],
 )->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
@@ -1191,12 +1213,26 @@ fn emit_scalar_float_bodies_with_globals(
     for g in globals {
         if !safe_scalar_external_name(&g.name) ||
             !global_names.insert(g.name.clone()) ||
-            global_ids.contains_key(&g.symbol) {
-            return Err(reject("invalid or duplicate FP external data import"));
+            global_ids.contains_key(&g.symbol) ||
+            !matches!(g.linkage,Linkage::Import|Linkage::Local|Linkage::Export) {
+            return Err(reject("invalid or duplicate checked FP data symbol"));
         }
-        let id=module.declare_data(&g.name,Linkage::Import,true,false)
+        let id=module.declare_data(&g.name,g.linkage,true,false)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         global_ids.insert(g.symbol,(id,g.ty));
+    }
+    // C tentative/static definitions without explicit initializers must
+    // allocate actual zero-initialized .bss, never fake imported storage.
+    for g in globals {
+        if g.linkage==Linkage::Import {continue;}
+        let id=global_ids.get(&g.symbol).ok_or_else(||
+            reject("FP zero-initialized data was not declared"))?.0;
+        let mut data=cranelift_module::DataDescription::new();
+        let bytes=match g.ty {FloatType::F32=>4usize,FloatType::F64=>8usize};
+        data.set_align(bytes as u64);
+        data.define_zeroinit(bytes);
+        module.define_data(id,&data)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
     }
     let mut declared=HashMap::new();
     for f in functions {
@@ -1445,13 +1481,13 @@ fn pointer_source_from_edg(
 /// Source-owned named C FP object import, never an arbitrary memory address.
 fn source_fp_global(
     il:&Il,symbol:crate::SymbolId,
-)->Result<(String,FloatType),CodegenError> {
+)->Result<(String,FloatType,Linkage),CodegenError> {
     let meta=il.global_variables.iter().find(|g|g.symbol==symbol)
         .ok_or_else(||reject("FP global is not an EDG-classified file-scope object"))?;
-    if meta.linkage!=1 || meta.explicit_initializer ||
+    if !matches!(meta.linkage,1|2|3) || meta.explicit_initializer ||
         meta.thread_local || meta.local_to_function ||
         il.static_local_owners.iter().any(|s|s.symbol==symbol) {
-        return Err(reject("FP globals must be external ordinary C declarations"));
+        return Err(reject("FP globals need uninitialized ordinary C storage"));
     }
     let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
         .map(|s|s.name.clone())
@@ -1463,7 +1499,11 @@ fn source_fp_global(
         .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
     check_plain_fp_local(il,declared)?;
     let ty=type_from_edg(il,declared)?;
-    Ok((name,ty))
+    let linkage=match meta.linkage {
+        1=>Linkage::Import,2=>Linkage::Local,3=>Linkage::Export,
+        _=>return Err(reject("unknown FP global storage linkage")),
+    };
+    Ok((name,ty,linkage))
 }
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
@@ -1676,7 +1716,7 @@ fn expression_from_edg(
             return Ok(FloatExpr::Local(i));
         }
         if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
-            let (_,actual)=source_fp_global(ctx.il,symbol)?;
+            let (_,actual,_)=source_fp_global(ctx.il,symbol)?;
             if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
                     reject("FP external global expression lacks native type"))?)?!=
                     ScalarType::Float(actual) {
@@ -2110,6 +2150,22 @@ fn lower_fp_body(
             if super::semantic(2,left.data.kind)!=2 || !left.operands.is_empty() {
                 return Err(reject("FP assignment target is not a direct local"));
             }
+            if let Some(symbol)=left.data.symbol_id {
+                if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+                    let (_,ty,_)=source_fp_global(ctx.il,symbol)?;
+                    if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                        reject("FP global store lvalue has no native type"))?)?!=
+                        ScalarType::Float(ty) {
+                        return Err(reject("FP global store ABI type mismatch"));
+                    }
+                    let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                    if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                        return Err(reject("FP global store RHS needs conversion"));
+                    }
+                    output.push(FloatStmt::StoreGlobal {symbol,ty,value});
+                    return Ok(());
+                }
+            }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
             if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
@@ -2297,13 +2353,13 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
     }
     if !found_float {return Ok(None);}
-    // This reference emitter only defines functions. A module that owns
-    // global storage or executable initialization must not silently drop
-    // its data section when switched from the general integer CFG.
+    // Allow only native C FP zero-initialized data definitions or extern
+    // imports. Explicit initializers, TLS and function-local statics need
+    // independent byte-image and lifetime support.
     if il.global_variables.iter().any(|g|
-        g.linkage!=1 || g.explicit_initializer || g.thread_local ||
-        g.local_to_function) {
-        return Err(reject("FP source module defines global/TLS storage without FP data lowering"));
+        !matches!(g.linkage,1|2|3) || g.explicit_initializer ||
+        g.thread_local || g.local_to_function) {
+        return Err(reject("FP source module has unsupported initialized/TLS globals"));
     }
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
@@ -2386,8 +2442,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         let Some(symbol)=expr.symbol_id else {continue;};
         if il.global_variables.iter().any(|g|g.symbol==symbol) &&
             seen.insert(symbol) {
-            let (name,ty)=source_fp_global(il,symbol)?;
-            fp_globals.push(FpImportedGlobal {symbol,name,ty});
+            let (name,ty,linkage)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage});
         }
     }
     emit_scalar_float_bodies_with_globals(&functions,true,&fp_globals).map(Some)
