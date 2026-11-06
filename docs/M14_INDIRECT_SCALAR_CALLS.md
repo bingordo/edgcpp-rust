@@ -39,7 +39,7 @@ or general dynamic linking.
 ## Not included
 
 - Function pointers stored in locals, fields, globals or memory, and function-pointer expressions produced by loads, casts, arithmetic, conditional selection or returned by other calls.
-- Passing function pointers as arguments to other callbacks, arbitrary external direct imports beyond the checked C scalar slice, indirect callbacks returning C INTEGER values, varargs, narrow integer promotions, aggregate SSE/SSEUP or C++ member ABI rules.
+- Passing function pointers as arguments to other callbacks, arbitrary external direct imports beyond the checked C scalar slice, **general** INTEGER-result call expressions beyond the [checked direct-return subset](M14_INDIRECT_INTEGER_RESULTS.md), varargs, narrow integer promotions, aggregate SSE/SSEUP or C++ member ABI rules.
 - General integer expression trees, arbitrary FP memory and volatile/atomic effects, and the production `bingordo/compiler` adapter.
 
-The next M14 integration choices are expanded memory-backed function-pointer values, INTEGER-returning indirect calls and broader ABI types, followed by sharing the integer and FP typed ABI/CFG plan. Checked external direct-call imports were subsequently implemented in [PR #67](https://github.com/bingordo/edgcpp-rust/pull/67). Atomic expansion remains a separately deferred task under [issue #59](https://github.com/bingordo/edgcpp-rust/issues/59).
+The next M14 integration choices are expanded memory-backed function-pointer values and broader INTEGER/FP ABI types, followed by sharing the typed ABI/CFG lowering plan. Checked external direct-call imports were added in [PR #67](https://github.com/bingordo/edgcpp-rust/pull/67), and **exact INTEGER-result indirect return statements** in [PR #68](https://github.com/bingordo/edgcpp-rust/pull/68). Atomics remain deferred under [issue #59](https://github.com/bingordo/edgcpp-rust/issues/59).
