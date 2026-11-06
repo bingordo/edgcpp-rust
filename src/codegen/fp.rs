@@ -1187,7 +1187,7 @@ fn expression_from_edg(
         }
         let callee=ctx.graph.expression(node.operands[0])
             .ok_or_else(||reject("FP scalar call has no callee expression"))?;
-        let (callee_name,pointer_parameter,pointer_type,fn_ty)=
+        let (callee_name,external_callee,pointer_parameter,pointer_type,fn_ty)=
             if super::semantic(2,callee.data.kind)==6 &&
                 callee.operands.is_empty() {
                 // Existing exact named routine path, including forward defs.
@@ -1197,16 +1197,24 @@ fn expression_from_edg(
                     s.id==symbol && s.kind==1)
                     .ok_or_else(||reject("FP direct target is not a named routine"))?;
                 let name=named.name.clone();
-                if !ctx.il.entities.iter().any(|e|matches!(e,
+                let in_module=ctx.il.entities.iter().any(|e|matches!(e,
                     crate::Entity::Routine{name,has_definition:true}
-                        if name==&named.name)) {
-                    return Err(reject("FP direct call requires an in-module definition"));
+                        if name==&named.name));
+                if !in_module {
+                    // An actual source C routine declaration, not a guessed
+                    // linker name, is required before importing its symbol.
+                    if !safe_scalar_external_name(&name) ||
+                        !ctx.il.entities.iter().any(|e|matches!(e,
+                            crate::Entity::Routine{name,has_definition:false}
+                                if name==&named.name)) {
+                        return Err(reject("FP external call has no verified C declaration"));
+                    }
                 }
                 let callee_ty=ctx.il.symbol_types.iter()
                     .find(|p|p.symbol==symbol)
                     .ok_or_else(||reject("FP direct callee has no native type"))?;
                 let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
-                (Some(name),None,None,fn_ty)
+                (Some(name),!in_module,None,None,fn_ty)
             } else {
                 // Exactly a pointer-valued *function formal*, optionally
                 // expressed by EDG as a function-designator dereference.
@@ -1248,7 +1256,7 @@ fn expression_from_edg(
                         return Err(reject("indirect FP designator prototype mismatch"));
                     }
                 }
-                (None,Some(index),Some(pointer_type),fn_ty)
+                (None,false,Some(index),Some(pointer_type),fn_ty)
             };
         let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
@@ -1308,9 +1316,15 @@ fn expression_from_edg(
             arguments.push(value);
         }
         return if let Some(callee)=callee_name {
-            Ok(FloatExpr::Call {
-                callee,parameters,return_type:ty,arguments,
-            })
+            if external_callee {
+                Ok(FloatExpr::CallExternal {
+                    callee,parameters,return_type:ty,arguments,
+                })
+            } else {
+                Ok(FloatExpr::Call {
+                    callee,parameters,return_type:ty,arguments,
+                })
+            }
         } else {
             Ok(FloatExpr::CallIndirect {
                 pointer_parameter:pointer_parameter.ok_or_else(||
