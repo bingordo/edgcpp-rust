@@ -44,8 +44,13 @@ struct ScalarFloatBody {
     name:String,
     parameters:Vec<ScalarType>,
     result:ScalarType,
-    locals:Vec<FloatType>,
+    locals:Vec<ScalarType>,
     statements:Vec<FloatStmt>,
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum PointerSource {
+    Parameter(usize),
+    Local(usize),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
@@ -80,7 +85,7 @@ pub enum FloatExpr {
     /// address or an unchecked C cast. The native pointee prototype is
     /// validated during EDG lowering.
     CallIndirect {
-        pointer_parameter:usize,
+        pointer:PointerSource,
         pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:FloatType,
@@ -131,6 +136,13 @@ pub struct FloatCondition {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
+    /// A nonescaping, native EDG-verified callable pointer value in a
+    /// typed automatic local. Definite assignment is tracked across CFG.
+    AssignPointer {
+        local:usize,
+        pointer_type:crate::TypeId,
+        source:PointerSource,
+    },
     Return(FloatExpr),
     /// EDG-verified conversion of an FP expression to a native C INTEGER
     /// return class. Out-of-range/NaN are undefined in C and not normalized.
@@ -139,7 +151,7 @@ pub enum FloatStmt {
     /// call. Unlike FP-to-int conversion this preserves the callee's native
     /// INTEGER return register and exact 32/64-bit width/signature.
     ReturnIndirectInteger {
-        pointer_parameter:usize,
+        pointer:PointerSource,
         pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:ScalarType,
@@ -173,9 +185,49 @@ pub struct FloatBodyFunction {
 fn reject(message:impl Into<String>)->CodegenError {
     CodegenError::InvalidFunction(message.into())
 }
+/// Resolve exact pointer ABI identity. A local is a register-sized,
+/// nonescaping C automatic scalar and cannot be used until initialized.
+fn pointer_source_type(
+    src:PointerSource,params:&[ScalarType],locals:&[ScalarType],
+)->Result<crate::TypeId,CodegenError> {
+    match src {
+        PointerSource::Parameter(n)=>match params.get(n) {
+            Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
+            _=>Err(reject("call target is not a checked pointer formal")),
+        },
+        PointerSource::Local(n)=>match locals.get(n) {
+            Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
+            _=>Err(reject("call target is not a checked pointer local")),
+        },
+    }
+}
+fn check_pointer_source_reads(
+    src:PointerSource,defined:&[bool],
+)->Result<(),CodegenError> {
+    match src {
+        PointerSource::Parameter(_)=>Ok(()),
+        PointerSource::Local(n) if defined.get(n).copied()==Some(true)=>Ok(()),
+        PointerSource::Local(_)=>Err(reject("read of uninitialized callable pointer local")),
+    }
+}
+fn emit_pointer_source(
+    src:PointerSource,fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],locals:&[Variable],
+    locals_ty:&[ScalarType],required:crate::TypeId,
+)->Result<Value,CodegenError> {
+    if pointer_source_type(src,params_ty,locals_ty)?!=required {
+        return Err(reject("call pointer source ABI identity mismatch"));
+    }
+    match src {
+        PointerSource::Parameter(n)=>params.get(n).copied().ok_or_else(||
+            reject("call pointer formal has no physical ABI value")),
+        PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
+            .ok_or_else(||reject("call pointer local has no SSA variable")),
+    }
+}
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
-    params:&[ScalarType],locals:&[FloatType],depth:usize,
+    params:&[ScalarType],locals:&[ScalarType],depth:usize,
 )->Result<(),CodegenError> {
     if depth>64 || arguments.len()!=target_types.len() ||
         arguments.len()>256 {
@@ -207,7 +259,7 @@ fn check_scalar_call_local_reads(
     Ok(())
 }
 fn expression_type(
-    expr:&FloatExpr,params:&[ScalarType],locals:&[FloatType],depth:usize,
+    expr:&FloatExpr,params:&[ScalarType],locals:&[ScalarType],depth:usize,
 )->Result<FloatType,CodegenError> {
     if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
     use FloatExpr::*;
@@ -226,17 +278,18 @@ fn expression_type(
         Call {parameters,return_type,arguments,..}|
         CallExternal {parameters,return_type,arguments,..}|
         CallIndirect {parameters,return_type,arguments,..}=>{
-            if let CallIndirect {pointer_parameter,pointer_type,..}=expr {
-                if params.get(*pointer_parameter)!=
-                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                    return Err(reject("FP indirect call requires the exact callable formal"));
+            if let CallIndirect {pointer,pointer_type,..}=expr {
+                if pointer_source_type(*pointer,params,locals)?!=*pointer_type {
+                    return Err(reject("FP indirect call requires exact native callable type"));
                 }
             }
             check_scalar_call_args(arguments,parameters,params,locals,depth+1)?;
             Ok(*return_type)
         }
-        Local(n)=>locals.get(*n).copied()
-            .ok_or_else(||reject("FP local out of range")),
+        Local(n)=>match locals.get(*n).copied() {
+            Some(ScalarType::Float(t))=>Ok(t),
+            _=>Err(reject("FP local out of range or is a callable pointer")),
+        },
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
         Neg(e)=>expression_type(e,params,locals,depth+1),
@@ -258,7 +311,7 @@ fn expression_type(
 fn emit_scalar_call_arguments(
     arguments:&[ScalarCallArg],parameters:&[ScalarType],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
-    locals:&[Variable],locals_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 )->Result<Vec<Value>,CodegenError> {
     if arguments.len()!=parameters.len() || arguments.len()>256 {
@@ -290,7 +343,7 @@ fn emit_expr(
     params:&[Value],
     params_ty:&[ScalarType],
     locals:&[Variable],
-    locals_ty:&[FloatType],
+    locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
@@ -332,14 +385,10 @@ fn emit_expr(
                 .ok_or_else(||reject("FP direct call has no return value"))?;
             (result,*return_type)
         }
-        CallIndirect {pointer_parameter,pointer_type,parameters,
+        CallIndirect {pointer,pointer_type,parameters,
                       return_type,arguments}=>{
-            if params_ty.get(*pointer_parameter)!=
-                Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                return Err(reject("indirect FP call target is not the verified pointer formal"));
-            }
-            let pointer=*params.get(*pointer_parameter)
-                .ok_or_else(||reject("indirect FP call formal missing"))?;
+            let pointer=emit_pointer_source(*pointer,fb,
+                params,params_ty,locals,locals_ty,*pointer_type)?;
             // The signature is typed: every INTEGER/SSE piece uses its
             // source class. The SysV call convention chooses the registers.
             let mut signature=cranelift_codegen::ir::Signature::new(
@@ -361,7 +410,10 @@ fn emit_expr(
         }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
-            let ty=*locals_ty.get(*n).ok_or_else(||reject("missing FP local type"))?;
+            let ty=match locals_ty.get(*n) {
+                Some(ScalarType::Float(t))=>*t,
+                _=>return Err(reject("FP local is not a typed FP value")),
+            };
             (fb.use_var(var),ty)
         }
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
@@ -405,8 +457,16 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}|CallExternal {arguments,..}|
-        CallIndirect {arguments,..}=>{
+        Call {arguments,..}|CallExternal {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(expr)=arg {
+                    check_local_reads(expr,defined,depth+1)?;
+                }
+            }
+            Ok(())
+        }
+        CallIndirect {pointer,arguments,..}=>{
+            check_pointer_source_reads(*pointer,defined)?;
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
                     check_local_reads(expr,defined,depth+1)?;
@@ -422,7 +482,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     }
 }
 fn check_condition(
-    cond:&FloatCondition,params:&[ScalarType],locals:&[FloatType],
+    cond:&FloatCondition,params:&[ScalarType],locals:&[ScalarType],
     defined:&[bool],
 )->Result<(),CodegenError> {
     check_local_reads(&cond.left,defined,0)?;
@@ -434,7 +494,7 @@ fn check_condition(
 }
 fn emit_condition(
     cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,
 )->Result<Value,CodegenError> {
     let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty,refs)?;
@@ -455,7 +515,7 @@ fn validate_fp_arm(
         let ty=*f.locals.get(*n)
             .ok_or_else(||reject("FP branch local index out of range"))?;
         check_local_reads(expr,&defined,0)?;
-        if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+        if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
             return Err(reject("FP branch assignment has an unconverted type"));
         }
         defined[*n]=true;
@@ -501,11 +561,22 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                let actual=f.locals.get(*local).ok_or_else(||
+                    reject("pointer assignment local out of range"))?;
+                if *actual!=ScalarType::FunctionPointer(*pointer_type) ||
+                    pointer_source_type(*source,&f.parameters,&f.locals)?!=*pointer_type {
+                    return Err(reject("pointer local assignment has incorrect native ABI type"));
+                }
+                check_pointer_source_reads(*source,&defined)?;
+                defined[*local]=true;
+                next=Some(defined);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
                 check_local_reads(expr,&defined,0)?;
-                if expression_type(expr,&f.parameters,&f.locals,0)?!=ty {
+                if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
                     return Err(reject("FP assignment has an unconverted type"));
                 }
                 defined[*n]=true;
@@ -529,18 +600,18 @@ fn check_fp_statements(
                 next=None;
             }
             FloatStmt::ReturnIndirectInteger {
-                pointer_parameter,pointer_type,parameters,return_type,arguments,
+                pointer,pointer_type,parameters,return_type,arguments,
             }=>{
                 if !matches!(return_type,ScalarType::Int {bits:32|64,..}) ||
                    *return_type!=f.result ||
-                   f.parameters.get(*pointer_parameter)!=
-                      Some(&ScalarType::FunctionPointer(*pointer_type)) ||
+                   pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*pointer_type ||
                    parameters.iter().any(|t|matches!(t,ScalarType::FunctionPointer(_))) {
                     return Err(reject("indirect INTEGER return ABI/formal mismatch"));
                 }
                 check_scalar_call_args(arguments,parameters,
                     &f.parameters,&f.locals,0)?;
                 check_scalar_call_local_reads(arguments,&defined)?;
+                check_pointer_source_reads(*pointer,&defined)?;
                 next=None;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
@@ -651,7 +722,7 @@ struct FpLoopTargets<'a> {
 #[allow(clippy::too_many_arguments)]
 fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
-    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[FloatType],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
     refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
@@ -660,6 +731,13 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                let value=emit_pointer_source(*source,fb,
+                    params,params_ty,locals,locals_ty,*pointer_type)?;
+                let var=*locals.get(*local).ok_or_else(||
+                    reject("pointer local has no SSA slot"))?;
+                fb.def_var(var,value);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.def_var(locals[*n],v);
@@ -682,14 +760,10 @@ fn emit_fp_statements(
                 live=false;
             }
             FloatStmt::ReturnIndirectInteger {
-                pointer_parameter,pointer_type,parameters,return_type,arguments,
+                pointer,pointer_type,parameters,return_type,arguments,
             }=>{
-                if params_ty.get(*pointer_parameter)!=
-                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                    return Err(reject("indirect INTEGER return pointer type mismatch"));
-                }
-                let pointer=*params.get(*pointer_parameter).ok_or_else(||
-                    reject("indirect INTEGER return pointer formal missing"))?;
+                let pointer=emit_pointer_source(*pointer,fb,
+                    params,params_ty,locals,locals_ty,*pointer_type)?;
                 let mut signature=cranelift_codegen::ir::Signature::new(
                     fb.func.signature.call_conv);
                 for ty in parameters {
@@ -838,7 +912,7 @@ fn emit_fp_statements(
 fn emit_fp_if(
     cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
-    locals:&[Variable],locals_ty:&[FloatType],
+    locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
     refs:&HashMap<String,FuncRef>,depth:usize,
 )->Result<bool,CodegenError> {
@@ -890,7 +964,8 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
         name:f.name.clone(),
         parameters:f.parameters.iter().copied().map(ScalarType::Float).collect(),
         result:ScalarType::Float(f.result),
-        locals:f.locals.clone(),statements:f.statements.clone(),
+        locals:f.locals.iter().copied().map(ScalarType::Float).collect(),
+        statements:f.statements.clone(),
     }).collect();
     emit_scalar_float_bodies(&scalar)
 }
@@ -1029,7 +1104,7 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
                 validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
             }
-            FloatStmt::Break|FloatStmt::Continue=>{},
+            FloatStmt::AssignPointer {..}|FloatStmt::Break|FloatStmt::Continue=>{},
         }
     }
     Ok(())
@@ -1203,14 +1278,21 @@ fn source_callable_signature(
     if !prototype.prototyped || prototype.variadic {
         return Err(reject("indirect designator is variadic/unprototyped"));
     }
-    let returned=scalar_type_from_edg(il,def.related
-        .ok_or_else(||reject("indirect function has no native return type"))?)?;
+    let ret_ty=def.related.ok_or_else(||
+        reject("indirect function has no native return type"))?;
+    if function_pointer_type_from_edg(il,ret_ty).is_ok() {
+        return Err(reject("nested pointer result is not a supported callable ABI"));
+    }
+    let returned=scalar_type_from_edg(il,ret_ty)?;
     let mut declared:Vec<_>=il.type_parameters.iter()
         .filter(|p|p.owner==function_ty).collect();
     declared.sort_by_key(|p|p.position);
     if declared.len()>256 || declared.iter().enumerate()
         .any(|(n,p)|p.position!=n as u32) {
         return Err(reject("indirect function prototype has invalid positions"));
+    }
+    if declared.iter().any(|p|function_pointer_type_from_edg(il,p.ty).is_ok()) {
+        return Err(reject("nested function-pointer parameter ABI unsupported"));
     }
     let parameters=declared.iter().map(|p|scalar_type_from_edg(il,p.ty))
         .collect::<Result<Vec<_>,_>>()?;
@@ -1224,7 +1306,25 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
     let canonical=super::canonical_abi_type(il,id)?;
     if let Ok((pointer,_))=function_pointer_type_from_edg(il,canonical) {
-        return Ok(ScalarType::FunctionPointer(pointer));
+        // EDG can assign distinct native type IDs to structurally
+        // equivalent function pointers (e.g. a formal and an automatic
+        // local). Normalize *only* complete, nonvariadic, exact scalar
+        // callable prototypes so SSA copies/calls use the same identity.
+        // A data pointer, nested callback ABI or unknown type never aliases.
+        let signature=source_callable_signature(il,pointer)?;
+        let mut representative=pointer;
+        for ty in &il.types {
+            if ty.id.0>=representative.0 ||
+               super::semantic(4,ty.kind)!=5 ||
+               ty.related_role!=Some(1) {
+                continue;
+            }
+            if function_pointer_type_from_edg(il,ty.id).is_ok() &&
+                source_callable_signature(il,ty.id).ok()==Some(signature.clone()) {
+                representative=ty.id;
+            }
+        }
+        return Ok(ScalarType::FunctionPointer(representative));
     }
     let info=il.c_integer_types.iter().find(|x|x.id==canonical)
         .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
@@ -1237,6 +1337,37 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     }
     Ok(ScalarType::Int {bits:info.bits,signed:info.signed})
 }
+/// Only an unmodified EDG formal or automatic local can provide a callable
+/// pointer SSA value; aliases, casts, data-pointer coercions and memory loads
+/// require a separate provenance and lifetime model.
+fn pointer_source_from_edg(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+)->Result<(PointerSource,crate::TypeId),CodegenError> {
+    let expr=ctx.graph.expression(id)
+        .ok_or_else(||reject("callable pointer value missing EDG expression"))?;
+    if super::semantic(2,expr.data.kind)!=2 ||
+        !expr.operands.is_empty() || expr.data.constant_kind.is_some() {
+        return Err(reject("function-pointer value must be direct checked variable"));
+    }
+    let symbol=expr.data.symbol_id.ok_or_else(||
+        reject("function-pointer value has no native EDG symbol"))?;
+    let ty=match scalar_type_from_edg(ctx.il,expr.data.type_id
+        .ok_or_else(||reject("function-pointer value lacks native type"))?)? {
+        ScalarType::FunctionPointer(ty)=>ty,
+        _=>return Err(reject("source expression is not callable-pointer typed")),
+    };
+    let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+        PointerSource::Parameter(i)
+    } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+        PointerSource::Local(i)
+    } else {
+        return Err(reject("global, computed or nonlocal function-pointer unsupported"));
+    };
+    if pointer_source_type(source,ctx.param_types,ctx.local_types)?!=ty {
+        return Err(reject("function-pointer value differs from native symbol ABI"));
+    }
+    Ok((source,ty))
+}
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
     il:&'a Il,
@@ -1245,7 +1376,7 @@ struct FpSourceCtx<'a> {
     params:&'a [crate::SymbolId],
     locals:&'a [crate::SymbolId],
     param_types:&'a [ScalarType],
-    local_types:&'a [FloatType],
+    local_types:&'a [ScalarType],
 }
 fn expression_from_edg(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
@@ -1265,7 +1396,7 @@ fn expression_from_edg(
         }
         let callee=ctx.graph.expression(node.operands[0])
             .ok_or_else(||reject("FP scalar call has no callee expression"))?;
-        let (callee_name,external_callee,pointer_parameter,pointer_type,fn_ty)=
+        let (callee_name,external_callee,pointer_source,pointer_type,fn_ty)=
             if super::semantic(2,callee.data.kind)==6 &&
                 callee.operands.is_empty() {
                 // Existing exact named routine path, including forward defs.
@@ -1309,16 +1440,11 @@ fn expression_from_edg(
                     pointer_expr.data.constant_kind.is_some() {
                     return Err(reject("FP indirect target must be a direct function-pointer formal"));
                 }
-                let symbol=pointer_expr.data.symbol_id.ok_or_else(||
-                    reject("FP indirect pointer has no native symbol"))?;
-                let index=ctx.params.iter().position(|p|*p==symbol)
-                    .ok_or_else(||reject("FP indirect callee is not a parameter"))?;
-                let (pointer_type,fn_ty)=function_pointer_type_from_edg(
-                    ctx.il,pointer_expr.data.type_id.ok_or_else(||
-                        reject("FP indirect pointer lacks a native type"))?)?;
-                if ctx.param_types[index]!=ScalarType::FunctionPointer(pointer_type) {
-                    return Err(reject("FP indirect pointer formal type mismatch"));
-                }
+                let (source,pointer_type)=pointer_source_from_edg(
+                    ctx,if std::ptr::eq(pointer_expr,callee) {
+                        node.operands[0]
+                    } else {callee.operands[0]})?;
+                let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
                 // The EDG expression must refer to the native pointer type,
                 // or be an actual function-designator dereference. Neither
                 // a cast to function pointer nor data-pointer coercion is safe.
@@ -1334,7 +1460,7 @@ fn expression_from_edg(
                         return Err(reject("indirect FP designator prototype mismatch"));
                     }
                 }
-                (None,false,Some(index),Some(pointer_type),fn_ty)
+                (None,false,Some(source),Some(pointer_type),fn_ty)
             };
         let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
@@ -1405,8 +1531,8 @@ fn expression_from_edg(
             }
         } else {
             Ok(FloatExpr::CallIndirect {
-                pointer_parameter:pointer_parameter.ok_or_else(||
-                    reject("FP indirect pointer parameter was not resolved"))?,
+                pointer:pointer_source.ok_or_else(||
+                    reject("FP indirect pointer source was not resolved"))?,
                 pointer_type:pointer_type.ok_or_else(||
                     reject("FP indirect pointer type was not resolved"))?,
                 parameters,return_type:ty,arguments,
@@ -1447,7 +1573,9 @@ fn expression_from_edg(
             return Ok(FloatExpr::Parameter(i));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
-            if ctx.local_types[i]!=ty {return Err(reject("FP local rvalue type mismatch"));}
+            if ctx.local_types[i]!=ScalarType::Float(ty) {
+                return Err(reject("FP local rvalue type mismatch"));
+            }
             return Ok(FloatExpr::Local(i));
         }
         return Err(reject("FP global/address-taken rvalue requires memory lowering"));
@@ -1726,8 +1854,10 @@ fn lower_fp_body(
                 if decl.is_vla || !ctx.locals.contains(&decl.symbol) {
                     return Err(reject("FP declaration is not a checked automatic scalar"));
                 }
-                if type_from_edg(ctx.il,decl.ty).is_err() {
-                    return Err(reject("FP declaration has unsupported source type"));
+                let index=ctx.locals.iter().position(|p|*p==decl.symbol)
+                    .ok_or_else(||reject("FP declaration local symbol missing"))?;
+                if scalar_type_from_edg(ctx.il,decl.ty)?!=ctx.local_types[index] {
+                    return Err(reject("FP declaration source ABI type mismatch"));
                 }
             }
             if !found {return Err(reject("FP declaration missing native symbol"));}
@@ -1741,6 +1871,18 @@ fn lower_fp_body(
             let symbol=init.symbol.ok_or_else(||reject("FP initializer has no local"))?;
             let local=ctx.locals.iter().position(|p|*p==symbol)
                 .ok_or_else(||reject("FP initializer target is not an automatic local"))?;
+            if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
+                if init.kind!=3 {
+                    return Err(reject("callable pointer initializer requires exact expression"));
+                }
+                let (source,actual)=pointer_source_from_edg(ctx,node.expression
+                    .ok_or_else(||reject("pointer initializer lacks source expression"))?)?;
+                if actual!=pointer_type {
+                    return Err(reject("pointer initializer native type mismatch"));
+                }
+                output.push(FloatStmt::AssignPointer {local,pointer_type,source});
+                return Ok(());
+            }
             let value=match init.kind {
                 // EDG dik_expression: an actual expression executes at this site.
                 3=>{
@@ -1770,8 +1912,10 @@ fn lower_fp_body(
                         return Err(reject("FP initializer native target type mismatch"));
                     }
                     match (ctx.local_types[local],exact.width) {
-                        (FloatType::F32,32)=>FloatExpr::Constant32(exact.bits as u32),
-                        (FloatType::F64,64)=>FloatExpr::Constant64(exact.bits),
+                        (ScalarType::Float(FloatType::F32),32)=>
+                            FloatExpr::Constant32(exact.bits as u32),
+                        (ScalarType::Float(FloatType::F64),64)=>
+                            FloatExpr::Constant64(exact.bits),
                         _=>return Err(reject("FP initializer width/type mismatch")),
                     }
                 }
@@ -1796,9 +1940,17 @@ fn lower_fp_body(
             }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            if type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
-                reject("missing native FP lvalue type"))?)?!=ctx.local_types[local] {
+            if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native scalar lvalue type"))?)?!=ctx.local_types[local] {
                 return Err(reject("FP lvalue type mismatch"));
+            }
+            if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
+                let (source,actual)=pointer_source_from_edg(ctx,operation.operands[1])?;
+                if actual!=pointer_type {
+                    return Err(reject("pointer assignment source ABI differs from target"));
+                }
+                output.push(FloatStmt::AssignPointer {local,pointer_type,source});
+                return Ok(());
             }
             let value=expression_from_edg(ctx,operation.operands[1],0)?;
             output.push(FloatStmt::Assign(local,value));
@@ -1884,16 +2036,11 @@ fn lower_integer_indirect_return(
         pointer_expr.data.constant_kind.is_some() {
         return Err(reject("INTEGER indirect call requires an unmodified pointer formal"));
     }
-    let symbol=pointer_expr.data.symbol_id.ok_or_else(||
-        reject("INTEGER indirect call has no callee symbol"))?;
-    let pointer_parameter=ctx.params.iter().position(|p|*p==symbol)
-        .ok_or_else(||reject("INTEGER indirect call callee is not a formal"))?;
-    let (pointer_type,fn_ty)=function_pointer_type_from_edg(ctx.il,
-        pointer_expr.data.type_id.ok_or_else(||
-            reject("INTEGER indirect call pointer lacks native type"))?)?;
-    if ctx.param_types[pointer_parameter]!=ScalarType::FunctionPointer(pointer_type) {
-        return Err(reject("INTEGER indirect pointer/formal ABI mismatch"));
-    }
+    let (pointer,pointer_type)=pointer_source_from_edg(
+        ctx,if std::ptr::eq(pointer_expr,callee) {
+            node.operands[0]
+        } else {callee.operands[0]})?;
+    let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
     if !std::ptr::eq(pointer_expr,callee) {
         let designator=super::canonical_abi_type(ctx.il,
             callee.data.type_id.ok_or_else(||
@@ -1944,7 +2091,7 @@ fn lower_integer_indirect_return(
         arguments.push(value);
     }
     Ok(FloatStmt::ReturnIndirectInteger {
-        pointer_parameter,pointer_type,parameters,
+        pointer,pointer_type,parameters,
         return_type:result,arguments,
     })
 }
@@ -2036,7 +2183,11 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 return Err(reject("unsupported FP local storage class"));
             }
             check_plain_fp_local(il,local.ty)?;
-            local_types.push(type_from_edg(il,local.ty)?);
+            let ty=scalar_type_from_edg(il,local.ty)?;
+            if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)) {
+                return Err(reject("non-FP, non-function-pointer automatic local unsupported"));
+            }
+            local_types.push(ty);
             local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
@@ -2120,7 +2271,7 @@ mod tests {
         ];
         for (index,result) in result_types.iter().copied().enumerate() {
             let original=FloatStmt::ReturnIndirectInteger {
-                pointer_parameter:0,
+                pointer:PointerSource::Parameter(0),
                 pointer_type:pointer,
                 parameters:vec![ScalarType::Int {bits:32,signed:true},
                                 ScalarType::Float(FloatType::F64)],
@@ -2157,19 +2308,91 @@ mod tests {
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
             let mut bad=function.clone();
-            if let FloatStmt::ReturnIndirectInteger {pointer_parameter,..}=
+            if let FloatStmt::ReturnIndirectInteger {pointer,..}=
                 &mut bad.statements[0] {
-                *pointer_parameter=1;
+                *pointer=PointerSource::Parameter(1);
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
             let mut bad=function.clone();
-            bad.locals.push(FloatType::F64);
+            bad.locals.push(ScalarType::Float(FloatType::F64));
             if let FloatStmt::ReturnIndirectInteger {arguments,..}=
                 &mut bad.statements[0] {
                 arguments[1]=ScalarCallArg::Float(FloatExpr::Local(0));
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
         }
+    }
+
+    #[test]
+    fn typed_callable_pointer_locals_propagate_ssa_and_validate_definite_assignment() {
+        let ptr=crate::TypeId(4096);
+        let call=FloatExpr::CallIndirect {
+            pointer:PointerSource::Local(0),pointer_type:ptr,
+            parameters:vec![ScalarType::Float(FloatType::F64)],
+            return_type:FloatType::F64,
+            arguments:vec![ScalarCallArg::Float(FloatExpr::Parameter(1))],
+        };
+        let function=ScalarFloatBody {
+            name:"m14_pointer_ssa_local".into(),
+            parameters:vec![ScalarType::FunctionPointer(ptr),
+                            ScalarType::Float(FloatType::F64)],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![ScalarType::FunctionPointer(ptr)],
+            statements:vec![
+                FloatStmt::AssignPointer {
+                    local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+                },
+                FloatStmt::Return(call.clone()),
+            ],
+        };
+        let object=emit_scalar_float_bodies(&[function.clone()]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        let mut bad=function.clone();
+        bad.statements=vec![FloatStmt::Return(call.clone())];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Local(0),
+            },
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.locals[0]=ScalarType::Float(FloatType::F64);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::AssignPointer {
+                local:0,pointer_type:crate::TypeId(4097),
+                source:PointerSource::Parameter(0),
+            },
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let cond=FloatCondition {
+            op:FloatPredicate::Gt,
+            left:FloatExpr::Parameter(1),
+            right:FloatExpr::Constant64(0.0f64.to_bits()),
+        };
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::IfBlock(cond.clone(),vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }],vec![]),
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut valid=function.clone();
+        valid.statements=vec![
+            FloatStmt::IfBlock(cond,vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }],vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }]),
+            FloatStmt::Return(call),
+        ];
+        assert!(emit_scalar_float_bodies(&[valid]).is_ok());
     }
 
     #[test]
@@ -2181,7 +2404,7 @@ mod tests {
             ScalarType::Float(FloatType::F64),
         ];
         let call=FloatExpr::CallIndirect {
-            pointer_parameter:0,pointer_type:ptr,
+            pointer:PointerSource::Parameter(0),pointer_type:ptr,
             parameters:vec![
                 ScalarType::Int {bits:32,signed:true},
                 ScalarType::Float(FloatType::F64),
@@ -2222,8 +2445,8 @@ mod tests {
         assert!(emit_scalar_float_bodies(&[bad]).is_err());
         let mut bad=good;
         let mut wrong=call;
-        if let FloatExpr::CallIndirect {pointer_parameter,..}=&mut wrong {
-            *pointer_parameter=2;
+        if let FloatExpr::CallIndirect {pointer,..}=&mut wrong {
+            *pointer=PointerSource::Parameter(2);
         }
         bad.statements=vec![FloatStmt::Return(wrong)];
         assert!(emit_scalar_float_bodies(&[bad]).is_err());
