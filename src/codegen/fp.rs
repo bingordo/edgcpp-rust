@@ -2243,7 +2243,7 @@ mod tests {
         ];
         for (index,result) in result_types.iter().copied().enumerate() {
             let original=FloatStmt::ReturnIndirectInteger {
-                pointer_parameter:0,
+                pointer:PointerSource::Parameter(0),
                 pointer_type:pointer,
                 parameters:vec![ScalarType::Int {bits:32,signed:true},
                                 ScalarType::Float(FloatType::F64)],
@@ -2280,9 +2280,9 @@ mod tests {
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
             let mut bad=function.clone();
-            if let FloatStmt::ReturnIndirectInteger {pointer_parameter,..}=
+            if let FloatStmt::ReturnIndirectInteger {pointer,..}=
                 &mut bad.statements[0] {
-                *pointer_parameter=1;
+                *pointer=PointerSource::Parameter(1);
             }
             assert!(emit_scalar_float_bodies(&[bad]).is_err());
             let mut bad=function.clone();
@@ -2304,7 +2304,7 @@ mod tests {
             ScalarType::Float(FloatType::F64),
         ];
         let call=FloatExpr::CallIndirect {
-            pointer_parameter:0,pointer_type:ptr,
+            pointer:PointerSource::Parameter(0),pointer_type:ptr,
             parameters:vec![
                 ScalarType::Int {bits:32,signed:true},
                 ScalarType::Float(FloatType::F64),
@@ -2345,8 +2345,8 @@ mod tests {
         assert!(emit_scalar_float_bodies(&[bad]).is_err());
         let mut bad=good;
         let mut wrong=call;
-        if let FloatExpr::CallIndirect {pointer_parameter,..}=&mut wrong {
-            *pointer_parameter=2;
+        if let FloatExpr::CallIndirect {pointer,..}=&mut wrong {
+            *pointer=PointerSource::Parameter(2);
         }
         bad.statements=vec![FloatStmt::Return(wrong)];
         assert!(emit_scalar_float_bodies(&[bad]).is_err());
