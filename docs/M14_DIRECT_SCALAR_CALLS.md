@@ -58,7 +58,7 @@ cover forward calls, nested calls, F32 return values, mixed
 caller/callee argument exhaustion and stack spills, a direct FP call in
 a loop-carried SSA update, and explicit integer results of an FP call.
 They run as both GCC-compiled and EDG/Cranelift objects.
-Source negative fixtures reject external-only callees and arithmetic
+Source negative fixtures now reject unprototyped external callees and arithmetic
 INTEGER call arguments. Rust tests also require rejection of missing
 callees and altered ABI signatures.
 
