@@ -1662,6 +1662,27 @@ fn expression_from_edg(
     }
     Ok(out)
 }
+/// A scalar C floating condition is true exactly when it is *nonzero*.
+/// Both +0.0 and -0.0 compare equal to zero; NaN is true because unordered
+/// comparisons satisfy C != (and false for the logical negation). Keep the
+/// source expression as F32/F64; never interpret a bool-cast as FP bit data.
+fn truthiness_from_edg(
+    ctx:&FpSourceCtx<'_>,source:crate::graph::ExpressionId,negated:bool,
+)->Result<FloatCondition,CodegenError> {
+    let left=expression_from_edg(ctx,source,0)?;
+    let ty=expression_type(&left,ctx.param_types,ctx.local_types,0)?;
+    let zero=match ty {
+        FloatType::F32=>FloatExpr::Constant32(0.0f32.to_bits()),
+        FloatType::F64=>FloatExpr::Constant64(0.0f64.to_bits()),
+    };
+    let cond=FloatCondition {
+        op:if negated {FloatPredicate::Eq} else {FloatPredicate::Ne},
+        left,right:zero,
+    };
+    check_condition(&cond,ctx.param_types,ctx.local_types,
+        &vec![true;ctx.local_types.len()])?;
+    Ok(cond)
+}
 /// A C floating-point comparison has an integer/bool result, but its
 /// operands must both have verified native FP widths. Never lower it by
 /// first interpreting the result as a floating-point expression.
@@ -1670,18 +1691,63 @@ fn comparison_from_edg(
 )->Result<FloatCondition,CodegenError> {
     let node=ctx.graph.expression(id).ok_or_else(||
         reject("missing EDG floating comparison"))?;
-    if super::semantic(2,node.data.kind)!=3 || node.operands.len()!=2 ||
+    // A direct FP-valued source expression is a legal C scalar condition.
+    // We also accept EDG's *explicit* bool cast and logical negation
+    // applied to an FP value. Reject integer/aggregate truthiness here:
+    // those belong to the integer CFG rather than guessing from FP bits.
+    let kind=super::semantic(2,node.data.kind);
+    let operator=node.data.operator.map(|v|super::semantic(3,v));
+    // EDG may preserve the original floating expression (including pure
+    // arithmetic, not just a variable) directly as the condition. The
+    // strict expression decoder below rejects calls/side effects we do not
+    // model, but all verified F32/F64 values have C scalar truthiness.
+    if node.data.type_id.is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok()) {
+        return truthiness_from_edg(ctx,id,false);
+    }
+    let boolean_kind=kind==3 &&
+        node.data.type_id.and_then(|ty|
+            super::canonical_abi_type(ctx.il,ty).ok()).is_some_and(|ty|
+            ctx.il.c_integer_types.iter().any(|k|k.id==ty &&
+                (k.is_bool || k.bits==32)));
+    if boolean_kind && node.data.constant_kind.is_none() &&
+        node.operands.len()==1 {
+        if operator==Some(17) {
+            return truthiness_from_edg(ctx,node.operands[0],false);
+        }
+        if operator==Some(28) {
+            let operand=ctx.graph.expression(node.operands[0]).ok_or_else(||
+                reject("logical-not FP condition has no operand"))?;
+            let direct=operand.data.type_id
+                .is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok());
+            if direct && super::semantic(2,operand.data.kind)==2 &&
+                operand.operands.is_empty() {
+                return truthiness_from_edg(ctx,node.operands[0],true);
+            }
+            if super::semantic(2,operand.data.kind)==3 &&
+                operand.data.operator.is_some_and(|op|
+                    super::semantic(3,op)==17) && operand.operands.len()==1 &&
+                operand.data.constant_kind.is_none() {
+                return truthiness_from_edg(ctx,operand.operands[0],true);
+            }
+        }
+    }
+    if kind!=3 || node.operands.len()!=2 ||
         node.data.constant_kind.is_some() {
-        return Err(reject("FP condition requires a binary comparison"));
+        return Err(reject("FP condition requires a source-verified comparison or scalar truthiness"));
     }
     let integer=super::canonical_abi_type(ctx.il,
         node.data.type_id.ok_or_else(||
             reject("FP condition has no native result type"))?)?;
     if !ctx.il.c_integer_types.iter().any(|ty|
         ty.id==integer && (ty.is_bool || ty.bits==32)) {
-        return Err(reject("FP comparison must produce C int or bool"));
+        return Err(reject(format!(
+            "FP comparison must produce C int or bool: kind={kind}, operator={operator:?}, expr_type={:?}, canonical={integer:?}, operand_types={:?}",
+            node.data.type_id,
+            node.operands.iter().map(|id|ctx.graph.expression(*id)
+                .and_then(|e|e.data.type_id)).collect::<Vec<_>>()
+        )));
     }
-    let op=match node.data.operator.map(|v|super::semantic(3,v)) {
+    let op=match operator {
         Some(5)=>FloatPredicate::Eq,
         Some(6)=>FloatPredicate::Ne,
         Some(7)=>FloatPredicate::Lt,
