@@ -1213,12 +1213,26 @@ fn emit_scalar_float_bodies_with_globals(
     for g in globals {
         if !safe_scalar_external_name(&g.name) ||
             !global_names.insert(g.name.clone()) ||
-            global_ids.contains_key(&g.symbol) {
-            return Err(reject("invalid or duplicate FP external data import"));
+            global_ids.contains_key(&g.symbol) ||
+            !matches!(g.linkage,Linkage::Import|Linkage::Local|Linkage::Export) {
+            return Err(reject("invalid or duplicate checked FP data symbol"));
         }
-        let id=module.declare_data(&g.name,Linkage::Import,true,false)
+        let id=module.declare_data(&g.name,g.linkage,true,false)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         global_ids.insert(g.symbol,(id,g.ty));
+    }
+    // C tentative/static definitions without explicit initializers must
+    // allocate actual zero-initialized .bss, never fake imported storage.
+    for g in globals {
+        if g.linkage==Linkage::Import {continue;}
+        let id=global_ids.get(&g.symbol).ok_or_else(||
+            reject("FP zero-initialized data was not declared"))?.0;
+        let mut data=cranelift_module::DataDescription::new();
+        let bytes=match g.ty {FloatType::F32=>4usize,FloatType::F64=>8usize};
+        data.set_align(bytes as u64);
+        data.define_zeroinit(bytes);
+        module.define_data(id,&data)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
     }
     let mut declared=HashMap::new();
     for f in functions {
