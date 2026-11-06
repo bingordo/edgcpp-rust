@@ -99,6 +99,17 @@ External/indirect calls, general integer expression trees, native FP
 memory, mixed INTEGER-returning callees and the production compiler
 adapter remain unsupported and fail closed.
 
+**M14 native EDG function-pointer formal calls (November 5, 2026):**
+The Cranelift reference frontend now supports **source-verified typed
+indirect F32/F64 calls** through a C function-pointer formal, using
+EDG-authored pointee prototypes and a typed SysV `call_indirect`.
+The tests cover mixed INTEGER/SSE arguments, a stack-passed pointer,
+dynamic F32/F64 callbacks, and callbacks in SSA loops. Arbitrary
+pointer expressions, globals, pointer locals, casts, varargs and
+external imports remain deliberately unsupported. The full native
+GCC differential suite [passed in run #42147086671](https://github.com/bingordo/edgcpp-rust/actions/runs/42147086671).
+See [M14 indirect-call ABI safety contract](docs/M14_INDIRECT_SCALAR_CALLS.md).
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
