@@ -63,7 +63,7 @@ execute both GCC and EDG/Cranelift objects, and test:
   argument forwarded to the INTEGER-returning callback.
 
 The negative fixtures reject INTEGER arithmetic around a callback,
-cast call targets, function-pointer locals, INTEGER-returning external
+cast call targets, **address-taken** function-pointer locals, INTEGER-returning external
 direct calls (a separate future slice), and non-32/64-bit results.
 No failed source may leave a generated object file. Rust tests also
 exercise malformed callback pointers, argument mismatches and reads
@@ -74,8 +74,10 @@ of uninitialized FP SSA locals.
 - INTEGER-valued calls used inside larger INTEGER expressions,
   assignments or comparisons, or calls that return pointer/aggregate
   results.
-- Function pointers stored in automatic locals, fields, arrays, globals
-  or memory; dynamically selected or cast function pointers.
+- Function pointers stored in **address-taken** automatic locals, fields, arrays,
+  globals or memory; dynamically selected or cast function pointers.
+  Source-verified [nonescaping automatic pointer locals](M14_AUTOMATIC_POINTER_LOCALS.md)
+  are supported by the later M14 slice.
 - Narrow integer/bool promotions, varargs, aggregate SSE/SSEUP ABI,
   general FP memory/global effects and C++ member-call ABI.
 - A shared target-independent INTEGER/FP typed ABI and CFG design,
