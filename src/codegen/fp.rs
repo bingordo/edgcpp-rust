@@ -1753,6 +1753,63 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn function_pointer_formal_indirect_call_checks_abi_classes_and_target_identity() {
+        let ptr=crate::TypeId(987);
+        let signature=vec![
+            ScalarType::FunctionPointer(ptr),
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Float(FloatType::F64),
+        ];
+        let call=FloatExpr::CallIndirect {
+            pointer_parameter:0,pointer_type:ptr,
+            parameters:vec![
+                ScalarType::Int {bits:32,signed:true},
+                ScalarType::Float(FloatType::F64),
+            ],
+            return_type:FloatType::F64,
+            arguments:vec![
+                ScalarCallArg::IntegerParameter(1),
+                ScalarCallArg::Float(FloatExpr::Parameter(2)),
+            ],
+        };
+        let good=ScalarFloatBody {
+            name:"m14_function_pointer_formal".into(),
+            parameters:signature.clone(),result:ScalarType::Float(FloatType::F64),
+            locals:vec![],statements:vec![FloatStmt::Return(call.clone())],
+        };
+        let elf=emit_scalar_float_bodies(&[good.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        // A raw integer, another pointer type, an FP parameter, and
+        // swapped argument classes may never stand in for this callee.
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::Int {bits:64,signed:false};
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::FunctionPointer(crate::TypeId(988));
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::Float(FloatType::F64);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        let mut wrong=call.clone();
+        if let FloatExpr::CallIndirect {arguments,..}=&mut wrong {
+            *arguments=vec![
+                ScalarCallArg::Float(FloatExpr::Parameter(2)),
+                ScalarCallArg::IntegerParameter(1),
+            ];
+        }
+        bad.statements=vec![FloatStmt::Return(wrong)];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good;
+        let mut wrong=call;
+        if let FloatExpr::CallIndirect {pointer_parameter,..}=&mut wrong {
+            *pointer_parameter=2;
+        }
+        bad.statements=vec![FloatStmt::Return(wrong)];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+
+    #[test]
     fn mixed_intra_module_direct_calls_check_full_typed_abi() {
         let signature=vec![
             ScalarType::Int {bits:32,signed:true},
