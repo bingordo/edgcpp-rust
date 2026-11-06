@@ -24,6 +24,9 @@ impl FloatType {
 pub enum ScalarType {
     Float(FloatType),
     Int { bits:u8,signed:bool },
+    /// An EDG-verified pointer to a prototyped nonvariadic C function.
+    /// Its canonical native identity prevents casting ordinary data pointers.
+    FunctionPointer(crate::TypeId),
 }
 impl ScalarType {
     fn machine(self)->cranelift_codegen::ir::Type {
@@ -31,6 +34,7 @@ impl ScalarType {
             Self::Float(t)=>t.machine(),
             Self::Int {bits:32,..}=>types::I32,
             Self::Int {bits:64,..}=>types::I64,
+            Self::FunctionPointer(_)=>types::I64,
             _=>unreachable!("integer width was checked at source boundary"),
         }
     }
@@ -59,6 +63,16 @@ pub enum FloatExpr {
     /// Indirect and external calls require a separate declaration contract.
     Call {
         callee:String,
+        parameters:Vec<ScalarType>,
+        return_type:FloatType,
+        arguments:Vec<ScalarCallArg>,
+    },
+    /// Direct use of a function-pointer *formal*, never a guessed memory
+    /// address or an unchecked C cast. The native pointee prototype is
+    /// validated during EDG lowering.
+    CallIndirect {
+        pointer_parameter:usize,
+        pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:FloatType,
         arguments:Vec<ScalarCallArg>,
@@ -157,7 +171,14 @@ fn expression_type(
                 Err(reject("FP integer cast source is not a checked integer formal"))
             }
         },
-        Call {parameters,return_type,arguments,..}=>{
+        Call {parameters,return_type,arguments,..}|
+        CallIndirect {parameters,return_type,arguments,..}=>{
+            if let CallIndirect {pointer_parameter,pointer_type,..}=expr {
+                if params.get(*pointer_parameter)!=
+                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
+                    return Err(reject("FP indirect call requires the exact callable formal"));
+                }
+            }
             if arguments.len()!=parameters.len() || arguments.len()>256 {
                 return Err(reject("FP direct call argument count does not match prototype"));
             }
@@ -192,6 +213,38 @@ fn expression_type(
             Ok(*to)
         }
     }
+}
+/// Evaluate typed scalar arguments exactly once and in source order.
+/// Both direct and indirect calls use this function and the same ABI classes.
+#[allow(clippy::too_many_arguments)]
+fn emit_scalar_call_arguments(
+    arguments:&[ScalarCallArg],parameters:&[ScalarType],
+    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
+    locals:&[Variable],locals_ty:&[FloatType],
+    refs:&HashMap<String,FuncRef>,
+)->Result<Vec<Value>,CodegenError> {
+    if arguments.len()!=parameters.len() || arguments.len()>256 {
+        return Err(reject("FP call argument arity invalid"));
+    }
+    let mut values=Vec::with_capacity(arguments.len());
+    for (arg,expected) in arguments.iter().zip(parameters) {
+        let value=match (arg,expected) {
+            (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
+                let (v,actual)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
+                if actual!=*t {return Err(reject("FP call argument needs conversion"));}
+                v
+            }
+            (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
+                if params_ty.get(*n)!=Some(expected) {
+                    return Err(reject("FP call INTEGER formal ABI mismatch"));
+                }
+                *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
+            }
+            _=>return Err(reject("FP call crosses incompatible argument classes")),
+        };
+        values.push(value);
+    }
+    Ok(values)
 }
 fn emit_expr(
     expr:&FloatExpr,
@@ -233,30 +286,38 @@ fn emit_expr(
             }
             let reference=*refs.get(callee)
                 .ok_or_else(||reject("FP call target has no defined function ref"))?;
-            let mut values=Vec::with_capacity(arguments.len());
-            for (arg,expected) in arguments.iter().zip(parameters) {
-                let value=match (arg,expected) {
-                    (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
-                        let (v,actual)=emit_expr(e,fb,params,params_ty,
-                            locals,locals_ty,refs)?;
-                        if actual!=*t {
-                            return Err(reject("FP direct call argument is not converted"));
-                        }
-                        v
-                    }
-                    (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
-                        if params_ty.get(*n)!=Some(expected) {
-                            return Err(reject("direct call INTEGER formal ABI mismatch"));
-                        }
-                        *params.get(*n).ok_or_else(||reject("missing direct call formal"))?
-                    }
-                    _=>return Err(reject("direct call crosses incompatible ABI classes")),
-                };
-                values.push(value);
-            }
+            let values=emit_scalar_call_arguments(arguments,parameters,fb,
+                params,params_ty,locals,locals_ty,refs)?;
             let inst=fb.ins().call(reference,&values);
             let result=*fb.inst_results(inst).first()
                 .ok_or_else(||reject("FP direct call has no return value"))?;
+            (result,*return_type)
+        }
+        CallIndirect {pointer_parameter,pointer_type,parameters,
+                      return_type,arguments}=>{
+            if params_ty.get(*pointer_parameter)!=
+                Some(&ScalarType::FunctionPointer(*pointer_type)) {
+                return Err(reject("indirect FP call target is not the verified pointer formal"));
+            }
+            let pointer=*params.get(*pointer_parameter)
+                .ok_or_else(||reject("indirect FP call formal missing"))?;
+            // The signature is typed: every INTEGER/SSE piece uses its
+            // source class. The SysV call convention chooses the registers.
+            let mut signature=cranelift_codegen::ir::Signature::new(
+                fb.func.signature.call_conv);
+            for ty in parameters {
+                if matches!(ty,ScalarType::FunctionPointer(_)) {
+                    return Err(reject("passing function pointers to FP callees unavailable"));
+                }
+                signature.params.push(AbiParam::new(ty.machine()));
+            }
+            signature.returns.push(AbiParam::new(return_type.machine()));
+            let values=emit_scalar_call_arguments(arguments,parameters,fb,
+                params,params_ty,locals,locals_ty,refs)?;
+            let reference=fb.import_signature(signature);
+            let call=fb.ins().call_indirect(reference,pointer,&values);
+            let result=*fb.inst_results(call).first()
+                .ok_or_else(||reject("indirect FP call has no result"))?;
             (result,*return_type)
         }
         Local(n)=>{
@@ -305,7 +366,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}=>{
+        Call {arguments,..}|CallIndirect {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
                     check_local_reads(expr,defined,depth+1)?;
@@ -776,6 +837,13 @@ fn validate_fp_calls_expr(
                 }
             }
         }
+        FloatExpr::CallIndirect {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(arg)=arg {
+                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                }
+            }
+        }
         FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
             validate_fp_calls_expr(e,declarations,depth+1)?,
         FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
@@ -941,6 +1009,68 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
     }
 }
+/// Only EDG-native *function* pointers are callable. Verify pointer
+/// layout, pointee role and actual prototype before accepting the ABI.
+fn function_pointer_type_from_edg(il:&Il,id:crate::TypeId)
+    ->Result<(crate::TypeId,crate::TypeId),CodegenError> {
+    let pointer=super::canonical_abi_type(il,id)?;
+    let ptr=il.types.iter().find(|t|t.id==pointer &&
+        super::semantic(4,t.kind)==5 && t.related_role==Some(1))
+        .ok_or_else(||reject("indirect FP call does not use a function pointer"))?;
+    let layout=il.type_object_sizes.iter().find(|x|x.owner==pointer)
+        .ok_or_else(||reject("indirect FP function pointer has no layout"))?;
+    if layout.bytes!=8 || layout.alignment!=8 {
+        return Err(reject("indirect FP function pointer has non-SysV layout"));
+    }
+    let target=super::canonical_abi_type(il,ptr.related.ok_or_else(||
+        reject("FP function pointer has no pointee type"))?)?;
+    if !il.types.iter().any(|t|t.id==target &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+        return Err(reject("FP pointer does not point to a C routine prototype"));
+    }
+    let proto=il.function_signatures.iter().find(|p|p.owner==target)
+        .ok_or_else(||reject("indirect FP call lacks native prototype"))?;
+    if !proto.prototyped || proto.variadic {
+        return Err(reject("indirect FP unprototyped/variadic call unsupported"));
+    }
+    Ok((pointer,target))
+}
+/// EDG may assign separate native type identities to a function designator
+/// and the pointee of a pointer-to-function, even when they have the same
+/// valid C prototype. Compare the *complete* source-verified scalar calling
+/// signature, never the numeric type-ID or only the argument count.
+fn source_callable_signature(
+    il:&Il,original:crate::TypeId,
+)->Result<(Vec<ScalarType>,ScalarType),CodegenError> {
+    let ty=super::canonical_abi_type(il,original)?;
+    let function_ty=if il.types.iter().any(|t|t.id==ty &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+        ty
+    } else {
+        let (_,fn_ty)=function_pointer_type_from_edg(il,ty)?;
+        fn_ty
+    };
+    let def=il.types.iter().find(|t|t.id==function_ty &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3))
+        .ok_or_else(||reject("indirect designator is not a function prototype"))?;
+    let prototype=il.function_signatures.iter().find(|p|p.owner==function_ty)
+        .ok_or_else(||reject("indirect designator has no prototype metadata"))?;
+    if !prototype.prototyped || prototype.variadic {
+        return Err(reject("indirect designator is variadic/unprototyped"));
+    }
+    let returned=scalar_type_from_edg(il,def.related
+        .ok_or_else(||reject("indirect function has no native return type"))?)?;
+    let mut declared:Vec<_>=il.type_parameters.iter()
+        .filter(|p|p.owner==function_ty).collect();
+    declared.sort_by_key(|p|p.position);
+    if declared.len()>256 || declared.iter().enumerate()
+        .any(|(n,p)|p.position!=n as u32) {
+        return Err(reject("indirect function prototype has invalid positions"));
+    }
+    let parameters=declared.iter().map(|p|scalar_type_from_edg(il,p.ty))
+        .collect::<Result<Vec<_>,_>>()?;
+    Ok((parameters,returned))
+}
 /// Reject a nonstandard ABI class, unsupported integer width, or synthetic
 /// type before generating code. Only standard signed/unsigned 32/64 bit C
 /// integer formals and native F32/F64 values enter this first mixed ABI slice.
@@ -948,6 +1078,9 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     ->Result<ScalarType,CodegenError> {
     if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
     let canonical=super::canonical_abi_type(il,id)?;
+    if let Ok((pointer,_))=function_pointer_type_from_edg(il,canonical) {
+        return Ok(ScalarType::FunctionPointer(pointer));
+    }
     let info=il.c_integer_types.iter().find(|x|x.id==canonical)
         .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
     let layout=il.type_object_sizes.iter().find(|x|x.owner==canonical)
@@ -986,29 +1119,73 @@ fn expression_from_edg(
             return Err(reject("FP direct call has unsupported implicit/member arguments"));
         }
         let callee=ctx.graph.expression(node.operands[0])
-            .ok_or_else(||reject("FP direct call has no callee expression"))?;
-        if super::semantic(2,callee.data.kind)!=6 ||
-            !callee.operands.is_empty() {
-            return Err(reject("FP indirect/function-pointer call unsupported"));
-        }
-        let symbol=callee.data.symbol_id.ok_or_else(||
-            reject("FP direct callee has no native symbol"))?;
-        let named=ctx.il.symbols.iter().find(|s|
-            s.id==symbol && s.kind==1)
-            .ok_or_else(||reject("FP direct call target is not a named routine"))?;
-        let callee_name=named.name.clone();
-        if !ctx.il.entities.iter().any(|e|matches!(e,
-            crate::Entity::Routine{name,has_definition:true}
-                if name==&callee_name)) {
-            return Err(reject("FP direct call requires a definition in this source module"));
-        }
-        let callee_ty=ctx.il.symbol_types.iter()
-            .find(|p|p.symbol==symbol)
-            .ok_or_else(||reject("FP direct callee has no native function type"))?;
-        let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+            .ok_or_else(||reject("FP scalar call has no callee expression"))?;
+        let (callee_name,pointer_parameter,pointer_type,fn_ty)=
+            if super::semantic(2,callee.data.kind)==6 &&
+                callee.operands.is_empty() {
+                // Existing exact named routine path, including forward defs.
+                let symbol=callee.data.symbol_id.ok_or_else(||
+                    reject("FP direct callee has no native symbol"))?;
+                let named=ctx.il.symbols.iter().find(|s|
+                    s.id==symbol && s.kind==1)
+                    .ok_or_else(||reject("FP direct target is not a named routine"))?;
+                let name=named.name.clone();
+                if !ctx.il.entities.iter().any(|e|matches!(e,
+                    crate::Entity::Routine{name,has_definition:true}
+                        if name==&named.name)) {
+                    return Err(reject("FP direct call requires an in-module definition"));
+                }
+                let callee_ty=ctx.il.symbol_types.iter()
+                    .find(|p|p.symbol==symbol)
+                    .ok_or_else(||reject("FP direct callee has no native type"))?;
+                let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+                (Some(name),None,None,fn_ty)
+            } else {
+                // Exactly a pointer-valued *function formal*, optionally
+                // expressed by EDG as a function-designator dereference.
+                // Neither pointer locals nor computed addresses are accepted.
+                let pointer_expr=if super::semantic(2,callee.data.kind)==3 &&
+                    callee.operands.len()==1 &&
+                    callee.data.operator.is_some_and(|op|
+                        super::semantic(3,op)==44) {
+                    ctx.graph.expression(callee.operands[0]).ok_or_else(||
+                        reject("FP indirect dereference has no pointer operand"))?
+                } else {callee};
+                if super::semantic(2,pointer_expr.data.kind)!=2 ||
+                    !pointer_expr.operands.is_empty() ||
+                    pointer_expr.data.constant_kind.is_some() {
+                    return Err(reject("FP indirect target must be a direct function-pointer formal"));
+                }
+                let symbol=pointer_expr.data.symbol_id.ok_or_else(||
+                    reject("FP indirect pointer has no native symbol"))?;
+                let index=ctx.params.iter().position(|p|*p==symbol)
+                    .ok_or_else(||reject("FP indirect callee is not a parameter"))?;
+                let (pointer_type,fn_ty)=function_pointer_type_from_edg(
+                    ctx.il,pointer_expr.data.type_id.ok_or_else(||
+                        reject("FP indirect pointer lacks a native type"))?)?;
+                if ctx.param_types[index]!=ScalarType::FunctionPointer(pointer_type) {
+                    return Err(reject("FP indirect pointer formal type mismatch"));
+                }
+                // The EDG expression must refer to the native pointer type,
+                // or be an actual function-designator dereference. Neither
+                // a cast to function pointer nor data-pointer coercion is safe.
+                if !std::ptr::eq(pointer_expr,callee) {
+                    let designator=super::canonical_abi_type(ctx.il,
+                        callee.data.type_id.ok_or_else(||
+                            reject("indirect FP designator lacks type"))?)?;
+                    // The native designator can have a distinct type ID.
+                    // Its full source prototype must still agree with the
+                    // exact pointee carried by the verified pointer formal.
+                    if source_callable_signature(ctx.il,designator)? !=
+                       source_callable_signature(ctx.il,fn_ty)? {
+                        return Err(reject("indirect FP designator prototype mismatch"));
+                    }
+                }
+                (None,Some(index),Some(pointer_type),fn_ty)
+            };
         let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
-            .ok_or_else(||reject("FP direct call needs an exact function prototype"))?;
+            .ok_or_else(||reject("FP callee requires a native function prototype"))?;
         let proto=ctx.il.function_signatures.iter()
             .find(|p|p.owner==fn_ty)
             .ok_or_else(||reject("FP direct callee missing prototype metadata"))?;
@@ -1057,13 +1234,25 @@ fn expression_from_edg(
                     }
                     ScalarCallArg::IntegerParameter(index)
                 }
+                ScalarType::FunctionPointer(_)=>return Err(reject(
+                    "passing function-pointer arguments needs a separate typed call contract")),
             };
             parameters.push(target);
             arguments.push(value);
         }
-        return Ok(FloatExpr::Call {
-            callee:callee_name,parameters,return_type:ty,arguments,
-        });
+        return if let Some(callee)=callee_name {
+            Ok(FloatExpr::Call {
+                callee,parameters,return_type:ty,arguments,
+            })
+        } else {
+            Ok(FloatExpr::CallIndirect {
+                pointer_parameter:pointer_parameter.ok_or_else(||
+                    reject("FP indirect pointer parameter was not resolved"))?,
+                pointer_type:pointer_type.ok_or_else(||
+                    reject("FP indirect pointer type was not resolved"))?,
+                parameters,return_type:ty,arguments,
+            })
+        };
     }
     if node.data.constant_kind.is_some() {
         if !node.operands.is_empty() || node.data.symbol_id.is_some() {
@@ -1479,6 +1668,8 @@ fn lower_fp_body(
                     let value=expression_from_edg(ctx,operand,0)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
+                ScalarType::FunctionPointer(_)=>return Err(reject(
+                    "FP reference module cannot return function-pointer values")),
             }
         }
         _=>return Err(reject("unsupported FP control flow or statement form")),
@@ -1601,6 +1792,63 @@ mod tests {
     fn bin(a:usize,b:usize)->FloatExpr {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
+    #[test]
+    fn function_pointer_formal_indirect_call_checks_abi_classes_and_target_identity() {
+        let ptr=crate::TypeId(987);
+        let signature=vec![
+            ScalarType::FunctionPointer(ptr),
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Float(FloatType::F64),
+        ];
+        let call=FloatExpr::CallIndirect {
+            pointer_parameter:0,pointer_type:ptr,
+            parameters:vec![
+                ScalarType::Int {bits:32,signed:true},
+                ScalarType::Float(FloatType::F64),
+            ],
+            return_type:FloatType::F64,
+            arguments:vec![
+                ScalarCallArg::IntegerParameter(1),
+                ScalarCallArg::Float(FloatExpr::Parameter(2)),
+            ],
+        };
+        let good=ScalarFloatBody {
+            name:"m14_function_pointer_formal".into(),
+            parameters:signature.clone(),result:ScalarType::Float(FloatType::F64),
+            locals:vec![],statements:vec![FloatStmt::Return(call.clone())],
+        };
+        let elf=emit_scalar_float_bodies(&[good.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        // A raw integer, another pointer type, an FP parameter, and
+        // swapped argument classes may never stand in for this callee.
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::Int {bits:64,signed:false};
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::FunctionPointer(crate::TypeId(988));
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        bad.parameters[0]=ScalarType::Float(FloatType::F64);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good.clone();
+        let mut wrong=call.clone();
+        if let FloatExpr::CallIndirect {arguments,..}=&mut wrong {
+            *arguments=vec![
+                ScalarCallArg::Float(FloatExpr::Parameter(2)),
+                ScalarCallArg::IntegerParameter(1),
+            ];
+        }
+        bad.statements=vec![FloatStmt::Return(wrong)];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=good;
+        let mut wrong=call;
+        if let FloatExpr::CallIndirect {pointer_parameter,..}=&mut wrong {
+            *pointer_parameter=2;
+        }
+        bad.statements=vec![FloatStmt::Return(wrong)];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+
     #[test]
     fn mixed_intra_module_direct_calls_check_full_typed_abi() {
         let signature=vec![
