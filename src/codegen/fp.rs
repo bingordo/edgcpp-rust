@@ -2110,6 +2110,69 @@ mod tests {
     }
 
     #[test]
+    fn indirect_integer_return_keeps_rax_and_rejects_bad_prototypes() {
+        let pointer=crate::TypeId(123456);
+        let result_types=[
+            ScalarType::Int {bits:32,signed:true},
+            ScalarType::Int {bits:32,signed:false},
+            ScalarType::Int {bits:64,signed:true},
+            ScalarType::Int {bits:64,signed:false},
+        ];
+        for (index,result) in result_types.iter().copied().enumerate() {
+            let original=FloatStmt::ReturnIndirectInteger {
+                pointer_parameter:0,
+                pointer_type:pointer,
+                parameters:vec![ScalarType::Int {bits:32,signed:true},
+                                ScalarType::Float(FloatType::F64)],
+                return_type:result,
+                arguments:vec![ScalarCallArg::IntegerParameter(1),
+                               ScalarCallArg::Float(FloatExpr::Parameter(2))],
+            };
+            let function=ScalarFloatBody {
+                name:format!("indirect_integer_result_{index}"),
+                parameters:vec![
+                    ScalarType::FunctionPointer(pointer),
+                    ScalarType::Int {bits:32,signed:true},
+                    ScalarType::Float(FloatType::F64),
+                ],
+                result,locals:vec![],statements:vec![original.clone()],
+            };
+            let bytes=emit_scalar_float_bodies(&[function.clone()]).unwrap();
+            assert_eq!(&bytes[..4],b"\x7fELF");
+            let mut bad=function.clone();
+            bad.parameters[0]=ScalarType::Int {bits:64,signed:false};
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=function.clone();
+            if let FloatStmt::ReturnIndirectInteger {return_type,..}=
+                &mut bad.statements[0] {
+                *return_type=ScalarType::Float(FloatType::F64);
+            }
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=function.clone();
+            if let FloatStmt::ReturnIndirectInteger {arguments,..}=
+                &mut bad.statements[0] {
+                *arguments=vec![ScalarCallArg::IntegerParameter(1),
+                    ScalarCallArg::Float(FloatExpr::IntegerParameterCast {
+                        parameter:0,to:FloatType::F64})];
+            }
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=function.clone();
+            if let FloatStmt::ReturnIndirectInteger {pointer_parameter,..}=
+                &mut bad.statements[0] {
+                *pointer_parameter=1;
+            }
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            let mut bad=function.clone();
+            bad.locals.push(FloatType::F64);
+            if let FloatStmt::ReturnIndirectInteger {arguments,..}=
+                &mut bad.statements[0] {
+                arguments[1]=ScalarCallArg::Float(FloatExpr::Local(0));
+            }
+            assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        }
+    }
+
+    #[test]
     fn function_pointer_formal_indirect_call_checks_abi_classes_and_target_identity() {
         let ptr=crate::TypeId(987);
         let signature=vec![
