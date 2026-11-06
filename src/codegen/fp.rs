@@ -453,6 +453,14 @@ fn emit_expr(
             };
             (fb.use_var(var),ty)
         }
+        ExternalGlobal {symbol,ty}=>{
+            let data=*global_refs.get(symbol).ok_or_else(||
+                reject("FP external global has no verified data import"))?;
+            // Always emit a real ordinary memory load. Even nonvolatile
+            // extern objects may change between calls and through other code.
+            let address=fb.ins().global_value(types::I64,data);
+            (fb.ins().load(ty.machine(),MemFlags::new(),address,0),*ty)
+        }
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
         Constant64(bits)=>(fb.ins().f64const(Ieee64::with_bits(*bits)),FloatType::F64),
         Neg(e)=>{
@@ -1407,6 +1415,29 @@ fn pointer_source_from_edg(
     }
     Ok((source,ty))
 }
+/// Source-owned named C FP object import, never an arbitrary memory address.
+fn source_fp_global(
+    il:&Il,symbol:crate::SymbolId,
+)->Result<(String,FloatType),CodegenError> {
+    let meta=il.global_variables.iter().find(|g|g.symbol==symbol)
+        .ok_or_else(||reject("FP global is not an EDG-classified file-scope object"))?;
+    if meta.linkage!=1 || meta.explicit_initializer ||
+        meta.thread_local || meta.local_to_function ||
+        il.static_local_owners.iter().any(|s|s.symbol==symbol) {
+        return Err(reject("FP globals must be external ordinary C declarations"));
+    }
+    let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
+        .map(|s|s.name.clone())
+        .ok_or_else(||reject("FP global has no native variable identity"))?;
+    if !safe_scalar_external_name(&name) {
+        return Err(reject("FP external global has unsafe/non-C symbol name"));
+    }
+    let declared=il.symbol_types.iter().find(|s|s.symbol==symbol)
+        .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
+    check_plain_fp_local(il,declared)?;
+    let ty=type_from_edg(il,declared)?;
+    Ok((name,ty))
+}
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
     il:&'a Il,
@@ -1616,6 +1647,15 @@ fn expression_from_edg(
                 return Err(reject("FP local rvalue type mismatch"));
             }
             return Ok(FloatExpr::Local(i));
+        }
+        if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+            let (_,actual)=source_fp_global(ctx.il,symbol)?;
+            if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+                    reject("FP external global expression lacks native type"))?)?!=
+                    ScalarType::Float(actual) {
+                return Err(reject("FP external global source expression type mismatch"));
+            }
+            return Ok(FloatExpr::ExternalGlobal {symbol,ty});
         }
         return Err(reject("FP global/address-taken rvalue requires memory lowering"));
     }
