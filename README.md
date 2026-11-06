@@ -106,9 +106,24 @@ EDG-authored pointee prototypes and a typed SysV `call_indirect`.
 The tests cover mixed INTEGER/SSE arguments, a stack-passed pointer,
 dynamic F32/F64 callbacks, and callbacks in SSA loops. Arbitrary
 pointer expressions, globals, pointer locals, casts, varargs and
-external imports remain deliberately unsupported. The full native
+arbitrary external imports remain deliberately unsupported. The full native
 GCC differential suite [passed in run #42147086671](https://github.com/bingordo/edgcpp-rust/actions/runs/42147086671).
 See [M14 indirect-call ABI safety contract](docs/M14_INDIRECT_SCALAR_CALLS.md).
+
+**M14 source-checked external C scalar calls (November 6, 2026):**
+[PR #67](https://github.com/bingordo/edgcpp-rust/pull/67)
+adds source-verified, typed ELF imports for **declared external C
+functions** returning F32/F64 and accepting F32/F64 and native
+signed/unsigned 32/64-bit INTEGER arguments. It checks complete
+nonvariadic EDG prototypes, source identifiers and conflicting imports
+before object emission; GCC implementations in a separate translation
+unit link and run against the generated wrappers, including 7-GPR/9-XMM
+argument overflow. The full
+[EDG/GCC CI run #42264148108](https://github.com/bingordo/edgcpp-rust/actions/runs/42264148108)
+passed. See the
+[external import contract](docs/M14_EXTERNAL_SCALAR_IMPORTS.md).
+This does not add external data symbols, pointer-valued parameters,
+varargs, C++ ABI, or general mixed scalar expression support.
 
 ## Reused, not reimplemented
 
