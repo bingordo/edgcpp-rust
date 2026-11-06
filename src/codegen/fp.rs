@@ -185,6 +185,46 @@ pub struct FloatBodyFunction {
 fn reject(message:impl Into<String>)->CodegenError {
     CodegenError::InvalidFunction(message.into())
 }
+/// Resolve exact pointer ABI identity. A local is a register-sized,
+/// nonescaping C automatic scalar and cannot be used until initialized.
+fn pointer_source_type(
+    src:PointerSource,params:&[ScalarType],locals:&[ScalarType],
+)->Result<crate::TypeId,CodegenError> {
+    match src {
+        PointerSource::Parameter(n)=>match params.get(n) {
+            Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
+            _=>Err(reject("call target is not a checked pointer formal")),
+        },
+        PointerSource::Local(n)=>match locals.get(n) {
+            Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
+            _=>Err(reject("call target is not a checked pointer local")),
+        },
+    }
+}
+fn check_pointer_source_reads(
+    src:PointerSource,defined:&[bool],
+)->Result<(),CodegenError> {
+    match src {
+        PointerSource::Parameter(_)=>Ok(()),
+        PointerSource::Local(n) if defined.get(n).copied()==Some(true)=>Ok(()),
+        PointerSource::Local(_)=>Err(reject("read of uninitialized callable pointer local")),
+    }
+}
+fn emit_pointer_source(
+    src:PointerSource,fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],locals:&[Variable],
+    locals_ty:&[ScalarType],required:crate::TypeId,
+)->Result<Value,CodegenError> {
+    if pointer_source_type(src,params_ty,locals_ty)?!=required {
+        return Err(reject("call pointer source ABI identity mismatch"));
+    }
+    match src {
+        PointerSource::Parameter(n)=>params.get(n).copied().ok_or_else(||
+            reject("call pointer formal has no physical ABI value")),
+        PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
+            .ok_or_else(||reject("call pointer local has no SSA variable")),
+    }
+}
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
     params:&[ScalarType],locals:&[ScalarType],depth:usize,
@@ -238,10 +278,9 @@ fn expression_type(
         Call {parameters,return_type,arguments,..}|
         CallExternal {parameters,return_type,arguments,..}|
         CallIndirect {parameters,return_type,arguments,..}=>{
-            if let CallIndirect {pointer_parameter,pointer_type,..}=expr {
-                if params.get(*pointer_parameter)!=
-                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                    return Err(reject("FP indirect call requires the exact callable formal"));
+            if let CallIndirect {pointer,pointer_type,..}=expr {
+                if pointer_source_type(*pointer,params,locals)?!=*pointer_type {
+                    return Err(reject("FP indirect call requires exact native callable type"));
                 }
             }
             check_scalar_call_args(arguments,parameters,params,locals,depth+1)?;
@@ -346,14 +385,10 @@ fn emit_expr(
                 .ok_or_else(||reject("FP direct call has no return value"))?;
             (result,*return_type)
         }
-        CallIndirect {pointer_parameter,pointer_type,parameters,
+        CallIndirect {pointer,pointer_type,parameters,
                       return_type,arguments}=>{
-            if params_ty.get(*pointer_parameter)!=
-                Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                return Err(reject("indirect FP call target is not the verified pointer formal"));
-            }
-            let pointer=*params.get(*pointer_parameter)
-                .ok_or_else(||reject("indirect FP call formal missing"))?;
+            let pointer=emit_pointer_source(*pointer,fb,
+                params,params_ty,locals,locals_ty,*pointer_type)?;
             // The signature is typed: every INTEGER/SSE piece uses its
             // source class. The SysV call convention chooses the registers.
             let mut signature=cranelift_codegen::ir::Signature::new(
@@ -422,8 +457,16 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}|CallExternal {arguments,..}|
-        CallIndirect {arguments,..}=>{
+        Call {arguments,..}|CallExternal {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(expr)=arg {
+                    check_local_reads(expr,defined,depth+1)?;
+                }
+            }
+            Ok(())
+        }
+        CallIndirect {pointer,arguments,..}=>{
+            check_pointer_source_reads(*pointer,defined)?;
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
                     check_local_reads(expr,defined,depth+1)?;
@@ -518,6 +561,17 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                let actual=f.locals.get(*local).ok_or_else(||
+                    reject("pointer assignment local out of range"))?;
+                if *actual!=ScalarType::FunctionPointer(*pointer_type) ||
+                    pointer_source_type(*source,&f.parameters,&f.locals)?!=*pointer_type {
+                    return Err(reject("pointer local assignment has incorrect native ABI type"));
+                }
+                check_pointer_source_reads(*source,&defined)?;
+                defined[*local]=true;
+                next=Some(defined);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
@@ -546,18 +600,18 @@ fn check_fp_statements(
                 next=None;
             }
             FloatStmt::ReturnIndirectInteger {
-                pointer_parameter,pointer_type,parameters,return_type,arguments,
+                pointer,pointer_type,parameters,return_type,arguments,
             }=>{
                 if !matches!(return_type,ScalarType::Int {bits:32|64,..}) ||
                    *return_type!=f.result ||
-                   f.parameters.get(*pointer_parameter)!=
-                      Some(&ScalarType::FunctionPointer(*pointer_type)) ||
+                   pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*pointer_type ||
                    parameters.iter().any(|t|matches!(t,ScalarType::FunctionPointer(_))) {
                     return Err(reject("indirect INTEGER return ABI/formal mismatch"));
                 }
                 check_scalar_call_args(arguments,parameters,
                     &f.parameters,&f.locals,0)?;
                 check_scalar_call_local_reads(arguments,&defined)?;
+                check_pointer_source_reads(*pointer,&defined)?;
                 next=None;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
@@ -677,6 +731,13 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                let value=emit_pointer_source(*source,fb,
+                    params,params_ty,locals,locals_ty,*pointer_type)?;
+                let var=*locals.get(*local).ok_or_else(||
+                    reject("pointer local has no SSA slot"))?;
+                fb.def_var(var,value);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
                 fb.def_var(locals[*n],v);
@@ -699,14 +760,10 @@ fn emit_fp_statements(
                 live=false;
             }
             FloatStmt::ReturnIndirectInteger {
-                pointer_parameter,pointer_type,parameters,return_type,arguments,
+                pointer,pointer_type,parameters,return_type,arguments,
             }=>{
-                if params_ty.get(*pointer_parameter)!=
-                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
-                    return Err(reject("indirect INTEGER return pointer type mismatch"));
-                }
-                let pointer=*params.get(*pointer_parameter).ok_or_else(||
-                    reject("indirect INTEGER return pointer formal missing"))?;
+                let pointer=emit_pointer_source(*pointer,fb,
+                    params,params_ty,locals,locals_ty,*pointer_type)?;
                 let mut signature=cranelift_codegen::ir::Signature::new(
                     fb.func.signature.call_conv);
                 for ty in parameters {
@@ -1047,7 +1104,7 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
                 validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
             }
-            FloatStmt::Break|FloatStmt::Continue=>{},
+            FloatStmt::AssignPointer {..}|FloatStmt::Break|FloatStmt::Continue=>{},
         }
     }
     Ok(())
