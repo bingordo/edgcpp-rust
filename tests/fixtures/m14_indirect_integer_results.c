@@ -29,6 +29,7 @@ long m14_indirect_spilled(
     long a2,double x2,unsigned long a3,float x3,
     int a4,double x4,unsigned int a5,float x5,
     long a6,double x6,double x7,double x8,
-    long (*fn)(long,double)) {
-    return fn(a6,x8);
+    long (*fn)(int,double,unsigned int,float,long,double,unsigned long,float,
+               int,double,unsigned int,float,long,double,double,double)) {
+    return fn(a0,x0,a1,x1,a2,x2,a3,x3,a4,x4,a5,x5,a6,x6,x7,x8);
 }
