@@ -95,7 +95,7 @@ calls, and calls inside checked SSA loops
 ([PR #65](https://github.com/bingordo/edgcpp-rust/pull/65),
 [green CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42067347502)).
 See [the direct-call safety contract](docs/M14_DIRECT_SCALAR_CALLS.md).
-External/indirect calls, general integer expression trees, native FP
+Unrestricted external/indirect calls, general integer expression trees, native FP
 memory, mixed INTEGER-returning callees and the production compiler
 adapter remain unsupported and fail closed.
 
