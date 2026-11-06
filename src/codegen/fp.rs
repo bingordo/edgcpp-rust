@@ -10,7 +10,7 @@ use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block
 use std::collections::HashMap;
 use std::cell::Cell;
 use cranelift_codegen::ir::{GlobalValue,MemFlags};
-type FpGlobalRefs=HashMap<crate::SymbolId,GlobalValue>;
+type FpGlobalRefs=HashMap<crate::SymbolId,(GlobalValue,FloatType)>;
 #[derive(Debug,Clone,PartialEq,Eq)]
 struct FpImportedGlobal {
     symbol:crate::SymbolId,
@@ -454,8 +454,11 @@ fn emit_expr(
             (fb.use_var(var),ty)
         }
         ExternalGlobal {symbol,ty}=>{
-            let data=*global_refs.get(symbol).ok_or_else(||
+            let (data,actual)=*global_refs.get(symbol).ok_or_else(||
                 reject("FP external global has no verified data import"))?;
+            if actual!=*ty {
+                return Err(reject("FP external global typed load disagrees with source import"));
+            }
             // Always emit a real ordinary memory load. Even nonvolatile
             // extern objects may change between calls and through other code.
             let address=fb.ins().global_value(types::I64,data);
@@ -1162,6 +1165,12 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
 fn emit_scalar_float_bodies_internal(
     functions:&[ScalarFloatBody],source_imports:bool,
 )->Result<Vec<u8>,CodegenError> {
+    emit_scalar_float_bodies_with_globals(functions,source_imports,&[])
+}
+fn emit_scalar_float_bodies_with_globals(
+    functions:&[ScalarFloatBody],source_imports:bool,
+    globals:&[FpImportedGlobal],
+)->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
     flags.set("opt_level","speed")
@@ -1174,6 +1183,21 @@ fn emit_scalar_float_bodies_internal(
         cranelift_module::default_libcall_names())
         .map_err(|e|CodegenError::Backend(e.to_string()))?;
     let mut module=ObjectModule::new(obj);
+    if !source_imports && !globals.is_empty() {
+        return Err(reject("standalone FP API cannot import unsourced global data"));
+    }
+    let mut global_ids=HashMap::new();
+    let mut global_names=std::collections::HashSet::new();
+    for g in globals {
+        if !safe_scalar_external_name(&g.name) ||
+            !global_names.insert(g.name.clone()) ||
+            global_ids.contains_key(&g.symbol) {
+            return Err(reject("invalid or duplicate FP external data import"));
+        }
+        let id=module.declare_data(&g.name,Linkage::Import,true,false)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
+        global_ids.insert(g.symbol,(id,g.ty));
+    }
     let mut declared=HashMap::new();
     for f in functions {
         if declared.insert(f.name.clone(),
@@ -1236,6 +1260,9 @@ fn emit_scalar_float_bodies_internal(
             let reference=module.declare_func_in_func(*id,&mut ctx.func);
             refs.insert(name.clone(),reference);
         }
+        let global_refs:FpGlobalRefs=global_ids.iter().map(|(symbol,(id,ty))|
+            (*symbol,(module.declare_data_in_func(*id,&mut ctx.func),*ty)))
+            .collect();
         let mut fctx=FunctionBuilderContext::new();
         {
             let mut fb=FunctionBuilder::new(&mut ctx.func,&mut fctx);
@@ -1250,7 +1277,7 @@ fn emit_scalar_float_bodies_internal(
                 var
             }).collect();
             if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
-                &vars,&f.locals,None,&refs,0)? {
+                &vars,&f.locals,None,&refs,&global_refs,0)? {
                 return Err(reject("FP emission ended with a reachable fallthrough"));
             }
             fb.finalize();
@@ -2349,7 +2376,21 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             locals:local_types,statements,
         });
     }
-    emit_scalar_float_bodies_internal(&functions,true).map(Some)
+    // Only externally declared ordinary standard C FP objects are
+    // available here. Initialized/tentative definitions and TLS remain
+    // under the existing memory-backed integration gate.
+    let mut fp_globals=Vec::new();
+    let mut seen=std::collections::HashSet::new();
+    for expr in &il.expressions {
+        if super::semantic(2,expr.kind)!=2 {continue;}
+        let Some(symbol)=expr.symbol_id else {continue;};
+        if il.global_variables.iter().any(|g|g.symbol==symbol) &&
+            seen.insert(symbol) {
+            let (name,ty)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpImportedGlobal {symbol,name,ty});
+        }
+    }
+    emit_scalar_float_bodies_with_globals(&functions,true,&fp_globals).map(Some)
 }
 
 #[cfg(test)]
