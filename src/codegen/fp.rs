@@ -349,7 +349,7 @@ fn emit_scalar_call_arguments(
     arguments:&[ScalarCallArg],parameters:&[ScalarType],
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
     locals:&[Variable],locals_ty:&[ScalarType],
-    refs:&HashMap<String,FuncRef>,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 )->Result<Vec<Value>,CodegenError> {
     if arguments.len()!=parameters.len() || arguments.len()>256 {
         return Err(reject("FP call argument arity invalid"));
@@ -358,7 +358,7 @@ fn emit_scalar_call_arguments(
     for (arg,expected) in arguments.iter().zip(parameters) {
         let value=match (arg,expected) {
             (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
-                let (v,actual)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,actual)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 if actual!=*t {return Err(reject("FP call argument needs conversion"));}
                 v
             }
@@ -381,7 +381,7 @@ fn emit_expr(
     params_ty:&[ScalarType],
     locals:&[Variable],
     locals_ty:&[ScalarType],
-    refs:&HashMap<String,FuncRef>,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
     let (value,ty)=match expr {
@@ -416,7 +416,7 @@ fn emit_expr(
             let reference=*refs.get(callee)
                 .ok_or_else(||reject("FP call target has no defined function ref"))?;
             let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                params,params_ty,locals,locals_ty,refs)?;
+                params,params_ty,locals,locals_ty,refs,global_refs)?;
             let inst=fb.ins().call(reference,&values);
             let result=*fb.inst_results(inst).first()
                 .ok_or_else(||reject("FP direct call has no return value"))?;
@@ -438,7 +438,7 @@ fn emit_expr(
             }
             signature.returns.push(AbiParam::new(return_type.machine()));
             let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                params,params_ty,locals,locals_ty,refs)?;
+                params,params_ty,locals,locals_ty,refs,global_refs)?;
             let reference=fb.import_signature(signature);
             let call=fb.ins().call_indirect(reference,pointer,&values);
             let result=*fb.inst_results(call).first()
@@ -456,11 +456,11 @@ fn emit_expr(
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
         Constant64(bits)=>(fb.ins().f64const(Ieee64::with_bits(*bits)),FloatType::F64),
         Neg(e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
             (fb.ins().fneg(v),t)
         }
         Convert(to,e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
+            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
             let value=match (t,*to) {
                 (FloatType::F32,FloatType::F64)=>fb.ins().fpromote(types::F64,v),
                 (FloatType::F64,FloatType::F32)=>fb.ins().fdemote(types::F32,v),
@@ -469,8 +469,8 @@ fn emit_expr(
             (value,*to)
         }
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty,refs)?;
-            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty,refs)?;
+            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
             if t!=u {return Err(reject("unconverted mixed FP arithmetic"));}
             let value=match expr {
                 Add(..)=>fb.ins().fadd(x,y),
@@ -493,7 +493,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
-        Constant32(_)|Constant64(_)=>Ok(()),
+        ExternalGlobal {..}|Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
@@ -532,10 +532,10 @@ fn check_condition(
 fn emit_condition(
     cond:&FloatCondition,fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
-    refs:&HashMap<String,FuncRef>,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 )->Result<Value,CodegenError> {
-    let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty,refs)?;
-    let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty,refs)?;
+    let (x,t)=emit_expr(&cond.left,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+    let (y,u)=emit_expr(&cond.right,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
     if t!=u {return Err(reject("unconverted mixed FP comparison"));}
     Ok(fb.ins().fcmp(cond.op.cranelift(),x,y))
 }
@@ -762,7 +762,7 @@ fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
-    refs:&HashMap<String,FuncRef>,depth:usize,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,depth:usize,
 )->Result<bool,CodegenError> {
     if depth>64 {return Err(reject("FP CFG emission exceeds recursion limit"));}
     let mut live=true;
@@ -777,16 +777,16 @@ fn emit_fp_statements(
                 fb.def_var(var,value);
             }
             FloatStmt::Assign(n,expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 fb.def_var(locals[*n],v);
             }
             FloatStmt::Return(expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 fb.ins().return_(&[v]);
                 live=false;
             }
             FloatStmt::ReturnInteger(expr,to)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 let converted=match to {
                     ScalarType::Int {signed:true,..}=>
                         fb.ins().fcvt_to_sint(to.machine(),v),
@@ -812,7 +812,7 @@ fn emit_fp_statements(
                 }
                 signature.returns.push(AbiParam::new(return_type.machine()));
                 let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                    params,params_ty,locals,locals_ty,refs)?;
+                    params,params_ty,locals,locals_ty,refs,global_refs)?;
                 let reference=fb.import_signature(signature);
                 let call=fb.ins().call_indirect(reference,pointer,&values);
                 let returned=*fb.inst_results(call).first().ok_or_else(||
@@ -821,23 +821,23 @@ fn emit_fp_statements(
                 live=false;
             }
             FloatStmt::IfReturn(cond,yes,no)=>{
-                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
+                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 let t=fb.create_block();
                 let f=fb.create_block();
                 fb.ins().brif(flag,t,&[],f,&[]);
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 fb.ins().return_(&[v]);
                 fb.switch_to_block(f);
-                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty,refs)?;
+                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 fb.ins().return_(&[v]);
                 live=false;
             }
             FloatStmt::IfBlock(cond,yes,no)=>{
                 live=emit_fp_if(cond,yes,no,fb,params,params_ty,
-                    locals,locals_ty,outer,refs,depth+1)?;
+                    locals,locals_ty,outer,refs,global_refs,depth+1)?;
             }
             FloatStmt::IfAssign(cond,yes,no)=>{
                 let a:Vec<_>=yes.iter().map(|(n,e)|
@@ -845,7 +845,7 @@ fn emit_fp_statements(
                 let b:Vec<_>=no.iter().map(|(n,e)|
                     FloatStmt::Assign(*n,e.clone())).collect();
                 live=emit_fp_if(cond,&a,&b,fb,params,params_ty,
-                    locals,locals_ty,outer,refs,depth+1)?;
+                    locals,locals_ty,outer,refs,global_refs,depth+1)?;
             }
             FloatStmt::While(cond,body)=>{
                 let head=fb.create_block();
@@ -853,7 +853,7 @@ fn emit_fp_statements(
                 let exit=fb.create_block();
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
-                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
+                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                 fb.ins().brif(test,body_block,&[],exit,&[]);
                 fb.seal_block(body_block);
                 fb.switch_to_block(body_block);
@@ -862,7 +862,7 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:head,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 if emit_fp_statements(body,fb,params,params_ty,locals,
-                    locals_ty,Some(inner),refs,depth+1)? {
+                    locals_ty,Some(inner),refs,global_refs,depth+1)? {
                     fb.ins().jump(head,&[]);
                 }
                 fb.seal_block(head);
@@ -871,7 +871,7 @@ fn emit_fp_statements(
             }
             FloatStmt::For {init,condition,increment,body}=>{
                 if !emit_fp_statements(init,fb,params,params_ty,locals,
-                    locals_ty,outer,refs,depth+1)? {live=false;continue;}
+                    locals_ty,outer,refs,global_refs,depth+1)? {live=false;continue;}
                 let head=fb.create_block();
                 let body_block=fb.create_block();
                 let step=fb.create_block();
@@ -879,7 +879,7 @@ fn emit_fp_statements(
                 fb.ins().jump(head,&[]);
                 fb.switch_to_block(head);
                 if let Some(cond)=condition {
-                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                     fb.ins().brif(test,body_block,&[],exit,&[]);
                 } else {fb.ins().jump(body_block,&[]);}
                 fb.seal_block(body_block);
@@ -889,13 +889,13 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:step,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),refs,depth+1)?;
+                    locals,locals_ty,Some(inner),refs,global_refs,depth+1)?;
                 if body_live {fb.ins().jump(step,&[]);}
                 fb.seal_block(step);
                 if body_live||saw_continue.get() {
                     fb.switch_to_block(step);
                     if emit_fp_statements(increment,fb,params,params_ty,
-                        locals,locals_ty,Some(inner),refs,depth+1)? {
+                        locals,locals_ty,Some(inner),refs,global_refs,depth+1)? {
                         fb.ins().jump(head,&[]);
                     }
                 }
@@ -916,12 +916,12 @@ fn emit_fp_statements(
                 let inner=FpLoopTargets {break_to:exit,continue_to:test_block,
                     saw_break:&saw_break,saw_continue:&saw_continue};
                 let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),refs,depth+1)?;
+                    locals,locals_ty,Some(inner),refs,global_refs,depth+1)?;
                 if body_live {fb.ins().jump(test_block,&[]);}
                 fb.seal_block(test_block);
                 if body_live||saw_continue.get() {
                     fb.switch_to_block(test_block);
-                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
+                    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                     fb.ins().brif(test,body_block,&[],exit,&[]);
                 }
                 fb.seal_block(body_block);
@@ -952,10 +952,10 @@ fn emit_fp_if(
     fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
     locals:&[Variable],locals_ty:&[ScalarType],
     outer:Option<FpLoopTargets<'_>>,
-    refs:&HashMap<String,FuncRef>,depth:usize,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,depth:usize,
 )->Result<bool,CodegenError> {
     if depth>64 {return Err(reject("FP nested if exceeds recursion limit"));}
-    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs)?;
+    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
     let t=fb.create_block();
     let f=fb.create_block();
     fb.ins().brif(test,t,&[],f,&[]);
@@ -963,7 +963,7 @@ fn emit_fp_if(
     fb.seal_block(f);
     fb.switch_to_block(t);
     let t_live=emit_fp_statements(yes,fb,params,params_ty,
-        locals,locals_ty,outer,refs,depth+1)?;
+        locals,locals_ty,outer,refs,global_refs,depth+1)?;
     let join=if t_live {
         let b=fb.create_block();
         fb.ins().jump(b,&[]);
@@ -971,7 +971,7 @@ fn emit_fp_if(
     } else {None};
     fb.switch_to_block(f);
     let f_live=emit_fp_statements(no,fb,params,params_ty,
-        locals,locals_ty,outer,refs,depth+1)?;
+        locals,locals_ty,outer,refs,global_refs,depth+1)?;
     let join=if f_live {
         let b=join.unwrap_or_else(||fb.create_block());
         fb.ins().jump(b,&[]);
@@ -1074,8 +1074,8 @@ fn validate_fp_calls_expr(
             validate_fp_calls_expr(b,declarations,imports,source_imports,depth+1)?;
         }
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
-        FloatExpr::Local(_)|FloatExpr::Constant32(_)|
-        FloatExpr::Constant64(_)=>{},
+        FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
+        FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
     }
     Ok(())
 }
