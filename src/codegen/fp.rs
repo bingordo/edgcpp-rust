@@ -24,6 +24,9 @@ impl FloatType {
 pub enum ScalarType {
     Float(FloatType),
     Int { bits:u8,signed:bool },
+    /// An EDG-verified pointer to a prototyped nonvariadic C function.
+    /// Its canonical native identity prevents casting ordinary data pointers.
+    FunctionPointer(crate::TypeId),
 }
 impl ScalarType {
     fn machine(self)->cranelift_codegen::ir::Type {
@@ -31,6 +34,7 @@ impl ScalarType {
             Self::Float(t)=>t.machine(),
             Self::Int {bits:32,..}=>types::I32,
             Self::Int {bits:64,..}=>types::I64,
+            Self::FunctionPointer(_)=>types::I64,
             _=>unreachable!("integer width was checked at source boundary"),
         }
     }
@@ -59,6 +63,16 @@ pub enum FloatExpr {
     /// Indirect and external calls require a separate declaration contract.
     Call {
         callee:String,
+        parameters:Vec<ScalarType>,
+        return_type:FloatType,
+        arguments:Vec<ScalarCallArg>,
+    },
+    /// Direct use of a function-pointer *formal*, never a guessed memory
+    /// address or an unchecked C cast. The native pointee prototype is
+    /// validated during EDG lowering.
+    CallIndirect {
+        pointer_parameter:usize,
+        pointer_type:crate::TypeId,
         parameters:Vec<ScalarType>,
         return_type:FloatType,
         arguments:Vec<ScalarCallArg>,
@@ -157,7 +171,14 @@ fn expression_type(
                 Err(reject("FP integer cast source is not a checked integer formal"))
             }
         },
-        Call {parameters,return_type,arguments,..}=>{
+        Call {parameters,return_type,arguments,..}|
+        CallIndirect {parameters,return_type,arguments,..}=>{
+            if let CallIndirect {pointer_parameter,pointer_type,..}=expr {
+                if params.get(*pointer_parameter)!=
+                    Some(&ScalarType::FunctionPointer(*pointer_type)) {
+                    return Err(reject("FP indirect call requires the exact callable formal"));
+                }
+            }
             if arguments.len()!=parameters.len() || arguments.len()>256 {
                 return Err(reject("FP direct call argument count does not match prototype"));
             }
@@ -305,7 +326,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}=>{
+        Call {arguments,..}|CallIndirect {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
                     check_local_reads(expr,defined,depth+1)?;
@@ -776,6 +797,13 @@ fn validate_fp_calls_expr(
                 }
             }
         }
+        FloatExpr::CallIndirect {arguments,..}=>{
+            for arg in arguments {
+                if let ScalarCallArg::Float(arg)=arg {
+                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                }
+            }
+        }
         FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
             validate_fp_calls_expr(e,declarations,depth+1)?,
         FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
@@ -941,6 +969,32 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
     }
 }
+/// Only EDG-native *function* pointers are callable. Verify pointer
+/// layout, pointee role and actual prototype before accepting the ABI.
+fn function_pointer_type_from_edg(il:&Il,id:crate::TypeId)
+    ->Result<(crate::TypeId,crate::TypeId),CodegenError> {
+    let pointer=super::canonical_abi_type(il,id)?;
+    let ptr=il.types.iter().find(|t|t.id==pointer &&
+        super::semantic(4,t.kind)==5 && t.related_role==Some(1))
+        .ok_or_else(||reject("indirect FP call does not use a function pointer"))?;
+    let layout=il.type_object_sizes.iter().find(|x|x.owner==pointer)
+        .ok_or_else(||reject("indirect FP function pointer has no layout"))?;
+    if layout.bytes!=8 || layout.alignment!=8 {
+        return Err(reject("indirect FP function pointer has non-SysV layout"));
+    }
+    let target=super::canonical_abi_type(il,ptr.related.ok_or_else(||
+        reject("FP function pointer has no pointee type"))?)?;
+    if !il.types.iter().any(|t|t.id==target &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+        return Err(reject("FP pointer does not point to a C routine prototype"));
+    }
+    let proto=il.function_signatures.iter().find(|p|p.owner==target)
+        .ok_or_else(||reject("indirect FP call lacks native prototype"))?;
+    if !proto.prototyped || proto.variadic {
+        return Err(reject("indirect FP unprototyped/variadic call unsupported"));
+    }
+    Ok((pointer,target))
+}
 /// Reject a nonstandard ABI class, unsupported integer width, or synthetic
 /// type before generating code. Only standard signed/unsigned 32/64 bit C
 /// integer formals and native F32/F64 values enter this first mixed ABI slice.
@@ -948,6 +1002,9 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     ->Result<ScalarType,CodegenError> {
     if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
     let canonical=super::canonical_abi_type(il,id)?;
+    if let Ok((pointer,_))=function_pointer_type_from_edg(il,canonical) {
+        return Ok(ScalarType::FunctionPointer(pointer));
+    }
     let info=il.c_integer_types.iter().find(|x|x.id==canonical)
         .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
     let layout=il.type_object_sizes.iter().find(|x|x.owner==canonical)
