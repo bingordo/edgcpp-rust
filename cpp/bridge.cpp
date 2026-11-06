@@ -1727,6 +1727,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         }
         if (have_value) emit_record(15, {num(symbol_id), signed_num(value)});
       }
+      // M14: preserve byte-exact EDG standard scalar IEEE global images.
+      // No decimal conversion, guessed zeros or extended FP reinterpreting.
+      if (v->init_kind == initk_static &&
+          v->has_explicit_initializer &&
+          v->initializer.constant != nullptr) {
+        uint32_t width = 0;
+        uint64_t bits = 0;
+        const uint32_t type_id = emit_type(v->type, 0);
+        if (type_id != 0 &&
+            standard_float_image(v->initializer.constant, v->type,
+                                 width, bits)) {
+          emit_record(60, {num(symbol_id), num(type_id),
+                           num(width), num(bits)});
+        }
+      }
       if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
         std::string hex;
         std::vector<NativeAggregateReloc> relocations;
