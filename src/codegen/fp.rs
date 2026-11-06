@@ -9,6 +9,14 @@ use super::*;
 use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
 use std::collections::HashMap;
 use std::cell::Cell;
+use cranelift_codegen::ir::{GlobalValue,MemFlags};
+type FpGlobalRefs=HashMap<crate::SymbolId,GlobalValue>;
+#[derive(Debug,Clone,PartialEq,Eq)]
+struct FpImportedGlobal {
+    symbol:crate::SymbolId,
+    name:String,
+    ty:FloatType,
+}
 use cranelift_frontend::Variable;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -92,6 +100,9 @@ pub enum FloatExpr {
         arguments:Vec<ScalarCallArg>,
     },
     Local(usize),
+    /// A source-verified, ordinary external C F32/F64 global load. Memory
+    /// effects are never folded into an SSA register or constant.
+    ExternalGlobal {symbol:crate::SymbolId,ty:FloatType},
     Constant32(u32),
     Constant64(u64),
     Neg(Box<Self>),
@@ -315,6 +326,7 @@ fn expression_type(
             Some(ScalarType::Float(t))=>Ok(t),
             _=>Err(reject("FP local out of range or is a callable pointer")),
         },
+        ExternalGlobal {ty,..}=>Ok(*ty),
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
         Neg(e)=>expression_type(e,params,locals,depth+1),
