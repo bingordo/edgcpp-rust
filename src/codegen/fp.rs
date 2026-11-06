@@ -1312,6 +1312,34 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     }
     Ok(ScalarType::Int {bits:info.bits,signed:info.signed})
 }
+/// Only an unmodified EDG formal or automatic local can provide a callable
+/// pointer SSA value; aliases, casts, data-pointer coercions and memory loads
+/// require a separate provenance and lifetime model.
+fn pointer_source_from_edg(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+)->Result<(PointerSource,crate::TypeId),CodegenError> {
+    let expr=ctx.graph.expression(id)
+        .ok_or_else(||reject("callable pointer value missing EDG expression"))?;
+    if super::semantic(2,expr.data.kind)!=2 ||
+        !expr.operands.is_empty() || expr.data.constant_kind.is_some() {
+        return Err(reject("function-pointer value must be direct checked variable"));
+    }
+    let symbol=expr.data.symbol_id.ok_or_else(||
+        reject("function-pointer value has no native EDG symbol"))?;
+    let (ty,_)=function_pointer_type_from_edg(ctx.il,expr.data.type_id
+        .ok_or_else(||reject("function-pointer value lacks native type"))?)?;
+    let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+        PointerSource::Parameter(i)
+    } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+        PointerSource::Local(i)
+    } else {
+        return Err(reject("global, computed or nonlocal function-pointer unsupported"));
+    };
+    if pointer_source_type(source,ctx.param_types,ctx.local_types)?!=ty {
+        return Err(reject("function-pointer value differs from native symbol ABI"));
+    }
+    Ok((source,ty))
+}
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
     il:&'a Il,
@@ -1340,7 +1368,7 @@ fn expression_from_edg(
         }
         let callee=ctx.graph.expression(node.operands[0])
             .ok_or_else(||reject("FP scalar call has no callee expression"))?;
-        let (callee_name,external_callee,pointer_parameter,pointer_type,fn_ty)=
+        let (callee_name,external_callee,pointer_source,pointer_type,fn_ty)=
             if super::semantic(2,callee.data.kind)==6 &&
                 callee.operands.is_empty() {
                 // Existing exact named routine path, including forward defs.
@@ -1384,16 +1412,11 @@ fn expression_from_edg(
                     pointer_expr.data.constant_kind.is_some() {
                     return Err(reject("FP indirect target must be a direct function-pointer formal"));
                 }
-                let symbol=pointer_expr.data.symbol_id.ok_or_else(||
-                    reject("FP indirect pointer has no native symbol"))?;
-                let index=ctx.params.iter().position(|p|*p==symbol)
-                    .ok_or_else(||reject("FP indirect callee is not a parameter"))?;
-                let (pointer_type,fn_ty)=function_pointer_type_from_edg(
-                    ctx.il,pointer_expr.data.type_id.ok_or_else(||
-                        reject("FP indirect pointer lacks a native type"))?)?;
-                if ctx.param_types[index]!=ScalarType::FunctionPointer(pointer_type) {
-                    return Err(reject("FP indirect pointer formal type mismatch"));
-                }
+                let (source,pointer_type)=pointer_source_from_edg(
+                    ctx,if std::ptr::eq(pointer_expr,callee) {
+                        node.operands[0]
+                    } else {callee.operands[0]})?;
+                let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
                 // The EDG expression must refer to the native pointer type,
                 // or be an actual function-designator dereference. Neither
                 // a cast to function pointer nor data-pointer coercion is safe.
@@ -1409,7 +1432,7 @@ fn expression_from_edg(
                         return Err(reject("indirect FP designator prototype mismatch"));
                     }
                 }
-                (None,false,Some(index),Some(pointer_type),fn_ty)
+                (None,false,Some(source),Some(pointer_type),fn_ty)
             };
         let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
@@ -1480,8 +1503,8 @@ fn expression_from_edg(
             }
         } else {
             Ok(FloatExpr::CallIndirect {
-                pointer_parameter:pointer_parameter.ok_or_else(||
-                    reject("FP indirect pointer parameter was not resolved"))?,
+                pointer:pointer_source.ok_or_else(||
+                    reject("FP indirect pointer source was not resolved"))?,
                 pointer_type:pointer_type.ok_or_else(||
                     reject("FP indirect pointer type was not resolved"))?,
                 parameters,return_type:ty,arguments,
@@ -1803,8 +1826,10 @@ fn lower_fp_body(
                 if decl.is_vla || !ctx.locals.contains(&decl.symbol) {
                     return Err(reject("FP declaration is not a checked automatic scalar"));
                 }
-                if type_from_edg(ctx.il,decl.ty).is_err() {
-                    return Err(reject("FP declaration has unsupported source type"));
+                let index=ctx.locals.iter().position(|p|*p==decl.symbol)
+                    .ok_or_else(||reject("FP declaration local symbol missing"))?;
+                if scalar_type_from_edg(ctx.il,decl.ty)?!=ctx.local_types[index] {
+                    return Err(reject("FP declaration source ABI type mismatch"));
                 }
             }
             if !found {return Err(reject("FP declaration missing native symbol"));}
@@ -1818,6 +1843,18 @@ fn lower_fp_body(
             let symbol=init.symbol.ok_or_else(||reject("FP initializer has no local"))?;
             let local=ctx.locals.iter().position(|p|*p==symbol)
                 .ok_or_else(||reject("FP initializer target is not an automatic local"))?;
+            if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
+                if init.kind!=3 {
+                    return Err(reject("callable pointer initializer requires exact expression"));
+                }
+                let (source,actual)=pointer_source_from_edg(ctx,node.expression
+                    .ok_or_else(||reject("pointer initializer lacks source expression"))?)?;
+                if actual!=pointer_type {
+                    return Err(reject("pointer initializer native type mismatch"));
+                }
+                output.push(FloatStmt::AssignPointer {local,pointer_type,source});
+                return Ok(());
+            }
             let value=match init.kind {
                 // EDG dik_expression: an actual expression executes at this site.
                 3=>{
@@ -1875,9 +1912,17 @@ fn lower_fp_body(
             }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            if ScalarType::Float(type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
-                reject("missing native FP lvalue type"))?)?)!=ctx.local_types[local] {
+            if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native scalar lvalue type"))?)?!=ctx.local_types[local] {
                 return Err(reject("FP lvalue type mismatch"));
+            }
+            if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
+                let (source,actual)=pointer_source_from_edg(ctx,operation.operands[1])?;
+                if actual!=pointer_type {
+                    return Err(reject("pointer assignment source ABI differs from target"));
+                }
+                output.push(FloatStmt::AssignPointer {local,pointer_type,source});
+                return Ok(());
             }
             let value=expression_from_edg(ctx,operation.operands[1],0)?;
             output.push(FloatStmt::Assign(local,value));
@@ -1963,16 +2008,11 @@ fn lower_integer_indirect_return(
         pointer_expr.data.constant_kind.is_some() {
         return Err(reject("INTEGER indirect call requires an unmodified pointer formal"));
     }
-    let symbol=pointer_expr.data.symbol_id.ok_or_else(||
-        reject("INTEGER indirect call has no callee symbol"))?;
-    let pointer_parameter=ctx.params.iter().position(|p|*p==symbol)
-        .ok_or_else(||reject("INTEGER indirect call callee is not a formal"))?;
-    let (pointer_type,fn_ty)=function_pointer_type_from_edg(ctx.il,
-        pointer_expr.data.type_id.ok_or_else(||
-            reject("INTEGER indirect call pointer lacks native type"))?)?;
-    if ctx.param_types[pointer_parameter]!=ScalarType::FunctionPointer(pointer_type) {
-        return Err(reject("INTEGER indirect pointer/formal ABI mismatch"));
-    }
+    let (pointer,pointer_type)=pointer_source_from_edg(
+        ctx,if std::ptr::eq(pointer_expr,callee) {
+            node.operands[0]
+        } else {callee.operands[0]})?;
+    let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
     if !std::ptr::eq(pointer_expr,callee) {
         let designator=super::canonical_abi_type(ctx.il,
             callee.data.type_id.ok_or_else(||
@@ -2023,7 +2063,7 @@ fn lower_integer_indirect_return(
         arguments.push(value);
     }
     Ok(FloatStmt::ReturnIndirectInteger {
-        pointer_parameter,pointer_type,parameters,
+        pointer,pointer_type,parameters,
         return_type:result,arguments,
     })
 }
