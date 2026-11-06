@@ -73,10 +73,18 @@ passed. Direct and indirect calls share typed scalar argument
 emission, but this slice does **not** implement pointer locals,
 computed pointer targets or indirect INTEGER-returning callees.
 
+## Source-verified external C scalar imports
+
+[PR #67](https://github.com/bingordo/edgcpp-rust/pull/67)
+adds checked, typed ELF imports for **declared** C scalar external
+functions. See [the external ABI contract](M14_EXTERNAL_SCALAR_IMPORTS.md)
+and [green native GCC CI](https://github.com/bingordo/edgcpp-rust/actions/runs/42264148108).
+General external imports and indirect INTEGER-returning callees remain open.
+
 ## Remaining M14 integration gates
 
-- Qualified external direct calls with checked imports/linkage/visibility,
-  and indirect calls through verified function-pointer values.
+- Broader external imports with pointer/aggregate/varargs arguments,
+  as well as memory-backed indirect-call targets.
 - General INTEGER expression trees, narrow integer parameter promotions,
   FP-to-integer and integer-to-FP conversions throughout full source
   expressions, and INTEGER-returning *callees* at mixed call sites.
