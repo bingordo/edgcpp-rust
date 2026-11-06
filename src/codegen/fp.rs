@@ -825,12 +825,20 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
     emit_scalar_float_bodies(&scalar)
 }
 
-/// Verify that every call resolves to a definition in the same module with
-/// the precise native ABI signature. Unsupported external or indirect calls
-/// are rejected before any ELF object is produced.
+/// Prevent compiler builtin and non-C symbol names from entering the
+/// ordinary imported-function ABI path without verified special semantics.
+fn safe_scalar_external_name(name:&str)->bool {
+    let b=name.as_bytes();
+    !b.is_empty() && b.len()<=256 && !name.starts_with("__") &&
+    (b[0].is_ascii_alphabetic()||b[0]==b'_') &&
+    b[1..].iter().all(|c|c.is_ascii_alphanumeric()||*c==b'_')
+}
+/// Prevalidate all source-authorized external prototypes before ELF emission.
 fn validate_fp_calls_expr(
     expr:&FloatExpr,
     declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    source_imports:bool,
     depth:usize,
 )->Result<(),CodegenError> {
     if depth>64 {return Err(reject("FP call expression exceeds depth limit"));}
@@ -845,23 +853,42 @@ fn validate_fp_calls_expr(
             }
             for arg in arguments {
                 if let ScalarCallArg::Float(arg)=arg {
-                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                    validate_fp_calls_expr(arg,declarations,imports,source_imports,depth+1)?;
+                }
+            }
+        }
+        FloatExpr::CallExternal {callee,parameters,return_type,arguments}=>{
+            if !source_imports || !safe_scalar_external_name(callee) ||
+                declarations.contains_key(callee) ||
+                arguments.len()!=parameters.len() || parameters.len()>256 ||
+                parameters.iter().any(|ty|matches!(ty,ScalarType::FunctionPointer(_))) {
+                return Err(reject("FP external call lacks an authorized C prototype"));
+            }
+            let sig=(parameters.clone(),ScalarType::Float(*return_type));
+            if let Some(previous)=imports.get(callee) {
+                if previous!=&sig {
+                    return Err(reject("conflicting native FP external-call prototypes"));
+                }
+            } else {imports.insert(callee.clone(),sig);}
+            for arg in arguments {
+                if let ScalarCallArg::Float(e)=arg {
+                    validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?;
                 }
             }
         }
         FloatExpr::CallIndirect {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(arg)=arg {
-                    validate_fp_calls_expr(arg,declarations,depth+1)?;
+                    validate_fp_calls_expr(arg,declarations,imports,source_imports,depth+1)?;
                 }
             }
         }
         FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
-            validate_fp_calls_expr(e,declarations,depth+1)?,
+            validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
         FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
         FloatExpr::Mul(a,b)|FloatExpr::Div(a,b)=>{
-            validate_fp_calls_expr(a,declarations,depth+1)?;
-            validate_fp_calls_expr(b,declarations,depth+1)?;
+            validate_fp_calls_expr(a,declarations,imports,source_imports,depth+1)?;
+            validate_fp_calls_expr(b,declarations,imports,source_imports,depth+1)?;
         }
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
         FloatExpr::Local(_)|FloatExpr::Constant32(_)|
@@ -872,14 +899,18 @@ fn validate_fp_calls_expr(
 fn validate_fp_calls_cond(
     cond:&FloatCondition,
     declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    source_imports:bool,
     depth:usize,
 )->Result<(),CodegenError> {
-    validate_fp_calls_expr(&cond.left,declarations,depth)?;
-    validate_fp_calls_expr(&cond.right,declarations,depth)
+    validate_fp_calls_expr(&cond.left,declarations,imports,source_imports,depth)?;
+    validate_fp_calls_expr(&cond.right,declarations,imports,source_imports,depth)
 }
 fn validate_fp_calls_stmts(
     stmts:&[FloatStmt],
     declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
+    source_imports:bool,
     depth:usize,
 )->Result<(),CodegenError> {
     if depth>64 {return Err(reject("FP call statements exceed depth limit"));}
@@ -887,38 +918,38 @@ fn validate_fp_calls_stmts(
         match stmt {
             FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
             FloatStmt::ReturnInteger(e,_)=>
-                validate_fp_calls_expr(e,declarations,depth+1)?,
+                validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
             FloatStmt::IfReturn(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,depth+1)?;
-                validate_fp_calls_expr(yes,declarations,depth+1)?;
-                validate_fp_calls_expr(no,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_expr(yes,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_expr(no,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::IfAssign(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
                 for (_,e) in yes.iter().chain(no) {
-                    validate_fp_calls_expr(e,declarations,depth+1)?;
+                    validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?;
                 }
             }
             FloatStmt::IfBlock(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,depth+1)?;
-                validate_fp_calls_stmts(yes,declarations,depth+1)?;
-                validate_fp_calls_stmts(no,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_stmts(yes,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_stmts(no,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::While(cond,body)=>{
-                validate_fp_calls_cond(cond,declarations,depth+1)?;
-                validate_fp_calls_stmts(body,declarations,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::DoWhile(body,cond)=>{
-                validate_fp_calls_stmts(body,declarations,depth+1)?;
-                validate_fp_calls_cond(cond,declarations,depth+1)?;
+                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::For {init,condition,increment,body}=>{
-                validate_fp_calls_stmts(init,declarations,depth+1)?;
+                validate_fp_calls_stmts(init,declarations,imports,source_imports,depth+1)?;
                 if let Some(cond)=condition {
-                    validate_fp_calls_cond(cond,declarations,depth+1)?;
+                    validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
                 }
-                validate_fp_calls_stmts(body,declarations,depth+1)?;
-                validate_fp_calls_stmts(increment,declarations,depth+1)?;
+                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
+                validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::Break|FloatStmt::Continue=>{},
         }
@@ -927,6 +958,11 @@ fn validate_fp_calls_stmts(
 }
 fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
     ->Result<Vec<u8>,CodegenError> {
+    emit_scalar_float_bodies_internal(functions,false)
+}
+fn emit_scalar_float_bodies_internal(
+    functions:&[ScalarFloatBody],source_imports:bool,
+)->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
     flags.set("opt_level","speed")
@@ -946,9 +982,24 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
             return Err(reject("duplicate scalar routine definition"));
         }
     }
+    let mut imports=HashMap::new();
+    for f in functions {
+        validate_fp_calls_stmts(&f.statements,&declared,&mut imports,
+            source_imports,0)?;
+    }
+    // Every import has been checked against actual EDG callsites, target
+    // classes and local definitions; no unknown extern is silently emitted.
+    let mut import_ids=Vec::new();
+    for (name,(params,ret)) in &imports {
+        let mut sig=module.make_signature();
+        for ty in params {sig.params.push(AbiParam::new(ty.machine()));}
+        sig.returns.push(AbiParam::new(ret.machine()));
+        let id=module.declare_function(name,Linkage::Import,&sig)
+            .map_err(|e|CodegenError::Backend(e.to_string()))?;
+        import_ids.push((name.clone(),id));
+    }
     let mut exports=Vec::new();
     for f in functions {
-        validate_fp_calls_stmts(&f.statements,&declared,0)?;
         if f.name.is_empty()||f.name.contains('\0') ||
             f.parameters.len()>256 || f.locals.len()>4096 {
             return Err(reject("invalid FP function name or variable count"));
@@ -980,6 +1031,10 @@ fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
         for (other,other_id) in functions.iter().zip(&exports) {
             let reference=module.declare_func_in_func(*other_id,&mut ctx.func);
             refs.insert(other.name.clone(),reference);
+        }
+        for (name,id) in &import_ids {
+            let reference=module.declare_func_in_func(*id,&mut ctx.func);
+            refs.insert(name.clone(),reference);
         }
         let mut fctx=FunctionBuilderContext::new();
         {
@@ -1794,7 +1849,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             locals:local_types,statements,
         });
     }
-    emit_scalar_float_bodies(&functions).map(Some)
+    emit_scalar_float_bodies_internal(&functions,true).map(Some)
 }
 
 #[cfg(test)]
