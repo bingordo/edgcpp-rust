@@ -1278,14 +1278,21 @@ fn source_callable_signature(
     if !prototype.prototyped || prototype.variadic {
         return Err(reject("indirect designator is variadic/unprototyped"));
     }
-    let returned=scalar_type_from_edg(il,def.related
-        .ok_or_else(||reject("indirect function has no native return type"))?)?;
+    let ret_ty=def.related.ok_or_else(||
+        reject("indirect function has no native return type"))?;
+    if function_pointer_type_from_edg(il,ret_ty).is_ok() {
+        return Err(reject("nested pointer result is not a supported callable ABI"));
+    }
+    let returned=scalar_type_from_edg(il,ret_ty)?;
     let mut declared:Vec<_>=il.type_parameters.iter()
         .filter(|p|p.owner==function_ty).collect();
     declared.sort_by_key(|p|p.position);
     if declared.len()>256 || declared.iter().enumerate()
         .any(|(n,p)|p.position!=n as u32) {
         return Err(reject("indirect function prototype has invalid positions"));
+    }
+    if declared.iter().any(|p|function_pointer_type_from_edg(il,p.ty).is_ok()) {
+        return Err(reject("nested function-pointer parameter ABI unsupported"));
     }
     let parameters=declared.iter().map(|p|scalar_type_from_edg(il,p.ty))
         .collect::<Result<Vec<_>,_>>()?;
@@ -1299,7 +1306,25 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
     if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
     let canonical=super::canonical_abi_type(il,id)?;
     if let Ok((pointer,_))=function_pointer_type_from_edg(il,canonical) {
-        return Ok(ScalarType::FunctionPointer(pointer));
+        // EDG can assign distinct native type IDs to structurally
+        // equivalent function pointers (e.g. a formal and an automatic
+        // local). Normalize *only* complete, nonvariadic, exact scalar
+        // callable prototypes so SSA copies/calls use the same identity.
+        // A data pointer, nested callback ABI or unknown type never aliases.
+        let signature=source_callable_signature(il,pointer)?;
+        let mut representative=pointer;
+        for ty in &il.types {
+            if ty.id.0>=representative.0 ||
+               super::semantic(4,ty.kind)!=5 ||
+               ty.related_role!=Some(1) {
+                continue;
+            }
+            if function_pointer_type_from_edg(il,ty.id).is_ok() &&
+                source_callable_signature(il,ty.id).ok()==Some(signature.clone()) {
+                representative=ty.id;
+            }
+        }
+        return Ok(ScalarType::FunctionPointer(representative));
     }
     let info=il.c_integer_types.iter().find(|x|x.id==canonical)
         .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
@@ -1326,8 +1351,11 @@ fn pointer_source_from_edg(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("function-pointer value has no native EDG symbol"))?;
-    let (ty,_)=function_pointer_type_from_edg(ctx.il,expr.data.type_id
-        .ok_or_else(||reject("function-pointer value lacks native type"))?)?;
+    let ty=match scalar_type_from_edg(ctx.il,expr.data.type_id
+        .ok_or_else(||reject("function-pointer value lacks native type"))?)? {
+        ScalarType::FunctionPointer(ty)=>ty,
+        _=>return Err(reject("source expression is not callable-pointer typed")),
+    };
     let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
         PointerSource::Parameter(i)
     } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
