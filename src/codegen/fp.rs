@@ -67,6 +67,15 @@ pub enum FloatExpr {
         return_type:FloatType,
         arguments:Vec<ScalarCallArg>,
     },
+    /// A source-verified named C declaration with no definition in the
+    /// current module. Emit a typed ELF undefined symbol for the linker.
+    /// Public FP-only reference entry points must reject this variant.
+    CallExternal {
+        callee:String,
+        parameters:Vec<ScalarType>,
+        return_type:FloatType,
+        arguments:Vec<ScalarCallArg>,
+    },
     /// Direct use of a function-pointer *formal*, never a guessed memory
     /// address or an unchecked C cast. The native pointee prototype is
     /// validated during EDG lowering.
@@ -172,6 +181,7 @@ fn expression_type(
             }
         },
         Call {parameters,return_type,arguments,..}|
+        CallExternal {parameters,return_type,arguments,..}|
         CallIndirect {parameters,return_type,arguments,..}=>{
             if let CallIndirect {pointer_parameter,pointer_type,..}=expr {
                 if params.get(*pointer_parameter)!=
@@ -280,7 +290,8 @@ fn emit_expr(
             };
             (converted,*to)
         }
-        Call {callee,parameters,return_type,arguments}=>{
+        Call {callee,parameters,return_type,arguments}|
+        CallExternal {callee,parameters,return_type,arguments}=>{
             if arguments.len()!=parameters.len() {
                 return Err(reject("invalid direct call argument count"));
             }
@@ -366,7 +377,8 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}|CallIndirect {arguments,..}=>{
+        Call {arguments,..}|CallExternal {arguments,..}|
+        CallIndirect {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
                     check_local_reads(expr,defined,depth+1)?;
