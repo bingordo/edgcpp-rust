@@ -1813,10 +1813,18 @@ fn lower_fp_body(
                 ScalarType::Float(_)=>
                     output.push(FloatStmt::Return(expression_from_edg(ctx,source,0)?)),
                 result @ ScalarType::Int {..}=>{
-                    // Only a unary, source-recorded cast from a standard FP
-                    // expression has a defined lowering here. Never turn
-                    // FP comparisons, integer arithmetic or implicit symbol
-                    // reinterpretation into a native integer return.
+                    // Exact INTEGER-valued indirect calls preserve RAX/EAX;
+                    // they are not FP-to-int numeric conversions.
+                    let is_call=ctx.graph.calls.iter().any(|site|
+                        site.function==native.data.function &&
+                        site.statement_path==native.data.statement_path &&
+                        site.path==native.data.path);
+                    if is_call {
+                        output.push(lower_integer_indirect_return(ctx,source,result)?);
+                        return Ok(());
+                    }
+                    // Only an EDG-authoritative FP-to-INTEGER cast remains
+                    // legal in the ordinary expression-return path.
                     if super::semantic(2,native.data.kind)!=3 ||
                         native.operands.len()!=1 ||
                         !matches!(native.data.operator.map(|v|
@@ -1835,6 +1843,110 @@ fn lower_fp_body(
     }
     if output.len()>10000 {return Err(reject("FP statement count exceeds limit"));}
     Ok(())
+}
+/// Source-checked narrow INTEGER-result indirect call slice. We accept an
+/// *exact* return expression `return fp(...);` with an EDG-verified function
+/// pointer formal. A separate expression tree is needed for integer arithmetic
+/// and casts, so these remain unsupported.
+fn lower_integer_indirect_return(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+    result:ScalarType,
+)->Result<FloatStmt,CodegenError> {
+    if !matches!(result,ScalarType::Int {bits:32|64,..}) {
+        return Err(reject("indirect return is not a supported C INTEGER"));
+    }
+    let node=ctx.graph.expression(id)
+        .ok_or_else(||reject("missing INTEGER indirect-call expression"))?;
+    if scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+        reject("INTEGER indirect-call expression lacks native result type"))?)?!=result {
+        return Err(reject("INTEGER indirect-call expression/result type mismatch"));
+    }
+    let mut calls=ctx.graph.calls.iter().filter(|site|
+        site.function==node.data.function &&
+        site.statement_path==node.data.statement_path &&
+        site.path==node.data.path);
+    let site=calls.next().ok_or_else(||
+        reject("INTEGER return is not a direct EDG-recorded call"))?;
+    if calls.next().is_some() || site.first_argument!=1 ||
+        node.operands.is_empty() {
+        return Err(reject("INTEGER indirect call has ambiguous/member argument layout"));
+    }
+    let callee=ctx.graph.expression(node.operands[0])
+        .ok_or_else(||reject("INTEGER indirect call has no native callee"))?;
+    let pointer_expr=if super::semantic(2,callee.data.kind)==3 &&
+        callee.operands.len()==1 &&
+        callee.data.operator.is_some_and(|op|super::semantic(3,op)==44) {
+        ctx.graph.expression(callee.operands[0]).ok_or_else(||
+            reject("INTEGER function designator has no pointer"))?
+    } else {callee};
+    if super::semantic(2,pointer_expr.data.kind)!=2 ||
+        !pointer_expr.operands.is_empty() ||
+        pointer_expr.data.constant_kind.is_some() {
+        return Err(reject("INTEGER indirect call requires an unmodified pointer formal"));
+    }
+    let symbol=pointer_expr.data.symbol_id.ok_or_else(||
+        reject("INTEGER indirect call has no callee symbol"))?;
+    let pointer_parameter=ctx.params.iter().position(|p|*p==symbol)
+        .ok_or_else(||reject("INTEGER indirect call callee is not a formal"))?;
+    let (pointer_type,fn_ty)=function_pointer_type_from_edg(ctx.il,
+        pointer_expr.data.type_id.ok_or_else(||
+            reject("INTEGER indirect call pointer lacks native type"))?)?;
+    if ctx.param_types[pointer_parameter]!=ScalarType::FunctionPointer(pointer_type) {
+        return Err(reject("INTEGER indirect pointer/formal ABI mismatch"));
+    }
+    if !std::ptr::eq(pointer_expr,callee) {
+        let designator=super::canonical_abi_type(ctx.il,
+            callee.data.type_id.ok_or_else(||
+                reject("INTEGER indirect designator lacks native type"))?)?;
+        if source_callable_signature(ctx.il,designator)?!=
+           source_callable_signature(ctx.il,fn_ty)? {
+            return Err(reject("INTEGER indirect designator prototype mismatch"));
+        }
+    }
+    let (parameters,returned)=source_callable_signature(ctx.il,fn_ty)?;
+    if returned!=result || parameters.len()!=node.operands.len()-1 {
+        return Err(reject("INTEGER indirect return signature/arity mismatch"));
+    }
+    if parameters.iter().any(|ty|matches!(ty,ScalarType::FunctionPointer(_))) {
+        return Err(reject("nested function-pointer INTEGER call unsupported"));
+    }
+    let mut arguments=Vec::with_capacity(parameters.len());
+    for (target,&operand) in parameters.iter().zip(&node.operands[1..]) {
+        let value=match target {
+            ScalarType::Float(t)=>{
+                let expr=expression_from_edg(ctx,operand,1)?;
+                if expression_type(&expr,ctx.param_types,ctx.local_types,0)?!=*t {
+                    return Err(reject("INTEGER indirect FP argument needs source conversion"));
+                }
+                ScalarCallArg::Float(expr)
+            }
+            ScalarType::Int {..}=>{
+                let expr=ctx.graph.expression(operand).ok_or_else(||
+                    reject("INTEGER indirect formal argument missing"))?;
+                if super::semantic(2,expr.data.kind)!=2 ||
+                    expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
+                    return Err(reject("INTEGER indirect call INTEGER argument not formal"));
+                }
+                let symbol=expr.data.symbol_id.ok_or_else(||
+                    reject("INTEGER indirect argument lacks native symbol"))?;
+                let index=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
+                    reject("INTEGER indirect argument not a checked formal"))?;
+                let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+                    reject("INTEGER indirect argument lacks native type"))?)?;
+                if ty!=*target || ctx.param_types[index]!=*target {
+                    return Err(reject("INTEGER indirect argument type mismatch"));
+                }
+                ScalarCallArg::IntegerParameter(index)
+            }
+            ScalarType::FunctionPointer(_)=>return Err(reject(
+                "nested function-pointer INTEGER argument unsupported")),
+        };
+        arguments.push(value);
+    }
+    Ok(FloatStmt::ReturnIndirectInteger {
+        pointer_parameter,pointer_type,parameters,
+        return_type:result,arguments,
+    })
 }
 /// Only a module consisting entirely of simple floating-point routines is
 /// handled here. Ordinary integer C follows the established CFG; mixed FP and
