@@ -12,10 +12,11 @@ use std::cell::Cell;
 use cranelift_codegen::ir::{GlobalValue,MemFlags};
 type FpGlobalRefs=HashMap<crate::SymbolId,(GlobalValue,FloatType)>;
 #[derive(Debug,Clone,PartialEq,Eq)]
-struct FpImportedGlobal {
+struct FpScalarGlobal {
     symbol:crate::SymbolId,
     name:String,
     ty:FloatType,
+    linkage:Linkage,
 }
 use cranelift_frontend::Variable;
 
@@ -147,6 +148,8 @@ pub struct FloatCondition {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
+    /// Real source-verified ordinary F32/F64 data store (not SSA).
+    StoreGlobal {symbol:crate::SymbolId,ty:FloatType,value:FloatExpr},
     /// A nonescaping, native EDG-verified callable pointer value in a
     /// typed automatic local. Definite assignment is tracked across CFG.
     AssignPointer {
@@ -620,6 +623,13 @@ fn check_fp_statements(
                 defined[*local]=true;
                 next=Some(defined);
             }
+            FloatStmt::StoreGlobal {ty,value,..}=>{
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP global store RHS native type mismatch"));
+                }
+                next=Some(defined);
+            }
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
@@ -786,6 +796,16 @@ fn emit_fp_statements(
                 let var=*locals.get(*local).ok_or_else(||
                     reject("pointer local has no SSA slot"))?;
                 fb.def_var(var,value);
+            }
+            FloatStmt::StoreGlobal {symbol,ty,value}=>{
+                let (data,actual)=*global_refs.get(symbol).ok_or_else(||
+                    reject("FP global store lacks verified data symbol"))?;
+                if *ty!=actual {return Err(reject("FP global store native type mismatch"));}
+                let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                    refs,global_refs)?;
+                if source!=*ty {return Err(reject("FP global store RHS type differs"));}
+                let address=fb.ins().global_value(types::I64,data);
+                fb.ins().store(MemFlags::new(),v,address,0);
             }
             FloatStmt::Assign(n,expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
@@ -1113,6 +1133,8 @@ fn validate_fp_calls_stmts(
             FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
             FloatStmt::ReturnInteger(e,_)=>
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
+            FloatStmt::StoreGlobal {value,..}=>
+                validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
                     if let ScalarCallArg::Float(e)=arg {
@@ -1169,7 +1191,7 @@ fn emit_scalar_float_bodies_internal(
 }
 fn emit_scalar_float_bodies_with_globals(
     functions:&[ScalarFloatBody],source_imports:bool,
-    globals:&[FpImportedGlobal],
+    globals:&[FpScalarGlobal],
 )->Result<Vec<u8>,CodegenError> {
     if functions.is_empty(){return Err(reject("empty FP function set"));}
     let mut flags=settings::builder();
