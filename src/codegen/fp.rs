@@ -1737,7 +1737,12 @@ fn comparison_from_edg(
             reject("FP condition has no native result type"))?)?;
     if !ctx.il.c_integer_types.iter().any(|ty|
         ty.id==integer && (ty.is_bool || ty.bits==32)) {
-        return Err(reject("FP comparison must produce C int or bool"));
+        return Err(reject(format!(
+            "FP comparison must produce C int or bool: kind={kind}, operator={operator:?}, expr_type={:?}, canonical={integer:?}, operand_types={:?}",
+            node.data.type_id,
+            node.operands.iter().map(|id|ctx.graph.expression(*id)
+                .and_then(|e|e.data.type_id)).collect::<Vec<_>>()
+        )));
     }
     let op=match operator {
         Some(5)=>FloatPredicate::Eq,
