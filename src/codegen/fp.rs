@@ -1035,6 +1035,42 @@ fn function_pointer_type_from_edg(il:&Il,id:crate::TypeId)
     }
     Ok((pointer,target))
 }
+/// EDG may assign separate native type identities to a function designator
+/// and the pointee of a pointer-to-function, even when they have the same
+/// valid C prototype. Compare the *complete* source-verified scalar calling
+/// signature, never the numeric type-ID or only the argument count.
+fn source_callable_signature(
+    il:&Il,original:crate::TypeId,
+)->Result<(Vec<ScalarType>,ScalarType),CodegenError> {
+    let ty=super::canonical_abi_type(il,original)?;
+    let function_ty=if il.types.iter().any(|t|t.id==ty &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+        ty
+    } else {
+        let (_,fn_ty)=function_pointer_type_from_edg(il,ty)?;
+        fn_ty
+    };
+    let def=il.types.iter().find(|t|t.id==function_ty &&
+        super::semantic(4,t.kind)==2 && t.related_role==Some(3))
+        .ok_or_else(||reject("indirect designator is not a function prototype"))?;
+    let prototype=il.function_signatures.iter().find(|p|p.owner==function_ty)
+        .ok_or_else(||reject("indirect designator has no prototype metadata"))?;
+    if !prototype.prototyped || prototype.variadic {
+        return Err(reject("indirect designator is variadic/unprototyped"));
+    }
+    let returned=scalar_type_from_edg(il,def.related
+        .ok_or_else(||reject("indirect function has no native return type"))?)?;
+    let mut declared:Vec<_>=il.type_parameters.iter()
+        .filter(|p|p.owner==function_ty).collect();
+    declared.sort_by_key(|p|p.position);
+    if declared.len()>256 || declared.iter().enumerate()
+        .any(|(n,p)|p.position!=n as u32) {
+        return Err(reject("indirect function prototype has invalid positions"));
+    }
+    let parameters=declared.iter().map(|p|scalar_type_from_edg(il,p.ty))
+        .collect::<Result<Vec<_>,_>>()?;
+    Ok((parameters,returned))
+}
 /// Reject a nonstandard ABI class, unsupported integer width, or synthetic
 /// type before generating code. Only standard signed/unsigned 32/64 bit C
 /// integer formals and native F32/F64 values enter this first mixed ABI slice.
@@ -1137,14 +1173,12 @@ fn expression_from_edg(
                     let designator=super::canonical_abi_type(ctx.il,
                         callee.data.type_id.ok_or_else(||
                             reject("indirect FP designator lacks type"))?)?;
-                    // Pinned EDG may preserve the pointer type for the
-                    // dereference expression, even when it denotes the
-                    // function designator. Only the two native identities
-                    // tied to the verified callable formal are valid.
-                    if designator!=fn_ty && designator!=pointer_type {
-                        return Err(reject(format!(
-                            "indirect FP designator type {} differs from function {} and pointer {}",
-                            designator.0,fn_ty.0,pointer_type.0)));
+                    // The native designator can have a distinct type ID.
+                    // Its full source prototype must still agree with the
+                    // exact pointee carried by the verified pointer formal.
+                    if source_callable_signature(ctx.il,designator)? !=
+                       source_callable_signature(ctx.il,fn_ty)? {
+                        return Err(reject("indirect FP designator prototype mismatch"));
                     }
                 }
                 (None,Some(index),Some(pointer_type),fn_ty)
