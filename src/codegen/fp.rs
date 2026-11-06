@@ -214,6 +214,38 @@ fn expression_type(
         }
     }
 }
+/// Evaluate typed scalar arguments exactly once and in source order.
+/// Both direct and indirect calls use this function and the same ABI classes.
+#[allow(clippy::too_many_arguments)]
+fn emit_scalar_call_arguments(
+    arguments:&[ScalarCallArg],parameters:&[ScalarType],
+    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
+    locals:&[Variable],locals_ty:&[FloatType],
+    refs:&HashMap<String,FuncRef>,
+)->Result<Vec<Value>,CodegenError> {
+    if arguments.len()!=parameters.len() || arguments.len()>256 {
+        return Err(reject("FP call argument arity invalid"));
+    }
+    let mut values=Vec::with_capacity(arguments.len());
+    for (arg,expected) in arguments.iter().zip(parameters) {
+        let value=match (arg,expected) {
+            (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
+                let (v,actual)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs)?;
+                if actual!=*t {return Err(reject("FP call argument needs conversion"));}
+                v
+            }
+            (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
+                if params_ty.get(*n)!=Some(expected) {
+                    return Err(reject("FP call INTEGER formal ABI mismatch"));
+                }
+                *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
+            }
+            _=>return Err(reject("FP call crosses incompatible argument classes")),
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
 fn emit_expr(
     expr:&FloatExpr,
     fb:&mut FunctionBuilder<'_>,
@@ -254,30 +286,38 @@ fn emit_expr(
             }
             let reference=*refs.get(callee)
                 .ok_or_else(||reject("FP call target has no defined function ref"))?;
-            let mut values=Vec::with_capacity(arguments.len());
-            for (arg,expected) in arguments.iter().zip(parameters) {
-                let value=match (arg,expected) {
-                    (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
-                        let (v,actual)=emit_expr(e,fb,params,params_ty,
-                            locals,locals_ty,refs)?;
-                        if actual!=*t {
-                            return Err(reject("FP direct call argument is not converted"));
-                        }
-                        v
-                    }
-                    (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
-                        if params_ty.get(*n)!=Some(expected) {
-                            return Err(reject("direct call INTEGER formal ABI mismatch"));
-                        }
-                        *params.get(*n).ok_or_else(||reject("missing direct call formal"))?
-                    }
-                    _=>return Err(reject("direct call crosses incompatible ABI classes")),
-                };
-                values.push(value);
-            }
+            let values=emit_scalar_call_arguments(arguments,parameters,fb,
+                params,params_ty,locals,locals_ty,refs)?;
             let inst=fb.ins().call(reference,&values);
             let result=*fb.inst_results(inst).first()
                 .ok_or_else(||reject("FP direct call has no return value"))?;
+            (result,*return_type)
+        }
+        CallIndirect {pointer_parameter,pointer_type,parameters,
+                      return_type,arguments}=>{
+            if params_ty.get(*pointer_parameter)!=
+                Some(&ScalarType::FunctionPointer(*pointer_type)) {
+                return Err(reject("indirect FP call target is not the verified pointer formal"));
+            }
+            let pointer=*params.get(*pointer_parameter)
+                .ok_or_else(||reject("indirect FP call formal missing"))?;
+            // The signature is typed: every INTEGER/SSE piece uses its
+            // source class. The SysV call convention chooses the registers.
+            let mut signature=cranelift_codegen::ir::Signature::new(
+                fb.func.signature.call_conv);
+            for ty in parameters {
+                if matches!(ty,ScalarType::FunctionPointer(_)) {
+                    return Err(reject("passing function pointers to FP callees unavailable"));
+                }
+                signature.params.push(AbiParam::new(ty.machine()));
+            }
+            signature.returns.push(AbiParam::new(return_type.machine()));
+            let values=emit_scalar_call_arguments(arguments,parameters,fb,
+                params,params_ty,locals,locals_ty,refs)?;
+            let reference=fb.import_signature(signature);
+            let call=fb.ins().call_indirect(reference,pointer,&values);
+            let result=*fb.inst_results(call).first()
+                .ok_or_else(||reject("indirect FP call has no result"))?;
             (result,*return_type)
         }
         Local(n)=>{
