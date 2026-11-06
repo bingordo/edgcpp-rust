@@ -1083,29 +1083,69 @@ fn expression_from_edg(
             return Err(reject("FP direct call has unsupported implicit/member arguments"));
         }
         let callee=ctx.graph.expression(node.operands[0])
-            .ok_or_else(||reject("FP direct call has no callee expression"))?;
-        if super::semantic(2,callee.data.kind)!=6 ||
-            !callee.operands.is_empty() {
-            return Err(reject("FP indirect/function-pointer call unsupported"));
-        }
-        let symbol=callee.data.symbol_id.ok_or_else(||
-            reject("FP direct callee has no native symbol"))?;
-        let named=ctx.il.symbols.iter().find(|s|
-            s.id==symbol && s.kind==1)
-            .ok_or_else(||reject("FP direct call target is not a named routine"))?;
-        let callee_name=named.name.clone();
-        if !ctx.il.entities.iter().any(|e|matches!(e,
-            crate::Entity::Routine{name,has_definition:true}
-                if name==&callee_name)) {
-            return Err(reject("FP direct call requires a definition in this source module"));
-        }
-        let callee_ty=ctx.il.symbol_types.iter()
-            .find(|p|p.symbol==symbol)
-            .ok_or_else(||reject("FP direct callee has no native function type"))?;
-        let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+            .ok_or_else(||reject("FP scalar call has no callee expression"))?;
+        let (callee_name,pointer_parameter,pointer_type,fn_ty)=
+            if super::semantic(2,callee.data.kind)==6 &&
+                callee.operands.is_empty() {
+                // Existing exact named routine path, including forward defs.
+                let symbol=callee.data.symbol_id.ok_or_else(||
+                    reject("FP direct callee has no native symbol"))?;
+                let named=ctx.il.symbols.iter().find(|s|
+                    s.id==symbol && s.kind==1)
+                    .ok_or_else(||reject("FP direct target is not a named routine"))?;
+                let name=named.name.clone();
+                if !ctx.il.entities.iter().any(|e|matches!(e,
+                    crate::Entity::Routine{name,has_definition:true}
+                        if name==&named.name)) {
+                    return Err(reject("FP direct call requires an in-module definition"));
+                }
+                let callee_ty=ctx.il.symbol_types.iter()
+                    .find(|p|p.symbol==symbol)
+                    .ok_or_else(||reject("FP direct callee has no native type"))?;
+                let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+                (Some(name),None,None,fn_ty)
+            } else {
+                // Exactly a pointer-valued *function formal*, optionally
+                // expressed by EDG as a function-designator dereference.
+                // Neither pointer locals nor computed addresses are accepted.
+                let pointer_expr=if super::semantic(2,callee.data.kind)==3 &&
+                    callee.operands.len()==1 &&
+                    callee.data.operator.is_some_and(|op|
+                        super::semantic(3,op)==44) {
+                    ctx.graph.expression(callee.operands[0]).ok_or_else(||
+                        reject("FP indirect dereference has no pointer operand"))?
+                } else {callee};
+                if super::semantic(2,pointer_expr.data.kind)!=2 ||
+                    !pointer_expr.operands.is_empty() ||
+                    pointer_expr.data.constant_kind.is_some() {
+                    return Err(reject("FP indirect target must be a direct function-pointer formal"));
+                }
+                let symbol=pointer_expr.data.symbol_id.ok_or_else(||
+                    reject("FP indirect pointer has no native symbol"))?;
+                let index=ctx.params.iter().position(|p|*p==symbol)
+                    .ok_or_else(||reject("FP indirect callee is not a parameter"))?;
+                let (pointer_type,fn_ty)=function_pointer_type_from_edg(
+                    ctx.il,pointer_expr.data.type_id.ok_or_else(||
+                        reject("FP indirect pointer lacks a native type"))?)?;
+                if ctx.param_types[index]!=ScalarType::FunctionPointer(pointer_type) {
+                    return Err(reject("FP indirect pointer formal type mismatch"));
+                }
+                // The EDG expression must refer to the native pointer type,
+                // or be an actual function-designator dereference. Neither
+                // a cast to function pointer nor data-pointer coercion is safe.
+                if !std::ptr::eq(pointer_expr,callee) {
+                    let designator=super::canonical_abi_type(ctx.il,
+                        callee.data.type_id.ok_or_else(||
+                            reject("indirect FP designator lacks type"))?)?;
+                    if designator!=fn_ty {
+                        return Err(reject("indirect FP designator type differs from target"));
+                    }
+                }
+                (None,Some(index),Some(pointer_type),fn_ty)
+            };
         let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
-            .ok_or_else(||reject("FP direct call needs an exact function prototype"))?;
+            .ok_or_else(||reject("FP callee requires a native function prototype"))?;
         let proto=ctx.il.function_signatures.iter()
             .find(|p|p.owner==fn_ty)
             .ok_or_else(||reject("FP direct callee missing prototype metadata"))?;
@@ -1154,13 +1194,25 @@ fn expression_from_edg(
                     }
                     ScalarCallArg::IntegerParameter(index)
                 }
+                ScalarType::FunctionPointer(_)=>return Err(reject(
+                    "passing function-pointer arguments needs a separate typed call contract")),
             };
             parameters.push(target);
             arguments.push(value);
         }
-        return Ok(FloatExpr::Call {
-            callee:callee_name,parameters,return_type:ty,arguments,
-        });
+        return if let Some(callee)=callee_name {
+            Ok(FloatExpr::Call {
+                callee,parameters,return_type:ty,arguments,
+            })
+        } else {
+            Ok(FloatExpr::CallIndirect {
+                pointer_parameter:pointer_parameter.ok_or_else(||
+                    reject("FP indirect pointer parameter was not resolved"))?,
+                pointer_type:pointer_type.ok_or_else(||
+                    reject("FP indirect pointer type was not resolved"))?,
+                parameters,return_type:ty,arguments,
+            })
+        };
     }
     if node.data.constant_kind.is_some() {
         if !node.operands.is_empty() || node.data.symbol_id.is_some() {
