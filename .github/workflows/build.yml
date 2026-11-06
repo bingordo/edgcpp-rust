@@ -854,6 +854,43 @@ jobs:
             done
           )
 
+      - name: M14 native source checked external F32 F64 globals GCC linked differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_external_globals*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen edg_m14_fp_external_data.o --c11 m14_fp_external_globals.c >m14_fp_external_data.log 2>&1; then
+              cat m14_fp_external_data.log
+              exit 1
+            fi
+            nm -u edg_m14_fp_external_data.o | grep -q m14_fp_shared_d
+            nm -u edg_m14_fp_external_data.o | grep -q m14_fp_shared_f
+            nm -g --defined-only edg_m14_fp_external_data.o | grep -q m14_external_d_loop
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_external_globals.c m14_fp_external_globals_driver.c -lm -o gcc_m14_fp_external_data
+            gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_fp_external_data.o m14_fp_external_globals_driver.c -lm -o cranelift_m14_fp_external_data
+            ./gcc_m14_fp_external_data
+            ./cranelift_m14_fp_external_data
+            for source in m14_fp_external_globals_bad_volatile.c m14_fp_external_globals_bad_owned.c m14_fp_external_globals_bad_static.c m14_fp_external_globals_bad_int.c; do
+              rm -f bad_fp_external_data.o bad_fp_external_data.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_fp_external_data.o --c11 "$source" >bad_fp_external_data.log 2>&1; then
+                echo "Unsupported F32/F64 global memory semantics unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |global|unsupported|qualified|external|EDG IL lowering failed|EDG reported compilation failure' bad_fp_external_data.log
+              test ! -e bad_fp_external_data.o
+            done
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
