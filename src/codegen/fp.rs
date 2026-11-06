@@ -2296,6 +2296,78 @@ mod tests {
     }
 
     #[test]
+    fn typed_callable_pointer_locals_propagate_ssa_and_validate_definite_assignment() {
+        let ptr=crate::TypeId(4096);
+        let call=FloatExpr::CallIndirect {
+            pointer:PointerSource::Local(0),pointer_type:ptr,
+            parameters:vec![ScalarType::Float(FloatType::F64)],
+            return_type:FloatType::F64,
+            arguments:vec![ScalarCallArg::Float(FloatExpr::Parameter(1))],
+        };
+        let function=ScalarFloatBody {
+            name:"m14_pointer_ssa_local".into(),
+            parameters:vec![ScalarType::FunctionPointer(ptr),
+                            ScalarType::Float(FloatType::F64)],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![ScalarType::FunctionPointer(ptr)],
+            statements:vec![
+                FloatStmt::AssignPointer {
+                    local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+                },
+                FloatStmt::Return(call.clone()),
+            ],
+        };
+        let object=emit_scalar_float_bodies(&[function.clone()]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        let mut bad=function.clone();
+        bad.statements=vec![FloatStmt::Return(call.clone())];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Local(0),
+            },
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.locals[0]=ScalarType::Float(FloatType::F64);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::AssignPointer {
+                local:0,pointer_type:crate::TypeId(4097),
+                source:PointerSource::Parameter(0),
+            },
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let cond=FloatCondition {
+            op:FloatPredicate::Gt,
+            left:FloatExpr::Parameter(1),
+            right:FloatExpr::Constant64(0.0f64.to_bits()),
+        };
+        let mut bad=function.clone();
+        bad.statements=vec![
+            FloatStmt::IfBlock(cond.clone(),vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }],vec![]),
+            FloatStmt::Return(call.clone()),
+        ];
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut valid=function.clone();
+        valid.statements=vec![
+            FloatStmt::IfBlock(cond,vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }],vec![FloatStmt::AssignPointer {
+                local:0,pointer_type:ptr,source:PointerSource::Parameter(0),
+            }]),
+            FloatStmt::Return(call),
+        ];
+        assert!(emit_scalar_float_bodies(&[valid]).is_ok());
+    }
+
+    #[test]
     fn function_pointer_formal_indirect_call_checks_abi_classes_and_target_identity() {
         let ptr=crate::TypeId(987);
         let signature=vec![
