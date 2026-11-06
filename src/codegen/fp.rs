@@ -1628,6 +1628,8 @@ fn lower_fp_body(
                     let value=expression_from_edg(ctx,operand,0)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
+                ScalarType::FunctionPointer(_)=>return Err(reject(
+                    "FP reference module cannot return function-pointer values")),
             }
         }
         _=>return Err(reject("unsupported FP control flow or statement form")),
