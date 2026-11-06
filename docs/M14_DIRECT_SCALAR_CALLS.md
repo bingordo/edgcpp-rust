@@ -62,6 +62,17 @@ Source negative fixtures reject external-only callees and arithmetic
 INTEGER call arguments. Rust tests also require rejection of missing
 callees and altered ABI signatures.
 
+## Follow-on typed indirect-call slice
+
+[PR #66](https://github.com/bingordo/edgcpp-rust/pull/66)
+(merge commit `a6b65484b210a69924d917ce703d66a1ac829d05`)
+added [source-verified native function-pointer-formal indirect
+calls](M14_INDIRECT_SCALAR_CALLS.md). The full
+[GCC differential workflow](https://github.com/bingordo/edgcpp-rust/actions/runs/42147086671)
+passed. Direct and indirect calls share typed scalar argument
+emission, but this slice does **not** implement pointer locals,
+computed pointer targets or indirect INTEGER-returning callees.
+
 ## Remaining M14 integration gates
 
 - Qualified external direct calls with checked imports/linkage/visibility,
