@@ -11,6 +11,8 @@ pub mod memory_order;
 pub mod scalar_abi;
 #[cfg(feature = "codegen")]
 pub mod codegen;
+#[cfg(feature = "native-compiler")]
+pub mod compiler_adapter;
 
 use std::{
     ffi::{c_char, c_int, c_void, CString},
