@@ -1651,6 +1651,36 @@ fn fp_data_pointer_type_from_edg(
 }
 /// Resolve a direct checked pointer formal. No computed addresses, local
 /// pointer variables, casts or other memory provenance are accepted.
+/// Source-owned direct C data pointer variable, only a formal or a checked
+/// nonescaping automatic pointer SSA value. Never infer provenance from C
+/// address constants, pointer arithmetic, casts or global pointer storage.
+fn source_fp_data_pointer_value(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
+)->Result<PointerSource,CodegenError> {
+    let expr=ctx.graph.expression(id).ok_or_else(||
+        reject("FP data pointer expression has no source identity"))?;
+    if super::semantic(2,expr.data.kind)!=2 ||
+        expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
+        return Err(reject("FP pointer value must be an unmodified typed variable"));
+    }
+    let symbol=expr.data.symbol_id.ok_or_else(||
+        reject("FP data pointer source has no native symbol"))?;
+    if fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+        reject("FP pointer expression has no native type"))?)?!=ty {
+        return Err(reject("FP pointer expression native pointee mismatch"));
+    }
+    let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+        PointerSource::Parameter(i)
+    } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+        PointerSource::Local(i)
+    } else {
+        return Err(reject("FP data pointer source is not a checked formal/local"));
+    };
+    if data_pointer_source_type(source,ctx.param_types,ctx.local_types)?!=ty {
+        return Err(reject("FP data pointer variable native ABI mismatch"));
+    }
+    Ok(source)
+}
 fn source_fp_pointer_formal(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
 )->Result<usize,CodegenError> {
@@ -2091,8 +2121,18 @@ fn expression_from_edg(
     // accepted. Integer expressions, local memory and implicit bitcasting
     // are *not* silently accepted as scalar floating point values.
     if op==44 && node.operands.len()==1 {
-        let n=source_fp_pointer_formal(ctx,node.operands[0],ty)?;
-        return Ok(FloatExpr::LoadPointerParameter {parameter:n,ty});
+        let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
+        return match source {
+            PointerSource::Parameter(n)=>{
+                // Keep the older stricter formal check as a regression gate.
+                if source_fp_pointer_formal(ctx,node.operands[0],ty)?!=n {
+                    return Err(reject("FP pointer formal provenance mismatch"));
+                }
+                Ok(FloatExpr::LoadPointerParameter {parameter:n,ty})
+            }
+            PointerSource::Local(local)=>
+                Ok(FloatExpr::LoadPointerLocal {local,ty}),
+        };
     }
     if node.operands.len()==1 && matches!(op,11|12|16) {
         let source=ctx.graph.expression(node.operands[0])
@@ -2473,6 +2513,15 @@ fn lower_fp_body(
                 output.push(FloatStmt::AssignPointer {local,pointer_type,source});
                 return Ok(());
             }
+            if let ScalarType::DataPointer(ty)=ctx.local_types[local] {
+                if init.kind!=3 || init.braced {
+                    return Err(reject("FP data pointer initializer requires source expression"));
+                }
+                let source=source_fp_data_pointer_value(ctx,node.expression
+                    .ok_or_else(||reject("FP pointer initializer has no expression"))?,ty)?;
+                output.push(FloatStmt::AssignDataPointer {local,ty,source});
+                return Ok(());
+            }
             let value=match init.kind {
                 // EDG dik_expression: an actual expression executes at this site.
                 3=>{
@@ -2532,12 +2581,21 @@ fn lower_fp_body(
                 left.operands.len()==1 {
                 let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                     reject("FP memory assignment lacks native lvalue type"))?)?;
-                let parameter=source_fp_pointer_formal(ctx,left.operands[0],ty)?;
+                let source=source_fp_data_pointer_value(ctx,left.operands[0],ty)?;
                 let value=expression_from_edg(ctx,operation.operands[1],0)?;
                 if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
                     return Err(reject("FP pointer store missing source conversion"));
                 }
-                output.push(FloatStmt::StorePointerParameter {parameter,ty,value});
+                match source {
+                    PointerSource::Parameter(parameter)=>{
+                        if source_fp_pointer_formal(ctx,left.operands[0],ty)?!=parameter {
+                            return Err(reject("FP pointer formal store provenance mismatch"));
+                        }
+                        output.push(FloatStmt::StorePointerParameter {parameter,ty,value});
+                    }
+                    PointerSource::Local(local)=>
+                        output.push(FloatStmt::StorePointerLocal {local,ty,value}),
+                }
                 return Ok(());
             }
             if super::semantic(2,left.data.kind)!=2 || !left.operands.is_empty() {
@@ -2571,6 +2629,11 @@ fn lower_fp_body(
                     return Err(reject("pointer assignment source ABI differs from target"));
                 }
                 output.push(FloatStmt::AssignPointer {local,pointer_type,source});
+                return Ok(());
+            }
+            if let ScalarType::DataPointer(ty)=ctx.local_types[local] {
+                let source=source_fp_data_pointer_value(ctx,operation.operands[1],ty)?;
+                output.push(FloatStmt::AssignDataPointer {local,ty,source});
                 return Ok(());
             }
             let value=expression_from_edg(ctx,operation.operands[1],0)?;
