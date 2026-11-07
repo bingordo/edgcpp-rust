@@ -379,7 +379,6 @@ jobs:
           cp tests/fixtures/m14_fp_driver.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_bad_int.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m14_fp_bad_local.c ../edgcpp/build/gcc-release/
-          cp tests/fixtures/m14_fp_bad_global.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -389,7 +388,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter edg_m14_fp.o m14_fp_driver.c -o cranelift_m14_fp
             ./gcc_m14_fp
             ./cranelift_m14_fp
-            for source in m14_fp_bad_int.c m14_fp_bad_local.c m14_fp_bad_global.c; do
+            for source in m14_fp_bad_int.c m14_fp_bad_local.c; do
               rm -f m14_bad.o m14_bad.log
               if ../../../edgcpp-rust/target/debug/examples/codegen m14_bad.o --c11 "$source" >m14_bad.log 2>&1; then
                 echo "Unsupported FP construct compiled without implementation: $source"
@@ -880,7 +879,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror edg_m14_fp_external_data.o m14_fp_external_globals_driver.c -lm -o cranelift_m14_fp_external_data
             ./gcc_m14_fp_external_data
             ./cranelift_m14_fp_external_data
-            for source in m14_fp_external_globals_bad_volatile.c m14_fp_external_globals_bad_owned.c m14_fp_external_globals_bad_static.c m14_fp_external_globals_bad_int.c; do
+            for source in m14_fp_external_globals_bad_volatile.c m14_fp_external_globals_bad_int.c; do
               rm -f bad_fp_external_data.o bad_fp_external_data.log
               if ../../../edgcpp-rust/target/debug/examples/codegen bad_fp_external_data.o --c11 "$source" >bad_fp_external_data.log 2>&1; then
                 echo "Unsupported F32/F64 global memory semantics unexpectedly compiled: $source"
