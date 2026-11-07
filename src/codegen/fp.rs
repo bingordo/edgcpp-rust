@@ -77,6 +77,8 @@ pub enum PointerSource {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FpIndex {
     Parameter {parameter:usize,ty:ScalarType},
+    /// A definitely initialized, checked I32/I64 C automatic SSA index.
+    Local {local:usize,ty:ScalarType},
     Constant {bits:u64,ty:ScalarType},
 }
 /// Side-effect-free, exact native INTEGER values allowed for automatic
@@ -304,13 +306,20 @@ fn data_pointer_source_type(
     }
 }
 fn checked_fp_index(
-    index:&FpIndex,params:&[ScalarType],
+    index:&FpIndex,params:&[ScalarType],locals:&[ScalarType],
 )->Result<ScalarType,CodegenError> {
     match index {
         FpIndex::Parameter {parameter,ty}=>{
             if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
                 params.get(*parameter)!=Some(ty) {
                 return Err(reject("FP subscript index is not an exact 32/64-bit INTEGER formal"));
+            }
+            Ok(*ty)
+        }
+        FpIndex::Local {local,ty}=>{
+            if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
+                locals.get(*local)!=Some(ty) {
+                return Err(reject("FP subscript index is not an exact I32/I64 automatic local"));
             }
             Ok(*ty)
         }
@@ -329,11 +338,13 @@ fn emit_fp_index_address(
     params:&[Value],params_ty:&[ScalarType],
     locals:&[Variable],locals_ty:&[ScalarType],
 )->Result<Value,CodegenError> {
-    let src=checked_fp_index(index,params_ty)?;
+    let src=checked_fp_index(index,params_ty,locals_ty)?;
     let base=emit_data_pointer_source(pointer,fb,params,params_ty,locals,locals_ty,ty)?;
     let index_value=match index {
         FpIndex::Parameter {parameter,..}=>*params.get(*parameter)
             .ok_or_else(||reject("FP INTEGER index formal has no ABI value"))?,
+        FpIndex::Local {local,..}=>fb.use_var(*locals.get(*local)
+            .ok_or_else(||reject("FP INTEGER index local has no SSA slot"))?),
         FpIndex::Constant {bits,..}=>emit_integer_literal(fb,src,*bits)?,
     };
     let extended=match src {
@@ -590,7 +601,7 @@ fn expression_type(
             if data_pointer_source_type(*pointer,params,locals)?!=*ty {
                 return Err(reject("FP indexed load pointee type mismatch"));
             }
-            checked_fp_index(index,params)?;
+            checked_fp_index(index,params,locals)?;
             Ok(*ty)
         },
         Constant32(_)=>Ok(FloatType::F32),
@@ -876,7 +887,15 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized INTEGER cast local")),
         LoadPointerLocal {local,..} if !defined.get(*local).copied().unwrap_or(false)=>
             Err(reject("FP load through uninitialized data pointer local")),
-        LoadIndexed {pointer,..}=>check_pointer_source_reads(*pointer,defined),
+        LoadIndexed {pointer,index,..}=>{
+            check_pointer_source_reads(*pointer,defined)?;
+            if let FpIndex::Local {local,..}=index {
+                if !defined.get(*local).copied().unwrap_or(false) {
+                    return Err(reject("FP index reads uninitialized INTEGER local"));
+                }
+            }
+            Ok(())
+        },
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         IntegerConstantCast {..}|IntegerLocalCast {..}|
         ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
@@ -1017,8 +1036,13 @@ fn check_fp_statements(
                 if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP indexed store pointee type mismatch"));
                 }
-                checked_fp_index(index,&f.parameters)?;
+                checked_fp_index(index,&f.parameters,&f.locals)?;
                 check_pointer_source_reads(*pointer,&defined)?;
+                if let FpIndex::Local {local,..}=index {
+                    if !defined.get(*local).copied().unwrap_or(false) {
+                        return Err(reject("FP indexed store uses uninitialized INTEGER local"));
+                    }
+                }
                 check_local_reads(value,&defined,0)?;
                 if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
                     return Err(reject("FP indexed store RHS has unconverted type"));
@@ -1985,28 +2009,15 @@ fn source_fp_data_pointer_value(
 fn source_fp_subscript_index(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
 )->Result<FpIndex,CodegenError> {
-    let node=ctx.graph.expression(id).ok_or_else(||
+    let expr=ctx.graph.expression(id).ok_or_else(||
         reject("FP indexed access lacks EDG integer expression"))?;
-    let ty=scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
-        reject("FP index has no native INTEGER type"))?)?;
-    if !matches!(ty,ScalarType::Int {bits:32|64,..}) {
-        return Err(reject("FP subscript requires a native 32/64-bit INTEGER index"));
+    let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+        reject("FP subscript index lacks native type"))?)?;
+    match source_fp_integer_value(ctx,id,ty)? {
+        FpIntegerSource::Parameter(parameter)=>Ok(FpIndex::Parameter {parameter,ty}),
+        FpIntegerSource::Local(local)=>Ok(FpIndex::Local {local,ty}),
+        FpIntegerSource::Constant {bits,ty}=>Ok(FpIndex::Constant {bits,ty}),
     }
-    if let Some(bits)=source_integer_constant(ctx,node,ty)? {
-        return Ok(FpIndex::Constant {bits,ty});
-    }
-    if super::semantic(2,node.data.kind)!=2 ||
-        node.data.constant_kind.is_some() || !node.operands.is_empty() {
-        return Err(reject("FP subscript index is not a direct INTEGER formal/constant"));
-    }
-    let symbol=node.data.symbol_id.ok_or_else(||
-        reject("FP subscript index lacks source symbol identity"))?;
-    let parameter=ctx.params.iter().position(|p|*p==symbol)
-        .ok_or_else(||reject("FP subscript INTEGER index is not a formal"))?;
-    if ctx.param_types[parameter]!=ty {
-        return Err(reject("FP subscript native INTEGER formal type mismatch"));
-    }
-    Ok(FpIndex::Parameter {parameter,ty})
 }
 fn source_fp_subscript(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
@@ -2037,7 +2048,7 @@ fn source_fp_subscript(
     };
     let pointer=source_fp_data_pointer_value(ctx,p,ty)?;
     let index=source_fp_subscript_index(ctx,i)?;
-    checked_fp_index(&index,ctx.param_types)?;
+    checked_fp_index(&index,ctx.param_types,ctx.local_types)?;
     Ok((pointer,index))
 }
 fn source_fp_pointer_formal(
@@ -3460,13 +3471,13 @@ mod tests {
             (ScalarType::Int {bits:64,signed:false},u64::MAX),
             (ScalarType::Int {bits:64,signed:true},u64::MAX),
         ] {
-            checked_fp_index(&FpIndex::Constant {bits,ty},&body.parameters)
+            checked_fp_index(&FpIndex::Constant {bits,ty},&body.parameters,&body.locals)
                 .unwrap();
         }
         // Reject a C short/char index until promotions are modeled.
         assert!(checked_fp_index(&FpIndex::Constant {
             bits:2,ty:ScalarType::Int {bits:16,signed:true},
-        },&body.parameters).is_err());
+        },&body.parameters,&body.locals).is_err());
         // Checked pointer locals must be definitely initialized on all paths.
         let local=ScalarFloatBody {
             name:"m14_indexed_uninitialized_local".into(),
