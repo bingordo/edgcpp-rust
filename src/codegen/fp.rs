@@ -2258,6 +2258,56 @@ fn source_integer_constant(
     checked_integer_literal(actual,bits)?;
     Ok(Some(bits))
 }
+/// Decode only an exact, side-effect-free C INTEGER value that has a
+/// native EDG type matching the expected 32/64-bit scalar class.
+fn source_fp_integer_value(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+    expected:ScalarType,
+)->Result<FpIntegerSource,CodegenError> {
+    if !matches!(expected,ScalarType::Int {bits:32|64,..}) {
+        return Err(reject("FP INTEGER source expected an exact 32/64-bit C type"));
+    }
+    let expr=ctx.graph.expression(id).ok_or_else(||
+        reject("FP INTEGER value lacks EDG expression"))?;
+    let native=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+        reject("FP INTEGER value has no native EDG type"))?)?;
+    if native!=expected {
+        return Err(reject("FP INTEGER source type/sign differs from target"));
+    }
+    if let Some(bits)=source_integer_constant(ctx,expr,expected)? {
+        return Ok(FpIntegerSource::Constant {bits,ty:expected});
+    }
+    if super::semantic(2,expr.data.kind)!=2 ||
+        !expr.operands.is_empty() || expr.data.constant_kind.is_some() {
+        return Err(reject("FP INTEGER value must be direct formal/local/literal"));
+    }
+    let symbol=expr.data.symbol_id.ok_or_else(||
+        reject("FP INTEGER variable lacks source symbol"))?;
+    if let Some(parameter)=ctx.params.iter().position(|s|*s==symbol) {
+        if ctx.param_types[parameter]!=expected {
+            return Err(reject("FP INTEGER formal source class differs"));
+        }
+        return Ok(FpIntegerSource::Parameter(parameter));
+    }
+    if let Some(local)=ctx.locals.iter().position(|s|*s==symbol) {
+        if ctx.local_types[local]!=expected {
+            return Err(reject("FP INTEGER local source class differs"));
+        }
+        return Ok(FpIntegerSource::Local(local));
+    }
+    Err(reject("FP INTEGER value is not a checked automatic/formal"))
+}
+fn source_fp_integer_arg(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+    expected:ScalarType,
+)->Result<ScalarCallArg,CodegenError> {
+    match source_fp_integer_value(ctx,id,expected)? {
+        FpIntegerSource::Parameter(n)=>Ok(ScalarCallArg::IntegerParameter(n)),
+        FpIntegerSource::Local(n)=>Ok(ScalarCallArg::IntegerLocal(n)),
+        FpIntegerSource::Constant {bits,ty}=>Ok(
+            ScalarCallArg::IntegerConstant {bits,ty}),
+    }
+}
 fn expression_from_edg(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
 )->Result<FloatExpr,CodegenError> {
@@ -2375,28 +2425,7 @@ fn expression_from_edg(
                     }
                     ScalarCallArg::Float(e)
                 }
-                ScalarType::Int {..}=>{
-                    let e=ctx.graph.expression(operand).ok_or_else(||
-                        reject("FP direct INTEGER arg has no native expression"))?;
-                    if let Some(bits)=source_integer_constant(ctx,e,target)? {
-                        ScalarCallArg::IntegerConstant {bits,ty:target}
-                    } else {
-                        if super::semantic(2,e.data.kind)!=2 ||
-                            !e.operands.is_empty() {
-                            return Err(reject("FP direct INTEGER argument must be a formal/literal"));
-                        }
-                        let id=e.data.symbol_id.ok_or_else(||
-                            reject("FP direct INTEGER argument lacks symbol"))?;
-                        let index=ctx.params.iter().position(|s|*s==id)
-                            .ok_or_else(||reject("FP direct INTEGER argument not a formal"))?;
-                        let actual=scalar_type_from_edg(ctx.il,e.data.type_id
-                            .ok_or_else(||reject("FP direct INTEGER argument type missing"))?)?;
-                        if actual!=target || ctx.param_types[index]!=target {
-                            return Err(reject("FP direct INTEGER argument has wrong type"));
-                        }
-                        ScalarCallArg::IntegerParameter(index)
-                    }
-                }
+                ScalarType::Int {..}=>source_fp_integer_arg(ctx,operand,target)?,
                 ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
                 ScalarType::StackFloat(_)=>return Err(reject(
                     "passing pointer arguments needs a separate typed call contract")),
@@ -2507,22 +2536,15 @@ fn expression_from_edg(
         let source_ty=source.data.type_id.ok_or_else(||
             reject("integer-to-FP cast operand has no native type"))?;
         let from=scalar_type_from_edg(ctx.il,source_ty)?;
-        if let ScalarType::Int {..}=from {
-            if let Some(bits)=source_integer_constant(ctx,source,from)? {
-                return Ok(FloatExpr::IntegerConstantCast {bits,source:from,to:ty});
-            }
-            if super::semantic(2,source.data.kind)!=2 ||
-                !source.operands.is_empty() || source.data.constant_kind.is_some() {
-                return Err(reject("integer-to-FP cast requires a direct integer formal or literal"));
-            }
-            let symbol=source.data.symbol_id.ok_or_else(||
-                reject("integer-to-FP cast operand lacks native symbol"))?;
-            let index=ctx.params.iter().position(|s|*s==symbol)
-                .ok_or_else(||reject("integer-to-FP cast does not reference a formal"))?;
-            if ctx.param_types[index]!=scalar_type_from_edg(ctx.il,source_ty)? {
-                return Err(reject("integer-to-FP formal's native type differs"));
-            }
-            return Ok(FloatExpr::IntegerParameterCast {parameter:index,to:ty});
+        if let ScalarType::Int {bits:32|64,..}=from {
+            return match source_fp_integer_value(ctx,node.operands[0],from)? {
+                FpIntegerSource::Parameter(parameter)=>
+                    Ok(FloatExpr::IntegerParameterCast {parameter,to:ty}),
+                FpIntegerSource::Local(local)=>
+                    Ok(FloatExpr::IntegerLocalCast {local,to:ty}),
+                FpIntegerSource::Constant {bits,ty:source}=>
+                    Ok(FloatExpr::IntegerConstantCast {bits,source,to:ty}),
+            };
         }
     }
     let arg=|i:usize|->Result<FloatExpr,CodegenError> {
@@ -3150,28 +3172,7 @@ fn lower_integer_indirect_return(
                 }
                 ScalarCallArg::Float(expr)
             }
-            ScalarType::Int {..}=>{
-                let expr=ctx.graph.expression(operand).ok_or_else(||
-                    reject("INTEGER indirect formal argument missing"))?;
-                if let Some(bits)=source_integer_constant(ctx,expr,*target)? {
-                    ScalarCallArg::IntegerConstant {bits,ty:*target}
-                } else {
-                    if super::semantic(2,expr.data.kind)!=2 ||
-                        !expr.operands.is_empty() {
-                        return Err(reject("INTEGER indirect call INTEGER argument not formal/literal"));
-                    }
-                    let symbol=expr.data.symbol_id.ok_or_else(||
-                        reject("INTEGER indirect argument lacks native symbol"))?;
-                    let index=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
-                        reject("INTEGER indirect argument not a checked formal"))?;
-                    let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
-                        reject("INTEGER indirect argument lacks native type"))?)?;
-                    if ty!=*target || ctx.param_types[index]!=*target {
-                        return Err(reject("INTEGER indirect argument type mismatch"));
-                    }
-                    ScalarCallArg::IntegerParameter(index)
-                }
-            }
+            ScalarType::Int {..}=>source_fp_integer_arg(ctx,operand,*target)?,
             ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
                 ScalarType::StackFloat(_)=>return Err(reject(
                 "pointer-valued INTEGER indirect-call argument unsupported")),
