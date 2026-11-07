@@ -436,7 +436,7 @@ fn expression_type(
             Ok(*return_type)
         }
         Local(n)=>match locals.get(*n).copied() {
-            Some(ScalarType::Float(t))=>Ok(t),
+            Some(ScalarType::Float(t)|ScalarType::StackFloat(t))=>Ok(t),
             _=>Err(reject("FP local out of range or is a callable pointer")),
         },
         ExternalGlobal {ty,..}=>Ok(*ty),
@@ -605,10 +605,14 @@ fn emit_expr(
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
             let ty=match locals_ty.get(*n) {
-                Some(ScalarType::Float(t))=>*t,
+                Some(ScalarType::Float(t)|ScalarType::StackFloat(t))=>*t,
                 _=>return Err(reject("FP local is not a typed FP value")),
             };
-            (fb.use_var(var),ty)
+            let value=fb.use_var(var);
+            let value=if matches!(locals_ty.get(*n),Some(ScalarType::StackFloat(_))) {
+                fb.ins().load(ty.machine(),MemFlags::new(),value,0)
+            } else {value};
+            (value,ty)
         }
         LoadPointerParameter {parameter,ty}=>{
             if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
@@ -770,7 +774,8 @@ fn validate_fp_arm(
         let ty=*f.locals.get(*n)
             .ok_or_else(||reject("FP branch local index out of range"))?;
         check_local_reads(expr,&defined,0)?;
-        if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
+        let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+        if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
             return Err(reject("FP branch assignment has an unconverted type"));
         }
         defined[*n]=true;
@@ -868,7 +873,8 @@ fn check_fp_statements(
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
                 check_local_reads(expr,&defined,0)?;
-                if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
+                let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+                if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
                     return Err(reject("FP assignment has an unconverted type"));
                 }
                 defined[*n]=true;
@@ -1068,8 +1074,18 @@ fn emit_fp_statements(
                 fb.ins().store(MemFlags::new(),v,address,0);
             }
             FloatStmt::Assign(n,expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.def_var(locals[*n],v);
+                let (v,actual)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                match locals_ty.get(*n) {
+                    Some(ScalarType::Float(ty)) if *ty==actual=>
+                        fb.def_var(locals[*n],v),
+                    Some(ScalarType::StackFloat(ty)) if *ty==actual=>{
+                        // An address-taken automatic must never retain an
+                        // out-of-date SSA copy after an aliased pointer store.
+                        let address=fb.use_var(locals[*n]);
+                        fb.ins().store(MemFlags::new(),v,address,0);
+                    }
+                    _=>return Err(reject("FP local store type differs from native source")),
+                }
             }
             FloatStmt::Return(expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
@@ -1592,6 +1608,18 @@ fn emit_scalar_float_bodies_with_globals(
             let vars:Vec<_>=f.locals.iter().enumerate().map(|(i,ty)|{
                 let var=Variable::from_u32(i as u32);
                 fb.declare_var(var,ty.machine());
+                if let ScalarType::StackFloat(t)=ty {
+                    let (bytes,log2_align)=match t {
+                        FloatType::F32=>(4,2),
+                        FloatType::F64=>(8,3),
+                    };
+                    let slot=fb.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            bytes,log2_align));
+                    let address=fb.ins().stack_addr(types::I64,slot,0);
+                    fb.def_var(var,address);
+                }
                 var
             }).collect();
             if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
