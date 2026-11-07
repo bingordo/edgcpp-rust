@@ -1,7 +1,7 @@
 # M14 — source-addressed FP automatic scalar objects
 
-Status: implementation and pinned EDG/Rust/Cranelift/GCC validation in
-progress. This is a bounded **address-taken local storage** improvement,
+Status: merged in [PR #79](https://github.com/bingordo/edgcpp-rust/pull/79),
+full pinned [native CI #42392410145](https://github.com/bingordo/edgcpp-rust/actions/runs/42392410145) green. This is a bounded **address-taken local storage** improvement,
 not completion of the general C memory/lifetime model in M14 #60.
 
 ## Source-checked stack selection
