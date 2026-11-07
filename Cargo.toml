@@ -14,8 +14,14 @@ path = "src/lib.rs"
 [features]
 default = []
 codegen = ["dep:cranelift-codegen", "dep:cranelift-module", "dep:cranelift-object", "dep:cranelift-frontend"]
+# The first production-backend pilot emits existing compiler IR directly.
+# Cranelift is not required; the source/backends stay pinned independently.
+native-compiler = ["dep:compiler-ir", "dep:compiler-backend", "dep:compiler-backend-x86"]
 
 [dependencies]
+compiler-ir = { git = "https://github.com/bingordo/compiler.git", rev = "7ce79651e5d170dfe70eebdeb2c12a7a1a555880", optional = true }
+compiler-backend = { git = "https://github.com/bingordo/compiler.git", rev = "7ce79651e5d170dfe70eebdeb2c12a7a1a555880", optional = true }
+compiler-backend-x86 = { git = "https://github.com/bingordo/compiler.git", rev = "7ce79651e5d170dfe70eebdeb2c12a7a1a555880", optional = true }
 cranelift-codegen = { version = "0.121", optional = true }
 cranelift-module = { version = "0.121", optional = true }
 cranelift-object = { version = "0.121", optional = true }
@@ -28,3 +34,7 @@ required-features = ["codegen"]
 [[example]]
 name = "m4_data_probe"
 required-features = ["codegen"]
+
+[[example]]
+name = "native_compiler"
+required-features = ["native-compiler"]
