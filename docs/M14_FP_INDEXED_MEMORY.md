@@ -17,9 +17,10 @@ The pointer is accepted only when it is the unchanged, source-verified
 pointer formal, definitely initialized automatic data-pointer SSA
 local or an already initialized, true address-taken F32/F64 stack
 object. The integer index is accepted only if it is an unchanged native
-I32/I64 formal or an EDG-owned integer literal with exact signedness,
-width and 64-bit carrier bits. No source string interpretation, cast,
-computed index tree, arbitrary address, integer local or pointer
+I32/I64 formal, a definitely initialized exact-type INTEGER automatic
+SSA local (merged PR #81), or an EDG-owned integer literal with exact
+signedness, width and 64-bit carrier bits. No source string interpretation, cast,
+computed index tree, arbitrary address, invalid INTEGER local or pointer
 arithmetic is inferred. Both `p[i]` and the C-equivalent `i[p]`
 operand order are checked.
 
@@ -43,7 +44,7 @@ behavior in C and is not made valid by this implementation.
   indices, incorrect pointee widths and absent source arguments.
 - Native EDG/Cranelift-versus-GCC differential uses the same independent
   driver and compares actual F32/F64 memory, signed negative and
-  unsigned indices, C reversed `i[p]`, pointer SSA aliases, fixed
+  unsigned indices (including verified INTEGER SSA locals in PR #81), C reversed `i[p]`, pointer SSA aliases, fixed
   literal indices, and signed-zero writes observed by the C caller.
 - Negative native inputs reject computed integer index arithmetic,
   pointer reinterpret casts, general `*(p+i)` arithmetic,
