@@ -883,8 +883,13 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
             for arg in arguments {
-                if let ScalarCallArg::Float(expr)=arg {
-                    check_local_reads(expr,defined,depth+1)?;
+                match arg {
+                    ScalarCallArg::Float(expr)=>
+                        check_local_reads(expr,defined,depth+1)?,
+                    ScalarCallArg::IntegerLocal(n) if
+                        !defined.get(*n).copied().unwrap_or(false)=>
+                        return Err(reject("FP call reads uninitialized INTEGER local")),
+                    _=>{},
                 }
             }
             Ok(())
@@ -892,8 +897,13 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         CallIndirect {pointer,arguments,..}=>{
             check_pointer_source_reads(*pointer,defined)?;
             for arg in arguments {
-                if let ScalarCallArg::Float(expr)=arg {
-                    check_local_reads(expr,defined,depth+1)?;
+                match arg {
+                    ScalarCallArg::Float(expr)=>
+                        check_local_reads(expr,defined,depth+1)?,
+                    ScalarCallArg::IntegerLocal(n) if
+                        !defined.get(*n).copied().unwrap_or(false)=>
+                        return Err(reject("FP indirect call reads uninitialized INTEGER local")),
+                    _=>{},
                 }
             }
             Ok(())
@@ -992,6 +1002,17 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::AssignInteger {local,source}=>{
+                let ty=*f.locals.get(*local).ok_or_else(||
+                    reject("INTEGER SSA assignment local is out of range"))?;
+                if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
+                    checked_fp_integer_source(source,&f.parameters,&f.locals)?!=ty {
+                    return Err(reject("INTEGER SSA assignment source class/sign differs"));
+                }
+                check_fp_integer_source_reads(source,&defined)?;
+                defined[*local]=true;
+                next=Some(defined);
+            }
             FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
                 if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP indexed store pointee type mismatch"));
@@ -1213,6 +1234,15 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::AssignInteger {local,source}=>{
+                let (value,ty)=emit_fp_integer_source(source,fb,
+                    params,params_ty,locals,locals_ty)?;
+                if locals_ty.get(*local)!=Some(&ty) {
+                    return Err(reject("INTEGER SSA assignment native class mismatch"));
+                }
+                fb.def_var(*locals.get(*local)
+                    .ok_or_else(||reject("INTEGER SSA destination has no variable"))?,value);
+            }
             FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
                 let address=emit_fp_index_address(*pointer,index,*ty,fb,
                     params,params_ty,locals,locals_ty)?;
@@ -1654,6 +1684,7 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
             }
             FloatStmt::AssignPointer {..}|FloatStmt::AssignDataPointer {..}|
+            FloatStmt::AssignInteger {..}|
             FloatStmt::Break|FloatStmt::Continue=>{},
         }
     }
@@ -3241,7 +3272,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             check_plain_fp_local(il,local.ty)?;
             let ty=scalar_type_from_edg(il,local.ty)?;
             if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)|
-                ScalarType::DataPointer(_)) {
+                ScalarType::DataPointer(_)|ScalarType::Int {bits:32|64,..}) {
                 return Err(reject("unsupported FP automatic local ABI class"));
             }
             // Use the EDG-owned expression tree to identify every native
