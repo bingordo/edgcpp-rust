@@ -1,4 +1,4 @@
-/* M14 source-checked nonescaping C float*/double* automatic pointers. */
+/* M14 source-checked nonescaping C float and double pointer locals. */
 double m14_ptrlocal_load(double *p) {
     double *copy=p;
     return *copy;
