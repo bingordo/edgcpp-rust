@@ -1,6 +1,7 @@
 # M14 — source-checked C indexed F32/F64 memory
 
-Status: native CI pending. This is a bounded extension of the existing
+Status: merged in [PR #80](https://github.com/bingordo/edgcpp-rust/pull/80),
+full pinned [native CI #42393335605](https://github.com/bingordo/edgcpp-rust/actions/runs/42393335605) green. This is a bounded extension of the existing
 pointer/formal, automatic pointer SSA and stack-backed local model.
 [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60) remains open.
 
