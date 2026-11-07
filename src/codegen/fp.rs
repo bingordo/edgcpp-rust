@@ -80,6 +80,7 @@ pub enum FpIndex {
     Parameter {parameter:usize,ty:ScalarType},
     Constant {bits:u64,ty:ScalarType},
 }
+#[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
     Float(FloatExpr),
     /// A native EDG direct INTEGER formal passed to the same scalar class.
@@ -893,6 +894,18 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
+                    return Err(reject("FP indexed store pointee type mismatch"));
+                }
+                checked_fp_index(index,&f.parameters)?;
+                check_pointer_source_reads(*pointer,&defined)?;
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP indexed store RHS has unconverted type"));
+                }
+                next=Some(defined);
+            }
             FloatStmt::AssignDataPointer {local,ty,source}=>{
                 if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
                     data_pointer_source_type(*source,&f.parameters,&f.locals)?!=*ty {
@@ -1102,6 +1115,14 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                let address=emit_fp_index_address(*pointer,index,*ty,fb,
+                    params,params_ty,locals,locals_ty)?;
+                let (value,actual)=emit_expr(value,fb,params,params_ty,
+                    locals,locals_ty,refs,global_refs)?;
+                if actual!=*ty {return Err(reject("indexed FP store RHS class mismatch"));}
+                fb.ins().store(MemFlags::new(),value,address,0);
+            }
             FloatStmt::AssignDataPointer {local,ty,source}=>{
                 let value=emit_data_pointer_source(*source,fb,
                     params,params_ty,locals,locals_ty,*ty)?;
@@ -1491,7 +1512,8 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
             FloatStmt::StoreGlobal {value,..}|
             FloatStmt::StorePointerParameter {value,..}|
-            FloatStmt::StorePointerLocal {value,..}=>
+            FloatStmt::StorePointerLocal {value,..}|
+            FloatStmt::StoreIndexed {value,..}=>
                 validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
