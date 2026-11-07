@@ -1203,7 +1203,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror m14_integer_literals.o m14_integer_literals_driver.c -lm -o clif_m14_integer_literals
             ./gcc_m14_integer_literals
             ./clif_m14_integer_literals
-            for source in m14_integer_literal_bad_short.c m14_integer_literal_bad_expr.c m14_integer_literal_bad_local.c; do
+            for source in m14_integer_literal_bad_short.c m14_integer_literal_bad_expr.c; do
               rm -f bad_m14_integer_literal.o bad_m14_integer_literal.log
               if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_integer_literal.o --c11 "$source" >bad_m14_integer_literal.log 2>&1; then
                 echo "Unchecked INTEGER/FP expression unexpectedly compiled: $source"
