@@ -2563,7 +2563,14 @@ fn lower_fp_body(
                 }
                 let index=ctx.locals.iter().position(|p|*p==decl.symbol)
                     .ok_or_else(||reject("FP declaration local symbol missing"))?;
-                if scalar_type_from_edg(ctx.il,decl.ty)?!=ctx.local_types[index] {
+                // StackFloat changes only the internal placement of a
+                // source C float/double, never its native declaration type.
+                let native=scalar_type_from_edg(ctx.il,decl.ty)?;
+                let expected=match ctx.local_types[index] {
+                    ScalarType::StackFloat(t)=>ScalarType::Float(t),
+                    other=>other,
+                };
+                if native!=expected {
                     return Err(reject("FP declaration source ABI type mismatch"));
                 }
             }
