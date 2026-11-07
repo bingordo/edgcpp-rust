@@ -259,6 +259,24 @@ General FP arrays/aggregates, pointer escapes, dynamic lifetimes,
 qualified memory and the backend-neutral source projection remain
 under [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60).
 
+**M14 exact INTEGER automatic SSA locals in FP code (November 7, 2026):**
+[PR #81](https://github.com/bingordo/edgcpp-rust/pull/81)
+adds checked nonqualified signed/unsigned I32/I64 automatic variables
+initialized or reassigned from exact native EDG constants, matching
+formals or already initialized locals. Numeric conversions to F32/F64
+use the correct signed/unsigned instructions, and integer locals can
+supply native typed C call arguments or indices for the earlier
+`p[i]` FP memory path. Source-checked definite initialization and
+negative rejection remain enforced; arbitrary integer arithmetic,
+promotions, address-taking and narrowing remain unavailable.
+The full pinned
+[CI #42394399311](https://github.com/bingordo/edgcpp-rust/actions/runs/42394399311)
+passed native EDG/Cranelift/GCC and pure Rust checks. See the
+[INTEGER SSA source contract](docs/M14_INTEGER_SSA_LOCALS.md).
+M14 [issue #60](https://github.com/bingordo/edgcpp-rust/issues/60)
+remains open for general scalar expression/lvalue semantics, fenv and
+backend-independent source projection.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
