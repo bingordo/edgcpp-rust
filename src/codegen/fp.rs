@@ -2111,7 +2111,8 @@ fn expression_from_edg(
                         ScalarCallArg::IntegerParameter(index)
                     }
                 }
-                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                     "passing pointer arguments needs a separate typed call contract")),
             };
             parameters.push(target);
@@ -2206,6 +2207,8 @@ fn expression_from_edg(
             }
             PointerSource::Local(local)=>
                 Ok(FloatExpr::LoadPointerLocal {local,ty}),
+            PointerSource::AddressedLocal(local)=>
+                Ok(FloatExpr::Local(local)),
         };
     }
     if node.operands.len()==1 && matches!(op,11|12|16) {
@@ -2671,6 +2674,8 @@ fn lower_fp_body(
                     }
                     PointerSource::Local(local)=>
                         output.push(FloatStmt::StorePointerLocal {local,ty,value}),
+                    PointerSource::AddressedLocal(local)=>
+                        output.push(FloatStmt::Assign(local,value)),
                 }
                 return Ok(());
             }
@@ -2752,7 +2757,8 @@ fn lower_fp_body(
                     let value=expression_from_edg(ctx,operand,0)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
-                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                     "FP reference module cannot return pointer values")),
             }
         }
@@ -2854,7 +2860,8 @@ fn lower_integer_indirect_return(
                     ScalarCallArg::IntegerParameter(index)
                 }
             }
-            ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+            ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                 "pointer-valued INTEGER indirect-call argument unsupported")),
         };
         arguments.push(value);
@@ -2961,7 +2968,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             // An addressed FP scalar must reside in one real stack object
             // for its entire function lifetime, including all aliases.
             let address_taken=graph.expressions.iter().any(|node|{
-                if node.data.function!=*name ||
+                if node.data.function.as_str()!=name ||
                     super::semantic(2,node.data.kind)!=3 ||
                     node.data.operator.map(|op|super::semantic(3,op))!=Some(43) ||
                     node.operands.len()!=1 {return false;}
