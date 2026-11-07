@@ -23,9 +23,10 @@ double m14_ptrlocal_branch(double *p,double *q,double x) {
 }
 double m14_ptrlocal_loop(double *p,double x) {
     double *copy=p;
-    while (x>0.0) {
+    double remaining=x;
+    while (remaining>0.0) {
         *copy=*copy+1.0;
-        x=x-1.0;
+        remaining=remaining-1.0;
     }
     return *copy;
 }
