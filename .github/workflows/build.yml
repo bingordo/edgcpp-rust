@@ -998,6 +998,41 @@ jobs:
             done
           )
 
+      - name: M14 checked FP data pointer SSA locals native GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_data_pointer_locals*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen m14_ptrlocals.o --c11 m14_fp_data_pointer_locals.c >m14_ptrlocals.log 2>&1; then
+              cat m14_ptrlocals.log
+              exit 1
+            fi
+            nm -g --defined-only m14_ptrlocals.o | grep -q m14_ptrlocal_branch
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_data_pointer_locals.c m14_fp_data_pointer_locals_driver.c -lm -o gcc_m14_ptrlocals
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_ptrlocals.o m14_fp_data_pointer_locals_driver.c -lm -o clif_m14_ptrlocals
+            ./gcc_m14_ptrlocals
+            ./clif_m14_ptrlocals
+            for source in m14_fp_data_pointer_locals_bad_uninit.c m14_fp_data_pointer_locals_bad_branch.c m14_fp_data_pointer_locals_bad_arith.c m14_fp_data_pointer_locals_bad_escape.c; do
+              rm -f bad_m14_ptrlocals.o bad_m14_ptrlocals.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_ptrlocals.o --c11 "$source" >bad_m14_ptrlocals.log 2>&1; then
+                echo "Unsafe FP pointer SSA local unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |pointer|unsupported|uninitialized|source|EDG IL lowering failed|EDG reported compilation failure' bad_m14_ptrlocals.log
+              test ! -e bad_m14_ptrlocals.o
+            done
+          )
+
       - name: M14 source-verified IEEE explicit global definitions GCC differential
         working-directory: edgcpp-rust
         env:
