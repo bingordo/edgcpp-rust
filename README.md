@@ -238,6 +238,27 @@ This does **not** add general address-taken FP locals, escaping pointers
 or complete C memory/lifetime semantics; [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
 remains open.
 
+**M14 source-checked FP address-taking and indexed memory (November 7, 2026):**
+[PR #79](https://github.com/bingordo/edgcpp-rust/pull/79)
+adds real stack storage for native EDG `&local` F32/F64 objects, so
+writes through a checked pointer are visible in direct local reads.
+[PR #80](https://github.com/bingordo/edgcpp-rust/pull/80)
+adds signed/unsigned 32/64-bit **native C `p[i]` and `i[p]`**
+subscripts on source-checked ordinary F32/F64 pointer formals,
+pointer SSA locals and addressed stack locals. Real scaled memory
+loads/stores preserve aliases; computed integer indices, pointer
+casts, raw pointer arithmetic and qualified pointees still fail closed.
+Full pinned native EDG/Rust/Cranelift/GCC
+[CI #42392410145](https://github.com/bingordo/edgcpp-rust/actions/runs/42392410145)
+for #79 and
+[CI #42393335605](https://github.com/bingordo/edgcpp-rust/actions/runs/42393335605)
+for #80 passed. See
+[address-taken local contract](docs/M14_FP_ADDRESS_TAKEN_LOCALS.md)
+and [indexed memory contract](docs/M14_FP_INDEXED_MEMORY.md).
+General FP arrays/aggregates, pointer escapes, dynamic lifetimes,
+qualified memory and the backend-neutral source projection remain
+under [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60).
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
