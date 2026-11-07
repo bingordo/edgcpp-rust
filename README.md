@@ -203,6 +203,23 @@ General INTEGER arithmetic, automatic integer locals and mixed scalar
 side-effect sequencing are **not** supported by this slice; [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
 remains open.
 
+**M14 exact IEEE file-scope FP initializer data (November 7, 2026):**
+[PR #77](https://github.com/bingordo/edgcpp-rust/pull/77) adds
+native EDG-verified constant IEEE images for C `float`/`double`
+global definitions. Explicit initialization produces byte-exact
+aligned ELF `.data`; zero/tentative definitions remain real `.bss`.
+Externally observable unreferenced globals are retained, and ordinary
+source-verified loads/stores remain true memory accesses. GCC driver
+checks cover signed zero, exact F32 last-bit values, static globals,
+independent GCC global reads/writes and exported unused data symbols.
+The full pinned Rust/EDG/Cranelift/GCC
+[CI #42385599855](https://github.com/bingordo/edgcpp-rust/actions/runs/42385599855)
+passed. See [the initialized FP global contract](docs/M14_FP_INITIALIZED_GLOBALS.md).
+This does **not** support dynamic initializers, general FP
+lvalues/aliasing, volatile/atomic/TLS storage or a native compiler
+adapter. [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
+remains open.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
