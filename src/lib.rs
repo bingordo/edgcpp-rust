@@ -119,6 +119,8 @@ pub struct Il {
     pub float_constants: Vec<FloatConstant>,
     /// EDG dik_constant scalar FP initializer images, wire event 59.
     pub float_initializers: Vec<FloatInitializer>,
+    /// Byte-exact native IEEE file-scope definition image, event 60.
+    pub global_float_initializers: Vec<GlobalFloatInitializer>,
     pub global_variables: Vec<GlobalVariable>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
@@ -269,6 +271,15 @@ pub struct FloatConstant {
 pub struct FloatInitializer {
     pub function: String,
     pub statement_path: String,
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub width: u8,
+    pub bits: u64,
+}
+
+/// Exact EDG ck_float initializer for a native file-scope definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalFloatInitializer {
     pub symbol: SymbolId,
     pub ty: TypeId,
     pub width: u8,
@@ -907,6 +918,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         57 => Some(il.c_float_types.len()),
         58 => Some(il.float_constants.len()),
         59 => Some(il.float_initializers.len()),
+        60 => Some(il.global_float_initializers.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
@@ -946,7 +958,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1096,6 +1108,18 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.float_constants.push(FloatConstant {
                 function,statement_path,path,ty:TypeId(ty),
                 width:width as u8,bits,
+            });
+        }
+        60 => {
+            let (Some(symbol),Some(ty),Some(width),Some(bits)) =
+                (n(0),n(1),n(2),fields[3].unsigned())
+                else {return;};
+            if symbol==0 || ty==0 || !matches!(width,32|64) ||
+                (width==32 && bits>u64::from(u32::MAX)) {
+                return;
+            }
+            output.global_float_initializers.push(GlobalFloatInitializer {
+                symbol:SymbolId(symbol),ty:TypeId(ty),width:width as u8,bits,
             });
         }
         59 => {
@@ -1848,6 +1872,34 @@ mod tests {
             invalid.as_ptr(),invalid.len(),0);}
         assert!(state.malformed);
         assert_eq!(state.il.float_initializers.len(),1);
+    }
+    #[test]
+    fn m14_global_fp_image_wire_preserves_ieee_bits_and_rejects_bad_width() {
+        let number=|value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let valid=[number(17),number(23),number(64),
+                   number(0x8000_0000_0000_0000)];
+        unsafe {collect((&mut state as *mut Collector).cast(),60,
+                        valid.as_ptr(),valid.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.global_float_initializers,vec![
+            GlobalFloatInitializer {
+                symbol:SymbolId(17),ty:TypeId(23),width:64,
+                bits:0x8000_0000_0000_0000,
+            }
+        ]);
+        let bad=[number(18),number(24),number(32),number(0x1_0000_0000)];
+        unsafe {collect((&mut state as *mut Collector).cast(),60,
+                        bad.as_ptr(),bad.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.global_float_initializers.len(),1);
+        let mut malformed=Collector {il:Il::default(),panicked:false,malformed:false};
+        unsafe {collect((&mut malformed as *mut Collector).cast(),60,
+                        valid.as_ptr(),3,0);}
+        assert!(malformed.malformed);
+        assert!(malformed.il.global_float_initializers.is_empty());
     }
     #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {

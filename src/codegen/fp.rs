@@ -17,6 +17,7 @@ struct FpScalarGlobal {
     name:String,
     ty:FloatType,
     linkage:Linkage,
+    initializer:Option<Vec<u8>>,
 }
 use cranelift_frontend::Variable;
 
@@ -1384,16 +1385,28 @@ fn emit_scalar_float_bodies_with_globals(
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         global_ids.insert(g.symbol,(id,g.ty));
     }
-    // C tentative/static definitions without explicit initializers must
-    // allocate actual zero-initialized .bss, never fake imported storage.
+    // Source-owned definitions have real ELF storage: .data for exact
+    // IEEE bit images, .bss for tentative/uninitialized objects.
     for g in globals {
-        if g.linkage==Linkage::Import {continue;}
+        if g.linkage==Linkage::Import {
+            if g.initializer.is_some() {
+                return Err(reject("imported FP global cannot own initializer"));
+            }
+            continue;
+        }
         let id=global_ids.get(&g.symbol).ok_or_else(||
-            reject("FP zero-initialized data was not declared"))?.0;
+            reject("FP data definition was not declared"))?.0;
         let mut data=cranelift_module::DataDescription::new();
         let bytes=match g.ty {FloatType::F32=>4usize,FloatType::F64=>8usize};
         data.set_align(bytes as u64);
-        data.define_zeroinit(bytes);
+        if let Some(image)=&g.initializer {
+            if image.len()!=bytes {
+                return Err(reject("FP global initializer native width mismatch"));
+            }
+            data.define(image.clone().into_boxed_slice());
+        } else {
+            data.define_zeroinit(bytes);
+        }
         module.define_data(id,&data)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
     }
@@ -1689,13 +1702,17 @@ fn pointer_source_from_edg(
 /// Source-owned named C FP object import, never an arbitrary memory address.
 fn source_fp_global(
     il:&Il,symbol:crate::SymbolId,
-)->Result<(String,FloatType,Linkage),CodegenError> {
-    let meta=il.global_variables.iter().find(|g|g.symbol==symbol)
-        .ok_or_else(||reject("FP global is not an EDG-classified file-scope object"))?;
-    if !matches!(meta.linkage,1|2|3) || meta.explicit_initializer ||
+)->Result<(String,FloatType,Linkage,Option<Vec<u8>>),CodegenError> {
+    let mut metas=il.global_variables.iter().filter(|g|g.symbol==symbol);
+    let meta=metas.next().ok_or_else(||
+        reject("FP global is not an EDG-classified file-scope object"))?;
+    if metas.next().is_some() {
+        return Err(reject("FP global has ambiguous native storage metadata"));
+    }
+    if !matches!(meta.linkage,1|2|3) ||
         meta.thread_local || meta.local_to_function ||
         il.static_local_owners.iter().any(|s|s.symbol==symbol) {
-        return Err(reject("FP globals need uninitialized ordinary C storage"));
+        return Err(reject("FP globals need ordinary C storage and source metadata"));
     }
     let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
         .map(|s|s.name.clone())
@@ -1707,11 +1724,31 @@ fn source_fp_global(
         .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
     check_plain_fp_local(il,declared)?;
     let ty=type_from_edg(il,declared)?;
+    let initializer=if meta.explicit_initializer {
+        let mut images=il.global_float_initializers.iter()
+            .filter(|v|v.symbol==symbol);
+        let image=images.next().ok_or_else(||
+            reject("explicit FP global initializer lacks exact native IEEE image"))?;
+        if images.next().is_some() {
+            return Err(reject("ambiguous native FP global initializer image"));
+        }
+        let width=match ty {FloatType::F32=>32,FloatType::F64=>64};
+        if image.ty!=declared || u32::from(image.width)!=width {
+            return Err(reject("FP global initializer native type/width mismatch"));
+        }
+        Some(image.bits.to_le_bytes()[..(width/8) as usize].to_vec())
+    } else {
+        if il.global_float_initializers.iter().any(|v|v.symbol==symbol) {
+            return Err(reject("native FP global image without explicit definition"));
+        }
+        None
+    };
     let linkage=match meta.linkage {
+        1 if meta.explicit_initializer=>Linkage::Export,
         1=>Linkage::Import,2=>Linkage::Local,3=>Linkage::Export,
         _=>return Err(reject("unknown FP global storage linkage")),
     };
-    Ok((name,ty,linkage))
+    Ok((name,ty,linkage,initializer))
 }
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
@@ -1949,7 +1986,7 @@ fn expression_from_edg(
             return Ok(FloatExpr::Local(i));
         }
         if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
-            let (_,actual,_)=source_fp_global(ctx.il,symbol)?;
+            let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
             if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
                     reject("FP external global expression lacks native type"))?)?!=
                     ScalarType::Float(actual) {
@@ -2420,7 +2457,7 @@ fn lower_fp_body(
             }
             if let Some(symbol)=left.data.symbol_id {
                 if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
-                    let (_,ty,_)=source_fp_global(ctx.il,symbol)?;
+                    let (_,ty,_,_)=source_fp_global(ctx.il,symbol)?;
                     if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                         reject("FP global store lvalue has no native type"))?)?!=
                         ScalarType::Float(ty) {
@@ -2625,13 +2662,12 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
     }
     if !found_float {return Ok(None);}
-    // Allow only native C FP zero-initialized data definitions or extern
-    // imports. Explicit initializers, TLS and function-local statics need
-    // independent byte-image and lifetime support.
+    // Allow only ordinary, source-classified C file-scope data. Explicit
+    // initialization requires a separate native IEEE byte-image event.
     if il.global_variables.iter().any(|g|
-        !matches!(g.linkage,1|2|3) || g.explicit_initializer ||
+        !matches!(g.linkage,1|2|3) ||
         g.thread_local || g.local_to_function) {
-        return Err(reject("FP source module has unsupported initialized/TLS globals"));
+        return Err(reject("FP source module has unsupported TLS/local globals"));
     }
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
@@ -2704,18 +2740,25 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             locals:local_types,statements,
         });
     }
-    // Only externally declared ordinary standard C FP objects are
-    // available here. Initialized/tentative definitions and TLS remain
-    // under the existing memory-backed integration gate.
+    // Retain ALL owned global definitions, even without a source-local read:
+    // external GCC objects can refer to these symbols. Only referenced
+    // declarations become imports.
     let mut fp_globals=Vec::new();
     let mut seen=std::collections::HashSet::new();
+    for g in &il.global_variables {
+        if (g.linkage!=1 || g.explicit_initializer) && seen.insert(g.symbol) {
+            let symbol=g.symbol;
+            let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
+        }
+    }
     for expr in &il.expressions {
         if super::semantic(2,expr.kind)!=2 {continue;}
         let Some(symbol)=expr.symbol_id else {continue;};
         if il.global_variables.iter().any(|g|g.symbol==symbol) &&
             seen.insert(symbol) {
-            let (name,ty,linkage)=source_fp_global(il,symbol)?;
-            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage});
+            let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
+            fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
         }
     }
     emit_scalar_float_bodies_with_globals(&functions,true,&fp_globals).map(Some)
@@ -2727,6 +2770,39 @@ mod tests {
     fn param(n:usize)->FloatExpr {FloatExpr::Parameter(n)}
     fn bin(a:usize,b:usize)->FloatExpr {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
+    }
+    #[test]
+    fn m14_ieee_global_data_images_are_exact_and_reject_malformed_definitions() {
+        let f=ScalarFloatBody {
+            name:"m14_exact_global_test".into(),
+            parameters:vec![],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(FloatExpr::Constant64(0))],
+        };
+        let bits=0x8000_0000_0000_0000_u64;
+        let g=FpScalarGlobal {
+            symbol:crate::SymbolId(100),name:"m14_exact_global_data".into(),
+            ty:FloatType::F64,linkage:Linkage::Export,
+            initializer:Some(bits.to_le_bytes().to_vec()),
+        };
+        let elf=emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[g.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        assert!(elf.windows(8).any(|bytes| bytes==bits.to_le_bytes().as_slice()));
+        let mut bad=g.clone();
+        bad.initializer=Some(vec![0;4]);
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[bad]).is_err());
+        let mut bad=g.clone();
+        bad.linkage=Linkage::Import;
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[bad]).is_err());
+        let mut bad=g.clone();
+        bad.symbol=crate::SymbolId(101);
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[g.clone(),bad]).is_err());
+        let zero=FpScalarGlobal {
+            symbol:crate::SymbolId(102),name:"m14_exact_zero_global".into(),
+            ty:FloatType::F32,linkage:Linkage::Local,initializer:None,
+        };
+        assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
     }
     #[test]
     fn source_authorized_external_scalar_imports_are_typed_and_restricted() {
