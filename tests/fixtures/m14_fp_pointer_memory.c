@@ -26,9 +26,10 @@ double m14_fp_ptr_branch(double *p,double x,double threshold) {
     return *p;
 }
 double m14_fp_ptr_loop(double *p,double x,double bound) {
-    while(x<bound) {
-        *p=x;
-        x=x+1.0;
+    double value=x;
+    while(value<bound) {
+        *p=value;
+        value=value+1.0;
     }
     return *p;
 }
