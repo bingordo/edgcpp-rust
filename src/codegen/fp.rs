@@ -1849,6 +1849,68 @@ fn source_fp_data_pointer_value(
     }
     Ok(source)
 }
+/// Resolve a native C pointer subscript without inventing pointer
+/// arithmetic or accepting an arbitrary integer expression.  The pointer
+/// must be the original checked scalar FP formal/local/addressed scalar;
+/// the integer must be a direct I32/I64 formal or bit-exact constant.
+fn source_fp_subscript_index(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+)->Result<FpIndex,CodegenError> {
+    let node=ctx.graph.expression(id).ok_or_else(||
+        reject("FP indexed access lacks EDG integer expression"))?;
+    let ty=scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+        reject("FP index has no native INTEGER type"))?)?;
+    if !matches!(ty,ScalarType::Int {bits:32|64,..}) {
+        return Err(reject("FP subscript requires a native 32/64-bit INTEGER index"));
+    }
+    if let Some(bits)=source_integer_constant(ctx,node,ty)? {
+        return Ok(FpIndex::Constant {bits,ty});
+    }
+    if super::semantic(2,node.data.kind)!=2 ||
+        node.data.constant_kind.is_some() || !node.operands.is_empty() {
+        return Err(reject("FP subscript index is not a direct INTEGER formal/constant"));
+    }
+    let symbol=node.data.symbol_id.ok_or_else(||
+        reject("FP subscript index lacks source symbol identity"))?;
+    let parameter=ctx.params.iter().position(|p|*p==symbol)
+        .ok_or_else(||reject("FP subscript INTEGER index is not a formal"))?;
+    if ctx.param_types[parameter]!=ty {
+        return Err(reject("FP subscript native INTEGER formal type mismatch"));
+    }
+    Ok(FpIndex::Parameter {parameter,ty})
+}
+fn source_fp_subscript(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
+)->Result<(PointerSource,FpIndex),CodegenError> {
+    let node=ctx.graph.expression(id)
+        .ok_or_else(||reject("FP subscript has no EDG source node"))?;
+    if super::semantic(2,node.data.kind)!=3 ||
+        node.data.operator.map(|op|super::semantic(3,op))!=Some(45) ||
+        node.operands.len()!=2 || node.data.constant_kind.is_some() ||
+        type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+            reject("FP indexed lvalue has no native result type"))?)?!=ty {
+        return Err(reject("FP indexed lvalue is not a checked C subscript"));
+    }
+    let left=ctx.graph.expression(node.operands[0]).ok_or_else(||
+        reject("FP subscript left operand missing"))?;
+    let right=ctx.graph.expression(node.operands[1]).ok_or_else(||
+        reject("FP subscript right operand missing"))?;
+    let left_ty=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+        reject("FP subscript left operand has no type"))?)?;
+    let right_ty=scalar_type_from_edg(ctx.il,right.data.type_id.ok_or_else(||
+        reject("FP subscript right operand has no type"))?)?;
+    let (p,i)=match (left_ty,right_ty) {
+        (ScalarType::DataPointer(p),ScalarType::Int {bits:32|64,..})
+            if p==ty=>(node.operands[0],node.operands[1]),
+        (ScalarType::Int {bits:32|64,..},ScalarType::DataPointer(p))
+            if p==ty=>(node.operands[1],node.operands[0]),
+        _=>return Err(reject("FP subscript does not have one exact pointer and INTEGER")),
+    };
+    let pointer=source_fp_data_pointer_value(ctx,p,ty)?;
+    let index=source_fp_subscript_index(ctx,i)?;
+    checked_fp_index(&index,ctx.param_types)?;
+    Ok((pointer,index))
+}
 fn source_fp_pointer_formal(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
 )->Result<usize,CodegenError> {
@@ -2290,6 +2352,10 @@ fn expression_from_edg(
     // Only an EDG-authoritative conversion from a direct integer formal is
     // accepted. Integer expressions, local memory and implicit bitcasting
     // are *not* silently accepted as scalar floating point values.
+    if op==45 && node.operands.len()==2 {
+        let (pointer,index)=source_fp_subscript(ctx,id,ty)?;
+        return Ok(FloatExpr::LoadIndexed {pointer,index,ty});
+    }
     if op==44 && node.operands.len()==1 {
         let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
         return match source {
@@ -2755,6 +2821,21 @@ fn lower_fp_body(
             }
             let left=ctx.graph.expression(operation.operands[0])
                 .ok_or_else(||reject("FP assignment has no lvalue"))?;
+            // Native C p[i]=rhs uses the same verified provenance and
+            // integer-index source contract as the corresponding rvalue.
+            if super::semantic(2,left.data.kind)==3 &&
+                left.data.operator.is_some_and(|op|super::semantic(3,op)==45) &&
+                left.operands.len()==2 {
+                let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                    reject("FP indexed assignment lacks native lvalue type"))?)?;
+                let (pointer,index)=source_fp_subscript(ctx,operation.operands[0],ty)?;
+                let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                    return Err(reject("FP indexed store RHS missing native conversion"));
+                }
+                output.push(FloatStmt::StoreIndexed {pointer,index,ty,value});
+                return Ok(());
+            }
             // Native C *p = rhs: p must be an unchanged, unqualified
             // source-verified pointer formal to exactly this F32/F64 type.
             if super::semantic(2,left.data.kind)==3 &&
