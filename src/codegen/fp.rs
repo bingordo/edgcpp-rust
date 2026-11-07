@@ -33,6 +33,9 @@ impl FloatType {
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum ScalarType {
     Float(FloatType),
+    /// Only an automatic source-local whose address was actually taken.
+    /// Its SSA variable contains a native stack address, never FP bits.
+    StackFloat(FloatType),
     Int { bits:u8,signed:bool },
     /// An EDG-verified pointer to a prototyped nonvariadic C function.
     /// Its canonical native identity prevents casting ordinary data pointers.
@@ -47,7 +50,8 @@ impl ScalarType {
             Self::Float(t)=>t.machine(),
             Self::Int {bits:32,..}=>types::I32,
             Self::Int {bits:64,..}=>types::I64,
-            Self::FunctionPointer(_)|Self::DataPointer(_)=>types::I64,
+            Self::FunctionPointer(_)|Self::DataPointer(_)|
+            Self::StackFloat(_)=>types::I64,
             _=>unreachable!("integer width was checked at source boundary"),
         }
     }
@@ -64,6 +68,9 @@ struct ScalarFloatBody {
 pub enum PointerSource {
     Parameter(usize),
     Local(usize),
+    /// Native &x for a checked, stack-backed FP local. Never a computed
+    /// address, global, parameter address, or escaping pointer.
+    AddressedLocal(usize),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
@@ -244,6 +251,8 @@ fn pointer_source_type(
             Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
             _=>Err(reject("call target is not a checked pointer local")),
         },
+        PointerSource::AddressedLocal(_)=>
+            Err(reject("address of FP object is not a C callable pointer")),
     }
 }
 fn data_pointer_source_type(
@@ -258,6 +267,10 @@ fn data_pointer_source_type(
             Some(ScalarType::DataPointer(t))=>Ok(*t),
             _=>Err(reject("FP data pointer is not an exact typed automatic local")),
         },
+        PointerSource::AddressedLocal(n)=>match locals.get(n) {
+            Some(ScalarType::StackFloat(t))=>Ok(*t),
+            _=>Err(reject("address-of FP local has no checked stack object")),
+        },
     }
 }
 fn check_pointer_source_reads(
@@ -265,8 +278,10 @@ fn check_pointer_source_reads(
 )->Result<(),CodegenError> {
     match src {
         PointerSource::Parameter(_)=>Ok(()),
-        PointerSource::Local(n) if defined.get(n).copied()==Some(true)=>Ok(()),
-        PointerSource::Local(_)=>Err(reject("read of uninitialized callable pointer local")),
+        PointerSource::Local(n)|PointerSource::AddressedLocal(n)
+            if defined.get(n).copied()==Some(true)=>Ok(()),
+        PointerSource::Local(_)|PointerSource::AddressedLocal(_)=>
+            Err(reject("pointer source or addressed FP object is uninitialized")),
     }
 }
 fn emit_data_pointer_source(
@@ -280,8 +295,9 @@ fn emit_data_pointer_source(
     match src {
         PointerSource::Parameter(n)=>params.get(n).copied().ok_or_else(||
             reject("FP data pointer formal has no native ABI value")),
-        PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
-            .ok_or_else(||reject("FP data pointer local has no SSA slot")),
+        PointerSource::Local(n)|PointerSource::AddressedLocal(n)=>
+            locals.get(n).map(|var|fb.use_var(*var))
+                .ok_or_else(||reject("FP data pointer local/addressed object has no slot")),
     }
 }
 fn emit_pointer_source(
@@ -297,6 +313,8 @@ fn emit_pointer_source(
             reject("call pointer formal has no physical ABI value")),
         PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
             .ok_or_else(||reject("call pointer local has no SSA variable")),
+        PointerSource::AddressedLocal(_)=>
+            Err(reject("addressed FP object cannot be a callable target")),
     }
 }
 /// Common source ABI plan shared by the FP Cranelift reference and the
@@ -418,7 +436,7 @@ fn expression_type(
             Ok(*return_type)
         }
         Local(n)=>match locals.get(*n).copied() {
-            Some(ScalarType::Float(t))=>Ok(t),
+            Some(ScalarType::Float(t)|ScalarType::StackFloat(t))=>Ok(t),
             _=>Err(reject("FP local out of range or is a callable pointer")),
         },
         ExternalGlobal {ty,..}=>Ok(*ty),
@@ -587,10 +605,14 @@ fn emit_expr(
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
             let ty=match locals_ty.get(*n) {
-                Some(ScalarType::Float(t))=>*t,
+                Some(ScalarType::Float(t)|ScalarType::StackFloat(t))=>*t,
                 _=>return Err(reject("FP local is not a typed FP value")),
             };
-            (fb.use_var(var),ty)
+            let value=fb.use_var(var);
+            let value=if matches!(locals_ty.get(*n),Some(ScalarType::StackFloat(_))) {
+                fb.ins().load(ty.machine(),MemFlags::new(),value,0)
+            } else {value};
+            (value,ty)
         }
         LoadPointerParameter {parameter,ty}=>{
             if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
@@ -752,7 +774,8 @@ fn validate_fp_arm(
         let ty=*f.locals.get(*n)
             .ok_or_else(||reject("FP branch local index out of range"))?;
         check_local_reads(expr,&defined,0)?;
-        if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
+        let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+        if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
             return Err(reject("FP branch assignment has an unconverted type"));
         }
         defined[*n]=true;
@@ -850,7 +873,8 @@ fn check_fp_statements(
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
                 check_local_reads(expr,&defined,0)?;
-                if ScalarType::Float(expression_type(expr,&f.parameters,&f.locals,0)?)!=ty {
+                let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+                if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
                     return Err(reject("FP assignment has an unconverted type"));
                 }
                 defined[*n]=true;
@@ -1050,8 +1074,18 @@ fn emit_fp_statements(
                 fb.ins().store(MemFlags::new(),v,address,0);
             }
             FloatStmt::Assign(n,expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.def_var(locals[*n],v);
+                let (v,actual)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                match locals_ty.get(*n) {
+                    Some(ScalarType::Float(ty)) if *ty==actual=>
+                        fb.def_var(locals[*n],v),
+                    Some(ScalarType::StackFloat(ty)) if *ty==actual=>{
+                        // An address-taken automatic must never retain an
+                        // out-of-date SSA copy after an aliased pointer store.
+                        let address=fb.use_var(locals[*n]);
+                        fb.ins().store(MemFlags::new(),v,address,0);
+                    }
+                    _=>return Err(reject("FP local store type differs from native source")),
+                }
             }
             FloatStmt::Return(expr)=>{
                 let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
@@ -1574,6 +1608,18 @@ fn emit_scalar_float_bodies_with_globals(
             let vars:Vec<_>=f.locals.iter().enumerate().map(|(i,ty)|{
                 let var=Variable::from_u32(i as u32);
                 fb.declare_var(var,ty.machine());
+                if let ScalarType::StackFloat(t)=ty {
+                    let (bytes,log2_align)=match t {
+                        FloatType::F32=>(4,2),
+                        FloatType::F64=>(8,3),
+                    };
+                    let slot=fb.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            bytes,log2_align));
+                    let address=fb.ins().stack_addr(types::I64,slot,0);
+                    fb.def_var(var,address);
+                }
                 var
             }).collect();
             if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
@@ -1659,6 +1705,33 @@ fn source_fp_data_pointer_value(
 )->Result<PointerSource,CodegenError> {
     let expr=ctx.graph.expression(id).ok_or_else(||
         reject("FP data pointer expression has no source identity"))?;
+    // EDG native &local (op 43) is valid only for an automatic F32/F64
+    // object which was selected for stack-backed storage from the
+    // complete source expression graph. Never infer a computed address.
+    if super::semantic(2,expr.data.kind)==3 &&
+        expr.data.operator.is_some_and(|op|super::semantic(3,op)==43) &&
+        expr.operands.len()==1 && expr.data.constant_kind.is_none() {
+        if fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+            reject("address-of FP local lacks native pointer type"))?)?!=ty {
+            return Err(reject("address-of FP local pointee type mismatch"));
+        }
+        let operand=ctx.graph.expression(expr.operands[0]).ok_or_else(||
+            reject("address-of FP local missing source object"))?;
+        if super::semantic(2,operand.data.kind)!=2 ||
+            !operand.operands.is_empty() || operand.data.constant_kind.is_some() ||
+            scalar_type_from_edg(ctx.il,operand.data.type_id.ok_or_else(||
+                reject("address-of FP local lacks object type"))?)?!=ScalarType::Float(ty) {
+            return Err(reject("address-of expression is not a native FP local object"));
+        }
+        let symbol=operand.data.symbol_id.ok_or_else(||
+            reject("address-of FP local has no native symbol"))?;
+        let index=ctx.locals.iter().position(|s|*s==symbol)
+            .ok_or_else(||reject("address-of FP requires an automatic local"))?;
+        if ctx.local_types[index]!=ScalarType::StackFloat(ty) {
+            return Err(reject("address-of FP local is not memory-backed"));
+        }
+        return Ok(PointerSource::AddressedLocal(index));
+    }
     if super::semantic(2,expr.data.kind)!=2 ||
         expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
         return Err(reject("FP pointer value must be an unmodified typed variable"));
@@ -2038,7 +2111,8 @@ fn expression_from_edg(
                         ScalarCallArg::IntegerParameter(index)
                     }
                 }
-                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                     "passing pointer arguments needs a separate typed call contract")),
             };
             parameters.push(target);
@@ -2098,7 +2172,8 @@ fn expression_from_edg(
             return Ok(FloatExpr::Parameter(i));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
-            if ctx.local_types[i]!=ScalarType::Float(ty) {
+            if !matches!(ctx.local_types[i],
+                ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
                 return Err(reject("FP local rvalue type mismatch"));
             }
             return Ok(FloatExpr::Local(i));
@@ -2132,6 +2207,8 @@ fn expression_from_edg(
             }
             PointerSource::Local(local)=>
                 Ok(FloatExpr::LoadPointerLocal {local,ty}),
+            PointerSource::AddressedLocal(local)=>
+                Ok(FloatExpr::Local(local)),
         };
     }
     if node.operands.len()==1 && matches!(op,11|12|16) {
@@ -2486,7 +2563,14 @@ fn lower_fp_body(
                 }
                 let index=ctx.locals.iter().position(|p|*p==decl.symbol)
                     .ok_or_else(||reject("FP declaration local symbol missing"))?;
-                if scalar_type_from_edg(ctx.il,decl.ty)?!=ctx.local_types[index] {
+                // StackFloat changes only the internal placement of a
+                // source C float/double, never its native declaration type.
+                let native=scalar_type_from_edg(ctx.il,decl.ty)?;
+                let expected=match ctx.local_types[index] {
+                    ScalarType::StackFloat(t)=>ScalarType::Float(t),
+                    other=>other,
+                };
+                if native!=expected {
                     return Err(reject("FP declaration source ABI type mismatch"));
                 }
             }
@@ -2551,9 +2635,11 @@ fn lower_fp_body(
                         return Err(reject("FP initializer native target type mismatch"));
                     }
                     match (ctx.local_types[local],exact.width) {
-                        (ScalarType::Float(FloatType::F32),32)=>
+                        (ScalarType::Float(FloatType::F32)|
+                         ScalarType::StackFloat(FloatType::F32),32)=>
                             FloatExpr::Constant32(exact.bits as u32),
-                        (ScalarType::Float(FloatType::F64),64)=>
+                        (ScalarType::Float(FloatType::F64)|
+                         ScalarType::StackFloat(FloatType::F64),64)=>
                             FloatExpr::Constant64(exact.bits),
                         _=>return Err(reject("FP initializer width/type mismatch")),
                     }
@@ -2595,6 +2681,8 @@ fn lower_fp_body(
                     }
                     PointerSource::Local(local)=>
                         output.push(FloatStmt::StorePointerLocal {local,ty,value}),
+                    PointerSource::AddressedLocal(local)=>
+                        output.push(FloatStmt::Assign(local,value)),
                 }
                 return Ok(());
             }
@@ -2619,8 +2707,13 @@ fn lower_fp_body(
             }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
-                reject("missing native scalar lvalue type"))?)?!=ctx.local_types[local] {
+            let native=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native scalar lvalue type"))?)?;
+            let checked=match ctx.local_types[local] {
+                ScalarType::StackFloat(t)=>ScalarType::Float(t),
+                other=>other,
+            };
+            if native!=checked {
                 return Err(reject("FP lvalue type mismatch"));
             }
             if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
@@ -2671,7 +2764,8 @@ fn lower_fp_body(
                     let value=expression_from_edg(ctx,operand,0)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
-                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                     "FP reference module cannot return pointer values")),
             }
         }
@@ -2773,7 +2867,8 @@ fn lower_integer_indirect_return(
                     ScalarCallArg::IntegerParameter(index)
                 }
             }
-            ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+            ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
+                ScalarType::StackFloat(_)=>return Err(reject(
                 "pointer-valued INTEGER indirect-call argument unsupported")),
         };
         arguments.push(value);
@@ -2875,7 +2970,24 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 ScalarType::DataPointer(_)) {
                 return Err(reject("unsupported FP automatic local ABI class"));
             }
-            local_types.push(ty);
+            // Use the EDG-owned expression tree to identify every native
+            // address-of of this exact automatic object in this function.
+            // An addressed FP scalar must reside in one real stack object
+            // for its entire function lifetime, including all aliases.
+            let address_taken=graph.expressions.iter().any(|node|{
+                if node.data.function.as_str()!=name ||
+                    super::semantic(2,node.data.kind)!=3 ||
+                    node.data.operator.map(|op|super::semantic(3,op))!=Some(43) ||
+                    node.operands.len()!=1 {return false;}
+                graph.expression(node.operands[0]).is_some_and(|operand|
+                    super::semantic(2,operand.data.kind)==2 &&
+                    operand.data.symbol_id==Some(local.symbol) &&
+                    operand.operands.is_empty())
+            });
+            local_types.push(match (ty,address_taken) {
+                (ScalarType::Float(t),true)=>ScalarType::StackFloat(t),
+                (other,_)=>other,
+            });
             local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
@@ -2955,6 +3067,45 @@ mod tests {
             ty:FloatType::F32,linkage:Linkage::Local,initializer:None,
         };
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
+    }
+    #[test]
+    fn m14_addressed_fp_local_is_memory_backed_and_source_checked() {
+        let ty=FloatType::F64;
+        let fp=ScalarType::Float(ty);
+        let body=ScalarFloatBody {
+            name:"m14_addressed_fp_local_unit".into(),
+            parameters:vec![fp],result:fp,
+            locals:vec![ScalarType::StackFloat(ty),ScalarType::DataPointer(ty)],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::AssignDataPointer {
+                    local:1,ty,source:PointerSource::AddressedLocal(0),
+                },
+                FloatStmt::StorePointerLocal {
+                    local:1,ty,value:FloatExpr::Constant64(0x8000_0000_0000_0000),
+                },
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[body.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=body.clone();
+        bad.statements.remove(0);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.locals[0]=ScalarType::Float(ty);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.locals[0]=ScalarType::StackFloat(FloatType::F32);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.statements[1]=FloatStmt::AssignDataPointer {
+            local:1,ty,source:PointerSource::Local(0),
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body;
+        bad.locals[1]=ScalarType::FunctionPointer(crate::TypeId(127));
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
     }
     #[test]
     fn m14_data_pointer_ssa_local_definite_assignment_and_memory() {

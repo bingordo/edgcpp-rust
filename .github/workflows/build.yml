@@ -423,7 +423,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter edg_m14_locals.o m14_fp_locals_driver.c -o cranelift_m14_locals
             ./gcc_m14_locals
             ./cranelift_m14_locals
-            for source in m14_fp_locals_uninit.c m14_fp_locals_address.c; do
+            for source in m14_fp_locals_uninit.c; do
               rm -f m14_unsafe.o m14_unsafe.log
               if ../../../edgcpp-rust/target/debug/examples/codegen m14_unsafe.o --c11 "$source" >m14_unsafe.log 2>&1; then
                 echo "Unsafe FP local silently compiled: $source"
@@ -987,7 +987,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_pointer_memory.o m14_fp_pointer_memory_driver.c -lm -o clif_m14_fp_pointer_memory
             ./gcc_m14_fp_pointer_memory
             ./clif_m14_fp_pointer_memory
-            for source in m14_fp_pointer_bad_arith.c m14_fp_pointer_bad_int.c m14_fp_pointer_bad_volatile.c m14_fp_pointer_bad_local.c m14_fp_pointer_bad_const_store.c; do
+            for source in m14_fp_pointer_bad_arith.c m14_fp_pointer_bad_int.c m14_fp_pointer_bad_volatile.c m14_fp_pointer_bad_const_store.c; do
               rm -f bad_m14_fp_pointer.o bad_m14_fp_pointer.log
               if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_fp_pointer.o --c11 "$source" >bad_m14_fp_pointer.log 2>&1; then
                 echo "Unsafe FP pointer memory unexpectedly compiled: $source"
@@ -995,6 +995,41 @@ jobs:
               fi
               grep -E 'FP |pointer|unsupported|EDG IL lowering failed|EDG reported compilation failure' bad_m14_fp_pointer.log
               test ! -e bad_m14_fp_pointer.o
+            done
+          )
+
+      - name: M14 real stack storage for source-addressed FP locals GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_address_taken*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen m14_addr_stack.o --c11 m14_fp_address_taken_locals.c >m14_addr_stack.log 2>&1; then
+              cat m14_addr_stack.log
+              exit 1
+            fi
+            nm -g --defined-only m14_addr_stack.o | grep -q m14_addr_store
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_address_taken_locals.c m14_fp_address_taken_locals_driver.c -lm -o gcc_m14_addr_stack
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_addr_stack.o m14_fp_address_taken_locals_driver.c -lm -o clif_m14_addr_stack
+            ./gcc_m14_addr_stack
+            ./clif_m14_addr_stack
+            for source in m14_fp_address_taken_bad_uninit.c m14_fp_address_taken_bad_arith.c m14_fp_address_taken_bad_escape.c m14_fp_address_taken_bad_volatile.c; do
+              rm -f bad_m14_addr_stack.o bad_m14_addr_stack.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_addr_stack.o --c11 "$source" >bad_m14_addr_stack.log 2>&1; then
+                echo "Unverified addressable FP stack object unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |pointer|stack|unsupported|uninitialized|source|qualified|EDG IL lowering failed|EDG reported compilation failure' bad_m14_addr_stack.log
+              test ! -e bad_m14_addr_stack.o
             done
           )
 
@@ -1022,7 +1057,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror m14_ptrlocals.o m14_fp_data_pointer_locals_driver.c -lm -o clif_m14_ptrlocals
             ./gcc_m14_ptrlocals
             ./clif_m14_ptrlocals
-            for source in m14_fp_data_pointer_locals_bad_uninit.c m14_fp_data_pointer_locals_bad_branch.c m14_fp_data_pointer_locals_bad_arith.c m14_fp_data_pointer_locals_bad_escape.c; do
+            for source in m14_fp_data_pointer_locals_bad_uninit.c m14_fp_data_pointer_locals_bad_branch.c m14_fp_data_pointer_locals_bad_arith.c; do
               rm -f bad_m14_ptrlocals.o bad_m14_ptrlocals.log
               if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_ptrlocals.o --c11 "$source" >bad_m14_ptrlocals.log 2>&1; then
                 echo "Unsafe FP pointer SSA local unexpectedly compiled: $source"
