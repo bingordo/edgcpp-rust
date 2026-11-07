@@ -164,6 +164,17 @@ This does **not** claim that aggregate SSE/MEMORY ABI, FP globals,
 general memory effects or the native `bingordo/compiler` adapter
 are implemented.
 
+**M14 native FP ternary expressions (November 6, 2026):**
+[PR #74](https://github.com/bingordo/edgcpp-rust/pull/74)
+adds EDG-verified C conditional-value expressions returning F32/F64
+with lazily evaluated branches and correctly typed SSA merges. The
+native GCC differential tests check NaN, signed zero, nested ternaries
+and external calls that must execute on exactly one arm. Full pinned
+[CI #42317136600](https://github.com/bingordo/edgcpp-rust/actions/runs/42317136600)
+passed. See [M14 FP conditional-value contract](docs/M14_FP_CONDITIONAL_VALUES.md).
+INTEGER-valued ternaries, general memory-lvalue semantics and
+unmodeled side effects still fail closed.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
