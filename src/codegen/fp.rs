@@ -3422,6 +3422,83 @@ mod tests {
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
     }
     #[test]
+    fn m14_source_checked_integer_ssa_local_and_conversion() {
+        let i32ty=ScalarType::Int {bits:32,signed:true};
+        let fp=ScalarType::Float(FloatType::F64);
+        let f=ScalarFloatBody {
+            name:"m14_i32_local_numeric".into(),
+            parameters:vec![i32ty,fp],result:fp,locals:vec![i32ty],
+            statements:vec![
+                FloatStmt::AssignInteger {
+                    local:0,source:FpIntegerSource::Parameter(0),
+                },
+                FloatStmt::Return(FloatExpr::Add(
+                    Box::new(FloatExpr::Parameter(1)),
+                    Box::new(FloatExpr::IntegerLocalCast {
+                        local:0,to:FloatType::F64,
+                    }),
+                )),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[f.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=f.clone();
+        bad.statements.remove(0);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=f.clone();
+        bad.statements[0]=FloatStmt::AssignInteger {
+            local:0,source:FpIntegerSource::Local(0),
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=f.clone();
+        bad.locals[0]=ScalarType::Int {bits:64,signed:false};
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=f.clone();
+        bad.locals[0]=ScalarType::Float(FloatType::F64);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=f.clone();
+        bad.statements[0]=FloatStmt::AssignInteger {
+            local:0,source:FpIntegerSource::Constant {
+                bits:u32::MAX as u64,ty:i32ty,
+            },
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut call=f.clone();
+        call.name="m14_i32_local_to_import".into();
+        call.statements[1]=FloatStmt::Return(FloatExpr::CallExternal {
+            callee:"m14_i32_local_native_import".into(),
+            parameters:vec![i32ty,fp],return_type:FloatType::F64,
+            arguments:vec![
+                ScalarCallArg::IntegerLocal(0),
+                ScalarCallArg::Float(FloatExpr::Parameter(1)),
+            ],
+        });
+        assert!(emit_scalar_float_bodies_internal(&[call.clone()],true).is_ok());
+        assert!(emit_scalar_float_bodies_internal(&[call.clone()],false).is_err());
+        call.statements.remove(0);
+        assert!(emit_scalar_float_bodies_internal(&[call],true).is_err());
+        // The local also drives checked FP subscript address calculation.
+        let indexed=ScalarFloatBody {
+            name:"m14_integer_local_index".into(),
+            parameters:vec![ScalarType::DataPointer(FloatType::F64),i32ty],
+            result:fp,locals:vec![i32ty],
+            statements:vec![
+                FloatStmt::AssignInteger {
+                    local:0,source:FpIntegerSource::Parameter(1),
+                },
+                FloatStmt::Return(FloatExpr::LoadIndexed {
+                    pointer:PointerSource::Parameter(0),
+                    index:FpIndex::Local {local:0,ty:i32ty},
+                    ty:FloatType::F64,
+                }),
+            ],
+        };
+        assert!(emit_scalar_float_bodies(&[indexed.clone()]).is_ok());
+        let mut bad=indexed;
+        bad.statements.remove(0);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+    #[test]
     fn m14_checked_fp_subscript_machine_index_and_rejection() {
         let f64ty=FloatType::F64;
         let source=ScalarType::Int {bits:32,signed:true};
