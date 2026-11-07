@@ -69,6 +69,9 @@ pub enum ScalarCallArg {
     Float(FloatExpr),
     /// A native EDG direct INTEGER formal passed to the same scalar class.
     IntegerParameter(usize),
+    /// A literal whose exact C integer width, signedness and bits were
+    /// checked against the native EDG expression and callee prototype.
+    IntegerConstant { bits:u64, ty:ScalarType },
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatExpr {
@@ -76,6 +79,9 @@ pub enum FloatExpr {
     /// Exact EDG integer formal converted to FP by a native cast node.
     /// Never reinterpret GPR argument bits as an XMM value.
     IntegerParameterCast {parameter:usize,to:FloatType},
+    /// A native EDG integer constant converted numerically to float/double.
+    /// Bits retain the full U64 range even though EDG's wire carrier is i64.
+    IntegerConstantCast {bits:u64,source:ScalarType,to:FloatType},
     /// An EDG-verified direct call to a definition in this compilation unit.
     /// Indirect and external calls require a separate declaration contract.
     Call {
@@ -279,6 +285,29 @@ fn checked_scalar_passing_plan(
         prototyped:true,variadic:false}.plan_sysv_x86_64()
         .map_err(|err|reject(format!("unsupported source-checked scalar ABI: {err:?}")))
 }
+/// Accept only exact representable bit images for source-verified C integer
+/// literals. Reject forged/truncated 32-bit literals, narrow integers and bool.
+fn checked_integer_literal(ty:ScalarType,bits:u64)->Result<(),CodegenError> {
+    match ty {
+        ScalarType::Int {bits:32,signed:true}
+            if bits==(bits as i32 as i64 as u64)=>Ok(()),
+        ScalarType::Int {bits:32,signed:false}
+            if bits==(bits as u32 as u64)=>Ok(()),
+        ScalarType::Int {bits:64,..}=>Ok(()),
+        _=>Err(reject("integer literal width, sign or native bit image invalid")),
+    }
+}
+fn emit_integer_literal(
+    fb:&mut FunctionBuilder<'_>,ty:ScalarType,bits:u64,
+)->Result<Value,CodegenError> {
+    checked_integer_literal(ty,bits)?;
+    let value=match ty {
+        ScalarType::Int {bits:32,..}=>bits as u32 as i32 as i64,
+        ScalarType::Int {bits:64,..}=>bits as i64,
+        _=>return Err(reject("unsupported integer literal ABI class")),
+    };
+    Ok(fb.ins().iconst(ty.machine(),value))
+}
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
     params:&[ScalarType],locals:&[ScalarType],depth:usize,
@@ -294,6 +323,10 @@ fn check_scalar_call_args(
             ScalarCallArg::IntegerParameter(n)=>match params.get(*n) {
                 Some(ScalarType::Int {..})=>params[*n],
                 _=>return Err(reject("call INTEGER argument is not a native formal")),
+            },
+            ScalarCallArg::IntegerConstant {bits,ty}=>{
+                checked_integer_literal(*ty,*bits)?;
+                *ty
             },
         };
         if source!=*target {
@@ -323,11 +356,15 @@ fn expression_type(
             _=>Err(reject("FP parameter missing or has integer ABI class")),
         },
         IntegerParameterCast {parameter,to}=>{
-            if matches!(params.get(*parameter),Some(ScalarType::Int {..})) {
+            if matches!(params.get(*parameter),Some(ScalarType::Int {bits:32|64,..})) {
                 Ok(*to)
             } else {
                 Err(reject("FP integer cast source is not a checked integer formal"))
             }
+        },
+        IntegerConstantCast {bits,source,to}=>{
+            checked_integer_literal(*source,*bits)?;
+            Ok(*to)
         },
         Call {parameters,return_type,arguments,..}|
         CallExternal {parameters,return_type,arguments,..}|
@@ -406,6 +443,12 @@ fn emit_scalar_call_arguments(
                 }
                 *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
             }
+            (ScalarCallArg::IntegerConstant {bits,ty},ScalarType::Int {..})=>{
+                if ty!=expected {
+                    return Err(reject("FP call INTEGER literal source type mismatch"));
+                }
+                emit_integer_literal(fb,*ty,*bits)?
+            }
             _=>return Err(reject("FP call crosses incompatible argument classes")),
         };
         values.push(value);
@@ -440,6 +483,19 @@ fn emit_expr(
             let value=*params.get(*parameter)
                 .ok_or_else(||reject("missing integer formal ABI value"))?;
             let converted=if input {
+                fb.ins().fcvt_from_sint(to.machine(),value)
+            } else {
+                fb.ins().fcvt_from_uint(to.machine(),value)
+            };
+            (converted,*to)
+        }
+        IntegerConstantCast {bits,source,to}=>{
+            let value=emit_integer_literal(fb,*source,*bits)?;
+            let signed=match source {
+                ScalarType::Int {signed,..}=>*signed,
+                _=>return Err(reject("invalid integer literal conversion source")),
+            };
+            let converted=if signed {
                 fb.ins().fcvt_from_sint(to.machine(),value)
             } else {
                 fb.ins().fcvt_from_uint(to.machine(),value)
@@ -577,6 +633,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
+        IntegerConstantCast {..}|
         ExternalGlobal {..}|LoadPointerParameter {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
@@ -1208,6 +1265,7 @@ fn validate_fp_calls_expr(
             validate_fp_calls_expr(b,declarations,imports,source_imports,depth+1)?;
         }
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
+        FloatExpr::IntegerConstantCast {..}|
         FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
         FloatExpr::LoadPointerParameter {..}|
         FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
@@ -1665,6 +1723,27 @@ struct FpSourceCtx<'a> {
     param_types:&'a [ScalarType],
     local_types:&'a [ScalarType],
 }
+/// Decode a source-owned integer constant, never a constant inferred
+/// from its printed name or a generic C integer expression. The IL stores
+/// unsigned U64 as an i64 bit carrier; do not sign-convert its payload.
+fn source_integer_constant(
+    ctx:&FpSourceCtx<'_>,node:&crate::graph::ExpressionNode,
+    expected:ScalarType,
+)->Result<Option<u64>,CodegenError> {
+    if node.data.constant_kind.is_none() {return Ok(None);}
+    if !node.operands.is_empty() || node.data.symbol_id.is_some() {
+        return Err(reject("integer constant has operands or variable identity"));
+    }
+    let actual=scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+        reject("integer literal has no native EDG type"))?)?;
+    if actual!=expected {
+        return Err(reject("integer literal native type differs from target ABI"));
+    }
+    let bits=node.data.constant_integer.ok_or_else(||
+        reject("integer constant has no exact 64-bit EDG image"))? as u64;
+    checked_integer_literal(actual,bits)?;
+    Ok(Some(bits))
+}
 fn expression_from_edg(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
 )->Result<FloatExpr,CodegenError> {
@@ -1785,20 +1864,24 @@ fn expression_from_edg(
                 ScalarType::Int {..}=>{
                     let e=ctx.graph.expression(operand).ok_or_else(||
                         reject("FP direct INTEGER arg has no native expression"))?;
-                    if super::semantic(2,e.data.kind)!=2 ||
-                        e.data.constant_kind.is_some() || !e.operands.is_empty() {
-                        return Err(reject("FP direct INTEGER argument must be a formal"));
+                    if let Some(bits)=source_integer_constant(ctx,e,target)? {
+                        ScalarCallArg::IntegerConstant {bits,ty:target}
+                    } else {
+                        if super::semantic(2,e.data.kind)!=2 ||
+                            !e.operands.is_empty() {
+                            return Err(reject("FP direct INTEGER argument must be a formal/literal"));
+                        }
+                        let id=e.data.symbol_id.ok_or_else(||
+                            reject("FP direct INTEGER argument lacks symbol"))?;
+                        let index=ctx.params.iter().position(|s|*s==id)
+                            .ok_or_else(||reject("FP direct INTEGER argument not a formal"))?;
+                        let actual=scalar_type_from_edg(ctx.il,e.data.type_id
+                            .ok_or_else(||reject("FP direct INTEGER argument type missing"))?)?;
+                        if actual!=target || ctx.param_types[index]!=target {
+                            return Err(reject("FP direct INTEGER argument has wrong type"));
+                        }
+                        ScalarCallArg::IntegerParameter(index)
                     }
-                    let id=e.data.symbol_id.ok_or_else(||
-                        reject("FP direct INTEGER argument lacks symbol"))?;
-                    let index=ctx.params.iter().position(|s|*s==id)
-                        .ok_or_else(||reject("FP direct INTEGER argument not a formal"))?;
-                    let actual=scalar_type_from_edg(ctx.il,e.data.type_id
-                        .ok_or_else(||reject("FP direct INTEGER argument type missing"))?)?;
-                    if actual!=target || ctx.param_types[index]!=target {
-                        return Err(reject("FP direct INTEGER argument has wrong type"));
-                    }
-                    ScalarCallArg::IntegerParameter(index)
                 }
                 ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
                     "passing pointer arguments needs a separate typed call contract")),
@@ -1891,10 +1974,14 @@ fn expression_from_edg(
             .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
         let source_ty=source.data.type_id.ok_or_else(||
             reject("integer-to-FP cast operand has no native type"))?;
-        if let ScalarType::Int {..}=scalar_type_from_edg(ctx.il,source_ty)? {
+        let from=scalar_type_from_edg(ctx.il,source_ty)?;
+        if let ScalarType::Int {..}=from {
+            if let Some(bits)=source_integer_constant(ctx,source,from)? {
+                return Ok(FloatExpr::IntegerConstantCast {bits,source:from,to:ty});
+            }
             if super::semantic(2,source.data.kind)!=2 ||
                 !source.operands.is_empty() || source.data.constant_kind.is_some() {
-                return Err(reject("integer-to-FP cast requires a direct integer formal"));
+                return Err(reject("integer-to-FP cast requires a direct integer formal or literal"));
             }
             let symbol=source.data.symbol_id.ok_or_else(||
                 reject("integer-to-FP cast operand lacks native symbol"))?;
@@ -2479,20 +2566,24 @@ fn lower_integer_indirect_return(
             ScalarType::Int {..}=>{
                 let expr=ctx.graph.expression(operand).ok_or_else(||
                     reject("INTEGER indirect formal argument missing"))?;
-                if super::semantic(2,expr.data.kind)!=2 ||
-                    expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
-                    return Err(reject("INTEGER indirect call INTEGER argument not formal"));
+                if let Some(bits)=source_integer_constant(ctx,expr,*target)? {
+                    ScalarCallArg::IntegerConstant {bits,ty:*target}
+                } else {
+                    if super::semantic(2,expr.data.kind)!=2 ||
+                        !expr.operands.is_empty() {
+                        return Err(reject("INTEGER indirect call INTEGER argument not formal/literal"));
+                    }
+                    let symbol=expr.data.symbol_id.ok_or_else(||
+                        reject("INTEGER indirect argument lacks native symbol"))?;
+                    let index=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
+                        reject("INTEGER indirect argument not a checked formal"))?;
+                    let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+                        reject("INTEGER indirect argument lacks native type"))?)?;
+                    if ty!=*target || ctx.param_types[index]!=*target {
+                        return Err(reject("INTEGER indirect argument type mismatch"));
+                    }
+                    ScalarCallArg::IntegerParameter(index)
                 }
-                let symbol=expr.data.symbol_id.ok_or_else(||
-                    reject("INTEGER indirect argument lacks native symbol"))?;
-                let index=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
-                    reject("INTEGER indirect argument not a checked formal"))?;
-                let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
-                    reject("INTEGER indirect argument lacks native type"))?)?;
-                if ty!=*target || ctx.param_types[index]!=*target {
-                    return Err(reject("INTEGER indirect argument type mismatch"));
-                }
-                ScalarCallArg::IntegerParameter(index)
             }
             ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
                 "pointer-valued INTEGER indirect-call argument unsupported")),
@@ -2683,6 +2774,69 @@ mod tests {
             &[build("m14_non_c_caller",name)],true).is_err());
     }
 
+
+    #[test]
+    fn checked_integer_literals_convert_numerically_and_keep_u64_bits() {
+        let cases=[
+            (ScalarType::Int {bits:32,signed:true},0x7fff_ffff_u64),
+            (ScalarType::Int {bits:32,signed:false},0xffff_ffff_u64),
+            (ScalarType::Int {bits:64,signed:true},0x7fff_ffff_ffff_ffff_u64),
+            (ScalarType::Int {bits:64,signed:false},u64::MAX),
+        ];
+        for (index,(source,bits)) in cases.into_iter().enumerate() {
+            for to in [FloatType::F32,FloatType::F64] {
+                let function=ScalarFloatBody {
+                    name:format!("m14_literal_conv_{index}_{to:?}"),
+                    parameters:vec![],result:ScalarType::Float(to),
+                    locals:vec![],
+                    statements:vec![FloatStmt::Return(FloatExpr::IntegerConstantCast {
+                        bits,source,to,
+                    })],
+                };
+                let bytes=emit_scalar_float_bodies(&[function.clone()]).unwrap();
+                assert_eq!(&bytes[..4],b"\x7fELF");
+                let mut bad=function.clone();
+                if let FloatStmt::Return(FloatExpr::IntegerConstantCast {source,..})=
+                    &mut bad.statements[0] {
+                    *source=ScalarType::Float(FloatType::F64);
+                }
+                assert!(emit_scalar_float_bodies(&[bad]).is_err());
+                let mut bad=function;
+                if let FloatStmt::Return(FloatExpr::IntegerConstantCast {bits,source,..})=
+                    &mut bad.statements[0] {
+                    *bits=0x1_0000_0000_u64;
+                    *source=ScalarType::Int {bits:32,signed:false};
+                }
+                assert!(emit_scalar_float_bodies(&[bad]).is_err());
+            }
+        }
+        assert!(checked_integer_literal(
+            ScalarType::Int {bits:32,signed:true},0xffff_ffff).is_err());
+        assert!(checked_integer_literal(
+            ScalarType::Int {bits:8,signed:false},7).is_err());
+        let external=ScalarFloatBody {
+            name:"m14_integer_literal_external".into(),
+            parameters:vec![],result:ScalarType::Float(FloatType::F64),
+            locals:vec![],statements:vec![FloatStmt::Return(FloatExpr::CallExternal {
+                callee:"m14_import_literal".into(),
+                parameters:vec![ScalarType::Int {bits:64,signed:false}],
+                return_type:FloatType::F64,
+                arguments:vec![ScalarCallArg::IntegerConstant {
+                    bits:u64::MAX,ty:ScalarType::Int {bits:64,signed:false},
+                }],
+            })],
+        };
+        assert!(emit_scalar_float_bodies_internal(&[external.clone()],true).is_ok());
+        assert!(emit_scalar_float_bodies_internal(&[external.clone()],false).is_err());
+        let mut bad=external;
+        if let FloatStmt::Return(FloatExpr::CallExternal {arguments,..})=
+            &mut bad.statements[0] {
+            arguments[0]=ScalarCallArg::IntegerConstant {
+                bits:u64::MAX,ty:ScalarType::Int {bits:64,signed:true},
+            };
+        }
+        assert!(emit_scalar_float_bodies_internal(&[bad],true).is_err());
+    }
     #[test]
     fn indirect_integer_return_keeps_rax_and_rejects_bad_prototypes() {
         let pointer=crate::TypeId(123456);
