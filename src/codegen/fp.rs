@@ -934,7 +934,7 @@ fn emit_fp_statements(
                 let mut signature=cranelift_codegen::ir::Signature::new(
                     fb.func.signature.call_conv);
                 for ty in parameters {
-                    if matches!(ty,ScalarType::FunctionPointer(_)) {
+                    if matches!(ty,ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)) {
                         return Err(reject("nested pointer argument unsupported"));
                     }
                     signature.params.push(AbiParam::new(ty.machine()));
@@ -1470,6 +1470,48 @@ fn function_pointer_type_from_edg(il:&Il,id:crate::TypeId)
     }
     Ok((pointer,target))
 }
+/// A native 64-bit pointer to **unqualified standard C float/double**.
+/// Only a pointer to a scalar is accepted; arrays, function pointers,
+/// qualified pointees, void*, integers and pointer arithmetic remain rejected.
+fn fp_data_pointer_type_from_edg(
+    il:&Il,id:crate::TypeId,
+)->Result<FloatType,CodegenError> {
+    let pointer=super::canonical_abi_type(il,id)?;
+    let native=il.types.iter().find(|t|t.id==pointer &&
+        super::semantic(4,t.kind)==5 && t.related_role==Some(1))
+        .ok_or_else(||reject("FP memory formal is not a native C pointer"))?;
+    let size=il.type_object_sizes.iter().find(|t|t.owner==pointer)
+        .ok_or_else(||reject("FP memory pointer has no native layout"))?;
+    if size.bytes!=8 || size.alignment!=8 {
+        return Err(reject("FP data pointer does not have the x86-64 SysV layout"));
+    }
+    check_plain_fp_local(il,native.related.ok_or_else(||
+        reject("FP data pointer lacks pointee type"))?)?;
+    type_from_edg(il,native.related.ok_or_else(||
+        reject("FP memory pointer lacks native pointee"))?)
+}
+/// Resolve a direct checked pointer formal. No computed addresses, local
+/// pointer variables, casts or other memory provenance are accepted.
+fn source_fp_pointer_formal(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
+)->Result<usize,CodegenError> {
+    let expr=ctx.graph.expression(id).ok_or_else(||
+        reject("FP pointer operand has no owned EDG expression"))?;
+    if super::semantic(2,expr.data.kind)!=2 ||
+        expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
+        return Err(reject("FP memory pointer must be an unchanged formal"));
+    }
+    let symbol=expr.data.symbol_id.ok_or_else(||
+        reject("FP memory pointer formal has no symbol"))?;
+    let n=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
+        reject("FP memory load/store pointer not a source formal"))?;
+    if ctx.param_types[n]!=ScalarType::DataPointer(ty) ||
+        fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+            reject("FP memory pointer operand missing native type"))?)?!=ty {
+        return Err(reject("FP memory pointer source pointee mismatch"));
+    }
+    Ok(n)
+}
 /// EDG may assign separate native type identities to a function designator
 /// and the pointee of a pointer-to-function, even when they have the same
 /// valid C prototype. Compare the *complete* source-verified scalar calling
@@ -1540,6 +1582,9 @@ fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
             }
         }
         return Ok(ScalarType::FunctionPointer(representative));
+    }
+    if let Ok(t)=fp_data_pointer_type_from_edg(il,canonical) {
+        return Ok(ScalarType::DataPointer(t));
     }
     let info=il.c_integer_types.iter().find(|x|x.id==canonical)
         .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
@@ -1755,8 +1800,8 @@ fn expression_from_edg(
                     }
                     ScalarCallArg::IntegerParameter(index)
                 }
-                ScalarType::FunctionPointer(_)=>return Err(reject(
-                    "passing function-pointer arguments needs a separate typed call contract")),
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                    "passing pointer arguments needs a separate typed call contract")),
             };
             parameters.push(target);
             arguments.push(value);
@@ -1837,6 +1882,10 @@ fn expression_from_edg(
     // Only an EDG-authoritative conversion from a direct integer formal is
     // accepted. Integer expressions, local memory and implicit bitcasting
     // are *not* silently accepted as scalar floating point values.
+    if op==44 && node.operands.len()==1 {
+        let n=source_fp_pointer_formal(ctx,node.operands[0],ty)?;
+        return Ok(FloatExpr::LoadPointerParameter {parameter:n,ty});
+    }
     if node.operands.len()==1 && matches!(op,11|12|16) {
         let source=ctx.graph.expression(node.operands[0])
             .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
@@ -2264,8 +2313,23 @@ fn lower_fp_body(
             }
             let left=ctx.graph.expression(operation.operands[0])
                 .ok_or_else(||reject("FP assignment has no lvalue"))?;
+            // Native C *p = rhs: p must be an unchanged, unqualified
+            // source-verified pointer formal to exactly this F32/F64 type.
+            if super::semantic(2,left.data.kind)==3 &&
+                left.data.operator.is_some_and(|op|super::semantic(3,op)==44) &&
+                left.operands.len()==1 {
+                let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                    reject("FP memory assignment lacks native lvalue type"))?)?;
+                let parameter=source_fp_pointer_formal(ctx,left.operands[0],ty)?;
+                let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                    return Err(reject("FP pointer store missing source conversion"));
+                }
+                output.push(FloatStmt::StorePointerParameter {parameter,ty,value});
+                return Ok(());
+            }
             if super::semantic(2,left.data.kind)!=2 || !left.operands.is_empty() {
-                return Err(reject("FP assignment target is not a direct local"));
+                return Err(reject("FP assignment target is not direct scalar storage"));
             }
             if let Some(symbol)=left.data.symbol_id {
                 if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
@@ -2332,8 +2396,8 @@ fn lower_fp_body(
                     let value=expression_from_edg(ctx,operand,0)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
-                ScalarType::FunctionPointer(_)=>return Err(reject(
-                    "FP reference module cannot return function-pointer values")),
+                ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                    "FP reference module cannot return pointer values")),
             }
         }
         _=>return Err(reject("unsupported FP control flow or statement form")),
@@ -2430,8 +2494,8 @@ fn lower_integer_indirect_return(
                 }
                 ScalarCallArg::IntegerParameter(index)
             }
-            ScalarType::FunctionPointer(_)=>return Err(reject(
-                "nested function-pointer INTEGER argument unsupported")),
+            ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)=>return Err(reject(
+                "pointer-valued INTEGER indirect-call argument unsupported")),
         };
         arguments.push(value);
     }
