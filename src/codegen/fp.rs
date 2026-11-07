@@ -2918,6 +2918,37 @@ fn lower_fp_body(
                 output.push(FloatStmt::AssignDataPointer {local,ty,source});
                 return Ok(());
             }
+            if let ty @ ScalarType::Int {bits:32|64,..}=ctx.local_types[local] {
+                let source=match init.kind {
+                    3=>{
+                        // Preserve native execution/evaluation ordering. The
+                        // only permitted expression is a direct checked copy
+                        // or an exact source-owned integer literal.
+                        let expr=node.expression.ok_or_else(||
+                            reject("INTEGER automatic initializer has no EDG expression"))?;
+                        source_fp_integer_value(ctx,expr,ty)?
+                    }
+                    2=>{
+                        if node.expression.is_some() {
+                            return Err(reject("INTEGER native constant initializer has expression"));
+                        }
+                        let mut images=ctx.il.statement_integer_initializers.iter()
+                            .filter(|v|v.function==*function &&
+                                v.statement_path==*path);
+                        let image=images.next().ok_or_else(||
+                            reject("INTEGER automatic has no exact native constant image"))?;
+                        if images.next().is_some() {
+                            return Err(reject("duplicate INTEGER source initializer image"));
+                        }
+                        let bits=image.value as u64;
+                        checked_integer_literal(ty,bits)?;
+                        FpIntegerSource::Constant {bits,ty}
+                    }
+                    _=>return Err(reject("unsupported INTEGER automatic initializer kind")),
+                };
+                output.push(FloatStmt::AssignInteger {local,source});
+                return Ok(());
+            }
             let value=match init.kind {
                 // EDG dik_expression: an actual expression executes at this site.
                 3=>{
@@ -3054,6 +3085,11 @@ fn lower_fp_body(
             if let ScalarType::DataPointer(ty)=ctx.local_types[local] {
                 let source=source_fp_data_pointer_value(ctx,operation.operands[1],ty)?;
                 output.push(FloatStmt::AssignDataPointer {local,ty,source});
+                return Ok(());
+            }
+            if let ty @ ScalarType::Int {bits:32|64,..}=ctx.local_types[local] {
+                let source=source_fp_integer_value(ctx,operation.operands[1],ty)?;
+                output.push(FloatStmt::AssignInteger {local,source});
                 return Ok(());
             }
             let value=expression_from_edg(ctx,operation.operands[1],0)?;
