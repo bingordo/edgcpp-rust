@@ -117,6 +117,10 @@ pub enum FloatExpr {
     /// Real ordinary memory access through a source-verified FP pointer formal.
     /// This is NOT an SSA alias or a guessed address.
     LoadPointerParameter {parameter:usize,ty:FloatType},
+    /// A local scalar pointer copied only from another checked FP data pointer.
+    /// Reads use real memory, and the local's pointer SSA value is defined
+    /// only along reachable CFG paths.
+    LoadPointerLocal {local:usize,ty:FloatType},
     Constant32(u32),
     Constant64(u64),
     Neg(Box<Self>),
@@ -172,6 +176,11 @@ pub enum FloatStmt {
     StoreGlobal {symbol:crate::SymbolId,ty:FloatType,value:FloatExpr},
     /// A checked unqualified *p=FP-value store to memory, never an SSA write.
     StorePointerParameter {parameter:usize,ty:FloatType,value:FloatExpr},
+    /// Ordinary source-verified write through a nonescaping pointer SSA local.
+    StorePointerLocal {local:usize,ty:FloatType,value:FloatExpr},
+    /// Copy a checked data pointer formal/local into an automatic pointer SSA
+    /// local, never create a pointer from integers, addresses or casts.
+    AssignDataPointer {local:usize,ty:FloatType,source:PointerSource},
     /// A nonescaping, native EDG-verified callable pointer value in a
     /// typed automatic local. Definite assignment is tracked across CFG.
     AssignPointer {
@@ -237,6 +246,20 @@ fn pointer_source_type(
         },
     }
 }
+fn data_pointer_source_type(
+    src:PointerSource,params:&[ScalarType],locals:&[ScalarType],
+)->Result<FloatType,CodegenError> {
+    match src {
+        PointerSource::Parameter(n)=>match params.get(n) {
+            Some(ScalarType::DataPointer(t))=>Ok(*t),
+            _=>Err(reject("FP data pointer is not an exact typed formal")),
+        },
+        PointerSource::Local(n)=>match locals.get(n) {
+            Some(ScalarType::DataPointer(t))=>Ok(*t),
+            _=>Err(reject("FP data pointer is not an exact typed automatic local")),
+        },
+    }
+}
 fn check_pointer_source_reads(
     src:PointerSource,defined:&[bool],
 )->Result<(),CodegenError> {
@@ -244,6 +267,21 @@ fn check_pointer_source_reads(
         PointerSource::Parameter(_)=>Ok(()),
         PointerSource::Local(n) if defined.get(n).copied()==Some(true)=>Ok(()),
         PointerSource::Local(_)=>Err(reject("read of uninitialized callable pointer local")),
+    }
+}
+fn emit_data_pointer_source(
+    src:PointerSource,fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],locals:&[Variable],
+    locals_ty:&[ScalarType],required:FloatType,
+)->Result<Value,CodegenError> {
+    if data_pointer_source_type(src,params_ty,locals_ty)?!=required {
+        return Err(reject("FP pointer SSA source has wrong native pointee"));
+    }
+    match src {
+        PointerSource::Parameter(n)=>params.get(n).copied().ok_or_else(||
+            reject("FP data pointer formal has no native ABI value")),
+        PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
+            .ok_or_else(||reject("FP data pointer local has no SSA slot")),
     }
 }
 fn emit_pointer_source(
@@ -387,6 +425,12 @@ fn expression_type(
         LoadPointerParameter {parameter,ty}=>{
             if params.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
                 return Err(reject("FP load through nonmatching pointer formal"));
+            }
+            Ok(*ty)
+        },
+        LoadPointerLocal {local,ty}=>{
+            if locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) {
+                return Err(reject("FP load through nonmatching data-pointer local"));
             }
             Ok(*ty)
         },
@@ -556,6 +600,11 @@ fn emit_expr(
                 reject("FP pointer load parameter has no ABI value"))?;
             (fb.ins().load(ty.machine(),MemFlags::new(),ptr,0),*ty)
         }
+        LoadPointerLocal {local,ty}=>{
+            let ptr=emit_data_pointer_source(PointerSource::Local(*local),fb,
+                params,params_ty,locals,locals_ty,*ty)?;
+            (fb.ins().load(ty.machine(),MemFlags::new(),ptr,0),*ty)
+        }
         ExternalGlobal {symbol,ty}=>{
             let (data,actual)=*global_refs.get(symbol).ok_or_else(||
                 reject("FP external global has no verified data import"))?;
@@ -633,9 +682,11 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     match expr {
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
+        LoadPointerLocal {local,..} if !defined.get(*local).copied().unwrap_or(false)=>
+            Err(reject("FP load through uninitialized data pointer local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         IntegerConstantCast {..}|
-        ExternalGlobal {..}|LoadPointerParameter {..}|
+        ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
             for arg in arguments {
@@ -1268,7 +1319,7 @@ fn validate_fp_calls_expr(
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
         FloatExpr::IntegerConstantCast {..}|
         FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
-        FloatExpr::LoadPointerParameter {..}|
+        FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
         FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
     }
     Ok(())
