@@ -72,7 +72,6 @@ pub enum PointerSource {
     /// address, global, parameter address, or escaping pointer.
     AddressedLocal(usize),
 }
-#[derive(Debug,Clone,PartialEq,Eq)]
 /// Signed/unsigned native integer source allowed as an FP pointer index.
 /// Only direct INTEGER formals and exact EDG constants are authorized.
 #[derive(Debug,Clone,PartialEq,Eq)]
