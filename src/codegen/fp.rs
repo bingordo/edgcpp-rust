@@ -111,6 +111,13 @@ pub enum FloatExpr {
     Sub(Box<Self>,Box<Self>),
     Mul(Box<Self>,Box<Self>),
     Div(Box<Self>,Box<Self>),
+    /// EDG-verified C conditional-value expression. Evaluate exactly one
+    /// arm; a block-parameter SSA merge preserves signed zero and NaN bits.
+    Conditional {
+        condition:Box<FloatCondition>,
+        yes:Box<Self>,
+        no:Box<Self>,
+    },
     /// The conversion is explicit and checked against its source type.
     Convert(FloatType,Box<Self>),
 }
@@ -339,6 +346,19 @@ fn expression_type(
             if a!=b {return Err(reject("FP binary operation operands differ in type"));}
             Ok(a)
         }
+        Conditional {condition,yes,no}=>{
+            let left=expression_type(&condition.left,params,locals,depth+1)?;
+            let right=expression_type(&condition.right,params,locals,depth+1)?;
+            if left!=right {
+                return Err(reject("FP conditional operands have mismatched types"));
+            }
+            let y=expression_type(yes,params,locals,depth+1)?;
+            let n=expression_type(no,params,locals,depth+1)?;
+            if y!=n {
+                return Err(reject("C FP conditional value arms lack native conversion"));
+            }
+            Ok(y)
+        }
         Convert(to,e)=>{
             let _=expression_type(e,params,locals,depth+1)?;
             Ok(*to)
@@ -482,6 +502,33 @@ fn emit_expr(
             };
             (value,*to)
         }
+        Conditional {condition,yes,no}=>{
+            // Do not emit select: only the chosen arm may be evaluated, as
+            // either arm can contain an external call or memory load.
+            let test=emit_condition(condition,fb,params,params_ty,locals,
+                locals_ty,refs,global_refs)?;
+            let then_block=fb.create_block();
+            let else_block=fb.create_block();
+            let merged=fb.create_block();
+            let expected=expression_type(yes,params_ty,locals_ty,0)?;
+            fb.append_block_param(merged,expected.machine());
+            fb.ins().brif(test,then_block,&[],else_block,&[]);
+            fb.seal_block(then_block);
+            fb.seal_block(else_block);
+            fb.switch_to_block(then_block);
+            let (selected,actual)=emit_expr(yes,fb,params,params_ty,
+                locals,locals_ty,refs,global_refs)?;
+            if actual!=expected {return Err(reject("FP conditional then arm type changed"));}
+            fb.ins().jump(merged,&[selected.into()]);
+            fb.switch_to_block(else_block);
+            let (selected,actual)=emit_expr(no,fb,params,params_ty,
+                locals,locals_ty,refs,global_refs)?;
+            if actual!=expected {return Err(reject("FP conditional else arm type changed"));}
+            fb.ins().jump(merged,&[selected.into()]);
+            fb.seal_block(merged);
+            fb.switch_to_block(merged);
+            (fb.block_params(merged)[0],expected)
+        }
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
             let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
             let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
@@ -525,6 +572,12 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             }
             Ok(())
         },
+        Conditional {condition,yes,no}=>{
+            check_local_reads(&condition.left,defined,depth+1)?;
+            check_local_reads(&condition.right,defined,depth+1)?;
+            check_local_reads(yes,defined,depth+1)?;
+            check_local_reads(no,defined,depth+1)
+        }
         Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
         Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
             check_local_reads(a,defined,depth+1)?;
@@ -1096,6 +1149,11 @@ fn validate_fp_calls_expr(
                     validate_fp_calls_expr(arg,declarations,imports,source_imports,depth+1)?;
                 }
             }
+        }
+        FloatExpr::Conditional {condition,yes,no}=>{
+            validate_fp_calls_cond(condition,declarations,imports,source_imports,depth+1)?;
+            validate_fp_calls_expr(yes,declarations,imports,source_imports,depth+1)?;
+            validate_fp_calls_expr(no,declarations,imports,source_imports,depth+1)?;
         }
         FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
             validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
@@ -1756,7 +1814,19 @@ fn expression_from_edg(
         expression_from_edg(ctx,*node.operands.get(i)
             .ok_or_else(||reject("missing native FP operand"))?,depth+1)
     };
-    let out=if node.operands.len()==1 {
+    let out=if op==25 {
+        // This is the source EDG conditional operator, not a speculative
+        // floating select or the integer backend's own expression kind.
+        if node.operands.len()!=3 {
+            return Err(reject("C FP conditional expression requires three operands"));
+        }
+        let condition=comparison_from_edg(ctx,node.operands[0])?;
+        FloatExpr::Conditional {
+            condition:Box::new(condition),
+            yes:Box::new(arg(1)?),
+            no:Box::new(arg(2)?),
+        }
+    } else if node.operands.len()==1 {
         match op {
             4=>FloatExpr::Neg(Box::new(arg(0)?)),
             // All type changes must be introduced by actual EDG nodes.
