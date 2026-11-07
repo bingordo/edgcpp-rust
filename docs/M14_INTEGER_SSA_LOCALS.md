@@ -1,7 +1,7 @@
 # M14 — source-checked INTEGER automatic SSA in the FP reference
 
-Status: implementation and full native EDG/Rust/Cranelift/GCC CI under
-review. This is a bounded scalar-expression bridge, not a general
+Status: merged in [PR #81](https://github.com/bingordo/edgcpp-rust/pull/81),
+full pinned [native CI #42394399311](https://github.com/bingordo/edgcpp-rust/actions/runs/42394399311) passed. This is a bounded scalar-expression bridge, not a general
 integer frontend or completion of M14 #60.
 
 ## Accepted native C source forms
