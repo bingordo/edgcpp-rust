@@ -1,178 +1,138 @@
-# EDG frontend integration into bingordo/compiler
+# EDG frontend integration into `bingordo/compiler`
 
-Status: **integration plan, not a claim of an existing EDG compiler adapter**.
-The project goal is a reusable EDG frontend for the native
-`bingordo/compiler` optimizer and machine backends. Cranelift is an optional
-**reference backend** for semantic and ABI differential testing, not an
-intermediate representation or required runtime dependency of `compiler`.
+Status: **first native integration pilot implemented and GCC-verified**.
+Full EDG C/C++ coverage and native FP lowering are *not* claimed.
+The production path is **direct checked lowering into the existing
+`compiler-ir`**, not a new semantic-projection IR or independent CFG.
 
-## Current state and intended boundaries
+## Implemented boundary (7 November 2026)
 
 ```text
-         EDG C/C++ frontend (matching native configuration)
-                              |
-                       owned Il snapshot
-                              |
-                   graph::Graph indexed view
-                              |
-              checked C semantics / source interface
-                     /                    \
-                    v                      v
-          Cranelift adapter          compiler adapter
-          (reference oracle)         (production goal)
-                    |                      |
-             Cranelift CFG         compiler-ir CFG/SSA
-             x86 SysV ABI          compiler target ABI
-                    |                      |
-             x86-64 ELF              native backend
-                    \                      /
-               differential execution against GCC/Clang
+   EDG C11 frontend
+          |
+    owned edgcpp::Il
+          |
+   edgcpp::graph::Graph (source identities and relationships)
+          |
+   tools/edg-driver source checks and direct SSA construction
+          |
+     compiler-ir::Function + existing verifier
+          |
+     compiler-backend-x86 native ELF object
+          |
+     independent GCC linked differential tests
 ```
 
-What is implemented already:
+The adapter is in
+[`bingordo/compiler/tools/edg-driver`](https://github.com/bingordo/compiler/tree/main/tools/edg-driver),
+merged in
+[compiler PR #505](https://github.com/bingordo/compiler/pull/505).
+It is a separate opt-in Cargo workspace: regular compiler core,
+optimizer, Oberon and Mini-C builds never acquire native EDG or
+Cranelift dependencies. It pins the EDG Rust binding revision and
+uses the owned IL/Graph API. The adapter itself understands EDG source
+kinds, ABI type identities and native layout, then creates ordinary
+`compiler_ir::Op` nodes immediately. The frontend never creates an
+extra IR, and the native compiler backend never sees EDG types.
 
-- `src/lib.rs` exports an owned, compilation-lifetime-independent `Il`.
-- `src/graph.rs` supplies an indexed graph with symbol/type/statement/
-  expression identity, scope, source location, lifetime and label metadata.
-- `src/codegen.rs` and `src/codegen/cfg.rs` implement an *optional* Cranelift
-  backend with a selected target ABI. Its internal `Expr`, `Stmt` and
-  Cranelift `FunctionBuilder` structures are **not** the frontend interface.
-- `bingordo/compiler` already owns its block-argument SSA CFG, verifier,
-  optimizer, machine backend and a separate Mini-C frontend driver.
-  The new EDG integration should follow the driver pattern rather than
-  linking the compiler core to Cranelift.
+The first supported C11 slice is **plain signed/unsigned I32/I64
+parameters and matching result**, exact source literals and
+side-effect-free unary minus/plus and add/subtract/multiply return
+expressions. The source type, signedness, expression tree and target
+layout are checked at each lowering step. The adapter runs
+`compiler_ir::verify` and `verify_module` before calling the
+production x86 ELF encoder.
 
-## Stable frontend contract to build next
+The integrated native GCC differential, SSA-verifier build and
+negative rejected-source tests passed in
+[compiler-ci #42401198825](https://github.com/bingordo/compiler-ci/actions/runs/42401198825)
+and the second
+[merged-main validation #42401419335](https://github.com/bingordo/compiler-ci/actions/runs/42401419335).
+The maintained [compiler-ci workflow](https://github.com/bingordo/compiler-ci/blob/main/.github/workflows/edg-direct-ssa-pilot.yml)
+was merged in [compiler-ci PR #119](https://github.com/bingordo/compiler-ci/pull/119).
+It uses `compiler-ci`'s existing scoped checkout key for the private
+compiler repository, checks out the matching EDG source/configuration,
+and validates the checksum-pinned EDG callable archive. It never adds
+a private compiler Git dependency to the EDG Rust repository.
 
-Introduce a **checked semantic projection** over the owned EDG `Il`/
-`graph::Graph`, reusing those IDs where possible and avoiding a second
-unconditional copy of the whole AST. The goal is a backend-neutral input to
-both lowering adapters, with:
+The first adapter deliberately rejects automatic locals, calls,
+globals, pointers, branches/loops, general integer promotions,
+division, float/double and C++ semantics. These are **future
+incremental compiler IR lowering features**, not implied acceptance.
+No output object is written for an unsupported translation unit.
 
-1. **Typed declarations and references:** symbol identity, function
-   prototype, linkage, storage class, qualifiers, source locations,
-   lexical scope and lifetime events. Preserve source `goto`/label/
-   `switch`/case/default identities; do **not** construct a shared CFG.
-2. **Explicit expression semantics:** source and promoted/result types,
-   value category (lvalue/rvalue), signedness, width, casts, integer
-   promotions, usual arithmetic conversions, short-circuiting,
-   sequencing and side-effect/volatile/atomic annotations. Keep pointer
-   provenance/alias guarantees conservative.
-3. **Object and initialization semantics:** native size, alignment, field
-   offsets, bitfield ranges, array bounds, global relocations and
-   dynamic-initializer execution order. These layouts are only valid for
-   the matching EDG target ABI configuration; do not treat x86-native
-   layout metadata as universal.
-4. **Actionable unsupported diagnostics:** classify missing metadata,
-   unsupported language semantics and unsupported *target backend*
-   capabilities separately. Never translate an unknown C operation into
-   a plausible but unverified SSA or machine operation.
-5. **A versioned Rust interface and tests:** use strongly typed IDs and
-   checked accessors rather than leaking opaque native EDG enum numbers;
-   avoid raw EDG pointers and Cranelift types in the consumer-facing API.
-   Public API changes should remain compatible where possible, or use
-   deliberate version/feature gates.
+## Architecture decision: no separate projection IR
 
-This is a semantic *source interface*, not a new optimization IR, generic
-three-address code, machine ABI passing plan, frontend SSA, or front-end
-CFG. Backends may directly build their own CFG/SSA from it.
+The immutable `Il` and `graph::Graph` remain the **source interface**:
+they expose native EDG types, symbol IDs, expression/statement paths,
+source positions, layout, scopes, labels and lifetime metadata.
+They are not a backend-specific control-flow graph.
 
-## Sequencing decision: stabilize Cranelift reference first
+For each supported C construct, the direct adapter:
 
-**Current execution order:** make EDG -> Cranelift a usable reference C
-compiler before beginning the `bingordo/compiler` adapter. This revises the
-earlier proposal to run M9 integration concurrently. The long-term goal
-remains `bingordo/compiler`; this is a dependency gate, **not** a decision
-to adopt Cranelift IR in the main compiler.
+1. Verifies the native EDG operation, type, signedness, promotions and
+   source object identity, using checked bridge accessors.
+2. Determines source evaluation order, side effects, lvalue address
+   and memory/qualifier behavior before selecting target-independent
+   `compiler-ir` operations.
+3. Emits the appropriate existing SSA instructions, block arguments
+   and terminators directly; it never copies them through a parallel
+   general-purpose C expression IR.
+4. Invokes the existing compiler verifier and rejects any unsupported
+   semantics. Where the existing compiler IR cannot preserve necessary
+   C behavior, add minimal reusable operations or metadata **there**.
 
-The immediate reference-readiness gate is:
+The optional EDG/Cranelift codegen remains a separate, thoroughly
+tested *reference* for ABI and language-semantics comparisons.
+It does not become a production compiler layer. The two paths may
+reuse small type/semantic checking utilities on the owned EDG data,
+but **must not share a second optimizer IR, SSA graph, instruction
+selector or machine ABI placement plan**. Machine ABI realization
+belongs to the chosen backend.
 
-1. Native x86-64 ELF code generation, callable from C via the example
-   driver, with no silent wrong-code for the supported subset.
-2. A pinned **100-seed** controlled YARPGen cohort, with independent GCC and
-   Clang oracles, a published pass/unsupported/failure breakdown and
-   replayable failing cases. Do not infer broad coverage from the existing
-   ten-seed smoke.
-3. Important C language gaps prioritized from the actual failure ranking:
-   unconditional `for (;;)` and other control-flow cases, C ABI classes,
-   indirect calls, initializer semantics, etc. Do not prioritize features
-   without a representative failing case or concrete interoperability need.
-4. Preserve two-way GCC caller/callee tests and enforce explicit rejection
-   when native EDG semantics, ABI layouts or target capabilities are unknown.
-5. Maintain the owned `Il` / `graph::Graph` interface without making
-   production compiler code or reference-only Cranelift machinery its API.
+## Next implementation steps
 
-Only after the reference cohort and interoperability gates are credible do
-we begin the first `compiler-ir` integration pilot described next.
-The 1,000-seed constrained/default breadth gates in
-[YARPGen roadmap](YARPGEN_CRANELIFT_MILESTONES.md) remain longer-term
-acceptance goals; they are not claims of current success.
+- **Automatic integer SSA locals:** preserve declaration lifetime,
+  native integer source types and definite initialization. Emit
+  compiler SSA/block parameters and use its existing verifier.
+- **Control flow:** native EDG `if`, `while`, `for`,
+  `switch` and source `goto` use the compiler's existing CFG and
+  phi block-argument model. Preserve lazy C evaluation, side effects
+  and scope transitions. Do not turn conditionals into eager selects
+  when arms have effects.
+- **Mixed scalar C:** implement precisely checked integer
+  promotions, usual arithmetic conversions, integer-valued call
+  expressions, pointer arithmetic and signed/unsigned semantics.
+  Reject unknown source constructs rather than inferring a plausible
+  SSA instruction.
+- **Native FP:** `compiler-ir` currently has no general F32/F64 SSA
+  value types or arithmetic. Add them directly to the shared compiler
+  type/op/ABI and x86 backend interfaces with focused verifier and
+  differential tests. Use existing M14 Cranelift F32/F64 behavior as
+  a useful reference, not as the required native code path.
+- **Memory and ABI:** typed lvalues, ordered/qualified effects,
+  pointer aliases and object lifetime; verified C calls, global
+  definitions, aggregates, stack alignment, FP exceptional/fenv
+  semantics and C++ ABI as separate bounded increments.
 
-## First compiler integration slice (after the reference-readiness gate)
+Every increment requires independent native GCC/Clang oracles,
+positive and negative fixtures, compiler SSA verification, and
+no silent wrong-code for the accepted C subset. Production features
+should be usable by other compiler frontends where possible.
 
-Create a separate EDG driver/adapter in `bingordo/compiler`, analogous to
-`tools/mini-c-driver`. Pin the EDG bridge revision and build configuration.
-Keep the normal compiler, generic IR and optimizer free of EDG, EDG binary
-and Cranelift dependencies. The adapter may use the checked projection from
-this repository as an ordinary Rust dependency.
+## CI, scope and portability
 
-1. Start with simple, **defined-behavior integer C**: one `int f(int)`
-   style function, constants/parameters, conversions, locals, return,
-   comparisons, then `if` and `while`.
-2. Translate directly into `compiler-ir` using its existing typed
-   block-argument CFG/SSA construction and verifier. The adapter—not
-   `compiler-ir`—knows EDG kinds and type metadata. Do not port the
-   Cranelift `Stmt` or `Expr` lowering as the public interface.
-3. Add labels, arbitrary `goto` and `switch` once their source
-   semantics are checked. The reference adapter can use a two-phase
-   label-to-Cranelift-block map; the native adapter uses its own
-   block map. Neither requires a shared frontend CFG.
-4. Extend to memory, globals, pointers, aggregate objects, calls and
-   more language coverage **incrementally**, relying on already tested
-   `compiler-ir` operations and target ABI hooks. Do not block the
-   pilot on full SysV aggregate, floating, variadic, VLA or atomic support.
+Use `bingordo/compiler-ci` for native EDG/production compiler
+interoperability checks. Avoid adding a Git dependency on the
+private compiler repository in the public EDG Rust library's default
+Cargo resolution: this was tried in the exploratory
+[EDG PR #82](https://github.com/bingordo/edgcpp-rust/pull/82)
+and closed because the public CI token could not authenticate.
+No credentials are embedded in the adapter.
 
-**Initial acceptance gate:** compile and link a tiny C function with EDG
-+ `compiler` native ELF; compare result to GCC and EDG + Cranelift on a
-fixed fixture; run the compiler IR verifier. Expand to a branch/loop
-fixture. Include one negative fixture that fails cleanly on both
-adapters rather than silently compiling unsupported semantics.
-
-## Subsequent integration and ABI ownership
-
-- M10: typed direct/indirect calls, function pointers and verified ABI.
-  The semantic projection provides C function types and target-native
-  layout metadata. Each concrete backend owns its machine calling
-  convention and placement, independently of Cranelift's `PassingPlan`.
-  Use GCC/Clang cross-object tests in both call directions.
-- M11: VLAs, runtime `sizeof` and lifetime events belong in the source
-  contract. Dynamic allocation/stack restoration and CFG edges belong in
-  each backend.
-- M12: volatile and C11 atomic semantics must be expressed as explicit
-  memory effects and orderings. The native compiler implements them in
-  `compiler-ir`/legalization/target code; Cranelift reference coverage
-  may remain partial and reject unsupported cases.
-- M13: broaden the checked projection and native adapter, audit semantics
-  and run reproducible compiler-vs-Cranelift-vs-GCC/Clang tests.
-  A Cranelift unsupported result is a coverage limit, not a proof of
-  compiler failure; a shared bug between two adapters is not proven
-  correct without an independent oracle.
-
-**Longer-term success criterion:** the same EDG source and checked semantic
-view can drive `compiler` without importing Cranelift; shared C semantic
-tests pass, target ABI and layout are independently validated, errors retain
-source locations, and frontend integration has no forked semantic rules.
-
-## CI and non-goals
-
-- Test the owned `Il` and checked semantic interface without having to
-  compile Cranelift. Keep bridge/native EDG dependency setup isolated.
-- Run narrow native compiler and Cranelift reference differential fixtures
-  separately; gate broad YARPGen seed cohorts on proven baseline coverage.
-- Pin the source/configuration/binary revision of EDG in integration CI;
-  respect the repository's existing access and binary artifact restrictions.
-- No duplicate general-purpose frontend CFG, optimizer, vectorizer,
-  register allocator or machine instruction selector.
-- No promise that an x86-64 native EDG snapshot is suitable for AArch64.
-  AArch64 requires matching frontend target configuration and layout
-  validation in addition to backend code generation.
+A C11 x86-64 source/layout snapshot is not automatically valid on
+AArch64: pin and verify target-specific EDG configuration and
+ABI/layout assumptions before enabling another machine backend.
+The [M14 reference work tracker](https://github.com/bingordo/edgcpp-rust/issues/60)
+continues to track full FP/C semantics; the native adapter has
+separate, incremental implementation milestones.
