@@ -2772,6 +2772,39 @@ mod tests {
         FloatExpr::Add(Box::new(param(a)),Box::new(param(b)))
     }
     #[test]
+    fn m14_ieee_global_data_images_are_exact_and_reject_malformed_definitions() {
+        let f=ScalarFloatBody {
+            name:"m14_exact_global_test".into(),
+            parameters:vec![],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],
+            statements:vec![FloatStmt::Return(FloatExpr::Constant64(0))],
+        };
+        let bits=0x8000_0000_0000_0000_u64;
+        let g=FpScalarGlobal {
+            symbol:crate::SymbolId(100),name:"m14_exact_global_data".into(),
+            ty:FloatType::F64,linkage:Linkage::Export,
+            initializer:Some(bits.to_le_bytes().to_vec()),
+        };
+        let elf=emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[g.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        assert!(elf.windows(8).any(|bytes| bytes==bits.to_le_bytes().as_slice()));
+        let mut bad=g.clone();
+        bad.initializer=Some(vec![0;4]);
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[bad]).is_err());
+        let mut bad=g.clone();
+        bad.linkage=Linkage::Import;
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[bad]).is_err());
+        let mut bad=g.clone();
+        bad.symbol=crate::SymbolId(101);
+        assert!(emit_scalar_float_bodies_with_globals(&[f.clone()],true,&[g.clone(),bad]).is_err());
+        let zero=FpScalarGlobal {
+            symbol:crate::SymbolId(102),name:"m14_exact_zero_global".into(),
+            ty:FloatType::F32,linkage:Linkage::Local,initializer:None,
+        };
+        assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
+    }
+    #[test]
     fn source_authorized_external_scalar_imports_are_typed_and_restricted() {
         let params=vec![ScalarType::Float(FloatType::F64)];
         let external=FloatExpr::CallExternal {
