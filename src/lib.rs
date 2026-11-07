@@ -1874,6 +1874,34 @@ mod tests {
         assert_eq!(state.il.float_initializers.len(),1);
     }
     #[test]
+    fn m14_global_fp_image_wire_preserves_ieee_bits_and_rejects_bad_width() {
+        let number=|value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let valid=[number(17),number(23),number(64),
+                   number(0x8000_0000_0000_0000)];
+        unsafe {collect((&mut state as *mut Collector).cast(),60,
+                        valid.as_ptr(),valid.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.global_float_initializers,vec![
+            GlobalFloatInitializer {
+                symbol:SymbolId(17),ty:TypeId(23),width:64,
+                bits:0x8000_0000_0000_0000,
+            }
+        ]);
+        let bad=[number(18),number(24),number(32),number(0x1_0000_0000)];
+        unsafe {collect((&mut state as *mut Collector).cast(),60,
+                        bad.as_ptr(),bad.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.global_float_initializers.len(),1);
+        let mut malformed=Collector {il:Il::default(),panicked:false,malformed:false};
+        unsafe {collect((&mut malformed as *mut Collector).cast(),60,
+                        valid.as_ptr(),3,0);}
+        assert!(malformed.malformed);
+        assert!(malformed.il.global_float_initializers.is_empty());
+    }
+    #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
