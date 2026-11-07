@@ -3062,6 +3062,45 @@ mod tests {
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
     }
     #[test]
+    fn m14_addressed_fp_local_is_memory_backed_and_source_checked() {
+        let ty=FloatType::F64;
+        let fp=ScalarType::Float(ty);
+        let body=ScalarFloatBody {
+            name:"m14_addressed_fp_local_unit".into(),
+            parameters:vec![fp],result:fp,
+            locals:vec![ScalarType::StackFloat(ty),ScalarType::DataPointer(ty)],
+            statements:vec![
+                FloatStmt::Assign(0,FloatExpr::Parameter(0)),
+                FloatStmt::AssignDataPointer {
+                    local:1,ty,source:PointerSource::AddressedLocal(0),
+                },
+                FloatStmt::StorePointerLocal {
+                    local:1,ty,value:FloatExpr::Constant64(0x8000_0000_0000_0000),
+                },
+                FloatStmt::Return(FloatExpr::Local(0)),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[body.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=body.clone();
+        bad.statements.remove(0);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.locals[0]=ScalarType::Float(ty);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.locals[0]=ScalarType::StackFloat(FloatType::F32);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.statements[1]=FloatStmt::AssignDataPointer {
+            local:1,ty,source:PointerSource::Local(0),
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body;
+        bad.locals[1]=ScalarType::FunctionPointer(crate::TypeId(127));
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+    #[test]
     fn m14_data_pointer_ssa_local_definite_assignment_and_memory() {
         let ty=FloatType::F64;
         let pointer=ScalarType::DataPointer(ty);
