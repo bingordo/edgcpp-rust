@@ -2353,6 +2353,16 @@ fn lower_fp_body(
                     super::semantic(2,left.data.kind),
                     left.data.operator.map(|op|super::semantic(3,op)),
                     left.operands.len(),left.data.symbol_id,left.data.type_id
+                )+
+                &format!(" source_path={} expr_path={} symbol_name={:?} formals={:?} locals={:?} native_formals={:?} native_locals={:?}",
+                    node.data.path,left.data.path,
+                    left.data.symbol_id.and_then(|id|ctx.il.symbols.iter()
+                        .find(|s|s.id==id).map(|s|(s.name.clone(),s.kind))),
+                    ctx.params,ctx.locals,
+                    ctx.il.function_parameters.iter().filter(|p|p.routine==ctx.routine)
+                        .map(|p|(p.symbol,p.ty)).collect::<Vec<_>>(),
+                    ctx.il.local_variables.iter().filter(|p|p.routine==ctx.routine)
+                        .map(|p|(p.symbol,p.ty)).collect::<Vec<_>>()
                 )))?;
             if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                 reject("missing native scalar lvalue type"))?)?!=ctx.local_types[local] {
