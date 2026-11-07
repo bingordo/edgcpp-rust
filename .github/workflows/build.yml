@@ -1033,6 +1033,42 @@ jobs:
             done
           )
 
+      - name: M14 verified indexed F32 F64 memory native GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_indexed*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen m14_indexed.o --c11 m14_fp_indexed_memory.c >m14_indexed.log 2>&1; then
+              cat m14_indexed.log
+              exit 1
+            fi
+            nm -g --defined-only m14_indexed.o | grep -q m14_index_load
+            nm -g --defined-only m14_indexed.o | grep -q m14_index_f32
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_indexed_memory.c m14_fp_indexed_memory_driver.c -lm -o gcc_m14_indexed
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_indexed.o m14_fp_indexed_memory_driver.c -lm -o clif_m14_indexed
+            ./gcc_m14_indexed
+            ./clif_m14_indexed
+            for source in m14_fp_indexed_bad_computed.c m14_fp_indexed_bad_pointer.c m14_fp_indexed_bad_arithmetic.c m14_fp_indexed_bad_volatile.c m14_fp_indexed_bad_narrow.c; do
+              rm -f bad_m14_indexed.o bad_m14_indexed.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_indexed.o --c11 "$source" >bad_m14_indexed.log 2>&1; then
+                echo "Unsupported C FP index/pointer expression unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |subscript|index|pointer|unsupported|source|qualified|EDG IL lowering failed|EDG reported compilation failure' bad_m14_indexed.log
+              test ! -e bad_m14_indexed.o
+            done
+          )
+
       - name: M14 checked FP data pointer SSA locals native GCC differential
         working-directory: edgcpp-rust
         env:

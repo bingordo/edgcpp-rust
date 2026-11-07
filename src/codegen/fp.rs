@@ -72,6 +72,13 @@ pub enum PointerSource {
     /// address, global, parameter address, or escaping pointer.
     AddressedLocal(usize),
 }
+/// Signed/unsigned native integer source allowed as an FP pointer index.
+/// Only direct INTEGER formals and exact EDG constants are authorized.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum FpIndex {
+    Parameter {parameter:usize,ty:ScalarType},
+    Constant {bits:u64,ty:ScalarType},
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
     Float(FloatExpr),
@@ -128,6 +135,9 @@ pub enum FloatExpr {
     /// Reads use real memory, and the local's pointer SSA value is defined
     /// only along reachable CFG paths.
     LoadPointerLocal {local:usize,ty:FloatType},
+    /// Native C p[i] (or i[p]) through a verified FP pointer and a direct
+    /// signed/unsigned I32/I64 index. Emit real memory, never an SSA alias.
+    LoadIndexed {pointer:PointerSource,index:FpIndex,ty:FloatType},
     Constant32(u32),
     Constant64(u64),
     Neg(Box<Self>),
@@ -185,6 +195,10 @@ pub enum FloatStmt {
     StorePointerParameter {parameter:usize,ty:FloatType,value:FloatExpr},
     /// Ordinary source-verified write through a nonescaping pointer SSA local.
     StorePointerLocal {local:usize,ty:FloatType,value:FloatExpr},
+    /// Native C p[i]=value with source-checked pointee, index and memory.
+    StoreIndexed {
+        pointer:PointerSource,index:FpIndex,ty:FloatType,value:FloatExpr,
+    },
     /// Copy a checked data pointer formal/local into an automatic pointer SSA
     /// local, never create a pointer from integers, addresses or casts.
     AssignDataPointer {local:usize,ty:FloatType,source:PointerSource},
@@ -272,6 +286,51 @@ fn data_pointer_source_type(
             _=>Err(reject("address-of FP local has no checked stack object")),
         },
     }
+}
+fn checked_fp_index(
+    index:&FpIndex,params:&[ScalarType],
+)->Result<ScalarType,CodegenError> {
+    match index {
+        FpIndex::Parameter {parameter,ty}=>{
+            if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
+                params.get(*parameter)!=Some(ty) {
+                return Err(reject("FP subscript index is not an exact 32/64-bit INTEGER formal"));
+            }
+            Ok(*ty)
+        }
+        FpIndex::Constant {bits,ty}=>{
+            checked_integer_literal(*ty,*bits)?;
+            Ok(*ty)
+        }
+    }
+}
+/// Real C pointer arithmetic: the source integer's signedness determines
+/// I32 extension. I64 arithmetic is modulo at machine level, and C code
+/// outside the pointed-to object remains undefined as in GCC.
+fn emit_fp_index_address(
+    pointer:PointerSource,index:&FpIndex,ty:FloatType,
+    fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],
+    locals:&[Variable],locals_ty:&[ScalarType],
+)->Result<Value,CodegenError> {
+    let src=checked_fp_index(index,params_ty)?;
+    let base=emit_data_pointer_source(pointer,fb,params,params_ty,locals,locals_ty,ty)?;
+    let index_value=match index {
+        FpIndex::Parameter {parameter,..}=>*params.get(*parameter)
+            .ok_or_else(||reject("FP INTEGER index formal has no ABI value"))?,
+        FpIndex::Constant {bits,..}=>emit_integer_literal(fb,src,*bits)?,
+    };
+    let extended=match src {
+        ScalarType::Int {bits:32,signed:true}=>
+            fb.ins().sextend(types::I64,index_value),
+        ScalarType::Int {bits:32,signed:false}=>
+            fb.ins().uextend(types::I64,index_value),
+        ScalarType::Int {bits:64,..}=>index_value,
+        _=>return Err(reject("FP index is not signed/unsigned I32/I64")),
+    };
+    let stride=match ty {FloatType::F32=>4,FloatType::F64=>8};
+    let offset=fb.ins().imul_imm(extended,stride);
+    Ok(fb.ins().iadd(base,offset))
 }
 fn check_pointer_source_reads(
     src:PointerSource,defined:&[bool],
@@ -452,6 +511,13 @@ fn expression_type(
             }
             Ok(*ty)
         },
+        LoadIndexed {pointer,index,ty}=>{
+            if data_pointer_source_type(*pointer,params,locals)?!=*ty {
+                return Err(reject("FP indexed load pointee type mismatch"));
+            }
+            checked_fp_index(index,params)?;
+            Ok(*ty)
+        },
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
         Neg(e)=>expression_type(e,params,locals,depth+1),
@@ -627,6 +693,11 @@ fn emit_expr(
                 params,params_ty,locals,locals_ty,*ty)?;
             (fb.ins().load(ty.machine(),MemFlags::new(),ptr,0),*ty)
         }
+        LoadIndexed {pointer,index,ty}=>{
+            let ptr=emit_fp_index_address(*pointer,index,*ty,fb,
+                params,params_ty,locals,locals_ty)?;
+            (fb.ins().load(ty.machine(),MemFlags::new(),ptr,0),*ty)
+        }
         ExternalGlobal {symbol,ty}=>{
             let (data,actual)=*global_refs.get(symbol).ok_or_else(||
                 reject("FP external global has no verified data import"))?;
@@ -706,6 +777,7 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
             Err(reject("read of uninitialized or invalid FP local")),
         LoadPointerLocal {local,..} if !defined.get(*local).copied().unwrap_or(false)=>
             Err(reject("FP load through uninitialized data pointer local")),
+        LoadIndexed {pointer,..}=>check_pointer_source_reads(*pointer,defined),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
         IntegerConstantCast {..}|
         ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
@@ -821,6 +893,18 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
+                    return Err(reject("FP indexed store pointee type mismatch"));
+                }
+                checked_fp_index(index,&f.parameters)?;
+                check_pointer_source_reads(*pointer,&defined)?;
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP indexed store RHS has unconverted type"));
+                }
+                next=Some(defined);
+            }
             FloatStmt::AssignDataPointer {local,ty,source}=>{
                 if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
                     data_pointer_source_type(*source,&f.parameters,&f.locals)?!=*ty {
@@ -1030,6 +1114,14 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                let address=emit_fp_index_address(*pointer,index,*ty,fb,
+                    params,params_ty,locals,locals_ty)?;
+                let (value,actual)=emit_expr(value,fb,params,params_ty,
+                    locals,locals_ty,refs,global_refs)?;
+                if actual!=*ty {return Err(reject("indexed FP store RHS class mismatch"));}
+                fb.ins().store(MemFlags::new(),value,address,0);
+            }
             FloatStmt::AssignDataPointer {local,ty,source}=>{
                 let value=emit_data_pointer_source(*source,fb,
                     params,params_ty,locals,locals_ty,*ty)?;
@@ -1389,6 +1481,7 @@ fn validate_fp_calls_expr(
         FloatExpr::IntegerConstantCast {..}|
         FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
         FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
+        FloatExpr::LoadIndexed {..}|
         FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
     }
     Ok(())
@@ -1418,7 +1511,8 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
             FloatStmt::StoreGlobal {value,..}|
             FloatStmt::StorePointerParameter {value,..}|
-            FloatStmt::StorePointerLocal {value,..}=>
+            FloatStmt::StorePointerLocal {value,..}|
+            FloatStmt::StoreIndexed {value,..}=>
                 validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
@@ -1753,6 +1847,68 @@ fn source_fp_data_pointer_value(
         return Err(reject("FP data pointer variable native ABI mismatch"));
     }
     Ok(source)
+}
+/// Resolve a native C pointer subscript without inventing pointer
+/// arithmetic or accepting an arbitrary integer expression.  The pointer
+/// must be the original checked scalar FP formal/local/addressed scalar;
+/// the integer must be a direct I32/I64 formal or bit-exact constant.
+fn source_fp_subscript_index(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
+)->Result<FpIndex,CodegenError> {
+    let node=ctx.graph.expression(id).ok_or_else(||
+        reject("FP indexed access lacks EDG integer expression"))?;
+    let ty=scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+        reject("FP index has no native INTEGER type"))?)?;
+    if !matches!(ty,ScalarType::Int {bits:32|64,..}) {
+        return Err(reject("FP subscript requires a native 32/64-bit INTEGER index"));
+    }
+    if let Some(bits)=source_integer_constant(ctx,node,ty)? {
+        return Ok(FpIndex::Constant {bits,ty});
+    }
+    if super::semantic(2,node.data.kind)!=2 ||
+        node.data.constant_kind.is_some() || !node.operands.is_empty() {
+        return Err(reject("FP subscript index is not a direct INTEGER formal/constant"));
+    }
+    let symbol=node.data.symbol_id.ok_or_else(||
+        reject("FP subscript index lacks source symbol identity"))?;
+    let parameter=ctx.params.iter().position(|p|*p==symbol)
+        .ok_or_else(||reject("FP subscript INTEGER index is not a formal"))?;
+    if ctx.param_types[parameter]!=ty {
+        return Err(reject("FP subscript native INTEGER formal type mismatch"));
+    }
+    Ok(FpIndex::Parameter {parameter,ty})
+}
+fn source_fp_subscript(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
+)->Result<(PointerSource,FpIndex),CodegenError> {
+    let node=ctx.graph.expression(id)
+        .ok_or_else(||reject("FP subscript has no EDG source node"))?;
+    if super::semantic(2,node.data.kind)!=3 ||
+        node.data.operator.map(|op|super::semantic(3,op))!=Some(45) ||
+        node.operands.len()!=2 || node.data.constant_kind.is_some() ||
+        type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+            reject("FP indexed lvalue has no native result type"))?)?!=ty {
+        return Err(reject("FP indexed lvalue is not a checked C subscript"));
+    }
+    let left=ctx.graph.expression(node.operands[0]).ok_or_else(||
+        reject("FP subscript left operand missing"))?;
+    let right=ctx.graph.expression(node.operands[1]).ok_or_else(||
+        reject("FP subscript right operand missing"))?;
+    let left_ty=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+        reject("FP subscript left operand has no type"))?)?;
+    let right_ty=scalar_type_from_edg(ctx.il,right.data.type_id.ok_or_else(||
+        reject("FP subscript right operand has no type"))?)?;
+    let (p,i)=match (left_ty,right_ty) {
+        (ScalarType::DataPointer(p),ScalarType::Int {bits:32|64,..})
+            if p==ty=>(node.operands[0],node.operands[1]),
+        (ScalarType::Int {bits:32|64,..},ScalarType::DataPointer(p))
+            if p==ty=>(node.operands[1],node.operands[0]),
+        _=>return Err(reject("FP subscript does not have one exact pointer and INTEGER")),
+    };
+    let pointer=source_fp_data_pointer_value(ctx,p,ty)?;
+    let index=source_fp_subscript_index(ctx,i)?;
+    checked_fp_index(&index,ctx.param_types)?;
+    Ok((pointer,index))
 }
 fn source_fp_pointer_formal(
     ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,ty:FloatType,
@@ -2195,6 +2351,10 @@ fn expression_from_edg(
     // Only an EDG-authoritative conversion from a direct integer formal is
     // accepted. Integer expressions, local memory and implicit bitcasting
     // are *not* silently accepted as scalar floating point values.
+    if op==45 && node.operands.len()==2 {
+        let (pointer,index)=source_fp_subscript(ctx,id,ty)?;
+        return Ok(FloatExpr::LoadIndexed {pointer,index,ty});
+    }
     if op==44 && node.operands.len()==1 {
         let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
         return match source {
@@ -2660,6 +2820,21 @@ fn lower_fp_body(
             }
             let left=ctx.graph.expression(operation.operands[0])
                 .ok_or_else(||reject("FP assignment has no lvalue"))?;
+            // Native C p[i]=rhs uses the same verified provenance and
+            // integer-index source contract as the corresponding rvalue.
+            if super::semantic(2,left.data.kind)==3 &&
+                left.data.operator.is_some_and(|op|super::semantic(3,op)==45) &&
+                left.operands.len()==2 {
+                let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                    reject("FP indexed assignment lacks native lvalue type"))?)?;
+                let (pointer,index)=source_fp_subscript(ctx,operation.operands[0],ty)?;
+                let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                    return Err(reject("FP indexed store RHS missing native conversion"));
+                }
+                output.push(FloatStmt::StoreIndexed {pointer,index,ty,value});
+                return Ok(());
+            }
             // Native C *p = rhs: p must be an unchanged, unqualified
             // source-verified pointer formal to exactly this F32/F64 type.
             if super::semantic(2,left.data.kind)==3 &&
@@ -3067,6 +3242,75 @@ mod tests {
             ty:FloatType::F32,linkage:Linkage::Local,initializer:None,
         };
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
+    }
+    #[test]
+    fn m14_checked_fp_subscript_machine_index_and_rejection() {
+        let f64ty=FloatType::F64;
+        let source=ScalarType::Int {bits:32,signed:true};
+        let ix=FpIndex::Parameter {parameter:1,ty:source};
+        let body=ScalarFloatBody {
+            name:"m14_indexed_unit".into(),
+            parameters:vec![ScalarType::DataPointer(f64ty),source,
+                            ScalarType::Float(f64ty)],
+            result:ScalarType::Float(f64ty),
+            locals:vec![],
+            statements:vec![
+                FloatStmt::StoreIndexed {
+                    pointer:PointerSource::Parameter(0),
+                    index:ix.clone(),ty:f64ty,
+                    value:FloatExpr::Parameter(2),
+                },
+                FloatStmt::Return(FloatExpr::LoadIndexed {
+                    pointer:PointerSource::Parameter(0),
+                    index:ix,ty:f64ty,
+                }),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[body.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=body.clone();
+        bad.parameters[0]=ScalarType::DataPointer(FloatType::F32);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.parameters[1]=ScalarType::Int {bits:64,signed:true};
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        if let FloatStmt::StoreIndexed {pointer,..}=&mut bad.statements[0] {
+            *pointer=PointerSource::Local(0);
+        }
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        if let FloatStmt::Return(FloatExpr::LoadIndexed {index,..})=
+            &mut bad.statements[1] {
+            *index=FpIndex::Constant {
+                bits:0x1_0000_0000,
+                ty:ScalarType::Int {bits:32,signed:false},
+            };
+        }
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        for (ty,bits) in [
+            (ScalarType::Int {bits:32,signed:false},u32::MAX as u64),
+            (ScalarType::Int {bits:64,signed:false},u64::MAX),
+            (ScalarType::Int {bits:64,signed:true},u64::MAX),
+        ] {
+            checked_fp_index(&FpIndex::Constant {bits,ty},&body.parameters)
+                .unwrap();
+        }
+        // Reject a C short/char index until promotions are modeled.
+        assert!(checked_fp_index(&FpIndex::Constant {
+            bits:2,ty:ScalarType::Int {bits:16,signed:true},
+        },&body.parameters).is_err());
+        // Checked pointer locals must be definitely initialized on all paths.
+        let local=ScalarFloatBody {
+            name:"m14_indexed_uninitialized_local".into(),
+            parameters:vec![source],result:ScalarType::Float(f64ty),
+            locals:vec![ScalarType::DataPointer(f64ty)],
+            statements:vec![FloatStmt::Return(FloatExpr::LoadIndexed {
+                pointer:PointerSource::Local(0),
+                index:FpIndex::Parameter {parameter:0,ty:source},ty:f64ty,
+            })],
+        };
+        assert!(emit_scalar_float_bodies(&[local]).is_err());
     }
     #[test]
     fn m14_addressed_fp_local_is_memory_backed_and_source_checked() {
