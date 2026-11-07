@@ -2794,7 +2794,7 @@ mod tests {
                     })],
                 };
                 let bytes=emit_scalar_float_bodies(&[function.clone()]).unwrap();
-                assert_eq!(&bytes[..4],b"\\x7fELF");
+                assert_eq!(&bytes[..4],b"\x7fELF");
                 let mut bad=function.clone();
                 if let FloatStmt::Return(FloatExpr::IntegerConstantCast {source,..})=
                     &mut bad.statements[0] {
