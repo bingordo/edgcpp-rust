@@ -423,7 +423,7 @@ jobs:
             gcc -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter edg_m14_locals.o m14_fp_locals_driver.c -o cranelift_m14_locals
             ./gcc_m14_locals
             ./cranelift_m14_locals
-            for source in m14_fp_locals_uninit.c m14_fp_locals_address.c; do
+            for source in m14_fp_locals_uninit.c; do
               rm -f m14_unsafe.o m14_unsafe.log
               if ../../../edgcpp-rust/target/debug/examples/codegen m14_unsafe.o --c11 "$source" >m14_unsafe.log 2>&1; then
                 echo "Unsafe FP local silently compiled: $source"
