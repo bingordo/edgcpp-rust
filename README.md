@@ -175,6 +175,20 @@ passed. See [M14 FP conditional-value contract](docs/M14_FP_CONDITIONAL_VALUES.m
 INTEGER-valued ternaries, general memory-lvalue semantics and
 unmodeled side effects still fail closed.
 
+**M14 source-verified FP pointer memory (November 6, 2026):**
+[PR #75](https://github.com/bingordo/edgcpp-rust/pull/75) adds
+ordinary F32/F64 loads and stores through native C `float*`/`double*`
+function formals, including visible pointer aliasing, branch and
+loop updates, and stack-passed pointers in mixed SysV ABI signatures.
+Pointer type, unqualified pointee layout, source symbol and dereference
+provenance are checked using EDG native metadata; these are real
+memory operations, not SSA rewrites. Full pinned
+[CI #42336164590](https://github.com/bingordo/edgcpp-rust/actions/runs/42336164590)
+passed, with native GCC differential and rejection fixtures. See the
+[FP pointer-memory contract](docs/M14_FP_POINTER_MEMORY.md).
+Address-taken automatic locals, pointer arithmetic and qualified
+pointees remain unsupported.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
