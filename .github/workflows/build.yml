@@ -928,6 +928,42 @@ jobs:
             done
           )
 
+      - name: M14 lazy FP conditional-value source GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/m14_fp_conditional*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ! ../../../edgcpp-rust/target/debug/examples/codegen m14_conditional.o --c11 m14_fp_conditional_values.c >m14_conditional.log 2>&1; then
+              cat m14_conditional.log
+              exit 1
+            fi
+            nm -g --defined-only m14_conditional.o | grep -q m14_ternary_truth
+            nm -u m14_conditional.o | grep -q m14_ternary_yes
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_fp_conditional_values.c m14_fp_conditional_values_driver.c -lm -o gcc_m14_conditional
+            gcc -std=c11 -O2 -Wall -Wextra -Werror m14_conditional.o m14_fp_conditional_values_driver.c -lm -o cranelift_m14_conditional
+            ./gcc_m14_conditional
+            ./cranelift_m14_conditional
+            for source in m14_fp_conditional_bad_integer_condition.c m14_fp_conditional_bad_pointer.c m14_fp_conditional_bad_side_effect.c; do
+              rm -f bad_m14_conditional.o bad_m14_conditional.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen bad_m14_conditional.o --c11 "$source" >bad_m14_conditional.log 2>&1; then
+                echo "Unsupported FP conditional expression unexpectedly compiled: $source"
+                exit 1
+              fi
+              grep -E 'FP |conditional|unsupported|EDG IL lowering failed|EDG reported compilation failure' bad_m14_conditional.log
+              test ! -e bad_m14_conditional.o
+            done
+          )
+
       - name: M12 explicit-order C11/GNU native differential and fail-closed matrix
         working-directory: edgcpp-rust
         env:
