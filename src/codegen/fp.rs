@@ -33,6 +33,9 @@ impl FloatType {
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum ScalarType {
     Float(FloatType),
+    /// Only an automatic source-local whose address was actually taken.
+    /// Its SSA variable contains a native stack address, never FP bits.
+    StackFloat(FloatType),
     Int { bits:u8,signed:bool },
     /// An EDG-verified pointer to a prototyped nonvariadic C function.
     /// Its canonical native identity prevents casting ordinary data pointers.
@@ -47,7 +50,8 @@ impl ScalarType {
             Self::Float(t)=>t.machine(),
             Self::Int {bits:32,..}=>types::I32,
             Self::Int {bits:64,..}=>types::I64,
-            Self::FunctionPointer(_)|Self::DataPointer(_)=>types::I64,
+            Self::FunctionPointer(_)|Self::DataPointer(_)|
+            Self::StackFloat(_)=>types::I64,
             _=>unreachable!("integer width was checked at source boundary"),
         }
     }
@@ -64,6 +68,9 @@ struct ScalarFloatBody {
 pub enum PointerSource {
     Parameter(usize),
     Local(usize),
+    /// Native &x for a checked, stack-backed FP local. Never a computed
+    /// address, global, parameter address, or escaping pointer.
+    AddressedLocal(usize),
 }
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
@@ -244,6 +251,8 @@ fn pointer_source_type(
             Some(ScalarType::FunctionPointer(ty))=>Ok(*ty),
             _=>Err(reject("call target is not a checked pointer local")),
         },
+        PointerSource::AddressedLocal(_)=>
+            Err(reject("address of FP object is not a C callable pointer")),
     }
 }
 fn data_pointer_source_type(
@@ -258,6 +267,10 @@ fn data_pointer_source_type(
             Some(ScalarType::DataPointer(t))=>Ok(*t),
             _=>Err(reject("FP data pointer is not an exact typed automatic local")),
         },
+        PointerSource::AddressedLocal(n)=>match locals.get(n) {
+            Some(ScalarType::StackFloat(t))=>Ok(*t),
+            _=>Err(reject("address-of FP local has no checked stack object")),
+        },
     }
 }
 fn check_pointer_source_reads(
@@ -265,8 +278,10 @@ fn check_pointer_source_reads(
 )->Result<(),CodegenError> {
     match src {
         PointerSource::Parameter(_)=>Ok(()),
-        PointerSource::Local(n) if defined.get(n).copied()==Some(true)=>Ok(()),
-        PointerSource::Local(_)=>Err(reject("read of uninitialized callable pointer local")),
+        PointerSource::Local(n)|PointerSource::AddressedLocal(n)
+            if defined.get(n).copied()==Some(true)=>Ok(()),
+        PointerSource::Local(_)|PointerSource::AddressedLocal(_)=>
+            Err(reject("pointer source or addressed FP object is uninitialized")),
     }
 }
 fn emit_data_pointer_source(
@@ -280,8 +295,9 @@ fn emit_data_pointer_source(
     match src {
         PointerSource::Parameter(n)=>params.get(n).copied().ok_or_else(||
             reject("FP data pointer formal has no native ABI value")),
-        PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
-            .ok_or_else(||reject("FP data pointer local has no SSA slot")),
+        PointerSource::Local(n)|PointerSource::AddressedLocal(n)=>
+            locals.get(n).map(|var|fb.use_var(*var))
+                .ok_or_else(||reject("FP data pointer local/addressed object has no slot")),
     }
 }
 fn emit_pointer_source(
@@ -297,6 +313,8 @@ fn emit_pointer_source(
             reject("call pointer formal has no physical ABI value")),
         PointerSource::Local(n)=>locals.get(n).map(|var|fb.use_var(*var))
             .ok_or_else(||reject("call pointer local has no SSA variable")),
+        PointerSource::AddressedLocal(_)=>
+            Err(reject("addressed FP object cannot be a callable target")),
     }
 }
 /// Common source ABI plan shared by the FP Cranelift reference and the
