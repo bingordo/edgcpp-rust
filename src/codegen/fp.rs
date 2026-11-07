@@ -2747,6 +2747,49 @@ mod tests {
     }
 
     #[test]
+    fn typed_fp_memory_formals_have_exact_abi_and_real_load_store() {
+        let ptr=ScalarType::DataPointer(FloatType::F64);
+        let load=FloatExpr::LoadPointerParameter {
+            parameter:0,ty:FloatType::F64,
+        };
+        let f=ScalarFloatBody {
+            name:"m14_pointer_memory".into(),
+            parameters:vec![ptr,ScalarType::Float(FloatType::F64)],
+            result:ScalarType::Float(FloatType::F64),locals:vec![],
+            statements:vec![
+                FloatStmt::StorePointerParameter {
+                    parameter:0,ty:FloatType::F64,
+                    value:FloatExpr::Parameter(1),
+                },
+                FloatStmt::Return(load.clone()),
+            ],
+        };
+        let bytes=emit_scalar_float_bodies(&[f.clone()]).unwrap();
+        assert_eq!(&bytes[..4],b"\x7fELF");
+        let mut wrong=f.clone();
+        wrong.parameters[0]=ScalarType::FunctionPointer(crate::TypeId(77));
+        assert!(emit_scalar_float_bodies(&[wrong]).is_err());
+        let mut wrong=f.clone();
+        wrong.parameters[0]=ScalarType::Int{bits:64,signed:false};
+        assert!(emit_scalar_float_bodies(&[wrong]).is_err());
+        let mut wrong=f.clone();
+        wrong.statements=vec![FloatStmt::Return(FloatExpr::LoadPointerParameter {
+            parameter:1,ty:FloatType::F64,
+        })];
+        assert!(emit_scalar_float_bodies(&[wrong]).is_err());
+        let mut wrong=f.clone();
+        if let FloatStmt::StorePointerParameter {ty,..}=&mut wrong.statements[0] {
+            *ty=FloatType::F32;
+        }
+        assert!(emit_scalar_float_bodies(&[wrong]).is_err());
+        let mut wrong=f.clone();
+        if let FloatStmt::StorePointerParameter {value,..}=&mut wrong.statements[0] {
+            *value=FloatExpr::Constant32(1.0f32.to_bits());
+        }
+        assert!(emit_scalar_float_bodies(&[wrong]).is_err());
+    }
+
+    #[test]
     fn native_fp_ternary_value_is_typed_lazy_and_checks_both_arms() {
         let cond=FloatCondition {
             op:FloatPredicate::Ne,left:FloatExpr::Parameter(0),
