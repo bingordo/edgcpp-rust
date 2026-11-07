@@ -3245,6 +3245,75 @@ mod tests {
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
     }
     #[test]
+    fn m14_checked_fp_subscript_machine_index_and_rejection() {
+        let f64ty=FloatType::F64;
+        let source=ScalarType::Int {bits:32,signed:true};
+        let ix=FpIndex::Parameter {parameter:1,ty:source};
+        let body=ScalarFloatBody {
+            name:"m14_indexed_unit".into(),
+            parameters:vec![ScalarType::DataPointer(f64ty),source,
+                            ScalarType::Float(f64ty)],
+            result:ScalarType::Float(f64ty),
+            locals:vec![],
+            statements:vec![
+                FloatStmt::StoreIndexed {
+                    pointer:PointerSource::Parameter(0),
+                    index:ix.clone(),ty:f64ty,
+                    value:FloatExpr::Parameter(2),
+                },
+                FloatStmt::Return(FloatExpr::LoadIndexed {
+                    pointer:PointerSource::Parameter(0),
+                    index:ix,ty:f64ty,
+                }),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[body.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=body.clone();
+        bad.parameters[0]=ScalarType::DataPointer(FloatType::F32);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        bad.parameters[1]=ScalarType::Int {bits:64,signed:true};
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        if let FloatStmt::StoreIndexed {pointer,..}=&mut bad.statements[0] {
+            *pointer=PointerSource::Local(0);
+        }
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=body.clone();
+        if let FloatStmt::Return(FloatExpr::LoadIndexed {index,..})=
+            &mut bad.statements[1] {
+            *index=FpIndex::Constant {
+                bits:0x1_0000_0000,
+                ty:ScalarType::Int {bits:32,signed:false},
+            };
+        }
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        for (ty,bits) in [
+            (ScalarType::Int {bits:32,signed:false},u32::MAX as u64),
+            (ScalarType::Int {bits:64,signed:false},u64::MAX),
+            (ScalarType::Int {bits:64,signed:true},u64::MAX),
+        ] {
+            checked_fp_index(&FpIndex::Constant {bits,ty},&body.parameters)
+                .unwrap();
+        }
+        // Reject a C short/char index until promotions are modeled.
+        assert!(checked_fp_index(&FpIndex::Constant {
+            bits:2,ty:ScalarType::Int {bits:16,signed:true},
+        },&body.parameters).is_err());
+        // Checked pointer locals must be definitely initialized on all paths.
+        let local=ScalarFloatBody {
+            name:"m14_indexed_uninitialized_local".into(),
+            parameters:vec![source],result:ScalarType::Float(f64ty),
+            locals:vec![ScalarType::DataPointer(f64ty)],
+            statements:vec![FloatStmt::Return(FloatExpr::LoadIndexed {
+                pointer:PointerSource::Local(0),
+                index:FpIndex::Parameter {parameter:0,ty:source},ty:f64ty,
+            })],
+        };
+        assert!(emit_scalar_float_bodies(&[local]).is_err());
+    }
+    #[test]
     fn m14_addressed_fp_local_is_memory_backed_and_source_checked() {
         let ty=FloatType::F64;
         let fp=ScalarType::Float(ty);
