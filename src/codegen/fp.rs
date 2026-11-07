@@ -798,6 +798,26 @@ fn check_fp_statements(
         };
         let next;
         match stmt {
+            FloatStmt::AssignDataPointer {local,ty,source}=>{
+                if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
+                    data_pointer_source_type(*source,&f.parameters,&f.locals)?!=*ty {
+                    return Err(reject("FP data pointer SSA assignment pointee mismatch"));
+                }
+                check_pointer_source_reads(*source,&defined)?;
+                defined[*local]=true;
+                next=Some(defined);
+            }
+            FloatStmt::StorePointerLocal {local,ty,value}=>{
+                if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
+                    !defined.get(*local).copied().unwrap_or(false) {
+                    return Err(reject("FP store through uninitialized/wrong data pointer local"));
+                }
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP local pointer store RHS source type mismatch"));
+                }
+                next=Some(defined);
+            }
             FloatStmt::AssignPointer {local,pointer_type,source}=>{
                 let actual=f.locals.get(*local).ok_or_else(||
                     reject("pointer assignment local out of range"))?;
@@ -986,6 +1006,21 @@ fn emit_fp_statements(
     for stmt in stmts {
         if !live {break;}
         match stmt {
+            FloatStmt::AssignDataPointer {local,ty,source}=>{
+                let value=emit_data_pointer_source(*source,fb,
+                    params,params_ty,locals,locals_ty,*ty)?;
+                let var=*locals.get(*local).ok_or_else(||
+                    reject("FP data pointer local has no SSA slot"))?;
+                fb.def_var(var,value);
+            }
+            FloatStmt::StorePointerLocal {local,ty,value}=>{
+                let pointer=emit_data_pointer_source(PointerSource::Local(*local),fb,
+                    params,params_ty,locals,locals_ty,*ty)?;
+                let (v,actual)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                    refs,global_refs)?;
+                if actual!=*ty {return Err(reject("FP data pointer store needs conversion"));}
+                fb.ins().store(MemFlags::new(),v,pointer,0);
+            }
             FloatStmt::AssignPointer {local,pointer_type,source}=>{
                 let value=emit_pointer_source(*source,fb,
                     params,params_ty,locals,locals_ty,*pointer_type)?;
@@ -1348,7 +1383,8 @@ fn validate_fp_calls_stmts(
             FloatStmt::ReturnInteger(e,_)=>
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
             FloatStmt::StoreGlobal {value,..}|
-            FloatStmt::StorePointerParameter {value,..}=>
+            FloatStmt::StorePointerParameter {value,..}|
+            FloatStmt::StorePointerLocal {value,..}=>
                 validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
@@ -1390,7 +1426,8 @@ fn validate_fp_calls_stmts(
                 validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
                 validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
             }
-            FloatStmt::AssignPointer {..}|FloatStmt::Break|FloatStmt::Continue=>{},
+            FloatStmt::AssignPointer {..}|FloatStmt::AssignDataPointer {..}|
+            FloatStmt::Break|FloatStmt::Continue=>{},
         }
     }
     Ok(())
@@ -2771,8 +2808,9 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             }
             check_plain_fp_local(il,local.ty)?;
             let ty=scalar_type_from_edg(il,local.ty)?;
-            if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)) {
-                return Err(reject("non-FP, non-function-pointer automatic local unsupported"));
+            if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)|
+                ScalarType::DataPointer(_)) {
+                return Err(reject("unsupported FP automatic local ABI class"));
             }
             local_types.push(ty);
             local_syms.push(local.symbol);
