@@ -220,6 +220,24 @@ lvalues/aliasing, volatile/atomic/TLS storage or a native compiler
 adapter. [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
 remains open.
 
+**M14 source-checked nonescaping FP data-pointer SSA locals (November 7, 2026):**
+[PR #78](https://github.com/bingordo/edgcpp-rust/pull/78)
+extends the verified `float*`/`double*` formal-memory slice to ordinary
+automatic data-pointer locals copied from exact native pointer formals
+or initialized locals. The reference CFG validates definite pointer
+initialization across branches/loops/joins, and dereferences remain
+real typed memory loads and stores that preserve source-visible
+aliasing. Native GCC driver cases cover float/double widths, signed
+zero, branch-selected targets, pointer reassignments and loop memory
+effects. Negative cases reject uninitialized/partly initialized
+pointer locals, pointer arithmetic and address-of automatic FP
+objects without an ELF output. Full pinned
+[CI #42386505956](https://github.com/bingordo/edgcpp-rust/actions/runs/42386505956)
+passed. See [M14 FP data-pointer SSA local contract](docs/M14_FP_DATA_POINTER_LOCALS.md).
+This does **not** add general address-taken FP locals, escaping pointers
+or complete C memory/lifetime semantics; [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
+remains open.
+
 ## Reused, not reimplemented
 
 - `cpp/bridge.cpp`: EDG IL traversal and lifetime-safe event extraction.
