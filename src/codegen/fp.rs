@@ -1705,6 +1705,33 @@ fn source_fp_data_pointer_value(
 )->Result<PointerSource,CodegenError> {
     let expr=ctx.graph.expression(id).ok_or_else(||
         reject("FP data pointer expression has no source identity"))?;
+    // EDG native &local (op 43) is valid only for an automatic F32/F64
+    // object which was selected for stack-backed storage from the
+    // complete source expression graph. Never infer a computed address.
+    if super::semantic(2,expr.data.kind)==3 &&
+        expr.data.operator.is_some_and(|op|super::semantic(3,op)==43) &&
+        expr.operands.len()==1 && expr.data.constant_kind.is_none() {
+        if fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+            reject("address-of FP local lacks native pointer type"))?)?!=ty {
+            return Err(reject("address-of FP local pointee type mismatch"));
+        }
+        let operand=ctx.graph.expression(expr.operands[0]).ok_or_else(||
+            reject("address-of FP local missing source object"))?;
+        if super::semantic(2,operand.data.kind)!=2 ||
+            !operand.operands.is_empty() || operand.data.constant_kind.is_some() ||
+            scalar_type_from_edg(ctx.il,operand.data.type_id.ok_or_else(||
+                reject("address-of FP local lacks object type"))?)?!=ScalarType::Float(ty) {
+            return Err(reject("address-of expression is not a native FP local object"));
+        }
+        let symbol=operand.data.symbol_id.ok_or_else(||
+            reject("address-of FP local has no native symbol"))?;
+        let index=ctx.locals.iter().position(|s|*s==symbol)
+            .ok_or_else(||reject("address-of FP requires an automatic local"))?;
+        if ctx.local_types[index]!=ScalarType::StackFloat(ty) {
+            return Err(reject("address-of FP local is not memory-backed"));
+        }
+        return Ok(PointerSource::AddressedLocal(index));
+    }
     if super::semantic(2,expr.data.kind)!=2 ||
         expr.data.constant_kind.is_some() || !expr.operands.is_empty() {
         return Err(reject("FP pointer value must be an unmodified typed variable"));
@@ -2144,7 +2171,8 @@ fn expression_from_edg(
             return Ok(FloatExpr::Parameter(i));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
-            if ctx.local_types[i]!=ScalarType::Float(ty) {
+            if !matches!(ctx.local_types[i],
+                ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
                 return Err(reject("FP local rvalue type mismatch"));
             }
             return Ok(FloatExpr::Local(i));
@@ -2597,9 +2625,11 @@ fn lower_fp_body(
                         return Err(reject("FP initializer native target type mismatch"));
                     }
                     match (ctx.local_types[local],exact.width) {
-                        (ScalarType::Float(FloatType::F32),32)=>
+                        (ScalarType::Float(FloatType::F32)|
+                         ScalarType::StackFloat(FloatType::F32),32)=>
                             FloatExpr::Constant32(exact.bits as u32),
-                        (ScalarType::Float(FloatType::F64),64)=>
+                        (ScalarType::Float(FloatType::F64)|
+                         ScalarType::StackFloat(FloatType::F64),64)=>
                             FloatExpr::Constant64(exact.bits),
                         _=>return Err(reject("FP initializer width/type mismatch")),
                     }
@@ -2665,8 +2695,13 @@ fn lower_fp_body(
             }
             let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
-                reject("missing native scalar lvalue type"))?)?!=ctx.local_types[local] {
+            let native=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                reject("missing native scalar lvalue type"))?)?;
+            let checked=match ctx.local_types[local] {
+                ScalarType::StackFloat(t)=>ScalarType::Float(t),
+                other=>other,
+            };
+            if native!=checked {
                 return Err(reject("FP lvalue type mismatch"));
             }
             if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
@@ -2921,7 +2956,24 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 ScalarType::DataPointer(_)) {
                 return Err(reject("unsupported FP automatic local ABI class"));
             }
-            local_types.push(ty);
+            // Use the EDG-owned expression tree to identify every native
+            // address-of of this exact automatic object in this function.
+            // An addressed FP scalar must reside in one real stack object
+            // for its entire function lifetime, including all aliases.
+            let address_taken=graph.expressions.iter().any(|node|{
+                if node.data.function!=*name ||
+                    super::semantic(2,node.data.kind)!=3 ||
+                    node.data.operator.map(|op|super::semantic(3,op))!=Some(43) ||
+                    node.operands.len()!=1 {return false;}
+                graph.expression(node.operands[0]).is_some_and(|operand|
+                    super::semantic(2,operand.data.kind)==2 &&
+                    operand.data.symbol_id==Some(local.symbol) &&
+                    operand.operands.is_empty())
+            });
+            local_types.push(match (ty,address_taken) {
+                (ScalarType::Float(t),true)=>ScalarType::StackFloat(t),
+                (other,_)=>other,
+            });
             local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
