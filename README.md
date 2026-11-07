@@ -160,8 +160,8 @@ Cranelift FP reference path and the INTEGER CFG's eligible scalar
 subset cross-check against this common plan; pure Rust tests verify
 independent GPR/XMM exhaustion and source-order stack spills.
 See [the shared ABI contract and completion audit](docs/M14_SHARED_SCALAR_ABI.md).
-This does **not** claim that aggregate SSE/MEMORY ABI, FP globals,
-general memory effects or the native `bingordo/compiler` adapter
+This does **not** claim that aggregate SSE/MEMORY ABI, general FP storage,
+qualified memory effects or the native `bingordo/compiler` adapter
 are implemented.
 
 **M14 native FP ternary expressions (November 6, 2026):**
@@ -188,6 +188,20 @@ passed, with native GCC differential and rejection fixtures. See the
 [FP pointer-memory contract](docs/M14_FP_POINTER_MEMORY.md).
 Address-taken automatic locals, pointer arithmetic and qualified
 pointees remain unsupported.
+
+**M14 source-checked C INTEGER literals in FP expressions and calls
+(November 7, 2026):** [PR #76](https://github.com/bingordo/edgcpp-rust/pull/76)
+adds native EDG constant INTEGER (signed/unsigned I32/I64) conversions to
+F32/F64 and exact typed INTEGER literal arguments for direct, indirect
+and imported C calls. Full-width U64 images are preserved, not
+accidentally reinterpreted as signed integers. The native GCC/Cranelift
+differential, pure Rust validation and unsupported-construct rejection
+matrix passed in pinned
+[CI #42384598213](https://github.com/bingordo/edgcpp-rust/actions/runs/42384598213).
+See [the integer literal conversion contract](docs/M14_INTEGER_LITERAL_CONVERSIONS.md).
+General INTEGER arithmetic, automatic integer locals and mixed scalar
+side-effect sequencing are **not** supported by this slice; [M14 #60](https://github.com/bingordo/edgcpp-rust/issues/60)
+remains open.
 
 ## Reused, not reimplemented
 
