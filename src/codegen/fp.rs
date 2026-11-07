@@ -36,6 +36,9 @@ pub enum ScalarType {
     /// An EDG-verified pointer to a prototyped nonvariadic C function.
     /// Its canonical native identity prevents casting ordinary data pointers.
     FunctionPointer(crate::TypeId),
+    /// A source-verified unqualified pointer to standard C float/double.
+    /// Its source pointee and native x86-64 layout are checked before use.
+    DataPointer(FloatType),
 }
 impl ScalarType {
     fn machine(self)->cranelift_codegen::ir::Type {
@@ -43,7 +46,7 @@ impl ScalarType {
             Self::Float(t)=>t.machine(),
             Self::Int {bits:32,..}=>types::I32,
             Self::Int {bits:64,..}=>types::I64,
-            Self::FunctionPointer(_)=>types::I64,
+            Self::FunctionPointer(_)|Self::DataPointer(_)=>types::I64,
             _=>unreachable!("integer width was checked at source boundary"),
         }
     }
@@ -104,6 +107,9 @@ pub enum FloatExpr {
     /// A source-verified, ordinary external C F32/F64 global load. Memory
     /// effects are never folded into an SSA register or constant.
     ExternalGlobal {symbol:crate::SymbolId,ty:FloatType},
+    /// Real ordinary memory access through a source-verified FP pointer formal.
+    /// This is NOT an SSA alias or a guessed address.
+    LoadPointerParameter {parameter:usize,ty:FloatType},
     Constant32(u32),
     Constant64(u64),
     Neg(Box<Self>),
@@ -157,6 +163,8 @@ pub enum FloatStmt {
     Assign(usize,FloatExpr),
     /// Real source-verified ordinary F32/F64 data store (not SSA).
     StoreGlobal {symbol:crate::SymbolId,ty:FloatType,value:FloatExpr},
+    /// A checked unqualified *p=FP-value store to memory, never an SSA write.
+    StorePointerParameter {parameter:usize,ty:FloatType,value:FloatExpr},
     /// A nonescaping, native EDG-verified callable pointer value in a
     /// typed automatic local. Definite assignment is tracked across CFG.
     AssignPointer {
@@ -261,6 +269,7 @@ fn checked_scalar_passing_plan(
             ScalarType::Int {bits:64,signed:true}=>Ok(K::Signed64),
             ScalarType::Int {bits:64,signed:false}=>Ok(K::Unsigned64),
             ScalarType::FunctionPointer(_)=>Ok(K::CallablePointer),
+            ScalarType::DataPointer(_)=>Ok(K::DataPointer),
             _=>Err(reject("scalar ABI requires source-verified native 32/64-bit types")),
         }
     };
@@ -337,6 +346,12 @@ fn expression_type(
             _=>Err(reject("FP local out of range or is a callable pointer")),
         },
         ExternalGlobal {ty,..}=>Ok(*ty),
+        LoadPointerParameter {parameter,ty}=>{
+            if params.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                return Err(reject("FP load through nonmatching pointer formal"));
+            }
+            Ok(*ty)
+        },
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
         Neg(e)=>expression_type(e,params,locals,depth+1),
@@ -476,6 +491,14 @@ fn emit_expr(
             };
             (fb.use_var(var),ty)
         }
+        LoadPointerParameter {parameter,ty}=>{
+            if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                return Err(reject("FP pointer memory load lacks verified formal"));
+            }
+            let ptr=*params.get(*parameter).ok_or_else(||
+                reject("FP pointer load parameter has no ABI value"))?;
+            (fb.ins().load(ty.machine(),MemFlags::new(),ptr,0),*ty)
+        }
         ExternalGlobal {symbol,ty}=>{
             let (data,actual)=*global_refs.get(symbol).ok_or_else(||
                 reject("FP external global has no verified data import"))?;
@@ -554,7 +577,8 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
-        ExternalGlobal {..}|Constant32(_)|Constant64(_)=>Ok(()),
+        ExternalGlobal {..}|LoadPointerParameter {..}|
+        Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
             for arg in arguments {
                 if let ScalarCallArg::Float(expr)=arg {
@@ -674,6 +698,16 @@ fn check_fp_statements(
                 }
                 check_pointer_source_reads(*source,&defined)?;
                 defined[*local]=true;
+                next=Some(defined);
+            }
+            FloatStmt::StorePointerParameter {parameter,ty,value}=>{
+                if f.parameters.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                    return Err(reject("FP memory store pointer formal type mismatch"));
+                }
+                check_local_reads(value,&defined,0)?;
+                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                    return Err(reject("FP pointer store needs exact FP source type"));
+                }
                 next=Some(defined);
             }
             FloatStmt::StoreGlobal {ty,value,..}=>{
@@ -849,6 +883,17 @@ fn emit_fp_statements(
                 let var=*locals.get(*local).ok_or_else(||
                     reject("pointer local has no SSA slot"))?;
                 fb.def_var(var,value);
+            }
+            FloatStmt::StorePointerParameter {parameter,ty,value}=>{
+                if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                    return Err(reject("FP pointer store uses unchecked formal"));
+                }
+                let pointer=*params.get(*parameter).ok_or_else(||
+                    reject("FP pointer store has no native formal value"))?;
+                let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                    refs,global_refs)?;
+                if source!=*ty {return Err(reject("FP memory store needs explicit conversion"));}
+                fb.ins().store(MemFlags::new(),v,pointer,0);
             }
             FloatStmt::StoreGlobal {symbol,ty,value}=>{
                 let (data,actual)=*global_refs.get(symbol).ok_or_else(||
@@ -1164,6 +1209,7 @@ fn validate_fp_calls_expr(
         }
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
         FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
+        FloatExpr::LoadPointerParameter {..}|
         FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
     }
     Ok(())
@@ -1191,7 +1237,8 @@ fn validate_fp_calls_stmts(
             FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
             FloatStmt::ReturnInteger(e,_)=>
                 validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
-            FloatStmt::StoreGlobal {value,..}=>
+            FloatStmt::StoreGlobal {value,..}|
+            FloatStmt::StorePointerParameter {value,..}=>
                 validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
             FloatStmt::ReturnIndirectInteger {arguments,..}=>{
                 for arg in arguments {
