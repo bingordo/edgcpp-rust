@@ -2636,6 +2636,44 @@ mod tests {
     }
 
     #[test]
+    fn native_fp_ternary_value_is_typed_lazy_and_checks_both_arms() {
+        let cond=FloatCondition {
+            op:FloatPredicate::Ne,left:FloatExpr::Parameter(0),
+            right:FloatExpr::Constant64(0.0f64.to_bits()),
+        };
+        let choose=FloatExpr::Conditional {
+            condition:Box::new(cond.clone()),
+            yes:Box::new(FloatExpr::Parameter(1)),
+            no:Box::new(FloatExpr::Parameter(2)),
+        };
+        let build=|expr:FloatExpr|ScalarFloatBody {
+            name:"m14_typed_conditional".into(),
+            parameters:vec![ScalarType::Float(FloatType::F64);3],
+            result:ScalarType::Float(FloatType::F64),
+            locals:vec![],statements:vec![FloatStmt::Return(expr)],
+        };
+        let bytes=emit_scalar_float_bodies(&[build(choose.clone())]).unwrap();
+        assert_eq!(&bytes[..4],b"\x7fELF");
+        let mut mismatched=choose.clone();
+        if let FloatExpr::Conditional {no,..}=&mut mismatched {
+            *no=Box::new(FloatExpr::Constant32(0.0f32.to_bits()));
+        }
+        assert!(emit_scalar_float_bodies(&[build(mismatched)]).is_err());
+        let mut bad_condition=choose.clone();
+        if let FloatExpr::Conditional {condition,..}=&mut bad_condition {
+            condition.right=FloatExpr::Constant32(0.0f32.to_bits());
+        }
+        assert!(emit_scalar_float_bodies(&[build(bad_condition)]).is_err());
+        let mut bad_call=choose;
+        if let FloatExpr::Conditional {yes,..}=&mut bad_call {
+            *yes=Box::new(FloatExpr::Call {callee:"absent".into(),
+                parameters:vec![],return_type:FloatType::F64,arguments:vec![]});
+        }
+        // Even a dynamically untaken arm must have a verified call target.
+        assert!(emit_scalar_float_bodies(&[build(bad_call)]).is_err());
+    }
+
+    #[test]
     fn typed_callable_pointer_locals_propagate_ssa_and_validate_definite_assignment() {
         let ptr=crate::TypeId(4096);
         let call=FloatExpr::CallIndirect {
