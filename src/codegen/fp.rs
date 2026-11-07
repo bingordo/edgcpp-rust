@@ -2957,6 +2957,47 @@ mod tests {
         assert!(emit_scalar_float_bodies_with_globals(&[f],true,&[g,zero]).is_ok());
     }
     #[test]
+    fn m14_data_pointer_ssa_local_definite_assignment_and_memory() {
+        let ty=FloatType::F64;
+        let pointer=ScalarType::DataPointer(ty);
+        let fp=ScalarType::Float(ty);
+        let baseline=ScalarFloatBody {
+            name:"m14_data_ptr_local_test".into(),
+            parameters:vec![pointer,fp],result:fp,
+            locals:vec![pointer],
+            statements:vec![
+                FloatStmt::AssignDataPointer {
+                    local:0,ty,source:PointerSource::Parameter(0),
+                },
+                FloatStmt::StorePointerLocal {
+                    local:0,ty,value:FloatExpr::Parameter(1),
+                },
+                FloatStmt::Return(FloatExpr::LoadPointerLocal {local:0,ty}),
+            ],
+        };
+        let elf=emit_scalar_float_bodies(&[baseline.clone()]).unwrap();
+        assert_eq!(&elf[..4],b"\x7fELF");
+        let mut bad=baseline.clone();
+        bad.statements.remove(0);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=baseline.clone();
+        bad.statements[0]=FloatStmt::AssignDataPointer {
+            local:0,ty,source:PointerSource::Local(0),
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=baseline.clone();
+        bad.parameters[0]=ScalarType::DataPointer(FloatType::F32);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=baseline.clone();
+        bad.locals[0]=ScalarType::Float(ty);
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+        let mut bad=baseline;
+        bad.statements[1]=FloatStmt::StorePointerLocal {
+            local:0,ty:FloatType::F32,value:FloatExpr::Parameter(1),
+        };
+        assert!(emit_scalar_float_bodies(&[bad]).is_err());
+    }
+    #[test]
     fn source_authorized_external_scalar_imports_are_typed_and_restricted() {
         let params=vec![ScalarType::Float(FloatType::F64)];
         let external=FloatExpr::CallExternal {
