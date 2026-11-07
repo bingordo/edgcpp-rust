@@ -79,11 +79,21 @@ pub enum FpIndex {
     Parameter {parameter:usize,ty:ScalarType},
     Constant {bits:u64,ty:ScalarType},
 }
+/// Side-effect-free, exact native INTEGER values allowed for automatic
+/// 32/64-bit SSA locals, not general C integer expression trees.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum FpIntegerSource {
+    Parameter(usize),
+    Local(usize),
+    Constant {bits:u64,ty:ScalarType},
+}
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum ScalarCallArg {
     Float(FloatExpr),
     /// A native EDG direct INTEGER formal passed to the same scalar class.
     IntegerParameter(usize),
+    /// Source-checked initialized INTEGER automatic SSA local.
+    IntegerLocal(usize),
     /// A literal whose exact C integer width, signedness and bits were
     /// checked against the native EDG expression and callee prototype.
     IntegerConstant { bits:u64, ty:ScalarType },
@@ -97,6 +107,9 @@ pub enum FloatExpr {
     /// A native EDG integer constant converted numerically to float/double.
     /// Bits retain the full U64 range even though EDG's wire carrier is i64.
     IntegerConstantCast {bits:u64,source:ScalarType,to:FloatType},
+    /// Numeric conversion from an initialized source-checked C INTEGER
+    /// automatic SSA local. Signedness comes from the native local type.
+    IntegerLocalCast {local:usize,to:FloatType},
     /// An EDG-verified direct call to a definition in this compilation unit.
     /// Indirect and external calls require a separate declaration contract.
     Call {
@@ -189,6 +202,9 @@ pub struct FloatCondition {
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum FloatStmt {
     Assign(usize,FloatExpr),
+    /// Exact same-class I32/I64 SSA copy from formal, initialized local or
+    /// bit-image constant. No arithmetic or implicit promotion is inferred.
+    AssignInteger {local:usize,source:FpIntegerSource},
     /// Real source-verified ordinary F32/F64 data store (not SSA).
     StoreGlobal {symbol:crate::SymbolId,ty:FloatType,value:FloatExpr},
     /// A checked unqualified *p=FP-value store to memory, never an SSA write.
@@ -424,6 +440,49 @@ fn emit_integer_literal(
     };
     Ok(fb.ins().iconst(ty.machine(),value))
 }
+fn checked_fp_integer_source(
+    source:&FpIntegerSource,
+    params:&[ScalarType],locals:&[ScalarType],
+)->Result<ScalarType,CodegenError> {
+    match source {
+        FpIntegerSource::Parameter(n)=>match params.get(*n).copied() {
+            Some(ty @ ScalarType::Int {bits:32|64,..})=>Ok(ty),
+            _=>Err(reject("INTEGER SSA copy source is not a 32/64-bit formal")),
+        },
+        FpIntegerSource::Local(n)=>match locals.get(*n).copied() {
+            Some(ty @ ScalarType::Int {bits:32|64,..})=>Ok(ty),
+            _=>Err(reject("INTEGER SSA copy source is not a checked automatic local")),
+        },
+        FpIntegerSource::Constant {bits,ty}=>{
+            checked_integer_literal(*ty,*bits)?;
+            Ok(*ty)
+        },
+    }
+}
+fn check_fp_integer_source_reads(
+    source:&FpIntegerSource,defined:&[bool],
+)->Result<(),CodegenError> {
+    match source {
+        FpIntegerSource::Local(n) if !defined.get(*n).copied().unwrap_or(false)=>
+            Err(reject("read of uninitialized INTEGER SSA local")),
+        _=>Ok(()),
+    }
+}
+fn emit_fp_integer_source(
+    source:&FpIntegerSource,fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],
+    locals:&[Variable],locals_ty:&[ScalarType],
+)->Result<(Value,ScalarType),CodegenError> {
+    let ty=checked_fp_integer_source(source,params_ty,locals_ty)?;
+    let value=match source {
+        FpIntegerSource::Parameter(n)=>*params.get(*n)
+            .ok_or_else(||reject("missing INTEGER source formal ABI value"))?,
+        FpIntegerSource::Local(n)=>fb.use_var(*locals.get(*n)
+            .ok_or_else(||reject("missing INTEGER source SSA local"))?),
+        FpIntegerSource::Constant {bits,..}=>emit_integer_literal(fb,ty,*bits)?,
+    };
+    Ok((value,ty))
+}
 fn check_scalar_call_args(
     arguments:&[ScalarCallArg],target_types:&[ScalarType],
     params:&[ScalarType],locals:&[ScalarType],depth:usize,
@@ -437,8 +496,12 @@ fn check_scalar_call_args(
             ScalarCallArg::Float(e)=>
                 ScalarType::Float(expression_type(e,params,locals,depth+1)?),
             ScalarCallArg::IntegerParameter(n)=>match params.get(*n) {
-                Some(ScalarType::Int {..})=>params[*n],
+                Some(ScalarType::Int {bits:32|64,..})=>params[*n],
                 _=>return Err(reject("call INTEGER argument is not a native formal")),
+            },
+            ScalarCallArg::IntegerLocal(n)=>match locals.get(*n) {
+                Some(ScalarType::Int {bits:32|64,..})=>locals[*n],
+                _=>return Err(reject("call INTEGER argument is not a checked automatic local")),
             },
             ScalarCallArg::IntegerConstant {bits,ty}=>{
                 checked_integer_literal(*ty,*bits)?;
@@ -455,8 +518,12 @@ fn check_scalar_call_local_reads(
     arguments:&[ScalarCallArg],defined:&[bool],
 )->Result<(),CodegenError> {
     for arg in arguments {
-        if let ScalarCallArg::Float(expr)=arg {
-            check_local_reads(expr,defined,0)?;
+        match arg {
+            ScalarCallArg::Float(expr)=>check_local_reads(expr,defined,0)?,
+            ScalarCallArg::IntegerLocal(n) if
+                !defined.get(*n).copied().unwrap_or(false)=>
+                    return Err(reject("INTEGER call argument local is uninitialized")),
+            _=>{},
         }
     }
     Ok(())
@@ -481,6 +548,14 @@ fn expression_type(
         IntegerConstantCast {bits,source,to}=>{
             checked_integer_literal(*source,*bits)?;
             Ok(*to)
+        },
+        IntegerLocalCast {local,to}=>{
+            if matches!(locals.get(*local),
+                Some(ScalarType::Int {bits:32|64,..})) {
+                Ok(*to)
+            } else {
+                Err(reject("FP INTEGER cast local is not source-checked 32/64-bit"))
+            }
         },
         Call {parameters,return_type,arguments,..}|
         CallExternal {parameters,return_type,arguments,..}|
@@ -572,6 +647,13 @@ fn emit_scalar_call_arguments(
                 }
                 *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
             }
+            (ScalarCallArg::IntegerLocal(n),ScalarType::Int {..})=>{
+                if locals_ty.get(*n)!=Some(expected) {
+                    return Err(reject("FP call INTEGER automatic local source ABI mismatch"));
+                }
+                fb.use_var(*locals.get(*n)
+                    .ok_or_else(||reject("FP call missing INTEGER SSA local"))?)
+            }
             (ScalarCallArg::IntegerConstant {bits,ty},ScalarType::Int {..})=>{
                 if ty!=expected {
                     return Err(reject("FP call INTEGER literal source type mismatch"));
@@ -625,6 +707,20 @@ fn emit_expr(
                 _=>return Err(reject("invalid integer literal conversion source")),
             };
             let converted=if signed {
+                fb.ins().fcvt_from_sint(to.machine(),value)
+            } else {
+                fb.ins().fcvt_from_uint(to.machine(),value)
+            };
+            (converted,*to)
+        }
+        IntegerLocalCast {local,to}=>{
+            let source=match locals_ty.get(*local) {
+                Some(ScalarType::Int {bits:32|64,signed})=>*signed,
+                _=>return Err(reject("invalid INTEGER automatic local cast source")),
+            };
+            let value=fb.use_var(*locals.get(*local)
+                .ok_or_else(||reject("INTEGER cast local has no SSA slot"))?);
+            let converted=if source {
                 fb.ins().fcvt_from_sint(to.machine(),value)
             } else {
                 fb.ins().fcvt_from_uint(to.machine(),value)
@@ -775,11 +871,14 @@ fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),Cod
     match expr {
         Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
             Err(reject("read of uninitialized or invalid FP local")),
+        IntegerLocalCast {local,..} if
+            !defined.get(*local).copied().unwrap_or(false)=>
+            Err(reject("read of uninitialized INTEGER cast local")),
         LoadPointerLocal {local,..} if !defined.get(*local).copied().unwrap_or(false)=>
             Err(reject("FP load through uninitialized data pointer local")),
         LoadIndexed {pointer,..}=>check_pointer_source_reads(*pointer,defined),
         Local(_)|Parameter(_)|IntegerParameterCast {..}|
-        IntegerConstantCast {..}|
+        IntegerConstantCast {..}|IntegerLocalCast {..}|
         ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
         Constant32(_)|Constant64(_)=>Ok(()),
         Call {arguments,..}|CallExternal {arguments,..}=>{
@@ -1478,7 +1577,7 @@ fn validate_fp_calls_expr(
             validate_fp_calls_expr(b,declarations,imports,source_imports,depth+1)?;
         }
         FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
-        FloatExpr::IntegerConstantCast {..}|
+        FloatExpr::IntegerConstantCast {..}|FloatExpr::IntegerLocalCast {..}|
         FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
         FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
         FloatExpr::LoadIndexed {..}|
