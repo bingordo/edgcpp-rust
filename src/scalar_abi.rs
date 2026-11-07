@@ -18,6 +18,9 @@ pub enum ScalarKind {
     /// A native 64-bit pointer whose callable prototype and provenance
     /// have *already* been verified by the source frontend.
     CallablePointer,
+    /// Unqualified native pointer to C float/double. Provenance and pointee
+    /// verification belong to the source adapter; ABI placement is GPR.
+    DataPointer,
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
 pub enum RegisterClass { Integer, Sse }
@@ -62,7 +65,8 @@ impl ScalarKind {
         match self {
             Self::Float32|Self::Float64=>RegisterClass::Sse,
             Self::Signed32|Self::Unsigned32|
-            Self::Signed64|Self::Unsigned64|Self::CallablePointer=>
+            Self::Signed64|Self::Unsigned64|
+            Self::CallablePointer|Self::DataPointer=>
                 RegisterClass::Integer,
         }
     }
@@ -147,6 +151,27 @@ mod tests {
         for (i,arg) in plan.parameters.iter().enumerate() {
             assert_eq!(arg.source_index,i);
         }
+    }
+    #[test]
+    fn data_pointer_uses_integer_register_bank_even_with_sse_spills() {
+        let plan=Signature {
+            parameters:vec![
+                ScalarKind::Float32,ScalarKind::DataPointer,
+                ScalarKind::Float64,ScalarKind::DataPointer,
+                ScalarKind::Float32,
+            ],
+            result:ScalarKind::Float64,prototyped:true,variadic:false,
+        }.plan_sysv_x86_64().unwrap();
+        assert_eq!(plan.parameters[1].location,Location::Register {
+            class:RegisterClass::Integer,index:0,
+        });
+        assert_eq!(plan.parameters[3].location,Location::Register {
+            class:RegisterClass::Integer,index:1,
+        });
+        assert_eq!(plan.parameters[4].location,Location::Register {
+            class:RegisterClass::Sse,index:2,
+        });
+        assert_eq!(ScalarKind::DataPointer.bits(),64);
     }
     #[test]
     fn pointer_consumes_gpr_not_sse_and_integer_result_returns_in_rax() {
