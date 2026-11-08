@@ -28,8 +28,9 @@ The adapter is in
 merged across
 [compiler PR #505](https://github.com/bingordo/compiler/pull/505),
 [PR #517](https://github.com/bingordo/compiler/pull/517),
-[PR #556](https://github.com/bingordo/compiler/pull/556) and
-[PR #563](https://github.com/bingordo/compiler/pull/563).
+[PR #556](https://github.com/bingordo/compiler/pull/556),
+[PR #563](https://github.com/bingordo/compiler/pull/563) and
+[PR #572](https://github.com/bingordo/compiler/pull/572).
 It is a separate opt-in Cargo workspace: regular compiler core,
 optimizer, Oberon and Mini-C builds never acquire native EDG or
 Cranelift dependencies. It pins the EDG Rust binding revision and
@@ -92,6 +93,32 @@ native float/double and C++ ABI remain unimplemented in this direct
 adapter. These are future compiler-IR and frontend integration steps,
 not implied acceptance. No output object is written for an
 unsupported translation unit.
+
+### D3c1: checked integer conditional and logical values
+
+[Compiler PR #572](https://github.com/bingordo/compiler/pull/572)
+extends native source expression lowering for the C `?:` operator,
+integer-valued comparisons, `&&`, `||`, and `!`. Every
+value-producing conditional is implemented using **real compiler IR
+branches and typed SSA block-argument joins**, not an eagerly
+evaluated `Select`. C comparisons and logical expressions return a
+proper signed I32 0/1 result. The accepted C11 subset includes nested
+conditional values in arithmetic, source-checked locals, direct calls
+and `while` expressions. Source-typed selected arms must agree or
+carry explicit EDG conversion nodes.
+
+An independent GCC-linked native differential explicitly checks that
+nonselected external calls are not executed and nonselected
+potentially invalid divisions cannot trap, as well as high-bit U64,
+cast and relational results. Assignment-valued expression arms,
+side-effecting assignment operands, pointer lvalues and complete
+ISO C expression sequencing remain unsupported. The adapter
+continues to reject them before object output.
+
+The FP IR work remains separate: existing
+[compiler PR #508](https://github.com/bingordo/compiler/pull/508)
+develops the generic F32/F64 SSA and verifier foundation; no second
+frontend IR or Cranelift production dependency is created by D3c1.
 
 ## Architecture decision: no separate projection IR
 
