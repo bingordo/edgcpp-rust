@@ -120,6 +120,30 @@ The FP IR work remains separate: existing
 develops the generic F32/F64 SSA and verifier foundation; no second
 frontend IR or Cranelift production dependency is created by D3c1.
 
+## Build option: keep Cranelift supported
+
+**Retain the existing opt-in `codegen` Cargo feature and Cranelift
+object backend**, independently of the new native `bingordo/compiler`
+backend. This is a supported alternative/reference code generator, not
+a transitional implementation to delete when native compiler
+coverage improves.
+
+- `cargo build` builds the EDG binding without a code generator or
+  Cranelift dependency.
+- `cargo build --features codegen` builds the existing optional
+  Cranelift implementation; its `codegen` example remains available.
+- The production native compiler integration stays in the separate
+  `bingordo/compiler/tools/edg-driver` Cargo workspace so that
+  `edgcpp-rust` does **not** acquire a private compiler repository
+  dependency, even through a disabled optional Cargo feature.
+- Keep Cranelift CI, diagnostics and codegen fixtures working as a
+  regression/reference oracle even as native compiler lowering
+  achieves parity. Where useful, compare both against GCC and each
+  other; no shared intermediate backend IR is required.
+- A future unified frontend CLI may offer `--backend=cranelift` and
+  `--backend=native`, but this must be an orchestration switch, not
+  removal of the existing feature or a new core frontend dependency.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
