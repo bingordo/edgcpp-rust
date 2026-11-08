@@ -144,6 +144,35 @@ coverage improves.
   `--backend=native`, but this must be an orchestration switch, not
   removal of the existing feature or a new core frontend dependency.
 
+### Practical C99 scalar loops and a useful frontend gate
+
+The native compiler integration now lowers EDG source-verified C99
+`for` statements to ordinary production compiler SSA
+preheader/header/body/increment/exit blocks. This includes bounded
+loop-initializer scalar assignments, source-declared loop counters,
+nested loops, early returns and lexical shadowing. Direct ordinary
+32/64-bit scalar/formal `++`/`--` and compound assignments
+write successive SSA values. A direct nonvoid integer call can be a
+standalone expression statement with its result discarded and
+its observable call retained.
+
+The native ELF/GCC differential is maintained in
+[compiler PR #601](https://github.com/bingordo/compiler/pull/601)
+and [compiler-ci PR #164](https://github.com/bingordo/compiler-ci/pull/164).
+These are *bounded* features: `break`/`continue`,
+`do while`, `switch`, `goto`, arbitrary pointer lvalues,
+qualified/atomic effects and using postincrement as an expression
+value are not accepted by the native EDG adapter.
+
+An explicit, non-percentage readiness matrix now lives in
+[compiler issue #604](https://github.com/bingordo/compiler/issues/604).
+It distinguishes a handpicked scalar-function subset from
+**generally useful unmodified C99 programs**: pointer/array loops,
+small integer types, structs, FP, libc and multi-file linking.
+The existing Cranelift `--features codegen` backend remains
+supported independently for broader reference behavior; the
+EDG-to-compiler path does not remove it.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
