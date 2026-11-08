@@ -1,11 +1,11 @@
 # EDG frontend integration into `bingordo/compiler`
 
-Status: **first native integration pilot implemented and GCC-verified**.
+Status: **direct C integer SSA, automatic locals and checked if/while CFG integrated and native GCC-verified**.
 Full EDG C/C++ coverage and native FP lowering are *not* claimed.
 The production path is **direct checked lowering into the existing
 `compiler-ir`**, not a new semantic-projection IR or independent CFG.
 
-## Implemented boundary (7 November 2026)
+## Implemented boundary (7–8 November 2026)
 
 ```text
    EDG C11 frontend
@@ -25,8 +25,10 @@ The production path is **direct checked lowering into the existing
 
 The adapter is in
 [`bingordo/compiler/tools/edg-driver`](https://github.com/bingordo/compiler/tree/main/tools/edg-driver),
-merged in
-[compiler PR #505](https://github.com/bingordo/compiler/pull/505).
+merged across
+[compiler PR #505](https://github.com/bingordo/compiler/pull/505),
+[PR #517](https://github.com/bingordo/compiler/pull/517) and
+[PR #556](https://github.com/bingordo/compiler/pull/556).
 It is a separate opt-in Cargo workspace: regular compiler core,
 optimizer, Oberon and Mini-C builds never acquire native EDG or
 Cranelift dependencies. It pins the EDG Rust binding revision and
@@ -55,11 +57,24 @@ compiler repository, checks out the matching EDG source/configuration,
 and validates the checksum-pinned EDG callable archive. It never adds
 a private compiler Git dependency to the EDG Rust repository.
 
-The first adapter deliberately rejects automatic locals, calls,
-globals, pointers, branches/loops, general integer promotions,
-division, float/double and C++ semantics. These are **future
-incremental compiler IR lowering features**, not implied acceptance.
-No output object is written for an unsupported translation unit.
+The initial D0 adapter deliberately rejected automatic locals and
+control flow. The merged D1/D2 iterations now accept native
+same-type I32/U32/I64/U64 declarations and SSA assignments, lexical
+shadowing, `if`/else, early returns, source integer comparisons,
+`while` with loop-carried phis, and lazy `&&`/`||`/`!` tests
+using real CFG branches. Definite initialization is checked across
+joins and zero-iteration loop paths; the verifier validates dominance,
+types and branch arguments. The full pinned native source/ELF/GCC
+differential and negative matrix passed in
+[compiler-ci run #42488285258](https://github.com/bingordo/compiler-ci/actions/runs/42488285258).
+An isolated `compiler-ci` workflow continues the acceptance gating.
+
+Calls, globals, pointer/qualified memory, implicit integer promotions,
+`for`/`do while`/`switch`/`goto`, effectful operands in logical
+conditions, division, float/double and C++ ABI remain unimplemented
+in this direct adapter. These are **future incremental compiler IR
+lowering features**, not implied acceptance. No output object is
+written for an unsupported translation unit.
 
 ## Architecture decision: no separate projection IR
 
@@ -92,14 +107,11 @@ belongs to the chosen backend.
 
 ## Next implementation steps
 
-- **Automatic integer SSA locals:** preserve declaration lifetime,
-  native integer source types and definite initialization. Emit
-  compiler SSA/block parameters and use its existing verifier.
-- **Control flow:** native EDG `if`, `while`, `for`,
-  `switch` and source `goto` use the compiler's existing CFG and
-  phi block-argument model. Preserve lazy C evaluation, side effects
-  and scope transitions. Do not turn conditionals into eager selects
-  when arms have effects.
+- **Broader checked source CFG:** extend the implemented native
+  `if`/`while` SSA lowering to `for`/`do while`, `break`,
+  `continue`, `switch` and source `goto` where required.
+  Preserve side-effect sequencing, scope/lifetimes, and fail-closed
+  behavior. Retain lazy `&&`/`||` decisions rather than eager selects.
 - **Mixed scalar C:** implement precisely checked integer
   promotions, usual arithmetic conversions, integer-valued call
   expressions, pointer arithmetic and signed/unsigned semantics.
