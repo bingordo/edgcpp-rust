@@ -1,6 +1,6 @@
 # EDG frontend integration into `bingordo/compiler`
 
-Status: **direct C integer SSA, automatic locals and checked if/while CFG integrated and native GCC-verified**.
+Status: **direct C integer SSA, CFG, source-typed 32/64-bit conversions and native direct integer calls merged and GCC-verified**.
 Full EDG C/C++ coverage and native FP lowering are *not* claimed.
 The production path is **direct checked lowering into the existing
 `compiler-ir`**, not a new semantic-projection IR or independent CFG.
@@ -27,8 +27,9 @@ The adapter is in
 [`bingordo/compiler/tools/edg-driver`](https://github.com/bingordo/compiler/tree/main/tools/edg-driver),
 merged across
 [compiler PR #505](https://github.com/bingordo/compiler/pull/505),
-[PR #517](https://github.com/bingordo/compiler/pull/517) and
-[PR #556](https://github.com/bingordo/compiler/pull/556).
+[PR #517](https://github.com/bingordo/compiler/pull/517),
+[PR #556](https://github.com/bingordo/compiler/pull/556) and
+[PR #563](https://github.com/bingordo/compiler/pull/563).
 It is a separate opt-in Cargo workspace: regular compiler core,
 optimizer, Oberon and Mini-C builds never acquire native EDG or
 Cranelift dependencies. It pins the EDG Rust binding revision and
@@ -69,12 +70,28 @@ differential and negative matrix passed in
 [compiler-ci run #42488285258](https://github.com/bingordo/compiler-ci/actions/runs/42488285258).
 An isolated `compiler-ci` workflow continues the acceptance gating.
 
-Calls, globals, pointer/qualified memory, implicit integer promotions,
-`for`/`do while`/`switch`/`goto`, effectful operands in logical
-conditions, division, float/double and C++ ABI remain unimplemented
-in this direct adapter. These are **future incremental compiler IR
-lowering features**, not implied acceptance. No output object is
-written for an unsupported translation unit.
+The merged D3a/b extension adds source-verified I32/U32/I64/U64
+integer conversions (signed/unsigned reinterpretation, 32-to-64
+sign/zero extension and 64-to-32 truncation), bitwise operations,
+signed/unsigned division and remainder, integer shifts and high-bit
+unsigned literal bit images, **without inferring missing promotions**.
+It also handles source-prototype-verified direct nonvariadic integer
+calls to internal and external functions through the compiler's native
+SysV ABI (including seven GPR arguments). The pinned GCC/ELF tests
+passed in [compiler-ci #42489753577](https://github.com/bingordo/compiler-ci/actions/runs/42489753577)
+and [merged-main #42489978105](https://github.com/bingordo/compiler-ci/actions/runs/42489978105);
+[compiler-ci PR #145](https://github.com/bingordo/compiler-ci/pull/145)
+adds these cases to the maintained daily workflow.
+
+This is **bounded 32/64-bit scalar support**, not full ISO C integer
+semantics. Calls through function pointers, `void` and variadic
+calls, nested call arguments, small-integer/`_Bool`/enum promotions,
+typedef/qualified types, pointer/global/qualified memory, effects
+inside logical conditions, `for`/`do while`/`switch`/`goto`,
+native float/double and C++ ABI remain unimplemented in this direct
+adapter. These are future compiler-IR and frontend integration steps,
+not implied acceptance. No output object is written for an
+unsupported translation unit.
 
 ## Architecture decision: no separate projection IR
 
@@ -112,11 +129,12 @@ belongs to the chosen backend.
   `continue`, `switch` and source `goto` where required.
   Preserve side-effect sequencing, scope/lifetimes, and fail-closed
   behavior. Retain lazy `&&`/`||` decisions rather than eager selects.
-- **Mixed scalar C:** implement precisely checked integer
-  promotions, usual arithmetic conversions, integer-valued call
-  expressions, pointer arithmetic and signed/unsigned semantics.
-  Reject unknown source constructs rather than inferring a plausible
-  SSA instruction.
+- **Remaining C type and effect semantics:** extend the merged native
+  I32/U32/I64/U64 cast/arithmetic and direct-call subset to precise
+  small-integer/enum/`_Bool` promotions, qualified types,
+  sequencing-sensitive side effects, indirect calls and typed
+  pointer/lvalue memory. Reject missing native EDG semantics rather
+  than inferring an operation from source spellings.
 - **Native FP:** `compiler-ir` currently has no general F32/F64 SSA
   value types or arithmetic. Add them directly to the shared compiler
   type/op/ABI and x86 backend interfaces with focused verifier and
