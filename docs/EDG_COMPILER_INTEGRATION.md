@@ -325,6 +325,35 @@ introduced. Header-heavy C, `printf` source variadics, aggregate
 initializers, typed pointer locals and broad records still require
 separate accepted tests.
 
+### C-fast P2b: source-layout-checked local C record fields
+
+Merged [compiler PR #656](https://github.com/bingordo/compiler/pull/656)
+adds a bounded **direct C struct field** slice to the EDG native
+production adapter. Named C struct definitions at file scope,
+automatic record locals, ordinary byte/I32 fields and target-verified
+size/alignment/EDG `RecordField` symbol identities and offsets are
+required. The existing native SSA `LocalSizedArrayAddr`,
+`PtrOffset` and ordered scalar memory operations own storage and
+access; no EDG projection IR or Cranelift dependency was added.
+
+Original unchanged C field/store/load, high-bit byte/sign and padding,
+distinct locals, branch, loop and lexical-scope tests passed exact
+source-pinned full [compiler-ci #42553290564](https://github.com/bingordo/compiler-ci/actions/runs/42553290564).
+Permanent regression is tracked in
+[compiler-ci #190](https://github.com/bingordo/compiler-ci/pull/190).
+Function-local standalone struct tag declarations, pointers to
+records and `->`, 16/64-bit fields, unions, bitfields, aggregate
+initializers, anonymous/packed member semantics and by-value record
+ABI are deliberately not included; the source fails before object
+output. This is not comprehensive C record support.
+
+This bounded adapter currently constructs legacy
+`compiler_ir::Function` bodies. Its source/runtime fixtures must be
+reused for the **redesigned TypeId-native production IR cutover**
+([compiler #510](https://github.com/bingordo/compiler/issues/510));
+do not interpret lack of an EDG-specific IR as proof that the new IR
+migration is already finished.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
