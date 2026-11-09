@@ -1743,6 +1743,42 @@ mod tests {
     }
 
     #[test]
+    fn decodes_exact_distinct_edg_cxx_link_names_without_demangling() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(),length: bytes.len(),value:0,tag:1,
+        };
+        let number = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let first=[number(10),number(1),string(b"ns::f")];
+        let second=[number(11),number(1),string(b"ns::f")];
+        let c=[number(12),number(1),string(b"extern_c")];
+        let mangled_i=[number(10),string(b"_ZN2ns1fEi"),number(1)];
+        let mangled_l=[number(11),string(b"_ZN2ns1fEl"),number(1)];
+        let plain_c=[number(12),string(b"extern_c"),number(0)];
+        unsafe {
+            let userdata=(&mut state as *mut Collector).cast();
+            for fields in [&first[..],&second[..],&c[..]] {
+                collect(userdata,13,fields.as_ptr(),fields.len(),0);
+            }
+            for fields in [&mangled_i[..],&mangled_l[..],&plain_c[..]] {
+                collect(userdata,61,fields.as_ptr(),fields.len(),0);
+            }
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbols[0].name,state.il.symbols[1].name);
+        assert_eq!(state.il.symbol_link_names,vec![
+            SymbolLinkName {symbol:SymbolId(10),link_name:"_ZN2ns1fEi".into(),
+                edg_mangled:true},
+            SymbolLinkName {symbol:SymbolId(11),link_name:"_ZN2ns1fEl".into(),
+                edg_mangled:true},
+            SymbolLinkName {symbol:SymbolId(12),link_name:"extern_c".into(),
+                edg_mangled:false},
+        ]);
+    }
+
+    #[test]
     fn decodes_authoritative_routine_identity_records() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
