@@ -7,7 +7,6 @@
 #include "fe_common.h"
 #include "const_ints.h"
 #include <cstdint>
-#include <cstdio>
 #include <cstddef>
 #include <cstring>
 #include <limits>
@@ -797,8 +796,9 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       !node->type->incomplete &&
       (node->type->kind == tk_array || node->type->kind == tk_pointer)) {
     const bool array = node->type->kind == tk_array;
-    a_type_ptr element = array ? node->type->variant.array.element_type
-                               : node->type->variant.pointer.type;
+    a_type_ptr element = object_initializer_type(
+        array ? node->type->variant.array.element_type
+              : node->type->variant.pointer.type);
     if (element != nullptr && element->size == 1) {
       const a_constant_ptr constant = node->variant.constant.ptr;
       const size_t n = constant->variant.string.length;
@@ -824,33 +824,6 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       }
     }
   }
-  // Temporary diagnostics for the source-owned literal canonicalization
-  // shape; removed after the exact native EDG variant is established.
-  if (has_constant && node->type != nullptr &&
-      node->type->kind == tk_pointer &&
-      node->variant.constant.ptr->kind == ck_address) {
-    const auto &addr=node->variant.constant.ptr->variant.address;
-    a_constant_ptr inner=(addr.kind==abk_constant || addr.kind==abk_temporary)
-        ? addr.variant.constant : nullptr;
-    std::fprintf(stderr,
-       "EDG G6 PROBE %s:%s:%s addresskind=%u offset=%lld subobject=%d onepast=%d reflect=%d innerkind=%u innertype=%u innersize=%llu innerlength=%llu pointee-kind=%u pointee-size=%llu\\n",
-       function.c_str(),stmt_path.c_str(),path.c_str(),
-       static_cast<unsigned>(addr.kind),
-       static_cast<long long>(addr.offset),
-       addr.subobject_path!=nullptr,addr.one_past_the_end,
-       addr.is_object_reflection,
-       inner==nullptr ? 999u : static_cast<unsigned>(inner->kind),
-       inner==nullptr || inner->type==nullptr ? 999u :
-           static_cast<unsigned>(inner->type->kind),
-       inner==nullptr || inner->type==nullptr ? 0ULL :
-           static_cast<unsigned long long>(inner->type->size),
-       inner==nullptr || inner->kind!=ck_string ? 0ULL :
-           static_cast<unsigned long long>(inner->variant.string.length),
-       node->type->variant.pointer.type==nullptr ? 999u :
-           static_cast<unsigned>(node->type->variant.pointer.type->kind),
-       node->type->variant.pointer.type==nullptr ? 0ULL :
-           static_cast<unsigned long long>(node->type->variant.pointer.type->size));
-  }
   // The ordinary C expression puts("literal") is represented by EDG
   // as ck_address/abk_constant of an underlying ck_string array. EDG
   // explicitly assigns stable identity to that constant in memory.
@@ -869,12 +842,15 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
         address.variant.constant->kind == ck_string) {
       a_constant_ptr original=address.variant.constant;
       a_type_ptr array=original->type;
-      a_type_ptr pointee=node->type->variant.pointer.type;
+      a_type_ptr pointee=object_initializer_type(
+          node->type->variant.pointer.type);
+      a_type_ptr element=array!=nullptr && array->kind==tk_array
+          ? object_initializer_type(array->variant.array.element_type)
+          : nullptr;
       if (array != nullptr && array->kind == tk_array &&
           !array->incomplete && pointee != nullptr &&
-          pointee->size == 1 &&
-          array->variant.array.element_type != nullptr &&
-          array->variant.array.element_type->size == 1 &&
+          pointee->size == 1 && element != nullptr &&
+          element->size == 1 &&
           array->size>0 && array->size<=4096) {
         const size_t size=static_cast<size_t>(array->size);
         const size_t n=original->variant.string.length;
