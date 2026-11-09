@@ -354,6 +354,44 @@ reused for the **redesigned TypeId-native production IR cutover**
 do not interpret lack of an EDG-specific IR as proof that the new IR
 migration is already finished.
 
+### G6a: glibc stdio.h and real native C string-literal hello (merged)
+
+Original unmodified C containing `#include <stdio.h>` can now be
+compiled to the **production compiler SSA / native x86 ELF backend** and
+linked against the system glibc runtime, including a standalone
+`main(void)` calling `puts("Hello, world!")`.
+
+- [EDG bridge #84](https://github.com/bingordo/edgcpp-rust/pull/84)
+  exports a bounded, source-keyed immutable byte image of EDG's original
+  `ck_address/abk_constant` pointing at `ck_string`. C array and
+  pointer-typed forms preserve the exact source type/identity and native
+  canonical (typeref-resolved) byte element layout; no C source-text
+  literal relexing or invented linker address is used.
+- [Compiler #684](https://github.com/bingordo/compiler/pull/684)
+  directly creates existing compiler IR `GlobalAddr` and immutable
+  `GlobalDefinition::Bytes` module data, linked by the already existing
+  native x86 ELF `.rodata` emitter; source-checked direct C `puts`
+  invokes actual glibc.
+- Permanent [compiler-ci #213](https://github.com/bingordo/compiler-ci/pull/213)
+  checks real glibc headers with explicit GCC builtin and multiarch
+  include paths, original `putchar` and `puts` hello programs,
+  source/GCC output parity, `.rodata` and string symbol definition,
+  and genuine libc linking. Source-pinned full
+  [CI #42680692004](https://github.com/bingordo/compiler-ci/actions/runs/42680692004),
+  merged-bridge [#42681186591](https://github.com/bingordo/compiler-ci/actions/runs/42681186591)
+  and unpinned main [#42681666562](https://github.com/bingordo/compiler-ci/actions/runs/42681666562)
+  are green.
+
+A `printf("Hello, world!\\n")` source **still rejects without
+an object**, because the current EDG adapter has not integrated the
+source-proven direct SysV variadic ABI. Use the existing checked
+GP-only x86 varargs infrastructure for bounded `printf` calls next:
+[compiler #717](https://github.com/bingordo/compiler/issues/717).
+Do not imply that glibc include directories are automatically discovered:
+CI passes both the target GCC builtin and glibc multiarch directories
+explicitly. The direct EDG adapter still constructs *legacy* compiler
+SSA pending TypeId migration (#510/#256).
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
