@@ -5,6 +5,14 @@ Full EDG C/C++ coverage and native FP lowering are *not* claimed.
 The production path is **direct checked lowering into the existing
 `compiler-ir`**, not a new semantic-projection IR or independent CFG.
 
+## Immediate delivery objective: useful C, then useful C++ (2026-11-08)
+
+The delivery target is **a usable native C compiler as quickly as possible, then a usable native C++ compiler**—not full C99/C11/C++ standard completion before an end-to-end deliverable. Keep the native path on `compiler-ir` and x86 ELF, and keep optional Cranelift as an independent reference.
+
+Track priority and acceptance in [compiler C usefulness issue #604](https://github.com/bingordo/compiler/issues/604) and [C++ bootstrap issue #617](https://github.com/bingordo/compiler/issues/617). Work first on source-checked typed pointer/array memory, ordinary `char`/small integer types, common external/void calls, linking and simple struct fields so *unmodified* string/array/struct/multi-translation-unit programs can execute. Fill remaining C CFG/FP/varargs features only where they block these concrete workloads. Native C `do while` is merged in [compiler PR #623](https://github.com/bingordo/compiler/pull/623) with [green full CI](https://github.com/bingordo/compiler-ci/actions/runs/42538046752).
+
+At the first accepted C-basic executable matrix, focus the main workstream on Itanium C++ linker names, overloaded free functions, and then nonvirtual class fields, methods, constructors/destructors and lifetime. C++ linker-symbol metadata may be developed independently before that handoff. Complex exception/unwind, polymorphic RTTI, broad templates and full C99/C11 completion are **not** prerequisites for the first practical milestones. Every accepted feature needs native source + GCC/Clang link/run oracles; otherwise reject unsupported code without writing a partial object.
+
 ## Implemented boundary (7–8 November 2026)
 
 ```text
