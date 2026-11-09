@@ -305,6 +305,26 @@ in [#604](https://github.com/bingordo/compiler/issues/604).
 C++ free-function mangling and class-bootstrap [#617](https://github.com/bingordo/compiler/issues/617)
 follow the C-basic gate; do not wait for exhaustive ISO conformance.
 
+### G7a: verified standalone native C `main` and system CRT link
+
+The native EDG adapter now has an **independent executable acceptance
+test**, not just helper functions linked into a GCC-owned driver.
+Unchanged source `int main(void)` plus a same-translation-unit typed
+pointer helper and local arrays is translated through the existing
+compiler SSA and native ELF. GCC links the resulting object with the
+normal C runtime startup; the standalone executable returns the same
+zero exit as independently compiled GCC. A separate source `main`
+returning a nonzero value confirms exact exit-status 7 parity.
+
+[Compiler PR #653](https://github.com/bingordo/compiler/pull/653)
+and permanent [compiler-ci PR #187](https://github.com/bingordo/compiler-ci/pull/187)
+are merged. Both pinned [CI #42546093378](https://github.com/bingordo/compiler-ci/actions/runs/42546093378)
+and unpinned/main [CI #42546303566](https://github.com/bingordo/compiler-ci/actions/runs/42546303566)
+passed. No new driver-specific IR, backend or Cranelift dependency was
+introduced. Header-heavy C, `printf` source variadics, aggregate
+initializers, typed pointer locals and broad records still require
+separate accepted tests.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
