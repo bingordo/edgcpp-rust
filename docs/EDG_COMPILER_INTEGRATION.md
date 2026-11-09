@@ -181,6 +181,39 @@ The existing Cranelift `--features codegen` backend remains
 supported independently for broader reference behavior; the
 EDG-to-compiler path does not remove it.
 
+### C-fast P0: native integer pointer memory (merged 2026-11-08)
+
+[Compiler PR #629](https://github.com/bingordo/compiler/pull/629) adds
+a first production **real memory** slice to the isolated
+`tools/edg-driver` adapter. It uses EDG-owned pointer/pointee
+`TypeId` relationships and native target layout to admit exact
+unqualified C `int*`, `unsigned*`, `long long*` and
+`unsigned long long*` function parameters. The existing
+`compiler-ir` `Ptr64`, `PtrOffset`, ordered scalar load/store,
+SSA verifier and x86 ELF backend do all actual production lowering;
+no new IR, machine memory model or Cranelift dependency was created.
+
+Real C `*p`, `p[i]` and `*(p+i)` loads, ordinary stores,
+pointer-formal aliases and loop-carried scalar results passed the
+independent pinned [native/GCC CI #42539807672](https://github.com/bingordo/compiler-ci/actions/runs/42539807672),
+including a negative signed index through an interior pointer.
+**Indices are restricted to signed C 32-bit `int`**: the existing
+legacy `PtrOffset` explicitly sign-extends its I32 index, so
+unchecked `unsigned` / `size_t` indices must reject until
+backend/IR semantics can preserve their zero-extension. This is
+not general C memory support: byte/short accesses, qualified
+pointees, pointer-local storage and escapes, address-of local arrays,
+pointer-valued calls, struct lvalues and general array objects remain
+unimplemented. All are future native production milestones, not
+Cranelift-reference blockers.
+
+**Next C readiness task:** source-checked `char*` and
+`unsigned char*` byte load/store, integer promotion, and a
+GCC/Clang differential `strlen`/byte-checksum/byte-copy program.
+Then typed source array/local storage and pointer calls. See the
+[C-fast readiness issue #604](https://github.com/bingordo/compiler/issues/604)
+and [C++ bootstrap issue #617](https://github.com/bingordo/compiler/issues/617).
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
@@ -213,7 +246,7 @@ belongs to the chosen backend.
 ## Next implementation steps
 
 - **Broader checked source CFG:** extend the implemented native
-  `if`/`while` SSA lowering to `for`/`do while`, `break`,
+  `if`/`while`/`for`/`do while` SSA lowering to `break`,
   `continue`, `switch` and source `goto` where required.
   Preserve side-effect sequencing, scope/lifetimes, and fail-closed
   behavior. Retain lazy `&&`/`||` decisions rather than eager selects.
