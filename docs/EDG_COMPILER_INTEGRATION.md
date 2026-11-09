@@ -321,7 +321,9 @@ and permanent [compiler-ci PR #187](https://github.com/bingordo/compiler-ci/pull
 are merged. Both pinned [CI #42546093378](https://github.com/bingordo/compiler-ci/actions/runs/42546093378)
 and unpinned/main [CI #42546303566](https://github.com/bingordo/compiler-ci/actions/runs/42546303566)
 passed. No new driver-specific IR, backend or Cranelift dependency was
-introduced. Header-heavy C, `printf` source variadics, aggregate
+introduced. At the time of G7a, header-heavy C and `printf`
+source variadics were still missing; **G6a/G6b below now cover real
+`<stdio.h>` and a bounded native `printf` subset**. Aggregate
 initializers, typed pointer locals and broad records still require
 separate accepted tests.
 
@@ -382,15 +384,40 @@ linked against the system glibc runtime, including a standalone
   and unpinned main [#42681666562](https://github.com/bingordo/compiler-ci/actions/runs/42681666562)
   are green.
 
-A `printf("Hello, world!\\n")` source **still rejects without
-an object**, because the current EDG adapter has not integrated the
-source-proven direct SysV variadic ABI. Use the existing checked
-GP-only x86 varargs infrastructure for bounded `printf` calls next:
-[compiler #717](https://github.com/bingordo/compiler/issues/717).
-Do not imply that glibc include directories are automatically discovered:
-CI passes both the target GCC builtin and glibc multiarch directories
-explicitly. The direct EDG adapter still constructs *legacy* compiler
-SSA pending TypeId migration (#510/#256).
+### G6b: direct source-proven SysV GP-only printf calls (merged)
+
+Unmodified C with real glibc `<stdio.h>` now supports **native standalone
+`printf("Hello, world!\\n")`**, `printf` with already-promoted
+`%d/%s/%ld` arguments, and seven integer variadic arguments that extend
+past six SysV integer registers onto the stack. No source-specific
+`printf` lowering or additional projection IR was introduced.
+
+- Merged [compiler #719](https://github.com/bingordo/compiler/pull/719)
+  validates exact EDG external routine prototypes, fixed and already-promoted
+  scalar GP-class variadic arguments, and glibc's pointer-level `restrict`
+  parameter wrapper. Pointee `const` and immutable string literal
+  provenance survive all array-to-pointer conversions.
+- The production
+  `compiler_backend_x86::emit_object_with_checked_sysv_gp_variadics`
+  interface validates source-derived external declarations and sets `AL=0`
+  immediately before GP-only SysV calls. Native `.rodata` string images
+  still come from EDG `ck_address/abk_constant` data as in G6a.
+- Permanent [compiler-ci #235](https://github.com/bingordo/compiler-ci/pull/235)
+  compares original unchanged glibc/GCC executables and exact stdout for
+  hello, integer/string/long format arguments, and stack-overflow calls;
+  unsupported floating-point varargs reject without producing an object.
+  Full [source-pinned CI #42690607231](https://github.com/bingordo/compiler-ci/actions/runs/42690607231)
+  and [main-tracking CI #42691204525](https://github.com/bingordo/compiler-ci/actions/runs/42691204525)
+  **passed**. The CI checkout is back to `compiler/main`.
+- [compiler issue #717](https://github.com/bingordo/compiler/issues/717)
+  is closed for this **direct external GP-only** subset; indirect varargs,
+  SSE/floating-point argument classes, variadic definitions and general
+  C `va_start`/`va_list` are not covered.
+
+CI continues to pass explicit target GCC builtin and glibc multiarch
+include directories; automatic system-header discovery is not yet
+implemented. The EDG native adapter still produces *legacy* compiler
+SSA pending the TypeId IR migration (#510/#256).
 
 ## Architecture decision: no separate projection IR
 
