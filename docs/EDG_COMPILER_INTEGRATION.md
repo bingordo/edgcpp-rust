@@ -243,6 +243,35 @@ simple struct objects, real `main`/libc linking and headers.
 is the direct-pointer-call follow-up. No additional EDG or
 Cranelift intermediate representation was introduced.
 
+### C-fast P1a: real external C pointer calls, including libc (merged)
+
+[Compiler PR #649](https://github.com/bingordo/compiler/pull/649)
+adds exact EDG-source-typed pointer arguments to direct nonvariadic
+C calls in the native adapter. An existing `Ptr64` value may cross
+the ordinary SysV ABI to an external C function **only** when the
+EDG function prototype and argument pointer/pointee semantics match.
+The native x86 ELF implementation and compiler IR call operations
+were already sufficient; this did not introduce an alternative IR
+or extend the independent Cranelift reference path.
+
+Independent pinned [compiler-ci #42541884721](https://github.com/bingordo/compiler-ci/actions/runs/42541884721)
+and permanent/main [CI #42542100391](https://github.com/bingordo/compiler-ci/actions/runs/42542100391)
+passed. The unchanged C source now calls real libc
+`puts(const char*)` and separately linked C functions taking
+`const unsigned char*` and `int*`, including two calls in one
+expression and observable pointer writes. Regression retained by
+[compiler-ci PR #184](https://github.com/bingordo/compiler-ci/pull/184).
+Pointer-valued return/calls, `void*` conversions, qualifier-erasing
+casts, nested call arguments requiring unmodeled sequencing, array
+decay and variadic/indirect ABI are still not accepted.
+
+**Critical remaining C-basic work:** source arrays/local storage,
+pointer return values and correct C pointer/size_t conversions,
+struct/field objects, libc/header compatibility and a standalone
+C `main`/two-TU executable matrix. Pursue initial C++ mangled
+free-function bootstrap in parallel where it does not block the
+C-basic source acceptance matrix.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
