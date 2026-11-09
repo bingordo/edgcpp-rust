@@ -148,6 +148,9 @@ pub struct Il {
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     pub symbols: Vec<Symbol>,
+    /// EDG's untouched routine linker spellings, distinct from display names.
+    /// A false mangled flag does NOT authorize fabricating C++ ABI names.
+    pub symbol_link_names: Vec<SymbolLinkName>,
     /// Authoritative routine IDs and their names as used by statement IL.
     pub routine_identities: Vec<RoutineIdentity>,
     /// Type edges for named declarations.
@@ -170,6 +173,19 @@ pub struct Symbol {
     /// 1=routine, 2=variable, 3=field, 4=goto label.
     pub kind: u32,
     pub name: String,
+}
+
+/// Exact EDG-owned linker spelling of a native routine. Unlike
+/// `Symbol::name`, this never undergoes namespace qualification,
+/// demangling, suffix disambiguation or any inferred Itanium encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolLinkName {
+    pub symbol: SymbolId,
+    pub link_name: String,
+    /// True only when EDG explicitly reports that it already mangled
+    /// the source correspondence name. False may denote extern "C"
+    /// or a C++ entity for which link-name formation is unfinished.
+    pub edg_mangled: bool,
 }
 
 /// Stable link within one compilation between a native routine symbol and
@@ -958,7 +974,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1496,6 +1512,19 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(id), Some(kind), Some(name)) = (n(0), n(1), t(2)) else { return; };
             output.symbols.push(Symbol { id: SymbolId(id), kind, name });
         }
+        61 => {
+            let (Some(symbol),Some(link_name),Some(mangled)) =
+                (n(0),t(1),n(2)) else {return;};
+            if symbol==0 || link_name.is_empty() || link_name.len()>4096 ||
+                link_name.contains('\0') || mangled>1 ||
+                !output.symbols.iter().any(|s|s.id==SymbolId(symbol) && s.kind==1) ||
+                output.symbol_link_names.iter().any(|s|s.symbol==SymbolId(symbol)) {
+                return;
+            }
+            output.symbol_link_names.push(SymbolLinkName {
+                symbol:SymbolId(symbol),link_name,edg_mangled:mangled==1,
+            });
+        }
         _ => {}
     }
 }
@@ -1711,6 +1740,42 @@ mod tests {
                     invalid_attributes.as_ptr(), invalid_attributes.len(), 0);
         }
         assert!(state.malformed);
+    }
+
+    #[test]
+    fn decodes_exact_distinct_edg_cxx_link_names_without_demangling() {
+        let string = |bytes: &[u8]| WireField {
+            data: bytes.as_ptr(),length: bytes.len(),value:0,tag:1,
+        };
+        let number = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let first=[number(10),number(1),string(b"ns::f")];
+        let second=[number(11),number(1),string(b"ns::f")];
+        let c=[number(12),number(1),string(b"extern_c")];
+        let mangled_i=[number(10),string(b"_ZN2ns1fEi"),number(1)];
+        let mangled_l=[number(11),string(b"_ZN2ns1fEl"),number(1)];
+        let plain_c=[number(12),string(b"extern_c"),number(0)];
+        unsafe {
+            let userdata=(&mut state as *mut Collector).cast();
+            for fields in [&first[..],&second[..],&c[..]] {
+                collect(userdata,13,fields.as_ptr(),fields.len(),0);
+            }
+            for fields in [&mangled_i[..],&mangled_l[..],&plain_c[..]] {
+                collect(userdata,61,fields.as_ptr(),fields.len(),0);
+            }
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbols[0].name,state.il.symbols[1].name);
+        assert_eq!(state.il.symbol_link_names,vec![
+            SymbolLinkName {symbol:SymbolId(10),link_name:"_ZN2ns1fEi".into(),
+                edg_mangled:true},
+            SymbolLinkName {symbol:SymbolId(11),link_name:"_ZN2ns1fEl".into(),
+                edg_mangled:true},
+            SymbolLinkName {symbol:SymbolId(12),link_name:"extern_c".into(),
+                edg_mangled:false},
+        ]);
     }
 
     #[test]
