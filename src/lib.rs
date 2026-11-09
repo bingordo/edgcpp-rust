@@ -107,6 +107,9 @@ pub struct Il {
     pub static_local_owners: Vec<StaticLocalOwner>,
     /// Owned expression nodes, including operation operand relationships.
     pub expressions: Vec<Expression>,
+    /// Source-keyed exact byte images of narrow EDG C string literals.
+    /// These are owned constant objects, not reinterpretations of pointers.
+    pub string_literals: Vec<ExpressionStringLiteral>,
     /// Identity-preserving types captured during this compilation.
     pub types: Vec<TypeDef>,
     /// EDG-verified signed, non-enum 64-bit integer ABI types (event 43).
@@ -712,6 +715,19 @@ pub struct Expression {
     pub symbol_id: Option<SymbolId>,
 }
 
+/// One EDG-owned narrow string literal stored as a complete, NUL-ended
+/// constant array image. The source path identifies the expression, while
+/// its type ID and bytes establish exact allocation size. No linker name
+/// is emitted by EDG for the literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpressionStringLiteral {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub ty: TypeId,
+    pub bytes: Vec<u8>,
+}
+
 /// A parameter variable owned by one function definition.
 /// Explicit parameters have dense zero-based positions; the implicit C++
 /// object parameter has `position: None`.
@@ -974,7 +990,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1045,6 +1061,18 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             if symbol==0 || target==0 {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
+            });
+        }
+        62 => {
+            let (Some(function), Some(statement_path), Some(path),
+                 Some(ty), Some(hex)) =
+                (t(0), t(1), t(2), n(3), t(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() || ty==0 {return;}
+            let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            if bytes.len()>4096 || bytes.last()!=Some(&0) {return;}
+            output.string_literals.push(ExpressionStringLiteral {
+                function, statement_path, path, ty:TypeId(ty), bytes,
             });
         }
         50 => {
