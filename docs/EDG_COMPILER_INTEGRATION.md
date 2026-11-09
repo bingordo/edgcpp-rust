@@ -272,6 +272,39 @@ C `main`/two-TU executable matrix. Pursue initial C++ mangled
 free-function bootstrap in parallel where it does not block the
 C-basic source acceptance matrix.
 
+### C-fast P2a: fixed local scalar arrays (merged and verified)
+
+[Compiler PR #650](https://github.com/bingordo/compiler/pull/650)
+adds bounded C fixed-size automatic arrays directly to existing
+production `compiler-ir` stack-memory operations:
+`LocalSizedArrayAddr` roots and scaled native pointer addressing
+with ordered 8/32/64-bit loads/stores. Native EDG fixed-array bounds,
+element identity, byte size and alignment are verified before allocating
+independently non-overlapping local stack extents. Source scopes and
+shadowing remain distinct. Only source-proven local arrays may participate
+in EDG's implicit array-to-qualified-pointer cast, with exact canonical
+element type and no const removal; arbitrary pointer casts are not
+admitted.
+
+Original unchanged C arrays and a separately linked
+`const int*` function passed pinned
+[compiler-ci #42545440464](https://github.com/bingordo/compiler-ci/actions/runs/42545440464);
+permanent [CI PR #185](https://github.com/bingordo/compiler-ci/pull/185)
+was merged following green main-tracking
+[run #42545689934](https://github.com/bingordo/compiler-ci/actions/runs/42545689934).
+The accepted scope covers byte, I32 and I64 locals, indexing,
+multiple independent arrays and lexical shadowing. Variable-length
+arrays, aggregate initializers, short/record elements, pointer locals,
+unverified pointer escape and pointer-valued return remain unsupported
+and reject before native object output.
+
+**Next C readiness target:** exact-layout C struct storage/fields
+([#652](https://github.com/bingordo/compiler/issues/652)), plus
+standalone C `main`, common libc/header and pointer-local acceptance
+in [#604](https://github.com/bingordo/compiler/issues/604).
+C++ free-function mangling and class-bootstrap [#617](https://github.com/bingordo/compiler/issues/617)
+follow the C-basic gate; do not wait for exhaustive ISO conformance.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
