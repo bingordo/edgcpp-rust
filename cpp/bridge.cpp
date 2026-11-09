@@ -823,6 +823,51 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       }
     }
   }
+  // The ordinary C expression puts("literal") is represented by EDG
+  // as ck_address/abk_constant of an underlying ck_string array. EDG
+  // explicitly assigns stable identity to that constant in memory.
+  // Capture only this exact direct address with zero displacement;
+  // arbitrary constant pointers and temporary/global addresses remain
+  // unsupported. This intentionally excludes string address comparisons
+  // until source identity is modeled across all occurrences.
+  if (has_constant && type_id != 0 && node->type != nullptr &&
+      node->type->kind == tk_pointer &&
+      node->variant.constant.ptr->kind == ck_address) {
+    const auto &address=node->variant.constant.ptr->variant.address;
+    if (address.kind == abk_constant && address.offset == 0 &&
+        !address.one_past_the_end && !address.is_object_reflection &&
+        address.subobject_path == nullptr &&
+        address.variant.constant != nullptr &&
+        address.variant.constant->kind == ck_string) {
+      a_constant_ptr original=address.variant.constant;
+      a_type_ptr array=original->type;
+      a_type_ptr pointee=node->type->variant.pointer.type;
+      if (array != nullptr && array->kind == tk_array &&
+          !array->incomplete && pointee != nullptr &&
+          pointee->size == 1 &&
+          array->variant.array.element_type != nullptr &&
+          array->variant.array.element_type->size == 1 &&
+          array->size>0 && array->size<=4096) {
+        const size_t size=static_cast<size_t>(array->size);
+        const size_t n=original->variant.string.length;
+        if (n<=size && original->variant.string.value!=nullptr) {
+          std::vector<uint8_t> image(size,0);
+          std::memcpy(image.data(),original->variant.string.value,n);
+          if (image.back()==0) {
+            static constexpr char digits[]="0123456789abcdef";
+            std::string hex;
+            hex.reserve(size*2);
+            for (uint8_t byte:image) {
+              hex.push_back(digits[byte>>4]);
+              hex.push_back(digits[byte&15]);
+            }
+            emit_record(62,{txt(function),txt(stmt_path),txt(path),
+                            num(type_id),txt(hex)});
+          }
+        }
+      }
+    }
+  }
   // M14: path-keyed constant-expression IEEE image (wire event 58).
   uint32_t fp_width = 0;
   uint64_t fp_bits = 0;
