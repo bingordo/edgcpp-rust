@@ -214,6 +214,35 @@ Then typed source array/local storage and pointer calls. See the
 [C-fast readiness issue #604](https://github.com/bingordo/compiler/issues/604)
 and [C++ bootstrap issue #617](https://github.com/bingordo/compiler/issues/617).
 
+### C-fast P0b: executable C byte/string kernels (merged)
+
+The isolated native compiler adapter now accepts source-checked C
+`char*`, `signed char*`, `unsigned char*` and
+`const char*` parameters, exact byte `*p`/`p[i]` loads and
+stores, sign/zero extension and explicit narrowing-cast
+normalization using existing `LoadNarrow`, `StoreNarrow` and
+integer SSA ops. EDG pointee typeref qualifiers are checked:
+`const` prohibits writes; volatile/atomic/restrict effects are
+rejected rather than silently erased. Source indexing remains
+limited to signed C `int`, because the current legacy
+`PtrOffset` sign-extends its 32-bit index.
+
+[Compiler PR #646](https://github.com/bingordo/compiler/pull/646)
+merged with unchanged-source C string-length, copy/NUL,
+byte checksum, high-bit char and alias tests passing the full
+[compiler-ci native x86 ELF/GCC run #42541101380](https://github.com/bingordo/compiler-ci/actions/runs/42541101380).
+Permanent regression tests were merged in
+[compiler-ci PR #183](https://github.com/bingordo/compiler-ci/pull/183)
+and passed the main-tracking
+[run #42541335253](https://github.com/bingordo/compiler-ci/actions/runs/42541335253).
+
+Remaining C-basic blockers: `size_t`/unsigned-index semantics,
+source arrays and pointer locals, typed external pointer calls,
+simple struct objects, real `main`/libc linking and headers.
+[Compiler PR #649](https://github.com/bingordo/compiler/pull/649)
+is the direct-pointer-call follow-up. No additional EDG or
+Cranelift intermediate representation was introduced.
+
 ## Architecture decision: no separate projection IR
 
 The immutable `Il` and `graph::Graph` remain the **source interface**:
