@@ -787,6 +787,38 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     }
   }
   const uint32_t type_id = emit_type(node->type, 0);
+  // Native C string literal: preserve the authoritative EDG constant
+  // bytes and exact complete array layout. No source-text re-lexing and
+  // no fabricated pointer or linker symbol. The narrow, one-byte-element
+  // representation is sufficient for ordinary glibc puts/printf format
+  // strings; wide strings and compound address constants are excluded.
+  // Event 62: (function, statement path, expression path, type ID, hex image).
+  if (has_constant && type_id != 0 && node->type != nullptr &&
+      node->variant.constant.ptr->kind == ck_string &&
+      node->type->kind == tk_array &&
+      node->type->variant.array.element_type != nullptr &&
+      node->type->variant.array.element_type->size == 1 &&
+      !node->type->incomplete &&
+      node->type->size > 0 && node->type->size <= 4096) {
+    const a_constant_ptr constant = node->variant.constant.ptr;
+    const size_t n = constant->variant.string.length;
+    const size_t size = static_cast<size_t>(node->type->size);
+    if (n <= size && constant->variant.string.value != nullptr) {
+      std::vector<uint8_t> image(size, 0);
+      std::memcpy(image.data(), constant->variant.string.value, n);
+      if (image.back() == 0) {
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string hex;
+        hex.reserve(image.size() * 2);
+        for (uint8_t byte : image) {
+          hex.push_back(digits[byte >> 4]);
+          hex.push_back(digits[byte & 15]);
+        }
+        emit_record(62, {txt(function), txt(stmt_path), txt(path),
+                         num(type_id), txt(hex)});
+      }
+    }
+  }
   // M14: path-keyed constant-expression IEEE image (wire event 58).
   uint32_t fp_width = 0;
   uint64_t fp_bits = 0;
