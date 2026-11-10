@@ -72,8 +72,13 @@ fn source_pointee(
         if semantic(2,node.data.kind)!=3 || node.operands.len()!=1 {
             break;
         }
-        // A native unary conversion or address-of is fine; a binary
-        // expression requires a separately checked pointer/alias analysis.
+        // Only transparent conversions and address formation may preserve
+        // the original pointer's provenance. Other unary operations (e.g.
+        // dereference or negation) must not confer an unrelated pointee type.
+        let op=node.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
+        if !matches!(op,11|16|43|46) {
+            break;
+        }
         current=node.operands[0];
     }
     Err(invalid("cannot recover typed, aligned atomic builtin source pointer"))
@@ -231,6 +236,17 @@ mod traversal_tests {
     #[test]
     fn pointer_walk_rejects_cyclic_chain_without_hanging() {
         let graph=unary_graph(128,true);
+        assert!(source_pointee(
+            &graph,ExpressionId(0),&Il::default(),
+            MemoryAccess::Atomic,4,
+        ).is_err());
+    }
+
+    #[test]
+    fn pointer_walk_does_not_follow_unrelated_unary_operation() {
+        let mut graph=unary_graph(2,false);
+        // A dereference is not a transparent conversion.
+        graph.expressions[0].data.operator=Some(edg_value(3,44));
         assert!(source_pointee(
             &graph,ExpressionId(0),&Il::default(),
             MemoryAccess::Atomic,4,
