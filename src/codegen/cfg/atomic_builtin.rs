@@ -4,11 +4,22 @@
 use super::*;
 
 fn literal(graph:&Graph,id:ExpressionId) -> Result<i64,CodegenError> {
-    let n=graph.expression(id).ok_or_else(||invalid("missing atomic literal"))?;
-    if let Some(value)=n.data.constant_integer {return Ok(value);}
-    if n.operands.len()==1 && semantic(2,n.data.kind)==3 {
+    // Conversion chains may be arbitrarily long. Use an iterative walk so
+    // malformed or deep graphs cannot exhaust the Rust stack.
+    let mut current=id;
+    let mut visited=std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(invalid("cyclic atomic literal conversion chain"));
+        }
+        let n=graph.expression(current).ok_or_else(||invalid("missing atomic literal"))?;
+        if let Some(value)=n.data.constant_integer {return Ok(value);}
+        if n.operands.len()!=1 || semantic(2,n.data.kind)!=3 {
+            break;
+        }
         let op=n.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
-        if matches!(op,11|12|16) {return literal(graph,n.operands[0]);}
+        if !matches!(op,11|12|16) {break;}
+        current=n.operands[0];
     }
     Err(invalid("atomic order/weak operand must be literal integer"))
 }
@@ -145,5 +156,47 @@ pub(super) fn lower(
         }
         _=>Err(invalid(format!(
             "unsupported source atomic builtin {name} with {} arguments",args.len()))),
+    }
+}
+
+#[cfg(test)]
+mod audit_atomic_literal_tests {
+    use super::*;
+    use crate::graph::{ExpressionNode,StatementId};
+
+    fn node(kind:u32, operator:Option<u32>, constant_integer:Option<i64>,
+            operand:Option<ExpressionId>) -> ExpressionNode {
+        ExpressionNode {
+            data:crate::Expression{
+                function:"f".into(), statement_path:"0".into(),path:"0".into(),
+                parent:None, kind,operator,type_kind:None,reference:None,
+                type_size:None,type_alignment:None,constant_kind:None,
+                constant_integer,related_type_role:None,related_type_kind:None,
+                type_id:None,symbol_id:None,
+            },
+            parent:None,operands:operand.into_iter().collect(),
+            statement:StatementId(0),
+        }
+    }
+
+    #[test]
+    fn deeply_nested_atomic_order_conversions_and_cycles() {
+        let literal_kind=(0..128).find(|&k|semantic(2,k)==1)
+            .expect("EDG constant expression kind");
+        let operator_kind=(0..128).find(|&k|semantic(2,k)==3)
+            .expect("EDG operator expression kind");
+        let conversion=(0..128).find(|&k|semantic(3,k)==11)
+            .expect("EDG identity conversion operator");
+        let mut graph=Graph::default();
+        graph.expressions.push(node(literal_kind,None,Some(7),None));
+        for index in 1..128 {
+            graph.expressions.push(node(operator_kind,Some(conversion),None,
+                Some(ExpressionId(index-1))));
+        }
+        assert_eq!(literal(&graph,ExpressionId(127)).unwrap(),7);
+        // An invalid input graph must fail rather than recurse indefinitely.
+        graph.expressions[1].operands=vec![ExpressionId(1)];
+        assert!(literal(&graph,ExpressionId(127)).is_err());
+        assert!(literal(&graph,ExpressionId(128)).is_err());
     }
 }
