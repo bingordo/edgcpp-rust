@@ -222,6 +222,22 @@ jobs:
             # as a signed i64 carrier with the EDG type kept separately.
             grep -qF 'integer constant outer::big_unsigned' il_result.txt
           )
+          # EDG's native C++ expression emitter has a defensive traversal
+          # depth bound. If the bound is reached, fail closed rather than
+          # silently accepting a truncated expression tree.
+          cp tests/fixtures/audit_deep_expression.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            if ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_deep_expression.cpp > audit_deep_expression.out 2>&1; then
+              echo "Deep EDG expression was silently accepted" >&2
+              exit 1
+            fi
+            grep -q 'MalformedCallback' audit_deep_expression.out || {
+              cat audit_deep_expression.out >&2
+              exit 1
+            }
+          )
 
       - name: M11 VLA dimension evaluation semantic snapshot (parse only)
         working-directory: edgcpp-rust
