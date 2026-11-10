@@ -137,9 +137,13 @@ static std::string namespace_prefix(a_scope_ptr parent)
   // File-scope IL lists can include entities declared in nested namespaces.
   // Use each declaration's parent scope, not the containing list, to qualify it.
   std::string result;
-  unsigned depth = 0;
-  for (a_scope_ptr scope = parent; scope != nullptr && depth++ < 128;
+  // A fixed depth cutoff silently truncated valid C++ qualified names.
+  // Track native scope identities instead, so even malformed cyclic parent
+  // chains terminate without modifying a valid deep namespace hierarchy.
+  std::unordered_set<a_scope_ptr> visited;
+  for (a_scope_ptr scope = parent; scope != nullptr;
        scope = scope->parent) {
+    if (!visited.insert(scope).second) break;
     if (scope->kind != sck_namespace) continue;
     a_namespace_ptr ns = scope->variant.assoc_namespace;
     if (ns == nullptr) continue;
