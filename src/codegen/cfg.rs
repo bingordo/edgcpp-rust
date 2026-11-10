@@ -86,6 +86,13 @@ fn has_lowered_vla_runtime(il:&Il,routine:crate::SymbolId) -> bool {
 }
 /// CFG-only scalar local validation. Ordinary C++ generated temporaries
 /// still need explicit lifetime and value-category handling.
+/// Reject scalar widths the Cranelift reference backend cannot represent.
+fn checked_integer_abi(info:&crate::CIntegerType) -> Result<CAbiInt,CodegenError> {
+    if !matches!(info.bits,8|16|32|64) {
+        return Err(invalid(format!("unsupported C scalar integer width {}",info.bits)));
+    }
+    Ok(CAbiInt {bits:info.bits,signed:info.signed,is_bool:info.is_bool})
+}
 fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, CodegenError> {
     let lowered_vla=has_lowered_vla_runtime(il,local.routine);
     if local.static_storage || local.structured_binding || local.handler_parameter ||
@@ -126,7 +133,7 @@ fn cfg_local_type(il: &Il, local: &crate::LocalVariable) -> Result<CAbiInt, Code
     }
     let info = il.c_integer_types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid(format!("local {} has unsupported scalar type",local.symbol.0)))?;
-    Ok(CAbiInt { bits: info.bits, signed: info.signed, is_bool: info.is_bool })
+    checked_integer_abi(info)
 }
 /// The ABI erases top-level parameter qualifiers, but their automatic
 /// object reads/writes must still obey the source declaration.
@@ -927,7 +934,7 @@ fn integer_expression_type(il: &Il, graph: &Graph, id: ExpressionId)
         .ok_or_else(|| invalid(format!(
             "unsupported C expression type at {}:{}:{}",
             node.data.function, node.data.statement_path, node.data.path)))?;
-    Ok(CAbiInt { bits: ty.bits, signed: ty.signed, is_bool: ty.is_bool })
+    checked_integer_abi(ty)
 }
 
 /// Every EDG operation has a result type, and each operand already carries
@@ -1125,8 +1132,7 @@ fn scalar_global(
     }
     let integer = il.c_integer_types.iter().find(|x| x.id == ty)
         .ok_or_else(|| invalid(format!("unsupported global scalar type: {name}")))?;
-    Ok((name,CAbiInt { bits: integer.bits, signed: integer.signed,
-                       is_bool: integer.is_bool }))
+    Ok((name,checked_integer_abi(integer)?))
 }
 /// Validate a global's linkage and return either a scalar layout or
 /// the size of a fixed array. Array expressions decay to an address rather
@@ -4086,5 +4092,63 @@ mod audit_resource_limits_tests {
         assert!(!valid_zero_aggregate_bytes(0));
         assert!(valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64));
         assert!(!valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64 + 1));
+    }
+}
+
+#[cfg(test)]
+mod audit_integer_width_tests {
+    use super::*;
+
+    #[test]
+    fn only_cranelift_supported_scalar_integer_widths_are_accepted() {
+        for bits in [8,16,32,64] {
+            let info=crate::CIntegerType{
+                id:crate::TypeId(1),bits,signed:true,is_bool:false,
+            };
+            assert_eq!(checked_integer_abi(&info).unwrap().bits,bits);
+        }
+        for bits in [0,1,7,24,65,128,255] {
+            let info=crate::CIntegerType{
+                id:crate::TypeId(1),bits,signed:true,is_bool:false,
+            };
+            assert!(matches!(
+                checked_integer_abi(&info),
+                Err(CodegenError::InvalidFunction(msg)) if msg.contains("integer width")
+            ),"invalid width {bits} must fail closed");
+        }
+    }
+
+    #[test]
+    fn typed_expression_rejects_unsupported_width_before_codegen() {
+        let int_kind=(0..4096).find(|&kind|semantic(4,kind)==1)
+            .expect("EDG integer kind is exposed by bridge");
+        let mut il=Il::default();
+        il.types.push(crate::TypeDef{
+            id:crate::TypeId(1),kind:int_kind,related_role:None,related:None,
+        });
+        let mut graph=Graph::default();
+        graph.expressions.push(crate::graph::ExpressionNode{
+            data:crate::Expression{
+                function:"f".into(),statement_path:"0".into(),path:"0".into(),
+                parent:None,kind:0,operator:None,type_kind:None,reference:None,
+                type_size:None,type_alignment:None,constant_kind:None,
+                constant_integer:Some(1),related_type_role:None,
+                related_type_kind:None,type_id:Some(crate::TypeId(1)),symbol_id:None,
+            },
+            parent:None,operands:vec![],statement:crate::graph::StatementId(0),
+        });
+        for bits in [8,16,32,64] {
+            il.c_integer_types=vec![crate::CIntegerType{
+                id:crate::TypeId(1),bits,signed:false,is_bool:false,
+            }];
+            assert_eq!(integer_expression_type(&il,&graph,ExpressionId(0))
+                .unwrap().bits,bits);
+        }
+        for bits in [0,7,128] {
+            il.c_integer_types=vec![crate::CIntegerType{
+                id:crate::TypeId(1),bits,signed:false,is_bool:false,
+            }];
+            assert!(integer_expression_type(&il,&graph,ExpressionId(0)).is_err());
+        }
     }
 }
