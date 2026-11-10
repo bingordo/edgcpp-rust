@@ -257,6 +257,21 @@ jobs:
               exit 1
             }
           )
+          # An oversized but valid C++ record must fail explicitly instead
+          # of emitting its first 10,000 fields as a complete object.
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            python3 -c 'from pathlib import Path; Path("audit_many_fields.cpp").write_text("struct AuditWideRecord {\n" + "".join(f"int field_{i};\n" for i in range(10001)) + "};\nAuditWideRecord audit_wide_record;\n")'
+            if ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_many_fields.cpp > audit_many_fields.out 2>&1; then
+              echo "Oversized native record was silently accepted" >&2
+              exit 1
+            fi
+            grep -q 'MalformedCallback' audit_many_fields.out || {
+              cat audit_many_fields.out >&2
+              exit 1
+            }
+          )
 
       - name: M11 VLA dimension evaluation semantic snapshot (parse only)
         working-directory: edgcpp-rust
