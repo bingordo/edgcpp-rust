@@ -14,6 +14,8 @@ const TYPE_KIND_POINTER: u32 = 5;
 const OP_PARENS: u32 = 11;
 const OP_UNARY_PLUS: u32 = 12;
 const OP_CAST: u32 = 16;
+const OP_ADDRESS_OF: u32 = 43;
+const OP_ARRAY_TO_POINTER: u32 = 46;
 
 fn literal(graph:&Graph,id:ExpressionId) -> Result<i64,CodegenError> {
     // Conversion chains may be arbitrarily long. Use an iterative walk so
@@ -85,8 +87,13 @@ fn source_pointee(
         if semantic(SEMANTIC_EXPRESSION,node.data.kind)!=EXPR_KIND_OPERATION || node.operands.len()!=1 {
             break;
         }
-        // A native unary conversion or address-of is fine; a binary
-        // expression requires a separately checked pointer/alias analysis.
+        // Only transparent conversions and address formation may preserve
+        // the original pointer's provenance. Dereference, negation, and other
+        // unary operators cannot recover the type of their source operand.
+        let op=node.data.operator.map(|x|semantic(SEMANTIC_OPERATOR,x)).unwrap_or(0);
+        if !matches!(op,OP_PARENS|OP_CAST|OP_ADDRESS_OF|OP_ARRAY_TO_POINTER) {
+            break;
+        }
         current=node.operands[0];
     }
     Err(invalid("cannot recover typed, aligned atomic builtin source pointer"))
@@ -210,5 +217,78 @@ mod audit_atomic_literal_tests {
         graph.expressions[1].operands=vec![ExpressionId(1)];
         assert!(literal(&graph,ExpressionId(127)).is_err());
         assert!(literal(&graph,ExpressionId(128)).is_err());
+    }
+
+    fn native(category:u32,semantic_id:u32) -> u32 {
+        (0..4096).find(|&value|semantic(category,value)==semantic_id)
+            .expect("EDG native kind for pointer traversal test")
+    }
+
+    fn typed_atomic_chain() -> (Graph,Il) {
+        let mut graph=Graph::default();
+        let operation=native(SEMANTIC_EXPRESSION,EXPR_KIND_OPERATION);
+        let parens=native(SEMANTIC_OPERATOR,OP_PARENS);
+        for index in 0..128 {
+            graph.expressions.push(node(
+                operation,Some(parens),None,Some(ExpressionId(index+1)),
+            ));
+        }
+        graph.expressions.push(node(0,None,None,None));
+        let atomic_int=crate::TypeId(17);
+        let pointer=crate::TypeId(18);
+        graph.expressions[128].data.type_id=Some(pointer);
+
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef {
+                id:atomic_int,kind:native(SEMANTIC_TYPE,1),
+                related_role:None,related:None,
+            },
+            crate::TypeDef {
+                id:pointer,kind:native(SEMANTIC_TYPE,TYPE_KIND_POINTER),
+                related_role:Some(1),related:Some(atomic_int),
+            },
+        ]);
+        il.c_integer_types.push(crate::CIntegerType {
+            id:atomic_int,bits:32,signed:true,is_bool:false,
+        });
+        il.type_details.push(crate::TypeDetail {
+            owner:atomic_int,is_reference:false,is_rvalue_reference:false,
+            qualifiers:Some(8), // native _Atomic
+        });
+        il.type_object_sizes.push(crate::TypeObjectSize {
+            owner:atomic_int,bytes:4,alignment:4,
+        });
+        (graph,il)
+    }
+
+    #[test]
+    fn deeply_nested_atomic_pointer_conversion_recovers_type() {
+        let (graph,il)=typed_atomic_chain();
+        assert_eq!(source_pointee(
+            &graph,ExpressionId(0),&il,MemoryAccess::Atomic,4,
+        ).unwrap(),crate::TypeId(17));
+    }
+
+    #[test]
+    fn nontransparent_unary_operation_cannot_recover_atomic_type() {
+        let (mut graph,il)=typed_atomic_chain();
+        graph.expressions[5].data.operator=Some(native(SEMANTIC_OPERATOR,44)); // indirect
+        assert!(source_pointee(
+            &graph,ExpressionId(0),&il,MemoryAccess::Atomic,4,
+        ).is_err());
+    }
+
+    #[test]
+    fn cyclic_atomic_pointer_conversion_rejects_graph() {
+        let (mut graph,il)=typed_atomic_chain();
+        graph.expressions[128].data.type_id=None;
+        graph.expressions[128].data.kind=native(SEMANTIC_EXPRESSION,EXPR_KIND_OPERATION);
+        graph.expressions[128].data.operator=Some(native(SEMANTIC_OPERATOR,OP_PARENS));
+        graph.expressions[128].operands.push(ExpressionId(0));
+        assert!(matches!(
+            source_pointee(&graph,ExpressionId(0),&il,MemoryAccess::Atomic,4),
+            Err(CodegenError::InvalidFunction(msg)) if msg.contains("cyclic atomic pointer")
+        ));
     }
 }
