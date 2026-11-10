@@ -5,6 +5,11 @@
 //! assigns them to XMM registers (or overflow stack slots) in C ABI order.
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
+// Defensive implementation caps, not C language or target ABI limits.
+const MAX_FP_ARGUMENTS: usize = 256;
+const MAX_FP_LOCALS: usize = 4096;
+const MAX_FP_STATEMENTS: usize = 10000;
+
 use super::*;
 use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
 use std::collections::HashMap;
@@ -499,7 +504,7 @@ fn check_scalar_call_args(
     params:&[ScalarType],locals:&[ScalarType],depth:usize,
 )->Result<(),CodegenError> {
     if depth>64 || arguments.len()!=target_types.len() ||
-        arguments.len()>256 {
+        arguments.len()>MAX_FP_ARGUMENTS {
         return Err(reject("scalar call arity/depth invalid"));
     }
     for (arg,target) in arguments.iter().zip(target_types) {
@@ -641,7 +646,7 @@ fn emit_scalar_call_arguments(
     locals:&[Variable],locals_ty:&[ScalarType],
     refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 )->Result<Vec<Value>,CodegenError> {
-    if arguments.len()!=parameters.len() || arguments.len()>256 {
+    if arguments.len()!=parameters.len() || arguments.len()>MAX_FP_ARGUMENTS {
         return Err(reject("FP call argument arity invalid"));
     }
     let mut values=Vec::with_capacity(arguments.len());
@@ -967,7 +972,7 @@ fn emit_condition(
 fn validate_fp_arm(
     writes:&[(usize,FloatExpr)],f:&ScalarFloatBody,mut defined:Vec<bool>,
 )->Result<Vec<bool>,CodegenError> {
-    if writes.len()>10000 {
+    if writes.len()>MAX_FP_STATEMENTS {
         return Err(reject("FP conditional assignment arm is oversized"));
     }
     for (n,expr) in writes {
@@ -1010,7 +1015,7 @@ fn check_fp_statements(
     stmts:&[FloatStmt],f:&ScalarFloatBody,entry:Vec<bool>,
     loop_depth:usize,depth:usize,
 )->Result<FpFlow,CodegenError> {
-    if depth>64 || stmts.len()>10000 {
+    if depth>64 || stmts.len()>MAX_FP_STATEMENTS {
         return Err(reject("FP CFG exceeds statement depth or size limit"));
     }
     let mut flow=FpFlow {normal:Some(entry),..FpFlow::default()};
@@ -1595,7 +1600,7 @@ fn validate_fp_calls_expr(
         FloatExpr::CallExternal {callee,parameters,return_type,arguments}=>{
             if !source_imports || !safe_scalar_external_name(callee) ||
                 declarations.contains_key(callee) ||
-                arguments.len()!=parameters.len() || parameters.len()>256 ||
+                arguments.len()!=parameters.len() || parameters.len()>MAX_FP_ARGUMENTS ||
                 parameters.iter().any(|ty|matches!(ty,ScalarType::FunctionPointer(_))) {
                 return Err(reject("FP external call lacks an authorized C prototype"));
             }
@@ -1807,10 +1812,10 @@ fn emit_scalar_float_bodies_with_globals(
     for f in functions {
         checked_scalar_passing_plan(&f.parameters,f.result)?;
         if f.name.is_empty()||f.name.contains('\0') ||
-            f.parameters.len()>256 || f.locals.len()>4096 {
+            f.parameters.len()>MAX_FP_ARGUMENTS || f.locals.len()>MAX_FP_LOCALS {
             return Err(reject("invalid FP function name or variable count"));
         }
-        if f.statements.is_empty() || f.statements.len()>10000 {
+        if f.statements.is_empty() || f.statements.len()>MAX_FP_STATEMENTS {
             return Err(reject("FP function body is empty or oversized"));
         }
         let checked=check_fp_statements(&f.statements,f,
@@ -2103,7 +2108,7 @@ fn source_callable_signature(
     let mut declared:Vec<_>=il.type_parameters.iter()
         .filter(|p|p.owner==function_ty).collect();
     declared.sort_by_key(|p|p.position);
-    if declared.len()>256 || declared.iter().enumerate()
+    if declared.len()>MAX_FP_ARGUMENTS || declared.iter().enumerate()
         .any(|(n,p)|p.position!=n as u32) {
         return Err(reject("indirect function prototype has invalid positions"));
     }
@@ -2757,7 +2762,7 @@ fn lower_fp_body(
                 let Some(arm)=arm else {return Ok(Vec::new());};
                 let mut statements=Vec::new();
                 lower_fp_body(ctx,arm,&mut statements,depth+1)?;
-                if statements.len()>10000 {
+                if statements.len()>MAX_FP_STATEMENTS {
                     return Err(reject("FP if arm is oversized"));
                 }
                 Ok(statements)
@@ -3145,7 +3150,7 @@ fn lower_fp_body(
         }
         _=>return Err(reject("unsupported FP control flow or statement form")),
     }
-    if output.len()>10000 {return Err(reject("FP statement count exceeds limit"));}
+    if output.len()>MAX_FP_STATEMENTS {return Err(reject("FP statement count exceeds limit"));}
     Ok(())
 }
 /// Source-checked narrow INTEGER-result indirect call slice. We accept an
@@ -3308,7 +3313,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
         let locals:Vec<_>=il.local_variables.iter()
             .filter(|v|v.routine==routine).collect();
-        if locals.len()>4096 {return Err(reject("too many FP locals"));}
+        if locals.len()>MAX_FP_LOCALS {return Err(reject("too many FP locals"));}
         let mut local_syms=Vec::with_capacity(locals.len());
         let mut local_types=Vec::with_capacity(locals.len());
         for local in locals {
