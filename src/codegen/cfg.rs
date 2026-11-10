@@ -1472,6 +1472,35 @@ fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
         _ => Err(invalid("expected pointer/array type for subscript")),
     }
 }
+/// A pointer difference is measured in elements of one compatible complete
+/// object type. Comparing only stride would also accept incompatible C
+/// pointers (e.g. int* minus unsigned*), yielding a plausible wrong value.
+fn pointer_difference_stride(
+    il:&Il,lhs:crate::TypeId,rhs:crate::TypeId,
+) -> Result<u64,CodegenError> {
+    let element=|ty| -> Result<crate::TypeId,CodegenError> {
+        let ty=canonical_abi_type(il,ty)?;
+        let pointer=il.types.iter().find(|t|t.id==ty &&
+            matches!(semantic(4,t.kind),5|6))
+            .ok_or_else(||invalid("pointer difference requires pointer/array operands"))?;
+        canonical_abi_type(il,pointer.related
+            .ok_or_else(||invalid("pointer difference lacks pointee type"))?)
+    };
+    let lhs_element=element(lhs)?;
+    let rhs_element=element(rhs)?;
+    if lhs_element!=rhs_element {
+        return Err(invalid("pointer difference has incompatible pointee types"));
+    }
+    pointer_stride(il,lhs)
+}
+/// This reference backend uses LP64, where ptrdiff_t is a signed 64-bit
+/// integer; fail closed if imported native EDG expression metadata disagrees.
+fn checked_ptrdiff_result(ty:CAbiInt) -> Result<(),CodegenError> {
+    if ty.bits!=64 || !ty.signed || ty.is_bool {
+        return Err(invalid("pointer difference result is not signed LP64 ptrdiff_t"));
+    }
+    Ok(())
+}
 fn expression_type_id(graph:&Graph,id:ExpressionId) -> Result<crate::TypeId,CodegenError> {
     graph.expression(id).and_then(|n| n.data.type_id)
         .ok_or_else(|| invalid("missing typed pointer expression"))
@@ -2089,7 +2118,9 @@ fn lower_c_expression(
                     let rhs_ptr=is_pointer_like(il,expression_type_id(graph,b)?)?;
                     if op==49 {
                         if !lhs_ptr || !rhs_ptr {return Err(invalid("pointer difference types"));}
-                        let stride=pointer_stride(il,expression_type_id(graph,a)?)?;
+                        checked_ptrdiff_result(output)?;
+                        let stride=pointer_difference_stride(
+                            il,expression_type_id(graph,a)?,expression_type_id(graph,b)?)?;
                         let left=lower_c_expression(graph,a,params,locals,il)?;
                         let right=lower_c_expression(graph,b,params,locals,il)?;
                         Expr::IntegerBinary(CIntBinaryOp::SignedDivide,
@@ -4149,6 +4180,70 @@ mod audit_integer_width_tests {
                 id:crate::TypeId(1),bits,signed:false,is_bool:false,
             }];
             assert!(integer_expression_type(&il,&graph,ExpressionId(0)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_pointer_difference_tests {
+    use super::*;
+
+    fn native_kind(semantic_id:u32) -> u32 {
+        (0..4096).find(|&kind|semantic(4,kind)==semantic_id)
+            .expect("EDG native type kind is exposed by bridge")
+    }
+
+    fn pointer_types() -> Il {
+        let mut il=Il::default();
+        let integer=native_kind(1);
+        let pointer=native_kind(5);
+        let alias=native_kind(3);
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(1),kind:integer,related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(2),kind:integer,related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(3),kind:pointer,related_role:Some(1),
+                related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(4),kind:pointer,related_role:Some(1),
+                related:Some(crate::TypeId(2))},
+            // A typedef/qualified alias to the same integer type is compatible.
+            crate::TypeDef{id:crate::TypeId(5),kind:alias,related_role:Some(4),
+                related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(6),kind:pointer,related_role:Some(1),
+                related:Some(crate::TypeId(5))},
+        ]);
+        il.c_integer_types.extend([
+            crate::CIntegerType{id:crate::TypeId(1),bits:32,signed:true,is_bool:false},
+            crate::CIntegerType{id:crate::TypeId(2),bits:32,signed:false,is_bool:false},
+        ]);
+        il
+    }
+
+    #[test]
+    fn pointer_subtraction_uses_same_canonical_element_type() {
+        let il=pointer_types();
+        assert_eq!(pointer_difference_stride(
+            &il,crate::TypeId(3),crate::TypeId(3)).unwrap(),4);
+        assert_eq!(pointer_difference_stride(
+            &il,crate::TypeId(3),crate::TypeId(6)).unwrap(),4);
+        // Both element types occupy four bytes: equal stride alone is NOT
+        // sufficient to admit this malformed subtraction.
+        assert!(pointer_difference_stride(
+            &il,crate::TypeId(3),crate::TypeId(4)).is_err());
+    }
+
+    #[test]
+    fn pointer_subtraction_checks_operand_types_and_result_abi() {
+        let il=pointer_types();
+        assert!(pointer_difference_stride(
+            &il,crate::TypeId(1),crate::TypeId(3)).is_err());
+        let good=CAbiInt{bits:64,signed:true,is_bool:false};
+        assert!(checked_ptrdiff_result(good).is_ok());
+        for bad in [
+            CAbiInt{bits:32,signed:true,is_bool:false},
+            CAbiInt{bits:64,signed:false,is_bool:false},
+            CAbiInt{bits:64,signed:true,is_bool:true},
+        ] {
+            assert!(checked_ptrdiff_result(bad).is_err());
         }
     }
 }
