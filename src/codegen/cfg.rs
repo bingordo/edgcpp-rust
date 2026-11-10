@@ -1,3 +1,8 @@
+// Defensive implementation caps, not C language or target ABI limits.
+const MAX_AGGREGATE_IMAGE_BYTES: usize = 4096;
+const MAX_NATIVE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_AGGREGATE_SCALAR_ELEMENTS: usize = 256;
+
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 use super::*;
 use std::collections::{HashSet,HashMap};
@@ -348,7 +353,7 @@ fn lower(
                 if let Some(image)=matching.first() {
                     if canonical_abi_type(il,image.ty)?!=local_ty ||
                        image.bytes.len()!=byte_size(il,local_ty)? as usize ||
-                       image.bytes.is_empty() || image.bytes.len()>4096 {
+                       image.bytes.is_empty() || image.bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
                         return Err(invalid("aggregate native image/type size mismatch"));
                     }
                     return Ok(vec![Stmt::InitializeAggregate(index,image.bytes.clone())]);
@@ -361,7 +366,7 @@ fn lower(
                     return Err(invalid(format!("{function}:{path}: aggregate initializer requires structured lowering (native kind={}, braced={}, image_present={})", init.kind, init.braced, !matching.is_empty())));
                 }
                 let bytes=byte_size(il,local_ty)?;
-                if bytes==0 || bytes>4096 {
+                if bytes==0 || bytes>MAX_AGGREGATE_IMAGE_BYTES {
                     return Err(invalid("aggregate zero initializer exceeds 4 KiB limit"));
                 }
                 return Ok(vec![Stmt::ZeroAggregate(index,bytes as u32)]);
@@ -790,13 +795,13 @@ fn check(
                 live = false;
             }
             Stmt::InitializeAggregate(index,bytes) => {
-                if *index>=locals || bytes.is_empty() || bytes.len()>4096 {
+                if *index>=locals || bytes.is_empty() || bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
                     return Err(invalid("invalid aggregate initializer image"));
                 }
                 vars.insert(*index);
             }
             Stmt::ZeroAggregate(i,bytes) => {
-                if *i >= locals || *bytes==0 || *bytes>4096 {
+                if *i >= locals || *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES {
                     return Err(invalid("invalid aggregate zero initialization"));
                 }
                 vars.insert(*i);
@@ -1196,7 +1201,7 @@ fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,Codeg
             let count = il.array_bounds.iter().find(|b| b.array == ty)
                 .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
             let n = byte_size_depth(il,element,depth+1)?;
-            n.checked_mul(count).filter(|&n| n > 0 && n <= 16*1024*1024)
+            n.checked_mul(count).filter(|&n| n > 0 && n <= MAX_NATIVE_OBJECT_BYTES)
                 .ok_or_else(|| invalid("array object too large"))
         }
         // Native EDG size includes the record's internal and trailing padding.
@@ -1220,7 +1225,7 @@ fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
         .ok_or_else(||invalid("object missing native EDG size/alignment"))?;
     if layout.bytes!=size || layout.alignment==0 ||
         !layout.alignment.is_power_of_two() ||
-        layout.alignment>16*1024*1024 || size%layout.alignment!=0 {
+        layout.alignment>MAX_NATIVE_OBJECT_BYTES || size%layout.alignment!=0 {
         return Err(invalid("object size/alignment disagrees with native EDG layout"));
     }
     Ok(layout.alignment)
@@ -1264,14 +1269,14 @@ fn checked_record_fields_depth<'a>(
     let native_size = il.type_object_sizes.iter()
         .find(|layout| layout.owner == owner)
         .ok_or_else(|| invalid("record has no native EDG object size"))?.bytes;
-    if native_size == 0 || native_size > 16 * 1024 * 1024 {
+    if native_size == 0 || native_size > MAX_NATIVE_OBJECT_BYTES {
         return Err(invalid("record has invalid native EDG object size"));
     }
     let native_alignment = il.type_object_sizes.iter()
         .find(|layout| layout.owner == owner)
         .ok_or_else(|| invalid("record has no native EDG alignment"))?.alignment;
     if native_alignment == 0 || !native_alignment.is_power_of_two()
-        || native_alignment > 16 * 1024 * 1024 {
+        || native_alignment > MAX_NATIVE_OBJECT_BYTES {
         return Err(invalid("record has invalid native EDG alignment"));
     }
     if native_size % native_alignment != 0 {
@@ -1347,7 +1352,7 @@ fn checked_record_fields_depth<'a>(
             }
             previous_end_bit=bit_end;
         }
-        if end>native_size || end>16*1024*1024 {
+        if end>native_size || end>MAX_NATIVE_OBJECT_BYTES {
             return Err(invalid("record field exceeds native EDG object size"));
         }
         if field.name.is_empty() {
@@ -1405,8 +1410,8 @@ fn flatten_copy_type(
         .ok_or_else(||invalid("missing aggregate copy type"))?;
     match semantic(4,def.kind) {
         1|5 => {
-            if out.len()>=256 {
-                return Err(invalid("aggregate copy has over 256 scalar elements"));
+            if out.len()>=MAX_AGGREGATE_SCALAR_ELEMENTS {
+                return Err(invalid("aggregate copy has over MAX_AGGREGATE_SCALAR_ELEMENTS scalar elements"));
             }
             let field_offset=i64::try_from(offset)
                 .map_err(|_|invalid("aggregate copy offset overflow"))?;
@@ -1421,7 +1426,7 @@ fn flatten_copy_type(
                 .ok_or_else(||invalid("aggregate array has no element type"))?;
             let count=il.array_bounds.iter().find(|b|b.array==ty)
                 .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
-            if count==0 || count>256 {
+            if count==0 || count>MAX_AGGREGATE_SCALAR_ELEMENTS {
                 return Err(invalid("aggregate copy array bound unsupported"));
             }
             let stride=byte_size(il,element)?;
@@ -3273,7 +3278,7 @@ fn emit_body(
                 live = false;
             }
             Stmt::InitializeAggregate(index,bytes) => {
-                if bytes.is_empty() || bytes.len()>4096 {
+                if bytes.is_empty() || bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
                     return Err(invalid("aggregate native image exceeds 4 KiB limit"));
                 }
                 let base=local_address(fb,stack,*index)?;
@@ -3294,7 +3299,7 @@ fn emit_body(
                 }
             }
             Stmt::ZeroAggregate(index,bytes) => {
-                if *bytes==0 || *bytes>4096 {
+                if *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES {
                     return Err(invalid("aggregate zero initialization too large"));
                 }
                 let base=local_address(fb,stack,*index)?;
