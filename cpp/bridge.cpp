@@ -326,9 +326,13 @@ static bool plain_cpp_record(a_type_ptr type) {
 // Assign dense IDs during compilation; never export EDG type addresses.
 static uint32_t emit_type(a_type_ptr type, unsigned depth)
 {
-  if (type == nullptr || depth > 64 || current_callback == nullptr) return 0;
+  if (type == nullptr || current_callback == nullptr) return 0;
+  // Already registered recursive types are safe regardless of encounter depth.
   auto existing = type_ids.find(type);
   if (existing != type_ids.end()) return existing->second;
+  // Missing a type relationship must invalidate the whole native snapshot,
+  // not silently degrade the relationship to "no target".
+  if (depth > 64) { report_incomplete_snapshot(); return 0; }
   uint32_t id = static_cast<uint32_t>(type_ids.size() + 1);
   type_ids.emplace(type, id); // Register before recursion, including recursive types.
   a_type_ptr related = nullptr;
@@ -1167,9 +1171,14 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
                                uint32_t routine, unsigned parent,
                                unsigned depth)
 {
-  if (lifetime == nullptr || depth > 64 || current_callback == nullptr ||
-      current_lifetime_ids.size() >= 10000) return;
+  if (lifetime == nullptr || current_callback == nullptr) return;
   if (current_lifetime_ids.find(lifetime) != current_lifetime_ids.end()) return;
+  // Neither an over-deep lifetime tree nor an exhausted ID budget can be
+  // represented by silently dropping destructors or scope relationships.
+  if (depth > 64 || current_lifetime_ids.size() >= 10000) {
+    report_incomplete_snapshot();
+    return;
+  }
   const uint32_t id = static_cast<uint32_t>(current_lifetime_ids.size());
   current_lifetime_ids.emplace(lifetime, id);
   emit_record(38, {num(routine), num(id),
@@ -1245,8 +1254,13 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
                              std::unordered_set<a_variable_ptr> &seen_locals,
                              unsigned depth)
 {
-  if (scope == nullptr || depth > 64 || next_id >= 10000 ||
-      !seen_scopes.insert(scope).second) return;
+  if (scope == nullptr || current_callback == nullptr) return;
+  if (seen_scopes.find(scope) != seen_scopes.end()) return;
+  if (depth > 64 || next_id >= 10000) {
+    report_incomplete_snapshot();
+    return;
+  }
+  seen_scopes.insert(scope);
   const uint32_t id = next_id++;
   const auto known_path = scope_statement_paths.find(scope);
   emit_record(30, {num(routine), num(id),
@@ -1743,9 +1757,11 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                           unsigned depth)
 {
-  if (scope == nullptr || current_callback == nullptr || depth > 128) return;
+  if (scope == nullptr || current_callback == nullptr) return;
   // Class scopes can be reached through more than one enclosing declaration.
-  if (!visited_scopes.insert(scope).second) return;
+  if (visited_scopes.find(scope) != visited_scopes.end()) return;
+  if (depth > 128) { report_incomplete_snapshot(); return; }
+  visited_scopes.insert(scope);
   // Overloaded functions cannot be keyed solely by qualified base name:
   // preserve demangled parameter signatures only when the base is ambiguous.
   std::unordered_map<std::string, unsigned> routine_counts;
