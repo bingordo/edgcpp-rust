@@ -1011,16 +1011,23 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// Keep the decoder's arity table separately testable from record collection.
+// Every kind with a wire arity must also have a destination count below.
+fn expected_wire_field_count(kind: u32) -> Option<usize> {
+    Some(match kind {
+        1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, _ => return None,
+    })
+
+}
+
 unsafe fn collect_event(output: &mut Il, kind: u32,
                         data: *const WireField, length: usize, aux: u32) {
     let fields = if length == 0 { &[][..] } else {
         if data.is_null() { return; }
         std::slice::from_raw_parts(data, length)
     };
-    let expected = match kind {
-        1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, _ => return,
-    };
+    let Some(expected) = expected_wire_field_count(kind) else {return;};
     if length != expected || fields.iter().any(|f|
         f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
     let t = |i: usize| fields[i].string();
@@ -2382,5 +2389,26 @@ mod audit_wire_record_count_tests {
             collect(userdata,62,bad_string.as_ptr(),bad_string.len(),0);
         }
         assert!(state.malformed);
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_schema_consistency_tests {
+    use super::*;
+
+    #[test]
+    fn wire_field_arity_and_collection_accounting_cover_the_same_kinds() {
+        let il=Il::default();
+        for kind in 0..=256 {
+            assert_eq!(
+                expected_wire_field_count(kind).is_some(),
+                callback_record_count(&il,kind).is_some(),
+                "wire record kind {kind} must be decoded and accounted together"
+            );
+            if (1..=64).contains(&kind) {
+                assert!(expected_wire_field_count(kind).is_some(),
+                        "known wire record kind {kind} is missing");
+            }
+        }
     }
 }
