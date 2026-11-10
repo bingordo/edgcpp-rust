@@ -13,6 +13,7 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -158,6 +159,25 @@ static std::string namespace_prefix(a_scope_ptr parent)
 static std::string declaration_name(const a_source_correspondence &sc,
                                     bool is_routine, bool keep_parameters = false)
 {
+  // Temporary CI diagnostic: explain why EDG strips a deeply nested name.
+  const char *original=source_name(sc);
+  if (original != nullptr && std::strcmp(original,"depth_value")==0) {
+    size_t total=0, namespaces=0;
+    std::unordered_set<a_scope_ptr> checked;
+    for (a_scope_ptr scope=sc.parent_scope;
+         scope != nullptr && checked.insert(scope).second;
+         scope=scope->parent) {
+      ++total;
+      if (scope->kind==sck_namespace) ++namespaces;
+    }
+    std::string prefix=namespace_prefix(sc.parent_scope);
+    std::fprintf(stderr,
+      "AUDIT-NAMESPACE-DEBUG raw=%s parent=%p scopes=%zu ns=%zu prefix_len=%zu mangled=%d\\n",
+      sc.name!=nullptr?sc.name:"<null>",
+      static_cast<void*>(sc.parent_scope),total,namespaces,prefix.size(),
+      static_cast<int>(sc.name_has_been_mangled));
+  }
+
 #if NEED_NAME_MANGLING
   if (sc.name_has_been_mangled && sc.name != nullptr) {
     int status = 0;
