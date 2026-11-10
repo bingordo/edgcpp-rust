@@ -3,6 +3,18 @@
 //! This reference x86-64 lowering legally strengthens accepted orders to SC.
 use super::*;
 
+// Stable normalized semantic IDs from cpp/bridge.cpp::edgcpp_codegen_kind.
+// These are NOT EDG's private/native enum discriminants.
+const SEMANTIC_EXPRESSION: u32 = 2;
+const SEMANTIC_OPERATOR: u32 = 3;
+const SEMANTIC_TYPE: u32 = 4;
+const EXPR_KIND_CONSTANT: u32 = 1;
+const EXPR_KIND_OPERATION: u32 = 3;
+const TYPE_KIND_POINTER: u32 = 5;
+const OP_PARENS: u32 = 11;
+const OP_UNARY_PLUS: u32 = 12;
+const OP_CAST: u32 = 16;
+
 fn literal(graph:&Graph,id:ExpressionId) -> Result<i64,CodegenError> {
     // Conversion chains may be arbitrarily long. Use an iterative walk so
     // malformed or deep graphs cannot exhaust the Rust stack.
@@ -14,11 +26,11 @@ fn literal(graph:&Graph,id:ExpressionId) -> Result<i64,CodegenError> {
         }
         let n=graph.expression(current).ok_or_else(||invalid("missing atomic literal"))?;
         if let Some(value)=n.data.constant_integer {return Ok(value);}
-        if n.operands.len()!=1 || semantic(2,n.data.kind)!=3 {
+        if n.operands.len()!=1 || semantic(SEMANTIC_EXPRESSION,n.data.kind)!=EXPR_KIND_OPERATION {
             break;
         }
-        let op=n.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
-        if !matches!(op,11|12|16) {break;}
+        let op=n.data.operator.map(|x|semantic(SEMANTIC_OPERATOR,x)).unwrap_or(0);
+        if !matches!(op,OP_PARENS|OP_UNARY_PLUS|OP_CAST) {break;}
         current=n.operands[0];
     }
     Err(invalid("atomic order/weak operand must be literal integer"))
@@ -59,7 +71,7 @@ fn source_pointee(
         for candidate in candidates {
             let Ok(base)=canonical_abi_type(il,candidate) else {continue};
             let Some(def)=il.types.iter().find(|t|t.id==base &&
-                semantic(4,t.kind)==5) else {continue};
+                semantic(SEMANTIC_TYPE,t.kind)==TYPE_KIND_POINTER) else {continue};
             let Some(element)=def.related else {continue};
             if scalar_memory_access(il,element).ok()!=Some(access) {continue;}
             if byte_size(il,element).ok()!=Some(bytes as u64) {continue;}
@@ -70,7 +82,7 @@ fn source_pointee(
             if ty.is_bool || usize::from(ty.bits)!=8*bytes {continue;}
             return Ok(element);
         }
-        if semantic(2,node.data.kind)!=3 || node.operands.len()!=1 {
+        if semantic(SEMANTIC_EXPRESSION,node.data.kind)!=EXPR_KIND_OPERATION || node.operands.len()!=1 {
             break;
         }
         // A native unary conversion or address-of is fine; a binary
@@ -181,11 +193,11 @@ mod audit_atomic_literal_tests {
 
     #[test]
     fn deeply_nested_atomic_order_conversions_and_cycles() {
-        let literal_kind=(0..128).find(|&k|semantic(2,k)==1)
+        let literal_kind=(0..128).find(|&k|semantic(SEMANTIC_EXPRESSION,k)==EXPR_KIND_CONSTANT)
             .expect("EDG constant expression kind");
-        let operator_kind=(0..128).find(|&k|semantic(2,k)==3)
+        let operator_kind=(0..128).find(|&k|semantic(SEMANTIC_EXPRESSION,k)==EXPR_KIND_OPERATION)
             .expect("EDG operator expression kind");
-        let conversion=(0..128).find(|&k|semantic(3,k)==11)
+        let conversion=(0..128).find(|&k|semantic(SEMANTIC_OPERATOR,k)==OP_PARENS)
             .expect("EDG identity conversion operator");
         let mut graph=Graph::default();
         graph.expressions.push(node(literal_kind,None,Some(7),None));
