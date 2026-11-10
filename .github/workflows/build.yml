@@ -1755,6 +1755,9 @@ jobs:
           set -euo pipefail
           cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
           cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
@@ -1770,6 +1773,29 @@ jobs:
               exit 1
             fi
             echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
           )
 
       - name: Reject unsupported EDG constructs
