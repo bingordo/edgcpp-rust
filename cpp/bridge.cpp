@@ -13,7 +13,6 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
-#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -156,28 +155,40 @@ static std::string namespace_prefix(a_scope_ptr parent)
   return result;
 }
 
+// Conservative fallback when the system C++ demangler refuses a very deep
+// Itanium ABI object name. Decode only _ZN<length><identifier>...E with no
+// substitutions, templates, qualifiers or type suffixes. A partial parse
+// must never become a plausible but incorrect C++ source name.
+static std::string plain_nested_object_name(const char *raw)
+{
+  if (raw == nullptr || std::strncmp(raw, "_ZN", 3) != 0) return {};
+  const char *end = raw + std::strlen(raw);
+  const char *cursor = raw + 3;
+  std::string name;
+  while (cursor < end && *cursor != 'E') {
+    if (*cursor < '0' || *cursor > '9') return {};
+    std::size_t width = 0;
+    do {
+      const unsigned digit = static_cast<unsigned>(*cursor - '0');
+      if (width > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+        return {};
+      width = width * 10 + digit;
+      ++cursor;
+    } while (cursor < end && *cursor >= '0' && *cursor <= '9');
+    if (width == 0 || width > static_cast<std::size_t>(end - cursor))
+      return {};
+    if (!name.empty()) name += "::";
+    name.append(cursor, width);
+    cursor += width;
+  }
+  if (name.empty() || cursor >= end || *cursor != 'E' || cursor + 1 != end)
+    return {};
+  return name;
+}
+
 static std::string declaration_name(const a_source_correspondence &sc,
                                     bool is_routine, bool keep_parameters = false)
 {
-  // Temporary CI diagnostic: explain why EDG strips a deeply nested name.
-  const char *original=source_name(sc);
-  if (original != nullptr && std::strcmp(original,"depth_value")==0) {
-    size_t total=0, namespaces=0;
-    std::unordered_set<a_scope_ptr> checked;
-    for (a_scope_ptr scope=sc.parent_scope;
-         scope != nullptr && checked.insert(scope).second;
-         scope=scope->parent) {
-      ++total;
-      if (scope->kind==sck_namespace) ++namespaces;
-    }
-    std::string prefix=namespace_prefix(sc.parent_scope);
-    std::fprintf(stderr,
-      "AUDIT-NAMESPACE-DEBUG raw=%s parent=%p scopes=%zu ns=%zu prefix_len=%zu mangled=%d\\n",
-      sc.name!=nullptr?sc.name:"<null>",
-      static_cast<void*>(sc.parent_scope),total,namespaces,prefix.size(),
-      static_cast<int>(sc.name_has_been_mangled));
-  }
-
 #if NEED_NAME_MANGLING
   if (sc.name_has_been_mangled && sc.name != nullptr) {
     int status = 0;
@@ -192,6 +203,10 @@ static std::string declaration_name(const a_source_correspondence &sc,
       return qualified;
     }
     std::free(decoded);
+    if (!is_routine) {
+      auto plain = plain_nested_object_name(sc.name);
+      if (!plain.empty()) return plain;
+    }
   }
 #endif
   return namespace_prefix(sc.parent_scope) +
