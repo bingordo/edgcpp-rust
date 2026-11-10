@@ -253,6 +253,54 @@ mod traversal_tests {
         ).is_err());
     }
 
+    fn typed_atomic_pointer_il() -> Il {
+        let mut il=Il::default();
+        let atomic_int=crate::TypeId(17);
+        let pointer=crate::TypeId(18);
+        il.types.extend([
+            crate::TypeDef {
+                id:atomic_int,kind:edg_value(4,1),
+                related_role:None,related:None,
+            },
+            crate::TypeDef {
+                id:pointer,kind:edg_value(4,5),
+                related_role:Some(1),related:Some(atomic_int),
+            },
+        ]);
+        il.c_integer_types.push(crate::CIntegerType {
+            id:atomic_int,bits:32,signed:true,is_bool:false,
+        });
+        il.type_details.push(crate::TypeDetail {
+            owner:atomic_int,is_reference:false,is_rvalue_reference:false,
+            qualifiers:Some(8), // native _Atomic
+        });
+        il.type_object_sizes.push(crate::TypeObjectSize {
+            owner:atomic_int,bytes:4,alignment:4,
+        });
+        il
+    }
+
+    #[test]
+    fn pointer_walk_finds_typed_pointee_after_128_transparent_nodes() {
+        let mut graph=unary_graph(128,false);
+        graph.expressions[128].data.type_id=Some(crate::TypeId(18));
+        assert_eq!(source_pointee(
+            &graph,ExpressionId(0),&typed_atomic_pointer_il(),
+            MemoryAccess::Atomic,4,
+        ).unwrap(),crate::TypeId(17));
+    }
+
+    #[test]
+    fn pointer_walk_rejects_nontransparent_step_before_valid_type() {
+        let mut graph=unary_graph(128,false);
+        graph.expressions[128].data.type_id=Some(crate::TypeId(18));
+        graph.expressions[5].data.operator=Some(edg_value(3,44)); // indirect
+        assert!(source_pointee(
+            &graph,ExpressionId(0),&typed_atomic_pointer_il(),
+            MemoryAccess::Atomic,4,
+        ).is_err());
+    }
+
     #[test]
     fn pointer_walk_rejects_missing_node() {
         let graph=Graph::default();
