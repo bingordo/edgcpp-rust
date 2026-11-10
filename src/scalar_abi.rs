@@ -77,12 +77,17 @@ impl ScalarKind {
         }
     }
 }
+const SYSV_INTEGER_ARGUMENT_REGISTERS:u8=6;
+const SYSV_SSE_ARGUMENT_REGISTERS:u8=8;
+// Defensive implementation cap, not a SysV ABI limit.
+const MAX_SUPPORTED_PARAMETERS:usize=256;
+
 impl Signature {
     pub fn plan_sysv_x86_64(&self)->Result<PassingPlan,PlanError> {
         if !self.prototyped || self.variadic {
             return Err(PlanError::UnprototypedOrVariadic);
         }
-        if self.parameters.len()>256 {
+        if self.parameters.len()>MAX_SUPPORTED_PARAMETERS {
             return Err(PlanError::OversizedSignature);
         }
         let mut gpr=0u8;
@@ -93,11 +98,11 @@ impl Signature {
             self.parameters.iter().copied().enumerate() {
             let class=source_type.class();
             let location=match class {
-                RegisterClass::Integer if gpr<6=>{
+                RegisterClass::Integer if gpr<SYSV_INTEGER_ARGUMENT_REGISTERS=>{
                     let index=gpr;gpr+=1;
                     Location::Register{class,index}
                 }
-                RegisterClass::Sse if xmm<8=>{
+                RegisterClass::Sse if xmm<SYSV_SSE_ARGUMENT_REGISTERS=>{
                     let index=xmm;xmm+=1;
                     Location::Register{class,index}
                 }

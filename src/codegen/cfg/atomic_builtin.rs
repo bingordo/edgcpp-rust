@@ -31,7 +31,11 @@ fn source_pointee(
     access:MemoryAccess,bytes:usize,
 ) -> Result<crate::TypeId,CodegenError> {
     let mut current=id;
-    for _ in 0..24 {
+    let mut visited=std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(invalid("cyclic atomic pointer conversion chain"));
+        }
         let node=graph.expression(current)
             .ok_or_else(||invalid("missing native atomic pointer operand"))?;
         let mut candidates=Vec::new();
