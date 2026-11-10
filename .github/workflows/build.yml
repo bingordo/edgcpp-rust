@@ -144,6 +144,7 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          python3 tools/check_wire_schema.py
           cargo test --lib --tests --features codegen
           cargo build --example parse
           cargo clippy --all-targets -- -D warnings
