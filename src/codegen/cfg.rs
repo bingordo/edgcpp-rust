@@ -1475,6 +1475,44 @@ fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
 /// A pointer difference is measured in elements of one compatible complete
 /// object type. Comparing only stride would also accept incompatible C
 /// pointers (e.g. int* minus unsigned*), yielding a plausible wrong value.
+/// C pointer equality permits a void* and an object pointer; ordering
+/// comparisons require matching object pointee types.  Do not turn
+/// incompatible pointer types into plausible raw unsigned comparisons.
+fn checked_pointer_comparison(
+    il:&Il,lhs:crate::TypeId,rhs:crate::TypeId,op:u32,
+) -> Result<(),CodegenError> {
+    if !matches!(op,5..=10) {
+        return Err(invalid("unsupported pointer comparison operator"));
+    }
+    let pointee=|ty| -> Result<(crate::TypeId,u32),CodegenError> {
+        let ty=canonical_abi_type(il,ty)?;
+        let ptr=il.types.iter().find(|d|d.id==ty &&
+            matches!(semantic(4,d.kind),5|6))
+            .ok_or_else(||invalid("pointer comparison requires pointer/array operands"))?;
+        let element=canonical_abi_type(il,ptr.related
+            .ok_or_else(||invalid("pointer comparison lacks pointee type"))?)?;
+        let kind=il.types.iter().find(|d|d.id==element)
+            .map(|d|semantic(4,d.kind))
+            .ok_or_else(||invalid("pointer comparison pointee type missing"))?;
+        Ok((element,kind))
+    };
+    let (left,left_kind)=pointee(lhs)?;
+    let (right,right_kind)=pointee(rhs)?;
+    let equality=matches!(op,5|6);
+    if left==right {
+        if !equality && matches!(left_kind,2|4) {
+            return Err(invalid("relational comparison of function/void pointers unsupported"));
+        }
+        return Ok(());
+    }
+    // ISO C permits equality between void* and any object pointer.
+    // A function pointer cannot be converted to/from void* by this rule.
+    if equality && ((left_kind==4 && right_kind!=2) ||
+                    (right_kind==4 && left_kind!=2)) {
+        return Ok(());
+    }
+    Err(invalid("incompatible pointer comparison pointee types"))
+}
 fn pointer_difference_stride(
     il:&Il,lhs:crate::TypeId,rhs:crate::TypeId,
 ) -> Result<u64,CodegenError> {
@@ -2360,6 +2398,11 @@ fn lower_c_expression(
                     let null_compare = matches!(op,5|6) &&
                         ((lhs_ptr && literal_zero(operands[1])) ||
                          (rhs_ptr && literal_zero(operands[0])));
+                    if lhs_ptr && rhs_ptr && matches!(op,5..=10) {
+                        checked_pointer_comparison(
+                            il,expression_type_id(graph,operands[0])?,
+                            expression_type_id(graph,operands[1])?,op)?;
+                    }
                     if (lhs_ptr && rhs_ptr && matches!(op,5..=10)) || null_compare {
                         let cmp=match op {
                             5=>CompareOp::Equal,6=>CompareOp::NotEqual,
@@ -4229,6 +4272,59 @@ mod audit_pointer_difference_tests {
         // sufficient to admit this malformed subtraction.
         assert!(pointer_difference_stride(
             &il,crate::TypeId(3),crate::TypeId(4)).is_err());
+    }
+
+
+    #[test]
+    fn pointer_comparison_requires_compatible_pointees() {
+        let il=pointer_types();
+        // Signed and unsigned int objects have the same sizeof; their
+        // pointers are not interchangeable for source comparisons.
+        for op in 5..=10 {
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(3),crate::TypeId(4),op).is_err());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(3),crate::TypeId(6),op).is_ok());
+        }
+        assert!(checked_pointer_comparison(
+            &il,crate::TypeId(1),crate::TypeId(3),5).is_err());
+        assert!(checked_pointer_comparison(
+            &il,crate::TypeId(3),crate::TypeId(3),99).is_err());
+    }
+
+    #[test]
+    fn equality_allows_void_object_pointer_not_relational_or_function() {
+        let mut il=pointer_types();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(7),kind:native_kind(4),
+                related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(8),kind:native_kind(5),
+                related_role:Some(1),related:Some(crate::TypeId(7))},
+            crate::TypeDef{id:crate::TypeId(9),kind:native_kind(2),
+                related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(10),kind:native_kind(5),
+                related_role:Some(1),related:Some(crate::TypeId(9))},
+        ]);
+        for op in [5,6] {
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(8),crate::TypeId(3),op).is_ok());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(3),crate::TypeId(8),op).is_ok());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(8),crate::TypeId(8),op).is_ok());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(10),crate::TypeId(10),op).is_ok());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(8),crate::TypeId(10),op).is_err());
+        }
+        for op in 7..=10 {
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(8),crate::TypeId(3),op).is_err());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(8),crate::TypeId(8),op).is_err());
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(10),crate::TypeId(10),op).is_err());
+        }
     }
 
     #[test]
