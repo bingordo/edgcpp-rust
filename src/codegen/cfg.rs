@@ -1,9 +1,17 @@
+//! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 // Defensive implementation caps, not C language or target ABI limits.
 const MAX_AGGREGATE_IMAGE_BYTES: usize = 4096;
 const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AGGREGATE_SCALAR_ELEMENTS: u64 = 256;
 
-//! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
+fn valid_aggregate_image_len(size: usize) -> bool {
+    size > 0 && size <= MAX_AGGREGATE_IMAGE_BYTES
+}
+
+fn valid_zero_aggregate_bytes(size: u64) -> bool {
+    size > 0 && size <= MAX_AGGREGATE_IMAGE_BYTES as u64
+}
+
 use super::*;
 use std::collections::{HashSet,HashMap};
 use std::cell::Cell;
@@ -353,7 +361,7 @@ fn lower(
                 if let Some(image)=matching.first() {
                     if canonical_abi_type(il,image.ty)?!=local_ty ||
                        image.bytes.len()!=byte_size(il,local_ty)? as usize ||
-                       image.bytes.is_empty() || image.bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
+                       !valid_aggregate_image_len(image.bytes.len()) {
                         return Err(invalid("aggregate native image/type size mismatch"));
                     }
                     return Ok(vec![Stmt::InitializeAggregate(index,image.bytes.clone())]);
@@ -366,7 +374,7 @@ fn lower(
                     return Err(invalid(format!("{function}:{path}: aggregate initializer requires structured lowering (native kind={}, braced={}, image_present={})", init.kind, init.braced, !matching.is_empty())));
                 }
                 let bytes=byte_size(il,local_ty)?;
-                if bytes==0 || bytes>MAX_AGGREGATE_IMAGE_BYTES as u64 {
+                if !valid_zero_aggregate_bytes(bytes) {
                     return Err(invalid("aggregate zero initializer exceeds 4 KiB limit"));
                 }
                 return Ok(vec![Stmt::ZeroAggregate(index,bytes as u32)]);
@@ -795,13 +803,13 @@ fn check(
                 live = false;
             }
             Stmt::InitializeAggregate(index,bytes) => {
-                if *index>=locals || bytes.is_empty() || bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
+                if *index>=locals || !valid_aggregate_image_len(bytes.len()) {
                     return Err(invalid("invalid aggregate initializer image"));
                 }
                 vars.insert(*index);
             }
             Stmt::ZeroAggregate(i,bytes) => {
-                if *i >= locals || *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES as u64 {
+                if *i >= locals || !valid_zero_aggregate_bytes(u64::from(*bytes)) {
                     return Err(invalid("invalid aggregate zero initialization"));
                 }
                 vars.insert(*i);
@@ -1411,7 +1419,7 @@ fn flatten_copy_type(
     match semantic(4,def.kind) {
         1|5 => {
             if out.len() as u64>=MAX_AGGREGATE_SCALAR_ELEMENTS {
-                return Err(invalid("aggregate copy has over MAX_AGGREGATE_SCALAR_ELEMENTS scalar elements"));
+                return Err(invalid("aggregate copy has over 256 scalar elements"));
             }
             let field_offset=i64::try_from(offset)
                 .map_err(|_|invalid("aggregate copy offset overflow"))?;
@@ -3278,7 +3286,7 @@ fn emit_body(
                 live = false;
             }
             Stmt::InitializeAggregate(index,bytes) => {
-                if bytes.is_empty() || bytes.len()>MAX_AGGREGATE_IMAGE_BYTES {
+                if !valid_aggregate_image_len(bytes.len()) {
                     return Err(invalid("aggregate native image exceeds 4 KiB limit"));
                 }
                 let base=local_address(fb,stack,*index)?;
@@ -3299,7 +3307,7 @@ fn emit_body(
                 }
             }
             Stmt::ZeroAggregate(index,bytes) => {
-                if *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES {
+                if !valid_zero_aggregate_bytes(u64::from(*bytes)) {
                     return Err(invalid("aggregate zero initialization too large"));
                 }
                 let base=local_address(fb,stack,*index)?;
@@ -4065,4 +4073,18 @@ mod tests {
         assert_eq!(&object[..4],b"\x7fELF");
     }
 
+}
+
+#[cfg(test)]
+mod audit_resource_limits_tests {
+    use super::*;
+    #[test]
+    fn aggregate_image_boundaries_are_checked() {
+        assert!(!valid_aggregate_image_len(0));
+        assert!(valid_aggregate_image_len(MAX_AGGREGATE_IMAGE_BYTES));
+        assert!(!valid_aggregate_image_len(MAX_AGGREGATE_IMAGE_BYTES + 1));
+        assert!(!valid_zero_aggregate_bytes(0));
+        assert!(valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64));
+        assert!(!valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64 + 1));
+    }
 }
