@@ -63,6 +63,9 @@ enum : uint32_t {
   WIRE_ABSENT = 0, WIRE_TEXT = 1, WIRE_UNSIGNED = 2, WIRE_SIGNED = 3,
   RECORD_SYMBOL = 13, RECORD_STATEMENT_SOURCE = 35,
   RECORD_EXPRESSION_SOURCE = 37,
+  // Deliberately invalid event kind: the Rust collector rejects this as a
+  // malformed callback, so incomplete native snapshots cannot be compiled.
+  RECORD_INCOMPLETE_SNAPSHOT = 0,
 };
 static edgcpp_field txt(const std::string &s) { return {s.data(), s.size(), 0, WIRE_TEXT}; }
 static edgcpp_field num(uint64_t n) { return {nullptr, 0, n, WIRE_UNSIGNED}; }
@@ -71,6 +74,11 @@ static edgcpp_field absent() { return {nullptr, 0, 0, WIRE_ABSENT}; }
 static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
   current_callback(current_user_data, kind, fields.begin(), fields.size(), aux);
+}
+static void report_incomplete_snapshot()
+{
+  if (current_callback != nullptr)
+    emit_record(RECORD_INCOMPLETE_SNAPSHOT, {});
 }
 // EDG sequence numbers are compilation-global and may incorporate includes
 // and #line remapping. Resolve while the source-file lookup table is live.
@@ -840,7 +848,8 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       const std::string &stmt_path, const std::string &path,
                       const std::string &parent, unsigned depth)
 {
-  if (node == nullptr || depth > 64 || current_callback == nullptr) return;
+  if (node == nullptr || current_callback == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
   emit_expression_source(function, stmt_path, 0, path, node->position);
   const unsigned op = node->kind == enk_operation ?
       static_cast<unsigned>(node->variant.operation.kind) : 0;
@@ -1080,7 +1089,8 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
                               const std::string &path, const std::string &parent,
                               unsigned depth)
 {
-  if (node == nullptr || current_callback == nullptr || depth > 64) return;
+  if (node == nullptr || current_callback == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
   uint32_t symbol = 0;
   if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
     a_variable_ptr var = node->variant.variable.ptr;
@@ -1332,7 +1342,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
                             unsigned depth, bool single)
 {
-  if (head == nullptr || depth > 64 || current_callback == nullptr) return;
+  if (head == nullptr || current_callback == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
   unsigned index = 0;
   for (a_statement_ptr stmt = head; stmt != nullptr && index < 10000;
        stmt = single ? nullptr : stmt->next, ++index) {
@@ -1688,7 +1699,8 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                                   const std::string &parent, unsigned depth,
                                   bool constructor = false, uint32_t position = 0)
 {
-  if (expr == nullptr || depth > 64) return;
+  if (expr == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
   uint32_t symbol = 0;
   if (expr->kind == enk_variable && expr->variant.variable.ptr != nullptr) {
     auto ptr = expr->variant.variable.ptr;
