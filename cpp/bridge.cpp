@@ -1760,7 +1760,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   if (scope == nullptr || current_callback == nullptr) return;
   // Class scopes can be reached through more than one enclosing declaration.
   if (visited_scopes.find(scope) != visited_scopes.end()) return;
-  if (depth > 128) { report_incomplete_snapshot(); return; }
+  // C++20 accepts deeply nested namespace chains (the bridge CI captures
+  // 136 levels). Retain a larger defensive recursion cap, but never return
+  // a seemingly complete snapshot when it is exceeded.
+  if (depth > 256) { report_incomplete_snapshot(); return; }
   visited_scopes.insert(scope);
   // Overloaded functions cannot be keyed solely by qualified base name:
   // preserve demangled parameter signatures only when the base is ambiguous.
