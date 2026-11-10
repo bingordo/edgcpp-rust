@@ -219,6 +219,30 @@ static bool plain_cpp_record(a_type_ptr type) {
       type->variant.class_struct_union.any_virtual_functions ||
       type->variant.class_struct_union.any_virtual_base_classes ||
       extra->assoc_scope->variables != nullptr) return false;
+  // The live routine list is NOT sufficient: EDG may lower an explicit
+  // constructor into field stores and remove its routine before back_end.
+  // The declaration-order member list is retained from the C++ source;
+  // reject anything but the exact ordinary field declarations. Require
+  // one-to-one field identity rather than accepting an empty/stale list.
+#if MAINTAIN_CLASS_MEMBER_LIST
+  std::unordered_set<const void *> source_fields;
+  unsigned declarations = 0;
+  for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
+       entry != nullptr; entry = entry->next) {
+    if (++declarations > 512 || entry->entity.kind != iek_field ||
+        entry->entity.ptr == nullptr ||
+        !source_fields.insert(entry->entity.ptr).second) return false;
+  }
+  unsigned physical_fields = 0;
+  for (a_field_ptr field = type->variant.class_struct_union.field_list;
+       field != nullptr; field = field->next) {
+    if (++physical_fields > 512 ||
+        source_fields.erase(field) != 1) return false;
+  }
+  if (physical_fields == 0 || !source_fields.empty()) return false;
+#else
+  return false; // Never admit C++ classes without source-member provenance.
+#endif
   unsigned count = 0;
   for (a_routine_ptr method = extra->assoc_scope->routines;
        method != nullptr; method = method->next) {
