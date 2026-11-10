@@ -62,6 +62,11 @@ pub enum Entity {
 #[derive(Debug, Clone, Default)]
 pub struct Il {
     pub entities: Vec<Entity>,
+    /// EDG-authoritative language dialect (None means missing wire provenance).
+    pub cpp_language: Option<bool>,
+    /// C++ local object admission after inspecting EDG's complete class
+    /// member scope, including methods inlined away from routine bodies.
+    pub cxx_record_admissions: Vec<CxxRecordAdmission>,
     /// Structural statement records captured while function IL is live.
     pub statements: Vec<Statement>,
     /// Native flags retained for each emitted statement.
@@ -370,6 +375,15 @@ pub struct TypeObjectSize {
     pub bytes: u64,
     /// Native EDG object alignment in bytes.
     pub alignment: u64,
+}
+
+/// EDG class-scope proof for native P0 local object storage. False means
+/// the type can carry methods, nontrivial specials or source-initialized
+/// subobjects. This does not authorize C++ by-value ABI or member calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CxxRecordAdmission {
+    pub owner: TypeId,
+    pub plain_object: bool,
 }
 
 /// A direct C++ base class, in declaration order.
@@ -954,6 +968,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
+        63 => Some(il.cxx_record_admissions.len()),
+        64 => Some(usize::from(il.cpp_language.is_some())),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -990,7 +1006,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
     };
     let expected = match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, _ => return,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, _ => return,
     };
     if length != expected || fields.iter().any(|f|
         f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
@@ -1062,6 +1078,21 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
             });
+        }
+        63 => {
+            let (Some(owner),Some(plain)) = (n(0),n(1)) else {return;};
+            if owner==0 || plain>1 ||
+                output.cxx_record_admissions.iter().any(|v|v.owner==TypeId(owner)) {
+                return;
+            }
+            output.cxx_record_admissions.push(CxxRecordAdmission {
+                owner:TypeId(owner),plain_object:plain==1,
+            });
+        }
+        64 => {
+            let Some(cpp) = n(0) else {return;};
+            if cpp>1 || output.cpp_language.is_some() {return;}
+            output.cpp_language=Some(cpp==1);
         }
         62 => {
             let (Some(function), Some(statement_path), Some(path),
@@ -1768,6 +1799,34 @@ mod tests {
                     invalid_attributes.as_ptr(), invalid_attributes.len(), 0);
         }
         assert!(state.malformed);
+    }
+
+    #[test]
+    fn decodes_cpp_dialect_and_immutable_record_triviality_proofs() {
+        let number = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let cpp=[number(1)];
+        let triv=[number(42),number(1)];
+        let ctor=[number(43),number(0)];
+        unsafe {
+            let data=(&mut state as *mut Collector).cast();
+            collect(data,64,cpp.as_ptr(),cpp.len(),0);
+            collect(data,63,triv.as_ptr(),triv.len(),0);
+            collect(data,63,ctor.as_ptr(),ctor.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.cpp_language,Some(true));
+        assert_eq!(state.il.cxx_record_admissions,vec![
+            CxxRecordAdmission {owner:TypeId(42),plain_object:true},
+            CxxRecordAdmission {owner:TypeId(43),plain_object:false},
+        ]);
+        unsafe {
+            let data=(&mut state as *mut Collector).cast();
+            collect(data,63,triv.as_ptr(),triv.len(),0);
+        }
+        assert!(state.malformed, "duplicate class proof must fail closed");
     }
 
     #[test]
