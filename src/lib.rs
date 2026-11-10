@@ -2253,3 +2253,23 @@ mod wire_field_regression_tests {
         assert!(!WireField { tag: 0, ..field }.present());
     }
 }
+
+#[cfg(test)]
+mod wire_tag_audit_tests {
+    use super::*;
+    #[test]
+    fn wire_tag_values_and_decoding_are_stable() {
+        assert_eq!([wire_tags::ABSENT,wire_tags::TEXT,wire_tags::UNSIGNED,wire_tags::SIGNED],[0,1,2,3]);
+        let number=WireField{data:std::ptr::null(),length:0,value:42,tag:wire_tags::UNSIGNED};
+        assert_eq!(number.unsigned(),Some(42));
+        assert_eq!(number.signed(),None);
+        let signed=WireField{tag:wire_tags::SIGNED,value:(-7i64) as u64,..number};
+        assert_eq!(signed.signed(),Some(-7));
+        let absent=WireField{tag:wire_tags::ABSENT,..number};
+        assert!(!absent.present());
+        let bytes=b"hello";
+        let text=WireField{data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT};
+        assert_eq!(text.string().as_deref(),Some("hello"));
+        assert_eq!(WireField{data:std::ptr::null(),..text}.string(),None);
+    }
+}
