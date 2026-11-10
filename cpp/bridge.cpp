@@ -204,7 +204,9 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   return id;
 }
 
-// Source-authoritative C++1-P0 gate for *trivial* local record storage.
+// Source-authoritative C++1 class-object gate for trivial record storage and
+// ordinary nonvirtual methods. Only an EDG-certified trivial object can be
+// passed as an implicit this pointer; no constructor/destructor ABI is inferred.
 // EDG's complete member scope includes methods which may be inlined away
 // before the native frontend sees an expression. Never infer triviality
 // merely from the absence of output routine bodies or record-field shapes.
@@ -233,7 +235,9 @@ static bool plain_cpp_record(a_type_ptr type) {
   unsigned declarations = 0;
   for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
        entry != nullptr; entry = entry->next) {
-    if (++declarations > 512 || entry->entity.kind != iek_field) return false;
+    if (++declarations > 512 ||
+        (entry->entity.kind != iek_field &&
+         entry->entity.kind != iek_routine)) return false;
   }
 #endif
   unsigned count = 0;
@@ -254,8 +258,13 @@ static bool plain_cpp_record(a_type_ptr type) {
         if (special_member_is_user_provided(method) ||
             !method->is_trivial_copy_function) return false;
         break;
+      case sfk_none:
+        // No virtual dispatch or special object lifetime is introduced by
+        // an ordinary nonvirtual member's own declaration. Its body and
+        // this argument remain subject to the compiler's separate P1 gate.
+        break;
       default:
-        return false; // Ordinary methods, conversions, dispatch, etc.
+        return false; // Conversion/literal operators, etc.
     }
   }
   return true;
