@@ -1544,6 +1544,16 @@ impl Graph {
                 graph.expressions[idx].parent = Some(parent);
                 graph.expressions[parent.0].operands.push(ExpressionId(idx));
             } else {
+                // Native emit_expr always assigns path "0" to the root of
+                // each statement expression. An orphan with another path is
+                // a truncated/malformed graph, not an independent root.
+                if item.path != "0" {
+                    return Err(GraphError::InvalidExpressionParent {
+                        function: item.function.clone(),
+                        statement: item.statement_path.clone(),
+                        path: item.path.clone(),
+                    });
+                }
                 let stmt = graph.expressions[idx].statement;
                 if graph.statements[stmt.0].expression.replace(ExpressionId(idx)).is_some() {
                     return Err(GraphError::MultipleStatementExpressions {
@@ -5109,5 +5119,37 @@ mod tests {
         let mut il = Il::default();
         il.statements.push(Statement { function:"f".into(), path:"0".into(), parent:Some("missing".into()), kind:1 });
         assert!(matches!(Graph::from_il(&il), Err(GraphError::MissingStatement { .. })));
+    }
+}
+
+#[cfg(test)]
+mod audit_expression_root_tests {
+    use super::*;
+
+    fn graph_with_root(path: &str) -> Result<Graph, GraphError> {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:1,
+        });
+        il.expressions.push(Expression {
+            function:"f".into(),statement_path:"0".into(),
+            path:path.into(),parent:None,kind:1,
+            operator:None,type_kind:None,reference:None,
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:Some(3),related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        });
+        Graph::from_il(&il)
+    }
+
+    #[test]
+    fn only_canonical_statement_expression_root_is_accepted() {
+        assert!(graph_with_root("0").is_ok());
+        for invalid in ["1","0.0","00",""] {
+            assert!(matches!(
+                graph_with_root(invalid),
+                Err(GraphError::InvalidExpressionParent { .. })
+            ), "noncanonical orphan expression root {invalid:?}");
+        }
     }
 }
