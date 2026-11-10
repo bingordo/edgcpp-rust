@@ -204,6 +204,46 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   return id;
 }
 
+// Source-authoritative C++1-P0 gate for *trivial* local record storage.
+// EDG's complete member scope includes methods which may be inlined away
+// before the native frontend sees an expression. Never infer triviality
+// merely from the absence of output routine bodies or record-field shapes.
+static bool plain_cpp_record(a_type_ptr type) {
+  if (type == nullptr ||
+      (type->kind != tk_struct && type->kind != tk_class) ||
+      type->incomplete) return false;
+  const auto *extra = type->variant.class_struct_union.extra_info;
+  if (extra == nullptr || extra->assoc_scope == nullptr ||
+      extra->direct_base_classes != nullptr ||
+      extra->has_field_initializer || extra->is_lambda_closure_class ||
+      type->variant.class_struct_union.any_virtual_functions ||
+      type->variant.class_struct_union.any_virtual_base_classes ||
+      extra->assoc_scope->variables != nullptr) return false;
+  unsigned count = 0;
+  for (a_routine_ptr method = extra->assoc_scope->routines;
+       method != nullptr; method = method->next) {
+    if (++count > 256 || method->is_virtual) return false;
+    switch (method->special_kind) {
+      case sfk_constructor:
+        if (special_member_is_user_provided(method) ||
+            (!method->is_trivial_default_constructor &&
+             !method->is_trivial_copy_function)) return false;
+        break;
+      case sfk_destructor:
+        if (special_member_is_user_provided(method) ||
+            !method->is_trivial_destructor) return false;
+        break;
+      case sfk_operator:
+        if (special_member_is_user_provided(method) ||
+            !method->is_trivial_copy_function) return false;
+        break;
+      default:
+        return false; // Ordinary methods, conversions, dispatch, etc.
+    }
+  }
+  return true;
+}
+
 // Assign dense IDs during compilation; never export EDG type addresses.
 static uint32_t emit_type(a_type_ptr type, unsigned depth)
 {
@@ -229,6 +269,13 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   uint32_t child = emit_type(related, depth + 1);
   if (child == 0) relation = 0; // Never export a relationship without a target.
+  // Event 63 is an immutable EDG class-scope proof. A bare C record has
+  // no C++ class ABI; event 64 separately identifies the language.
+  // In C++ mode a missing or false proof must fail closed even if a
+  // constructor was optimized into ordinary scalar stores.
+  if (type->kind == tk_class || type->kind == tk_struct) {
+    emit_record(63, {num(id), num(plain_cpp_record(type) ? 1 : 0)});
+  }
   // Native EDG object layout, never reconstructed from field order.
   // An alignment of zero is not a usable layout.
   if (!type->incomplete && type->size > 0 && type->alignment > 0) {
@@ -1902,6 +1949,9 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 
 void back_end(void)
 {
+  // EDG's actual chosen language dialect, not a filename, flag heuristic
+  // or the presence of an already-mangled C++ symbol.
+  emit_record(64, {num(C_mode() ? 0 : 1)});
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
   // After every routine has been registered, recover static locals that
