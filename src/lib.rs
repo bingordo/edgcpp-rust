@@ -1000,11 +1000,16 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
     }
 }
 
+// Keep in sync with cpp/bridge.cpp::MAX_NATIVE_AGGREGATE_IMAGE_BYTES.
+// C++ sends hex images with two ASCII characters per byte.
+const MAX_NATIVE_AGGREGATE_IMAGE_BYTES: usize = 4096;
+const MAX_NATIVE_AGGREGATE_HEX_CHARS: usize = MAX_NATIVE_AGGREGATE_IMAGE_BYTES * 2;
+
 /// Decode a bounded native byte image. Reject arbitrary strings and odd
 /// lengths; a malformed wire event must not become a partial initializer.
 fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
     let raw=input.as_bytes();
-    if raw.is_empty() || raw.len()>8192 || !raw.len().is_multiple_of(2) {return None;}
+    if raw.is_empty() || raw.len()>MAX_NATIVE_AGGREGATE_HEX_CHARS || !raw.len().is_multiple_of(2) {return None;}
     let hex=|b:u8| ->Option<u8> {
         match b {
             b'0'..=b'9'=>Some(b-b'0'),
@@ -1131,7 +1136,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             if function.is_empty() || statement_path.is_empty() ||
                 path.is_empty() || ty==0 {return;}
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
-            if bytes.len()>4096 || bytes.last()!=Some(&0) {return;}
+            if bytes.len()>MAX_NATIVE_AGGREGATE_IMAGE_BYTES || bytes.last()!=Some(&0) {return;}
             output.string_literals.push(ExpressionStringLiteral {
                 function, statement_path, path, ty:TypeId(ty), bytes,
             });
@@ -2458,5 +2463,24 @@ mod audit_wire_preflight_tests {
         callback_rejects(13,&field,1);
         callback_rejects(13,&field,usize::MAX);
         callback_rejects(13,&field,0);
+    }
+}
+
+#[cfg(test)]
+mod audit_native_aggregate_image_cap_tests {
+    use super::*;
+
+    #[test]
+    fn hex_images_accept_exact_limit_and_reject_oversized_or_malformed_data() {
+        let good="7f".repeat(MAX_NATIVE_AGGREGATE_IMAGE_BYTES);
+        let bytes=decode_aggregate_hex(&good).expect("4 KiB native image");
+        assert_eq!(bytes.len(),MAX_NATIVE_AGGREGATE_IMAGE_BYTES);
+        assert_eq!(bytes[0],0x7f);
+        assert_eq!(bytes[MAX_NATIVE_AGGREGATE_IMAGE_BYTES-1],0x7f);
+        assert!(decode_aggregate_hex(&format!("{good}7f")).is_none());
+        assert!(decode_aggregate_hex("").is_none());
+        assert!(decode_aggregate_hex("0").is_none());
+        assert!(decode_aggregate_hex("gg").is_none());
+        assert!(decode_aggregate_hex("AA").is_none());
     }
 }
