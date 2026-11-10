@@ -1,7 +1,7 @@
 // Defensive implementation caps, not C language or target ABI limits.
 const MAX_AGGREGATE_IMAGE_BYTES: usize = 4096;
-const MAX_NATIVE_OBJECT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_AGGREGATE_SCALAR_ELEMENTS: usize = 256;
+const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_AGGREGATE_SCALAR_ELEMENTS: u64 = 256;
 
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 use super::*;
@@ -366,7 +366,7 @@ fn lower(
                     return Err(invalid(format!("{function}:{path}: aggregate initializer requires structured lowering (native kind={}, braced={}, image_present={})", init.kind, init.braced, !matching.is_empty())));
                 }
                 let bytes=byte_size(il,local_ty)?;
-                if bytes==0 || bytes>MAX_AGGREGATE_IMAGE_BYTES {
+                if bytes==0 || bytes>MAX_AGGREGATE_IMAGE_BYTES as u64 {
                     return Err(invalid("aggregate zero initializer exceeds 4 KiB limit"));
                 }
                 return Ok(vec![Stmt::ZeroAggregate(index,bytes as u32)]);
@@ -801,7 +801,7 @@ fn check(
                 vars.insert(*index);
             }
             Stmt::ZeroAggregate(i,bytes) => {
-                if *i >= locals || *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES {
+                if *i >= locals || *bytes==0 || *bytes>MAX_AGGREGATE_IMAGE_BYTES as u64 {
                     return Err(invalid("invalid aggregate zero initialization"));
                 }
                 vars.insert(*i);
@@ -1410,7 +1410,7 @@ fn flatten_copy_type(
         .ok_or_else(||invalid("missing aggregate copy type"))?;
     match semantic(4,def.kind) {
         1|5 => {
-            if out.len()>=MAX_AGGREGATE_SCALAR_ELEMENTS {
+            if out.len() as u64>=MAX_AGGREGATE_SCALAR_ELEMENTS {
                 return Err(invalid("aggregate copy has over MAX_AGGREGATE_SCALAR_ELEMENTS scalar elements"));
             }
             let field_offset=i64::try_from(offset)
