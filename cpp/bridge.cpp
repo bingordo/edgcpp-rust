@@ -80,6 +80,16 @@ static void report_incomplete_snapshot()
   if (current_callback != nullptr)
     emit_record(RECORD_INCOMPLETE_SNAPSHOT, {});
 }
+
+// Native linked lists have an explicit defensive upper bound. Never treat
+// reaching it as a clean end-of-list: report invalid IL to the Rust collector.
+static constexpr std::size_t MAX_NATIVE_LIST_ELEMENTS = 10000;
+static bool within_native_list_limit(std::size_t index)
+{
+  if (index < MAX_NATIVE_LIST_ELEMENTS) return true;
+  report_incomplete_snapshot();
+  return false;
+}
 // EDG sequence numbers are compilation-global and may incorporate includes
 // and #line remapping. Resolve while the source-file lookup table is live.
 // Omit synthetic/unknown locations rather than inventing a source line.
@@ -367,7 +377,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
     unsigned index = 0;
     for (a_field_ptr field = type->variant.class_struct_union.field_list;
-         field != nullptr && index < 10000; field = field->next, ++index) {
+         field != nullptr && within_native_list_limit(index); field = field->next, ++index) {
       uint32_t field_type = emit_type(field->type, depth + 1);
       const char *field_name = source_name(field->source_corresp);
       std::string field_text = field_name == nullptr ? "" : field_name;
@@ -387,7 +397,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     unsigned position = 0;
     for (a_base_class_ptr base =
              type->variant.class_struct_union.extra_info->direct_base_classes;
-         base != nullptr && position < 10000;
+         base != nullptr && within_native_list_limit(position);
          base = base->next_direct, ++position) {
       const uint32_t base_id = emit_type(base->type, depth + 1);
       if (base_id != 0) {
@@ -418,7 +428,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     unsigned position = 0;
     for (a_param_type_ptr p = type->variant.routine.extra_info->param_type_list;
-         p != nullptr && position < 10000; p = p->next, ++position) {
+         p != nullptr && within_native_list_limit(position); p = p->next, ++position) {
       uint32_t parameter = emit_type(p->type, depth + 1);
       emit_record(8, {num(id), num(position), num(parameter)});
     }
@@ -1078,7 +1088,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   const auto children = children_of(node);
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && index < 10000;
+       operand != nullptr && within_native_list_limit(index);
        operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_expr(operand, function, stmt_path,
               path + "." + std::to_string(index), path, depth + 1);
@@ -1121,7 +1131,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
   const auto children = children_of(node);
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && index < 10000;
+       operand != nullptr && within_native_list_limit(index);
        operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_control_expr(operand, function, statement, role,
                       path + "." + std::to_string(index), path, depth + 1);
@@ -1175,7 +1185,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
   if (current_lifetime_ids.find(lifetime) != current_lifetime_ids.end()) return;
   // Neither an over-deep lifetime tree nor an exhausted ID budget can be
   // represented by silently dropping destructors or scope relationships.
-  if (depth > 64 || current_lifetime_ids.size() >= 10000) {
+  if (depth > 64 || current_lifetime_ids.size() >= MAX_NATIVE_LIST_ELEMENTS) {
     report_incomplete_snapshot();
     return;
   }
@@ -1190,7 +1200,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
   unsigned position = 0;
   std::unordered_set<a_dynamic_init_ptr> seen;
   for (a_dynamic_init_ptr d = lifetime->destructions;
-       d != nullptr && position < 10000 && seen.insert(d).second;
+       d != nullptr && within_native_list_limit(position) && seen.insert(d).second;
        d = d->next_in_destruction_list) {
     uint32_t variable = 0, destructor = 0;
     if (d->variable != nullptr) {
@@ -1211,7 +1221,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
   }
   unsigned children = 0;
   for (an_object_lifetime_ptr child = lifetime->child_lifetime;
-       child != nullptr && children++ < 10000; child = child->next) {
+       child != nullptr && within_native_list_limit(children++); child = child->next) {
     emit_lifetime_tree(child, routine, id, depth + 1);
   }
 }
@@ -1228,7 +1238,7 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
   // (e.g., after labels, temporaries and special static regions).
   std::vector<a_scope_ptr> pending{body};
   std::unordered_set<a_scope_ptr> visited;
-  while (!pending.empty() && visited.size() < 10000) {
+  while (!pending.empty() && within_native_list_limit(visited.size())) {
     a_scope_ptr scope = pending.back();
     pending.pop_back();
     if (scope == nullptr || !visited.insert(scope).second) continue;
@@ -1241,7 +1251,7 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
     }
     unsigned children = 0;
     for (a_scope_ptr child = scope->scopes;
-         child != nullptr && children++ < 10000; child = child->next) {
+         child != nullptr && within_native_list_limit(children++); child = child->next) {
       pending.push_back(child);
     }
   }
@@ -1256,7 +1266,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
 {
   if (scope == nullptr || current_callback == nullptr) return;
   if (seen_scopes.find(scope) != seen_scopes.end()) return;
-  if (depth > 64 || next_id >= 10000) {
+  if (depth > 64 || next_id >= MAX_NATIVE_LIST_ELEMENTS) {
     report_incomplete_snapshot();
     return;
   }
@@ -1278,7 +1288,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
     a_variable_ptr first = group == 0 ?
         scope->nonstatic_variables : scope->variables;
     unsigned count = 0;
-    for (a_variable_ptr var = first; var != nullptr && count++ < 10000;
+    for (a_variable_ptr var = first; var != nullptr && within_native_list_limit(count++);
          var = var->next) {
       if (var->is_parameter || var->is_this_parameter ||
           !seen_locals.insert(var).second) continue;
@@ -1309,7 +1319,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
   }
   unsigned child_count = 0;
   for (a_scope_ptr child = scope->scopes;
-       child != nullptr && child_count++ < 10000; child = child->next) {
+       child != nullptr && within_native_list_limit(child_count++); child = child->next) {
     emit_local_scope(child, routine, function, id, next_id,
                      seen_scopes, seen_locals, depth + 1);
   }
@@ -1323,7 +1333,7 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   unsigned count = 0;
   std::unordered_set<a_variable_ptr> seen_parameters;
   for (a_variable_ptr var = body->variant.routine.parameters;
-       var != nullptr && count++ < 10000; var = var->next) {
+       var != nullptr && within_native_list_limit(count++); var = var->next) {
     if (var->is_this_parameter || !seen_parameters.insert(var).second) continue;
     const char *raw_name = source_name(var->source_corresp);
     const std::string name = function + "::" +
@@ -1359,7 +1369,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
   if (head == nullptr || current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
   unsigned index = 0;
-  for (a_statement_ptr stmt = head; stmt != nullptr && index < 10000;
+  for (a_statement_ptr stmt = head; stmt != nullptr && within_native_list_limit(index);
        stmt = single ? nullptr : stmt->next, ++index) {
     std::string path = parent.empty() ? std::to_string(index) :
                          parent + "." + edge + "." + std::to_string(index);
@@ -1383,7 +1393,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       unsigned position = 0;
       unsigned traversed = 0;
       for (an_il_entity_list_entry_ptr entity = stmt->variant.decl.entities;
-           entity != nullptr && traversed++ < 10000; entity = entity->next) {
+           entity != nullptr && within_native_list_limit(traversed++); entity = entity->next) {
         if (entity->entity.kind != iek_variable || entity->entity.ptr == nullptr)
           continue;
         a_variable_ptr variable =
@@ -1697,7 +1707,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         emit_statements(info->statement, function, path, "try", depth + 1, true);
         unsigned handler_index = 0;
         for (a_handler_ptr handler = info->handlers;
-             handler != nullptr && handler_index < 10000;
+             handler != nullptr && within_native_list_limit(handler_index);
              handler = handler->next, ++handler_index) {
           emit_statements(handler->statement, function, path,
                           "catch" + std::to_string(handler_index), depth + 1, true);
@@ -1747,7 +1757,7 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
   const auto children = children_of(expr);
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && index < 10000;
+       operand != nullptr && within_native_list_limit(index);
        operand = children.linked_list ? operand->next : nullptr, ++index) {
     emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
                           path, depth + 1, constructor, position);
@@ -1863,7 +1873,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           // initialization entries, ordered by actual execution order.
           unsigned init_position = 0;
           for (a_constructor_init_ptr init = body->variant.routine.constructor_inits;
-               init != nullptr && init_position < 10000;
+               init != nullptr && within_native_list_limit(init_position);
                init = init->next, ++init_position) {
             uint32_t target_type = 0;
             uint32_t target_symbol = 0;
