@@ -1,8 +1,3 @@
-// Defensive implementation caps, not C language or target ABI limits.
-const MAX_FP_ARGUMENTS: usize = 256;
-const MAX_FP_LOCALS: usize = 4096;
-const MAX_FP_STATEMENTS: usize = 10000;
-
 //! M14: first checked SysV x86-64 scalar floating-point ABI slice.
 //!
 //! This independent reference path does not reinterpret floating values as
@@ -10,6 +5,11 @@ const MAX_FP_STATEMENTS: usize = 10000;
 //! assigns them to XMM registers (or overflow stack slots) in C ABI order.
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
+// Defensive implementation caps, not C language or target ABI limits.
+const MAX_FP_ARGUMENTS: usize = 256;
+const MAX_FP_LOCALS: usize = 4096;
+const MAX_FP_STATEMENTS: usize = 10000;
+
 use super::*;
 use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
 use std::collections::HashMap;
