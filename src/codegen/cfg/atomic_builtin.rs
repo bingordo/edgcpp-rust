@@ -184,6 +184,59 @@ mod traversal_tests {
         assert!(literal(&graph,ExpressionId(1)).is_err());
     }
 
+    // Resolve EDG's private enum values through the bridge, never hard-code
+    // their numeric representation in Rust tests.
+    fn edg_value(category:u32,expected:u32) -> u32 {
+        (0..4096).find(|&value|semantic(category,value)==expected)
+            .expect("EDG bridge must expose the tested expression kind/operator")
+    }
+
+    fn unary_graph(depth:usize,cyclic:bool) -> Graph {
+        let mut graph=Graph::default();
+        let kind=edg_value(2,3); // operation
+        let op=edg_value(3,11); // parentheses
+        for index in 0..depth {
+            let mut data=expression(None);
+            data.kind=kind;
+            data.operator=Some(op);
+            graph.expressions.push(crate::graph::ExpressionNode {
+                data,parent:None,
+                operands:vec![ExpressionId(if index+1==depth {
+                    if cyclic {0} else {depth}
+                } else {index+1})],
+                statement:crate::graph::StatementId(0),
+            });
+        }
+        if !cyclic {
+            graph.expressions.push(crate::graph::ExpressionNode {
+                data:expression(Some(73)),parent:None,operands:vec![],
+                statement:crate::graph::StatementId(0),
+            });
+        }
+        graph
+    }
+
+    #[test]
+    fn literal_accepts_deep_unary_chain() {
+        let graph=unary_graph(128,false);
+        assert_eq!(literal(&graph,ExpressionId(0)).unwrap(),73);
+    }
+
+    #[test]
+    fn literal_rejects_cyclic_unary_chain() {
+        let graph=unary_graph(128,true);
+        assert!(literal(&graph,ExpressionId(0)).is_err());
+    }
+
+    #[test]
+    fn pointer_walk_rejects_cyclic_chain_without_hanging() {
+        let graph=unary_graph(128,true);
+        assert!(source_pointee(
+            &graph,ExpressionId(0),&Il::default(),
+            MemoryAccess::Atomic,4,
+        ).is_err());
+    }
+
     #[test]
     fn pointer_walk_rejects_missing_node() {
         let graph=Graph::default();
