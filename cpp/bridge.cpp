@@ -137,9 +137,13 @@ static std::string namespace_prefix(a_scope_ptr parent)
   // File-scope IL lists can include entities declared in nested namespaces.
   // Use each declaration's parent scope, not the containing list, to qualify it.
   std::string result;
-  unsigned depth = 0;
-  for (a_scope_ptr scope = parent; scope != nullptr && depth++ < 128;
+  // A fixed depth cutoff silently truncated valid C++ qualified names.
+  // Track native scope identities instead, so even malformed cyclic parent
+  // chains terminate without modifying a valid deep namespace hierarchy.
+  std::unordered_set<a_scope_ptr> visited;
+  for (a_scope_ptr scope = parent; scope != nullptr;
        scope = scope->parent) {
+    if (!visited.insert(scope).second) break;
     if (scope->kind != sck_namespace) continue;
     a_namespace_ptr ns = scope->variant.assoc_namespace;
     if (ns == nullptr) continue;
@@ -149,6 +153,37 @@ static std::string namespace_prefix(a_scope_ptr parent)
     }
   }
   return result;
+}
+
+// Conservative fallback when the system C++ demangler refuses a very deep
+// Itanium ABI object name. Decode only _ZN<length><identifier>...E with no
+// substitutions, templates, qualifiers or type suffixes. A partial parse
+// must never become a plausible but incorrect C++ source name.
+static std::string plain_nested_object_name(const char *raw)
+{
+  if (raw == nullptr || std::strncmp(raw, "_ZN", 3) != 0) return {};
+  const char *end = raw + std::strlen(raw);
+  const char *cursor = raw + 3;
+  std::string name;
+  while (cursor < end && *cursor != 'E') {
+    if (*cursor < '0' || *cursor > '9') return {};
+    std::size_t width = 0;
+    do {
+      const unsigned digit = static_cast<unsigned>(*cursor - '0');
+      if (width > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+        return {};
+      width = width * 10 + digit;
+      ++cursor;
+    } while (cursor < end && *cursor >= '0' && *cursor <= '9');
+    if (width == 0 || width > static_cast<std::size_t>(end - cursor))
+      return {};
+    if (!name.empty()) name += "::";
+    name.append(cursor, width);
+    cursor += width;
+  }
+  if (name.empty() || cursor >= end || *cursor != 'E' || cursor + 1 != end)
+    return {};
+  return name;
 }
 
 static std::string declaration_name(const a_source_correspondence &sc,
@@ -168,6 +203,10 @@ static std::string declaration_name(const a_source_correspondence &sc,
       return qualified;
     }
     std::free(decoded);
+    if (!is_routine) {
+      auto plain = plain_nested_object_name(sc.name);
+      if (!plain.empty()) return plain;
+    }
   }
 #endif
   return namespace_prefix(sc.parent_scope) +

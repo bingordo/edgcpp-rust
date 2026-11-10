@@ -150,3 +150,278 @@ int mixed(int seed) {
     return total + first;
 }
 }
+
+// Exercise qualified-name reconstruction beyond the old 128-scope cutoff.
+namespace deep_0 {
+namespace deep_1 {
+namespace deep_2 {
+namespace deep_3 {
+namespace deep_4 {
+namespace deep_5 {
+namespace deep_6 {
+namespace deep_7 {
+namespace deep_8 {
+namespace deep_9 {
+namespace deep_10 {
+namespace deep_11 {
+namespace deep_12 {
+namespace deep_13 {
+namespace deep_14 {
+namespace deep_15 {
+namespace deep_16 {
+namespace deep_17 {
+namespace deep_18 {
+namespace deep_19 {
+namespace deep_20 {
+namespace deep_21 {
+namespace deep_22 {
+namespace deep_23 {
+namespace deep_24 {
+namespace deep_25 {
+namespace deep_26 {
+namespace deep_27 {
+namespace deep_28 {
+namespace deep_29 {
+namespace deep_30 {
+namespace deep_31 {
+namespace deep_32 {
+namespace deep_33 {
+namespace deep_34 {
+namespace deep_35 {
+namespace deep_36 {
+namespace deep_37 {
+namespace deep_38 {
+namespace deep_39 {
+namespace deep_40 {
+namespace deep_41 {
+namespace deep_42 {
+namespace deep_43 {
+namespace deep_44 {
+namespace deep_45 {
+namespace deep_46 {
+namespace deep_47 {
+namespace deep_48 {
+namespace deep_49 {
+namespace deep_50 {
+namespace deep_51 {
+namespace deep_52 {
+namespace deep_53 {
+namespace deep_54 {
+namespace deep_55 {
+namespace deep_56 {
+namespace deep_57 {
+namespace deep_58 {
+namespace deep_59 {
+namespace deep_60 {
+namespace deep_61 {
+namespace deep_62 {
+namespace deep_63 {
+namespace deep_64 {
+namespace deep_65 {
+namespace deep_66 {
+namespace deep_67 {
+namespace deep_68 {
+namespace deep_69 {
+namespace deep_70 {
+namespace deep_71 {
+namespace deep_72 {
+namespace deep_73 {
+namespace deep_74 {
+namespace deep_75 {
+namespace deep_76 {
+namespace deep_77 {
+namespace deep_78 {
+namespace deep_79 {
+namespace deep_80 {
+namespace deep_81 {
+namespace deep_82 {
+namespace deep_83 {
+namespace deep_84 {
+namespace deep_85 {
+namespace deep_86 {
+namespace deep_87 {
+namespace deep_88 {
+namespace deep_89 {
+namespace deep_90 {
+namespace deep_91 {
+namespace deep_92 {
+namespace deep_93 {
+namespace deep_94 {
+namespace deep_95 {
+namespace deep_96 {
+namespace deep_97 {
+namespace deep_98 {
+namespace deep_99 {
+namespace deep_100 {
+namespace deep_101 {
+namespace deep_102 {
+namespace deep_103 {
+namespace deep_104 {
+namespace deep_105 {
+namespace deep_106 {
+namespace deep_107 {
+namespace deep_108 {
+namespace deep_109 {
+namespace deep_110 {
+namespace deep_111 {
+namespace deep_112 {
+namespace deep_113 {
+namespace deep_114 {
+namespace deep_115 {
+namespace deep_116 {
+namespace deep_117 {
+namespace deep_118 {
+namespace deep_119 {
+namespace deep_120 {
+namespace deep_121 {
+namespace deep_122 {
+namespace deep_123 {
+namespace deep_124 {
+namespace deep_125 {
+namespace deep_126 {
+namespace deep_127 {
+namespace deep_128 {
+namespace deep_129 {
+namespace deep_130 {
+namespace deep_131 {
+namespace deep_132 {
+namespace deep_133 {
+namespace deep_134 {
+namespace deep_135 {
+int depth_value = 123;
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
