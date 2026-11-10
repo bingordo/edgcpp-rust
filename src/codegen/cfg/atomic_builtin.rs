@@ -4,13 +4,23 @@
 use super::*;
 
 fn literal(graph:&Graph,id:ExpressionId) -> Result<i64,CodegenError> {
-    let n=graph.expression(id).ok_or_else(||invalid("missing atomic literal"))?;
-    if let Some(value)=n.data.constant_integer {return Ok(value);}
-    if n.operands.len()==1 && semantic(2,n.data.kind)==3 {
-        let op=n.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
-        if matches!(op,11|12|16) {return literal(graph,n.operands[0]);}
+    let mut current=id;
+    let mut visited=std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(invalid("cyclic atomic literal expression"));
+        }
+        let n=graph.expression(current).ok_or_else(||invalid("missing atomic literal"))?;
+        if let Some(value)=n.data.constant_integer {return Ok(value);}
+        if n.operands.len()==1 && semantic(2,n.data.kind)==3 {
+            let op=n.data.operator.map(|x|semantic(3,x)).unwrap_or(0);
+            if matches!(op,11|12|16) {
+                current=n.operands[0];
+                continue;
+            }
+        }
+        return Err(invalid("atomic order/weak operand must be literal integer"));
     }
-    Err(invalid("atomic order/weak operand must be literal integer"))
 }
 fn order(
     graph:&Graph,id:ExpressionId,
@@ -31,7 +41,11 @@ fn source_pointee(
     access:MemoryAccess,bytes:usize,
 ) -> Result<crate::TypeId,CodegenError> {
     let mut current=id;
-    for _ in 0..24 {
+    let mut visited=std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(invalid("cyclic native atomic pointer expression"));
+        }
         let node=graph.expression(current)
             .ok_or_else(||invalid("missing native atomic pointer operand"))?;
         let mut candidates=Vec::new();
