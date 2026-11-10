@@ -83,6 +83,10 @@ static void report_incomplete_snapshot()
 
 // Native linked lists have an explicit defensive upper bound. Never treat
 // reaching it as a clean end-of-list: report invalid IL to the Rust collector.
+// Full object images are intentionally limited to 4 KiB until larger
+// layouts and relocation storage receive separate resource validation.
+static constexpr std::size_t MAX_NATIVE_AGGREGATE_IMAGE_BYTES = 4096;
+static constexpr unsigned MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS = 4096;
 static constexpr std::size_t MAX_NATIVE_LIST_ELEMENTS = 10000;
 static bool within_native_list_limit(std::size_t index)
 {
@@ -719,7 +723,7 @@ static bool constant_initializer_image(
     uint64_t index = 0;
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
-    while (current != nullptr && visits++ < 4096) {
+    while (current != nullptr && visits++ < MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS) {
       if (current->kind == ck_init_repeat) {
         // EDG compresses repeated array constants (often implicit zeros).
         // Do not implement multidimensional designated range tails by guess.
@@ -760,7 +764,7 @@ static bool constant_initializer_image(
   if (type->kind == tk_struct || type->kind == tk_union) {
     a_field_ptr field = type->variant.class_struct_union.field_list;
     unsigned visits = 0;
-    while (current != nullptr && visits++ < 4096) {
+    while (current != nullptr && visits++ < MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS) {
       if (current->kind == ck_designator) {
         if (current->variant.designator.is_generic ||
             !current->variant.designator.is_field_designator) return false;
@@ -804,7 +808,7 @@ static bool aggregate_initializer_image(
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
-      type->size > 4096) return false;
+      type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES) return false;
   std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
   if (!constant_initializer_image(root, type, 0, bytes, 0,
                                   relocations)) return false;
@@ -944,7 +948,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       const a_constant_ptr constant = node->variant.constant.ptr;
       const size_t n = constant->variant.string.length;
       const size_t size = array ? static_cast<size_t>(node->type->size) : n;
-      if (size > 0 && size <= 4096 && n <= size &&
+      if (size > 0 && size <= MAX_NATIVE_AGGREGATE_IMAGE_BYTES && n <= size &&
           constant->variant.string.value != nullptr) {
         std::vector<uint8_t> image(size, 0);
         std::memcpy(image.data(), constant->variant.string.value, n);
@@ -992,7 +996,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           !array->incomplete && pointee != nullptr &&
           pointee->size == 1 && element != nullptr &&
           element->size == 1 &&
-          array->size>0 && array->size<=4096) {
+          array->size>0 && array->size<=MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
         const size_t size=static_cast<size_t>(array->size);
         const size_t n=original->variant.string.length;
         if (n<=size && original->variant.string.value!=nullptr) {
