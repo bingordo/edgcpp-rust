@@ -3584,15 +3584,27 @@ struct ScalarGlobal {
     alignment: u64,
 }
 
-/// Resolve only referenced C globals. Unused declarations of unrelated
-/// C++ types cannot make an otherwise scalar routine un-compilable.
+/// A C external definition must exist in the object even when only a
+/// *different* translation unit references it. A declaration alone does not
+/// define storage. Unreferenced file-scope statics can still be eliminated,
+/// and unrelated C++ globals retain the previous referenced-only policy.
+fn requires_c_global_definition(meta: &crate::GlobalVariable, cpp: Option<bool>) -> bool {
+    cpp == Some(false) && !meta.thread_local && !meta.local_to_function &&
+        (meta.linkage == 3 || (meta.linkage == 1 && meta.explicit_initializer))
+}
+
+/// Resolve referenced globals, plus externally visible C definitions.
+/// Omit unsupported unrelated C++ types until full C++ global lowering exists.
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     let references=il.expressions.iter()
         .filter(|expr|semantic(2,expr.kind)==2).filter_map(|expr|expr.symbol_id)
         .chain(il.constant_addresses.iter().map(|a|a.symbol))
-        .chain(il.global_aggregate_relocations.iter().flat_map(|r|[r.symbol,r.target]));
+        .chain(il.global_aggregate_relocations.iter().flat_map(|r|[r.symbol,r.target]))
+        .chain(il.global_variables.iter()
+            .filter(|meta| requires_c_global_definition(meta,il.cpp_language))
+            .map(|meta|meta.symbol));
     for id in references {
         if !il.global_variables.iter().any(|g|g.symbol==id) ||
            !seen.insert(id) {continue;}
@@ -4341,5 +4353,31 @@ mod audit_pointer_difference_tests {
         ] {
             assert!(checked_ptrdiff_result(bad).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_c_external_global_definition_tests {
+    use super::*;
+
+    #[test]
+    fn exports_c_file_scope_definitions_but_not_declarations_or_unreferenced_statics() {
+        let meta=|linkage,explicit_initializer| crate::GlobalVariable {
+            symbol:crate::SymbolId(1),linkage,explicit_initializer,
+            thread_local:false,local_to_function:false,
+        };
+        assert!(requires_c_global_definition(&meta(3,false),Some(false)));
+        assert!(requires_c_global_definition(&meta(3,true),Some(false)));
+        assert!(requires_c_global_definition(&meta(1,true),Some(false)));
+        assert!(!requires_c_global_definition(&meta(1,false),Some(false)));
+        assert!(!requires_c_global_definition(&meta(2,true),Some(false)));
+        assert!(!requires_c_global_definition(&meta(3,true),Some(true)));
+        assert!(!requires_c_global_definition(&meta(3,true),None));
+        let mut tls=meta(3,true);
+        tls.thread_local=true;
+        assert!(!requires_c_global_definition(&tls,Some(false)));
+        let mut local=meta(3,true);
+        local.local_to_function=true;
+        assert!(!requires_c_global_definition(&local,Some(false)));
     }
 }
