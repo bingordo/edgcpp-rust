@@ -219,29 +219,22 @@ static bool plain_cpp_record(a_type_ptr type) {
       type->variant.class_struct_union.any_virtual_functions ||
       type->variant.class_struct_union.any_virtual_base_classes ||
       extra->assoc_scope->variables != nullptr) return false;
-  // The live routine list is NOT sufficient: EDG may lower an explicit
-  // constructor into field stores and remove its routine before back_end.
-  // The declaration-order member list is retained from the C++ source;
-  // reject anything but the exact ordinary field declarations. Require
-  // one-to-one field identity rather than accepting an empty/stale list.
+  // The runtime routine list and source declaration list can both be
+  // pruned by EDG. Use its authoritative *semantic* C++ class property:
+  // a POD/trivial class cannot have a user-provided nontrivial constructor,
+  // destructor or initializer. This survives constructor inlining.
+  // A source member-list entry, when retained, can additionally reject
+  // any explicit routine without relying on mutable field pointer identity.
+  if (symbol_for(type) == nullptr || !is_pod_class(type) ||
+      !is_trivial_class(type) || type_has_nontrivial_destructor(type)) {
+    return false;
+  }
 #if MAINTAIN_CLASS_MEMBER_LIST
-  std::unordered_set<const void *> source_fields;
   unsigned declarations = 0;
   for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
        entry != nullptr; entry = entry->next) {
-    if (++declarations > 512 || entry->entity.kind != iek_field ||
-        entry->entity.ptr == nullptr ||
-        !source_fields.insert(entry->entity.ptr).second) return false;
+    if (++declarations > 512 || entry->entity.kind != iek_field) return false;
   }
-  unsigned physical_fields = 0;
-  for (a_field_ptr field = type->variant.class_struct_union.field_list;
-       field != nullptr; field = field->next) {
-    if (++physical_fields > 512 ||
-        source_fields.erase(field) != 1) return false;
-  }
-  if (physical_fields == 0 || !source_fields.empty()) return false;
-#else
-  return false; // Never admit C++ classes without source-member provenance.
 #endif
   unsigned count = 0;
   for (a_routine_ptr method = extra->assoc_scope->routines;
