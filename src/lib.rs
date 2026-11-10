@@ -973,6 +973,11 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         58 => Some(il.float_constants.len()),
         59 => Some(il.float_initializers.len()),
         60 => Some(il.global_float_initializers.len()),
+        // Record 61/62 decoding already exists below. Without these counts,
+        // rejected native events are silently dropped instead of marking the
+        // compilation malformed.
+        61 => Some(il.symbol_link_names.len()),
+        62 => Some(il.string_literals.len()),
         47 => Some(il.global_variables.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
@@ -2330,5 +2335,52 @@ mod wire_tag_audit_tests {
         let text=WireField{data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT};
         assert_eq!(text.string().as_deref(),Some("hello"));
         assert_eq!(WireField{data:std::ptr::null(),..text}.string(),None);
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_record_count_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_link_names_and_string_literals_fail_closed() {
+        let number = |value: u64| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let text = |bytes: &'static [u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let mut state=Collector {
+            il:Il::default(),panicked:false,malformed:false,
+        };
+        let symbol=[number(42),number(1),text(b"f")];
+        let name=[number(42),text(b"_Z1fv"),number(1)];
+        let string=[text(b"f"),text(b"0"),text(b"0"),number(1),text(b"6100")];
+        let bad_string=[text(b"f"),text(b"0"),text(b"0"),number(1),text(b"abc")];
+        unsafe {
+            let userdata=(&mut state as *mut Collector).cast();
+            collect(userdata,13,symbol.as_ptr(),symbol.len(),0);
+            collect(userdata,61,name.as_ptr(),name.len(),0);
+            collect(userdata,62,string.as_ptr(),string.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbol_link_names.len(),1);
+        assert_eq!(state.il.string_literals.len(),1);
+
+        // Rejected duplicate linker-name records must not be ignored.
+        unsafe {
+            let userdata=(&mut state as *mut Collector).cast();
+            collect(userdata,61,name.as_ptr(),name.len(),0);
+        }
+        assert!(state.malformed);
+        state.malformed=false;
+
+        // Odd-length byte images are rejected by the decoder. The callback
+        // must also report malformed input, not simply drop the event.
+        unsafe {
+            let userdata=(&mut state as *mut Collector).cast();
+            collect(userdata,62,bad_string.as_ptr(),bad_string.len(),0);
+        }
+        assert!(state.malformed);
     }
 }
