@@ -261,7 +261,7 @@ jobs:
           (
             cd ../edgcpp/build/gcc-release
             source environment.sh
-            python3 -c 'from pathlib import Path; Path("audit_many_fields.cpp").write_text("struct AuditWideRecord {\\n" + "".join(f"int field_{i};\\n" for i in range(10001)) + "};\\nAuditWideRecord audit_wide_record;\\n")'
+            python3 -c 'from pathlib import Path; Path("audit_many_fields.cpp").write_text("struct AuditWideRecord {\n" + "".join(f"int field_{i};\n" for i in range(10001)) + "};\nAuditWideRecord audit_wide_record;\n")'
             if ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_many_fields.cpp > audit_many_fields.out 2>&1; then
               echo "Oversized native record was silently accepted" >&2
               exit 1
