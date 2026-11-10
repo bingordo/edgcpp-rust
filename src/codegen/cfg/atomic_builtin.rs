@@ -157,3 +157,39 @@ pub(super) fn lower(
             "unsupported source atomic builtin {name} with {} arguments",args.len()))),
     }
 }
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+
+    fn expression(value:Option<i64>) -> crate::Expression {
+        crate::Expression {
+            function:String::new(),statement_path:String::new(),
+            path:String::new(),parent:None,kind:0,operator:None,
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,
+            constant_integer:value,related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        }
+    }
+
+    #[test]
+    fn literal_reads_exact_constant_and_rejects_missing_node() {
+        let mut graph=Graph::default();
+        graph.expressions.push(crate::graph::ExpressionNode {
+            data:expression(Some(42)),parent:None,operands:vec![],
+            statement:crate::graph::StatementId(0),
+        });
+        assert_eq!(literal(&graph,ExpressionId(0)).unwrap(),42);
+        assert!(literal(&graph,ExpressionId(1)).is_err());
+    }
+
+    #[test]
+    fn pointer_walk_rejects_missing_node() {
+        let graph=Graph::default();
+        assert!(source_pointee(
+            &graph,ExpressionId(0),&Il::default(),
+            MemoryAccess::Atomic,4,
+        ).is_err());
+    }
+}
