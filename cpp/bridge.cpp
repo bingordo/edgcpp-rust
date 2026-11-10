@@ -609,11 +609,26 @@ static bool pack_constant_bitfield(
   }
   return true;
 }
+// Checked subobject-relative offsets. Nested designated initializers can
+// walk multiple EDG field/array levels before reaching the leaf-size check;
+// validate each step so malformed native offsets cannot wrap or underflow.
+static constexpr bool aggregate_subobject_fits(
+    size_t total, size_t base, size_t relative)
+{
+  return base <= total && relative <= total - base;
+}
+static_assert(aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
+                                       MAX_NATIVE_AGGREGATE_IMAGE_BYTES - 1, 1));
+static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
+                                        MAX_NATIVE_AGGREGATE_IMAGE_BYTES - 1, 2));
+static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
+                                        std::numeric_limits<size_t>::max(), 1));
+
 static bool constant_designated_value(
     a_constant_ptr &current, a_type_ptr original_type, size_t offset,
     std::vector<uint8_t> &bytes, unsigned depth,
     std::vector<NativeAggregateReloc> *relocations) {
-  if (current == nullptr || depth > 32) return false;
+  if (current == nullptr || depth > 32 || offset > bytes.size()) return false;
   if (current->kind != ck_designator) {
     if (!constant_initializer_image(current, original_type, offset,
                                     bytes, depth + 1, relocations)) return false;
@@ -641,9 +656,11 @@ static bool constant_designated_value(
       current=current->next;
       return true;
     }
-    if (selected->offset_bit_remainder != 0) return false;
+    if (selected->offset_bit_remainder != 0 ||
+        !aggregate_subobject_fits(bytes.size(), offset, selected->offset))
+      return false;
     element = selected->type;
-    child_offset += selected->offset;
+    child_offset = offset + static_cast<size_t>(selected->offset);
   } else {
     if (type->kind != tk_array || type->incomplete ||
         type->variant.array.is_variable_size_array ||
@@ -784,8 +801,9 @@ static bool constant_initializer_image(
           current=current->next;
         } else {
           if (field->offset_bit_remainder != 0) return false;
-          if (!constant_designated_value(current, field->type,
-                                         offset + field->offset,
+          if (!aggregate_subobject_fits(bytes.size(), offset, field->offset) ||
+              !constant_designated_value(current, field->type,
+                                         offset + static_cast<size_t>(field->offset),
                                          bytes, depth + 1, relocations))
             return false;
         }
