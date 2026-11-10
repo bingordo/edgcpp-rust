@@ -906,19 +906,27 @@ struct Collector {
 unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
                               name: *const WireField, length: usize, defined: u32) {
     if context.is_null() { return; }
-    if name.is_null() && length != 0 { return; }
     let state = &mut *(context as *mut Collector);
     if state.panicked || state.malformed { return; }
-    let before = callback_record_count(&state.il, kind);
+    // Reject unknown event IDs, arity mismatches and missing field arrays
+    // before constructing a slice from the C++ callback pointer. In
+    // particular, a bogus length must never reach from_raw_parts.
+    if expected_wire_field_count(kind) != Some(length) ||
+        (length != 0 && name.is_null()) {
+        state.malformed = true;
+        return;
+    }
+    let Some(before) = callback_record_count(&state.il, kind) else {
+        state.malformed = true;
+        return;
+    };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         collect_event(&mut state.il, kind, name, length, defined);
     }));
     if result.is_err() {
         state.panicked = true;
-    } else if let Some(before) = before {
-        if callback_record_count(&state.il, kind) == Some(before) {
-            state.malformed = true;
-        }
+    } else if callback_record_count(&state.il, kind) == Some(before) {
+        state.malformed = true;
     }
 }
 
@@ -1023,12 +1031,14 @@ fn expected_wire_field_count(kind: u32) -> Option<usize> {
 
 unsafe fn collect_event(output: &mut Il, kind: u32,
                         data: *const WireField, length: usize, aux: u32) {
+    // This preflight must precede from_raw_parts even for direct callers
+    // of collect_event: never construct a slice with an untrusted arity.
+    let Some(expected) = expected_wire_field_count(kind) else {return;};
+    if length != expected || (length != 0 && data.is_null()) {return;}
     let fields = if length == 0 { &[][..] } else {
-        if data.is_null() { return; }
         std::slice::from_raw_parts(data, length)
     };
-    let Some(expected) = expected_wire_field_count(kind) else {return;};
-    if length != expected || fields.iter().any(|f|
+    if fields.iter().any(|f|
         f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
@@ -2410,5 +2420,43 @@ mod audit_wire_schema_consistency_tests {
                         "known wire record kind {kind} is missing");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_preflight_tests {
+    use super::*;
+
+    fn callback_rejects(kind:u32, ptr:*const WireField, count:usize) {
+        let mut state=Collector {
+            il:Il::default(),panicked:false,malformed:false,
+        };
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),kind,ptr,count,0);
+        }
+        assert!(state.malformed, "event kind {kind} length {count} must be rejected");
+        assert!(!state.panicked);
+        assert!(state.il.entities.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_records_and_missing_field_arrays() {
+        callback_rejects(0,std::ptr::null(),0);
+        callback_rejects(65,std::ptr::null(),0);
+        callback_rejects(u32::MAX,std::ptr::null(),0);
+        callback_rejects(13,std::ptr::null(),3);
+    }
+
+    #[test]
+    fn rejects_incorrect_arity_before_reading_native_memory() {
+        let field=WireField {
+            data:std::ptr::null(),length:0,value:1,
+            tag:wire_tags::UNSIGNED,
+        };
+        // Deliberately pass a pointer to only one actual field. Both
+        // wrong lengths must be rejected without forming a native slice.
+        callback_rejects(13,&field,1);
+        callback_rejects(13,&field,usize::MAX);
+        callback_rejects(13,&field,0);
     }
 }
