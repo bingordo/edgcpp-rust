@@ -27,17 +27,25 @@ struct WireField {
     value: u64,
     tag: u32,
 }
+// Keep these wire protocol discriminants synchronized with cpp/bridge.cpp.
+mod wire_tags {
+    pub const ABSENT:u32=0;
+    pub const TEXT:u32=1;
+    pub const UNSIGNED:u32=2;
+    pub const SIGNED:u32=3;
+    pub const MAX:u32=SIGNED;
+}
 type Callback = unsafe extern "C" fn(*mut c_void, u32, *const WireField, usize, u32);
 impl WireField {
     fn string(self) -> Option<String> {
-        if self.tag != 1 || self.data.is_null() { return None; }
+        if self.tag != wire_tags::TEXT || self.data.is_null() { return None; }
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(self.data, self.length) })
             .ok().map(str::to_owned)
     }
-    fn unsigned(self) -> Option<u64> { (self.tag == 2).then_some(self.value) }
+    fn unsigned(self) -> Option<u64> { (self.tag == wire_tags::UNSIGNED).then_some(self.value) }
     fn u32(self) -> Option<u32> { self.unsigned().and_then(|n| n.try_into().ok()) }
-    fn signed(self) -> Option<i64> { (self.tag == 3).then_some(self.value as i64) }
-    fn present(self) -> bool { self.tag != 0 }
+    fn signed(self) -> Option<i64> { (self.tag == wire_tags::SIGNED).then_some(self.value as i64) }
+    fn present(self) -> bool { self.tag != wire_tags::ABSENT }
 }
 
 extern "C" {
@@ -1009,7 +1017,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, _ => return,
     };
     if length != expected || fields.iter().any(|f|
-        f.tag > 3 || (f.tag == 1 && f.data.is_null())) { return; }
+        f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
@@ -2302,5 +2310,25 @@ mod wire_field_regression_tests {
         assert_eq!(WireField { tag: 3, ..field }.signed(), Some(-1));
         assert_eq!(WireField { tag: 3, ..field }.unsigned(), None);
         assert!(!WireField { tag: 0, ..field }.present());
+    }
+}
+
+#[cfg(test)]
+mod wire_tag_audit_tests {
+    use super::*;
+    #[test]
+    fn wire_tag_values_and_decoding_are_stable() {
+        assert_eq!([wire_tags::ABSENT,wire_tags::TEXT,wire_tags::UNSIGNED,wire_tags::SIGNED],[0,1,2,3]);
+        let number=WireField{data:std::ptr::null(),length:0,value:42,tag:wire_tags::UNSIGNED};
+        assert_eq!(number.unsigned(),Some(42));
+        assert_eq!(number.signed(),None);
+        let signed=WireField{tag:wire_tags::SIGNED,value:(-7i64) as u64,..number};
+        assert_eq!(signed.signed(),Some(-7));
+        let absent=WireField{tag:wire_tags::ABSENT,..number};
+        assert!(!absent.present());
+        let bytes=b"hello";
+        let text=WireField{data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT};
+        assert_eq!(text.string().as_deref(),Some("hello"));
+        assert_eq!(WireField{data:std::ptr::null(),..text}.string(),None);
     }
 }

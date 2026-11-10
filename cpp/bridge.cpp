@@ -58,10 +58,16 @@ thread_local std::unordered_map<std::string, uint32_t> named_class_types;
 }
 
 namespace edg {
-static edgcpp_field txt(const std::string &s) { return {s.data(), s.size(), 0, 1}; }
-static edgcpp_field num(uint64_t n) { return {nullptr, 0, n, 2}; }
-static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint64_t>(n), 3}; }
-static edgcpp_field absent() { return {nullptr, 0, 0, 0}; }
+// Wire protocol values; must match Rust's wire_tags module.
+enum : uint32_t {
+  WIRE_ABSENT = 0, WIRE_TEXT = 1, WIRE_UNSIGNED = 2, WIRE_SIGNED = 3,
+  RECORD_SYMBOL = 13, RECORD_STATEMENT_SOURCE = 35,
+  RECORD_EXPRESSION_SOURCE = 37,
+};
+static edgcpp_field txt(const std::string &s) { return {s.data(), s.size(), 0, WIRE_TEXT}; }
+static edgcpp_field num(uint64_t n) { return {nullptr, 0, n, WIRE_UNSIGNED}; }
+static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint64_t>(n), WIRE_SIGNED}; }
+static edgcpp_field absent() { return {nullptr, 0, 0, WIRE_ABSENT}; }
 static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
   current_callback(current_user_data, kind, fields.begin(), fields.size(), aux);
@@ -97,7 +103,7 @@ static void emit_statement_source(const std::string &function,
 {
   ResolvedSource location{};
   if (resolve_source(pos, location)) {
-    emit_record(35, {txt(function), txt(path), num(location.seq),
+    emit_record(RECORD_STATEMENT_SOURCE, {txt(function), txt(path), num(location.seq),
                      num(location.column), txt(location.file), num(location.line)});
   }
 }
@@ -109,7 +115,7 @@ static void emit_expression_source(const std::string &function,
 {
   ResolvedSource location{};
   if (resolve_source(pos, location)) {
-    emit_record(37, {txt(function), txt(statement), num(role), txt(path),
+    emit_record(RECORD_EXPRESSION_SOURCE, {txt(function), txt(statement), num(role), txt(path),
                      num(location.seq), num(location.column),
                      txt(location.file), num(location.line)});
   }
@@ -177,7 +183,7 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
   if (found != symbol_ids.end()) return found->second;
   uint32_t id = static_cast<uint32_t>(symbol_ids.size() + 1);
   symbol_ids.emplace(ptr, id);
-  emit_record(13, {num(id), num(kind), txt(name)});
+  emit_record(RECORD_SYMBOL, {num(id), num(kind), txt(name)});
   if (kind >= 1 && kind <= 3) {
     // EDG routines, variables and fields all place source_corresp first.
     const auto *correspondence =
