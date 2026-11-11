@@ -1014,6 +1014,15 @@ impl Graph {
             }
             graph.member_functions.push(member.clone());
         }
+        // Cross-check field ownership only when both the member routine
+        // and the native record field identities have been exported.
+        let constructor_owner: HashMap<SymbolId, TypeId> = graph.member_functions.iter()
+            .map(|member| (member.routine, member.owner)).collect();
+        let mut field_owners: HashMap<SymbolId, std::collections::HashSet<TypeId>> =
+            HashMap::new();
+        for field in &graph.record_fields {
+            field_owners.entry(field.symbol).or_default().insert(field.owner);
+        }
         // Constructor initializers refer to routine symbols, field symbols,
         // or record types. Check the complete snapshot before indexing them.
         let mut ctor_positions = std::collections::HashSet::new();
@@ -1022,7 +1031,13 @@ impl Graph {
             let valid_target = match init.kind {
                 0 | 1 => init.target_type.is_some_and(|ty| type_map.contains_key(&ty))
                     && init.target_field.is_none(),
-                2 => init.target_field.is_some_and(|field| has_kind(field, 3))
+                2 => init.target_field.is_some_and(|field| {
+                        has_kind(field, 3) &&
+                        constructor_owner.get(&init.routine).is_none_or(|owner| {
+                            field_owners.get(&field).is_none_or(|owners|
+                                owners.contains(owner))
+                        })
+                    })
                     && init.target_type.is_none(),
                 3 => init.target_type.is_none() && init.target_field.is_none(),
                 _ => false,
@@ -4959,6 +4974,47 @@ mod tests {
         il.member_functions.push(il.member_functions[0].clone());
         assert_eq!(Graph::from_il(&il).unwrap_err(),
                    GraphError::DuplicateMemberFunction(SymbolId(1)));
+    }
+
+    #[test]
+    fn audit_constructor_initializer_rejects_foreign_record_field() {
+        let mut il = Il::default();
+        for id in 1..=3 {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 1, related_role: None, related: None,
+            });
+        }
+        for (id, kind, name) in [
+            (1, 1, "Owner::Owner"),
+            (2, 3, "member"),
+            (3, 3, "foreign_member"),
+        ] {
+            il.symbols.push(Symbol {
+                id: SymbolId(id), kind, name: name.into(),
+            });
+        }
+        il.member_functions.push(MemberFunction {
+            owner: TypeId(1), routine: SymbolId(1),
+        });
+        for (owner, symbol) in [(1, 2), (2, 3)] {
+            il.record_fields.push(RecordField {
+                owner: TypeId(owner), position: 0, ty: TypeId(3),
+                symbol: SymbolId(symbol), name: format!("field_{symbol}"),
+                byte_offset: 0, bit_offset: 0, bit_width: 0,
+            });
+        }
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine: SymbolId(1), position: 0, kind: 2,
+            target_type: None, target_field: Some(SymbolId(3)),
+            compiler_generated: false, braced: false,
+            use_field_initializer: false, pack_expansion: false,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidConstructorInitializer {
+                routine: SymbolId(1), position: 0,
+            });
+        il.constructor_initializers[0].target_field = Some(SymbolId(2));
+        Graph::from_il(&il).expect("constructor initializes own member");
     }
 
     #[test]
