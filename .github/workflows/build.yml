@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      audit_call_lookup_benchmark:
+        description: "Run opt-in graph call lookup and ABI cache microbenchmarks"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded runs for the same PR/branch before they consume build CPU.
 concurrency:
@@ -319,6 +324,20 @@ jobs:
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --lib --features codegen audit_type_index_batch_scaling -- --ignored --nocapture
+
+      # Reproducible measurement on demand; routine CI never runs this.
+      - name: "Audit call index and ABI cache scaling (opt-in)"
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.audit_call_lookup_benchmark }}
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --lib --features codegen audit_call_lookup_scaling -- --ignored --nocapture
+          cargo test --lib --features codegen audit_direct_call_catalog_scaling -- --ignored --nocapture
 
       - name: M11 VLA dimension evaluation semantic snapshot (parse only)
         working-directory: edgcpp-rust

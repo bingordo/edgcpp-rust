@@ -4195,6 +4195,76 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Reproduce the pre-#152/#155 routine-declaration rescans against
+    /// the current validated, compilation-local ABI declaration catalog.
+    /// Snapshot setup is outside the timed region; the indexed timings
+    /// INCLUDE building the catalog with direct_call_decl once per target.
+    #[test]
+    #[ignore = "opt-in direct-call declaration scaling measurement"]
+    fn audit_direct_call_catalog_scaling() {
+        let kind=|semantic_kind| (0..4096).find(|&value|
+            semantic(4,value)==semantic_kind).expect("pinned EDG type kind");
+        for count in [256_u32,1024,4096] {
+            let mut il=Il::default();
+            il.types.push(crate::TypeDef {
+                id:crate::TypeId(1), kind:kind(4),
+                related_role:None, related:None,
+            });
+            il.types.push(crate::TypeDef {
+                id:crate::TypeId(2), kind:kind(2),
+                related_role:Some(3),related:Some(crate::TypeId(1)),
+            });
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(2),prototyped:true,variadic:false,
+            });
+            for id in 1..=count {
+                il.symbols.push(crate::Symbol {
+                    id:crate::SymbolId(id),kind:1,name:format!("bench_{id}"),
+                });
+                il.symbol_types.push(crate::SymbolType {
+                    symbol:crate::SymbolId(id),ty:crate::TypeId(2),
+                });
+            }
+            let repeated=vec![crate::SymbolId(count);count as usize];
+            let distinct:Vec<_>=(1..=count).map(crate::SymbolId).collect();
+            for (label, targets) in [("repeated", &repeated),("distinct", &distinct)] {
+                let mut old_times=Vec::new();
+                let mut indexed_times=Vec::new();
+                for _ in 0..3 {
+                    let started=std::time::Instant::now();
+                    let old:Vec<_>=targets.iter()
+                        .map(|&symbol|direct_call_decl(&il,symbol).unwrap())
+                        .collect();
+                    old_times.push(started.elapsed());
+                    let started=std::time::Instant::now();
+                    let mut catalog=HashMap::new();
+                    for &symbol in targets {
+                        if !catalog.contains_key(&symbol) {
+                            catalog.insert(symbol,direct_call_decl(&il,symbol).unwrap());
+                        }
+                    }
+                    let indexed:Vec<_>=targets.iter()
+                        .map(|&symbol|cached_call_decl(&catalog,symbol).unwrap())
+                        .collect();
+                    indexed_times.push(started.elapsed());
+                    assert_eq!(old.len(),indexed.len());
+                    for (a,b) in old.iter().zip(indexed) {
+                        assert_eq!(a.symbol,b.symbol);
+                        assert_eq!(a.name,b.name);
+                        assert_eq!(a.abi,b.abi);
+                    }
+                    std::hint::black_box(&old);
+                    std::hint::black_box(&catalog);
+                }
+                old_times.sort_unstable();
+                indexed_times.sort_unstable();
+                let before=old_times[1].as_secs_f64()*1000.0;
+                let after=indexed_times[1].as_secs_f64()*1000.0;
+                println!("call-abi kind={label} symbols={count} old_ms={before:.3} indexed_ms={after:.3} speedup={:.2}x",before/after);
+            }
+        }
+    }
+
     #[test]
     fn audit_cached_direct_call_declarations_are_snapshot_local() {
         let word=CAbiInt {bits:64,signed:true,is_bool:false};
