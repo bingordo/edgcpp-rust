@@ -303,7 +303,7 @@ jobs:
       # One-time, same-runner comparison against the frozen pre-#174
       # scan-based algorithm. The ignored test stays available for future
       # manual measurements, but regular CI does not rerun slow benchmarks.
-      - name: Audit #171 type-index batch scaling (one-time)
+      - name: "Audit #171 type-index batch scaling (one-time)"
         if: ${{ github.event_name == 'pull_request' && github.head_ref == 'audit/type-index-batch-benchmark-20261111' }}
         working-directory: edgcpp-rust
         env:
