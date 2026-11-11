@@ -1436,6 +1436,8 @@ impl Graph {
             if !smap.contains_key(&key)
                 || !has_kind(decl.symbol, 2)
                 || !type_map.contains_key(&decl.ty)
+                || symbol_type_by_id.get(&decl.symbol)
+                    .is_some_and(|&symbol_ty| symbol_ty != decl.ty)
             {
                 return Err(GraphError::InvalidStatementDeclaration {
                     function: decl.function.clone(), path: decl.statement_path.clone(),
@@ -4874,6 +4876,35 @@ mod tests {
         il.statement_declarations[0].symbol = SymbolId(999);
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidStatementDeclaration { .. })));
+    }
+
+    #[test]
+    fn audit_statement_declaration_type_must_match_symbol_type() {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:1,
+        });
+        il.symbols.push(Symbol {
+            id:SymbolId(3),kind:2,name:"local".into(),
+        });
+        for id in 1..=2 {
+            il.types.push(TypeDef {
+                id:TypeId(id),kind:2,related_role:None,related:None,
+            });
+        }
+        il.symbol_types.push(SymbolType {
+            symbol:SymbolId(3),ty:TypeId(1),
+        });
+        il.statement_declarations.push(StatementDeclaration {
+            function:"f".into(),statement_path:"0".into(),
+            position:0,symbol:SymbolId(3),ty:TypeId(1),is_vla:false,
+        });
+        Graph::from_il(&il).expect("native declaration agrees with symbol type");
+        il.statement_declarations[0].ty=TypeId(2);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidStatementDeclaration {
+                function:"f".into(),path:"0".into(),
+            });
     }
 
     #[test]
