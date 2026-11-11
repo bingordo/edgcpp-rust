@@ -1803,7 +1803,7 @@ fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
 }
 /// Accept only a real function type or a pointer to a function. Do not
 /// reinterpret an arbitrary data pointer as a callable C prototype.
-fn callable_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
+fn callable_function_type(il:&Il,ty:crate::TypeId) -> Result<crate::TypeId,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing call target type"))?;
@@ -1813,7 +1813,31 @@ fn callable_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
             def.related.ok_or_else(||invalid("function pointer without target"))?)?,
         _ => return Err(invalid("call target is not a function/function pointer")),
     };
-    function_type_abi(il,function_ty)
+    Ok(function_ty)
+}
+fn callable_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
+    function_type_abi(il,callable_function_type(il,ty)?)
+}
+/// The actual type on a native call expression must be the type returned
+/// by the callee's declared function, including signedness/pointee identity.
+/// An arbitrary call-result type must not be interpreted as though the call
+/// had a different C return type. EDG typeref/typedef aliases are permitted.
+fn checked_call_result_type(
+    il:&Il,callee_ty:crate::TypeId,call_result_ty:crate::TypeId,
+) -> Result<(),CodegenError> {
+    let fn_ty=callable_function_type(il,callee_ty)?;
+    let def=il.types.iter().find(|t|t.id==fn_ty)
+        .ok_or_else(||invalid("missing called function type"))?;
+    if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
+        return Err(invalid("call target has no function return type"));
+    }
+    let declared=canonical_abi_type(il,def.related
+        .ok_or_else(||invalid("missing declared call result type"))?)?;
+    let actual=canonical_abi_type(il,call_result_ty)?;
+    if declared!=actual {
+        return Err(invalid("call result type differs from declared function return type"));
+    }
+    Ok(())
 }
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Member calls remain a separate C++ ABI/lifetime feature.
@@ -1889,6 +1913,14 @@ fn lower_c_expression(
         if abi.parameters.len()!=node.operands.len()-1 {
             return Err(invalid("call argument count disagrees with EDG prototype"));
         }
+        let callee_ty=if let Some(decl)=&declaration {
+            il.symbol_types.iter().find(|d|d.symbol==decl.symbol)
+                .ok_or_else(||invalid("direct call has no source declaration type"))?.ty
+        } else {
+            expression_type_id(graph,node.operands[0])?
+        };
+        checked_call_result_type(il,callee_ty,
+            node.data.type_id.ok_or_else(||invalid("call expression has no result type"))?)?;
         let mut args=Vec::with_capacity(abi.parameters.len());
         for (&operand,aggregate) in node.operands[1..].iter()
             .zip(&abi.aggregate_parameters) {
@@ -4841,5 +4873,61 @@ mod audit_unique_scalar_global_initializer_tests {
         il.initializer_integers.push(crate::InitializerInteger{symbol:id,value:91});
         assert!(checked_global_integer_initializer(&il,id).is_err());
         assert_eq!(checked_global_integer_initializer(&il,crate::SymbolId(72)).unwrap(),Some(33));
+    }
+}
+
+#[cfg(test)]
+mod audit_call_result_type_tests {
+    use super::*;
+
+    fn native_kind(category:u32)->u32 {
+        (0..4096).find(|&kind|semantic(4,kind)==category)
+            .expect("native EDG type kind")
+    }
+
+    fn call_types() -> Il {
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(1),kind:native_kind(1),related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(2),kind:native_kind(1),related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(3),kind:native_kind(2),related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(4),kind:native_kind(5),related_role:Some(1),related:Some(crate::TypeId(3))},
+            crate::TypeDef{id:crate::TypeId(5),kind:native_kind(3),related_role:Some(4),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(6),kind:native_kind(4),related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(7),kind:native_kind(2),related_role:Some(3),related:Some(crate::TypeId(6))},
+            crate::TypeDef{id:crate::TypeId(8),kind:native_kind(5),related_role:Some(1),related:Some(crate::TypeId(2))},
+            crate::TypeDef{id:crate::TypeId(9),kind:native_kind(5),related_role:Some(1),related:Some(crate::TypeId(1))},
+        ]);
+        il.c_integer_types.extend([
+            crate::CIntegerType{id:crate::TypeId(1),bits:32,signed:true,is_bool:false},
+            crate::CIntegerType{id:crate::TypeId(2),bits:32,signed:false,is_bool:false},
+        ]);
+        il
+    }
+
+    #[test]
+    fn audit_call_result_type_direct_and_indirect_agree_with_declared_result() {
+        let il=call_types();
+        // A function pointer and an actual function designator use the same
+        // return contract, and a typedef alias is not a type mismatch.
+        for callee in [crate::TypeId(3),crate::TypeId(4)] {
+            for result in [crate::TypeId(1),crate::TypeId(5)] {
+                assert!(checked_call_result_type(&il,callee,result).is_ok());
+            }
+            // Same machine width, *different* C signedness.
+            assert!(checked_call_result_type(&il,callee,crate::TypeId(2)).is_err());
+            assert!(checked_call_result_type(&il,callee,crate::TypeId(6)).is_err());
+        }
+        assert!(checked_call_result_type(&il,crate::TypeId(7),crate::TypeId(6)).is_ok());
+        assert!(checked_call_result_type(&il,crate::TypeId(7),crate::TypeId(1)).is_err());
+    }
+
+    #[test]
+    fn audit_call_result_type_rejects_noncallable_and_unrelated_pointer_results() {
+        let il=call_types();
+        assert!(checked_call_result_type(&il,crate::TypeId(1),crate::TypeId(1)).is_err());
+        assert!(checked_call_result_type(&il,crate::TypeId(8),crate::TypeId(1)).is_err());
+        assert!(checked_call_result_type(&il,crate::TypeId(9),crate::TypeId(1)).is_err());
+        assert!(checked_call_result_type(&il,crate::TypeId(4),crate::TypeId(999)).is_err());
     }
 }
