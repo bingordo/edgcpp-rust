@@ -78,7 +78,8 @@
     "64": 1,
     "65": 2,
     "66": 2,
-    "67": 2
+    "67": 2,
+    "68": 5
   },
   "record_field_tags": {
     "1": [
@@ -481,6 +482,13 @@
     ],
     "67": [
       "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "68": [
+      "TEXT",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
       "UNSIGNED"
     ]
   }
