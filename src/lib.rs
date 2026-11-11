@@ -917,6 +917,7 @@ struct WireSeen {
     globals: HashSet<SymbolId>,
     cxx_records: HashSet<TypeId>,
     cxx_lifetimes: HashSet<TypeId>,
+    symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     routine_link_names: HashSet<SymbolId>,
 }
@@ -1645,6 +1646,11 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         13 => {
             let (Some(id), Some(kind), Some(name)) = (n(0), n(1), t(2)) else { return; };
+            // The native bridge's pointer-to-ID table emits this mapping
+            // once; duplicate IDs make type, global and call references
+            // ambiguous. Never allow a zero or non-symbol kind either.
+            if id==0 || !(1..=4).contains(&kind) ||
+                !seen.symbols.insert(SymbolId(id)) {return;}
             if kind==1 {seen.routine_symbols.insert(SymbolId(id));}
             output.symbols.push(Symbol { id: SymbolId(id), kind, name });
         }
@@ -2622,6 +2628,50 @@ mod audit_unique_native_type_identity_tests {
             assert!(state.malformed);
             assert!(!state.panicked);
             assert_eq!(state.il.symbol_types.len(),1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_symbol_identity_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,id:u64,kind:u64,name:&'static [u8]) {
+        let fields=[
+            WireField {data:std::ptr::null(),length:0,value:id,tag:wire_tags::UNSIGNED},
+            WireField {data:std::ptr::null(),length:0,value:kind,tag:wire_tags::UNSIGNED},
+            WireField {data:name.as_ptr(),length:name.len(),value:0,tag:wire_tags::TEXT},
+        ];
+        unsafe {collect((state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+    }
+
+    #[test]
+    fn accepts_distinct_native_symbol_identities() {
+        let mut state=Collector::default();
+        for (id,kind) in [(1,1),(2,2),(3,3),(4,4)] {
+            send(&mut state,id,kind,b"src");
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbols.len(),4);
+        assert_eq!(state.seen.symbols.len(),4);
+        assert_eq!(state.seen.routine_symbols.len(),1);
+    }
+
+    #[test]
+    fn zero_unknown_and_duplicate_symbol_ids_are_malformed() {
+        for (id,kind) in [(0,1),(8,0),(8,5)] {
+            let mut state=Collector::default();
+            send(&mut state,id,kind,b"f");
+            assert!(state.malformed,"invalid id={id} kind={kind} accepted");
+            assert!(state.il.symbols.is_empty());
+        }
+        for kind in [1,2,3,4] {
+            let mut state=Collector::default();
+            send(&mut state,8,1,b"f");
+            send(&mut state,8,kind,b"duplicate");
+            assert!(state.malformed,"duplicate symbol with kind={kind} accepted");
+            assert_eq!(state.il.symbols.len(),1);
+            assert_eq!(state.seen.symbols.len(),1);
         }
     }
 }
