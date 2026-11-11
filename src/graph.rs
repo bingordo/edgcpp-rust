@@ -5823,8 +5823,10 @@ mod tests {
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidTypeDetailOwner(TypeId(1)));
         il.types[0].kind=native_type_kind_for_semantic(3);
+        il.type_details[0].qualifiers=Some(0);
         Graph::from_il(&il).expect("typeref detail");
         il.types[0].kind=native_type_kind_for_semantic(5);
+        il.type_details[0].qualifiers=None;
         Graph::from_il(&il).expect("pointer detail");
     }
 
