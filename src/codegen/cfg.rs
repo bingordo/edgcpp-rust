@@ -5150,3 +5150,101 @@ mod audit_call_argument_abi_tests {
         "#);
     }
 }
+
+#[cfg(test)]
+mod audit_call_argument_shape_tests {
+    use super::*;
+
+    fn native_type_kind(kind:u32)->u32 {
+        (0..4096).find(|&value|semantic(4,value)==kind)
+            .expect("native EDG type kind")
+    }
+    fn types() -> Il {
+        let mut il=Il::default();
+        let ty=|id,kind,role,related| crate::TypeDef {
+            id:crate::TypeId(id),kind:native_type_kind(kind),
+            related_role:role,related:related.map(crate::TypeId),
+        };
+        il.types.extend([
+            ty(1,1,None,None),            // 32-bit signed int
+            ty(2,7,None,None),            // struct A { int value; }
+            ty(3,7,None,None),            // distinct struct B, same layout
+            ty(4,3,Some(4),Some(2)),      // typedef struct A Alias
+            ty(5,5,Some(1),Some(1)),      // int*
+            ty(6,6,Some(1),Some(1)),      // int[4]
+            ty(7,2,Some(3),Some(1)),      // int function(void)
+            ty(8,5,Some(1),Some(7)),      // int (*)(void)
+            ty(9,1,None,None),            // C _Bool
+            ty(10,4,None,None),           // void
+            ty(11,5,Some(1),Some(10)),    // void*
+            ty(12,9,None,None),           // union
+        ]);
+        il.c_integer_types.extend([
+            crate::CIntegerType{id:crate::TypeId(1),bits:32,signed:true,is_bool:false},
+            crate::CIntegerType{id:crate::TypeId(9),bits:8,signed:false,is_bool:true},
+        ]);
+        for owner in [2,3] {
+            il.type_object_sizes.push(crate::TypeObjectSize {
+                owner:crate::TypeId(owner),bytes:4,alignment:4,
+            });
+            il.record_fields.push(crate::RecordField {
+                owner:crate::TypeId(owner),position:0,ty:crate::TypeId(1),
+                symbol:crate::SymbolId(owner as u64),name:"value".into(),
+                byte_offset:0,bit_offset:0,bit_width:0,
+            });
+        }
+        il.array_bounds.push(crate::ArrayBound {
+            array:crate::TypeId(6),elements:4,
+        });
+        il
+    }
+    fn checked(il:&Il,expected:u64,actual:u64)->bool {
+        checked_call_argument_shape(il,crate::TypeId(expected),crate::TypeId(actual)).is_ok()
+    }
+
+    #[test]
+    fn audit_call_argument_shape_rejects_distinct_equal_size_structs() {
+        let il=types();
+        // Both are classified as the same four-byte SysV INTEGER aggregate.
+        assert_eq!(target::ABI.classify_aggregate(&il,crate::TypeId(2)).unwrap(),Some(4));
+        assert_eq!(target::ABI.classify_aggregate(&il,crate::TypeId(3)).unwrap(),Some(4));
+        assert!(!checked(&il,2,3),"different struct tags are not compatible by value");
+        assert!(!checked(&il,3,2));
+        assert!(checked(&il,2,2));
+        assert!(checked(&il,2,4),"typedef of exactly the same struct is compatible");
+        assert!(checked(&il,4,2));
+        assert!(!checked(&il,2,1));
+        assert!(!checked(&il,2,5));
+        assert!(!checked(&il,2,6));
+    }
+
+    #[test]
+    fn audit_call_argument_shape_rejects_records_in_scalar_abi_slots() {
+        let il=types();
+        for formal in [1,5,8,9,11] {
+            for actual in [2,3,4,12] {
+                assert!(!checked(&il,formal,actual),
+                    "aggregate {actual} cannot silently become scalar {formal}");
+            }
+        }
+        assert!(checked(&il,1,1));
+        assert!(checked(&il,9,1),"scalar integer converts to _Bool");
+        assert!(checked(&il,9,5),"object pointer converts to _Bool");
+        assert!(!checked(&il,1,6),"an array does not convert to int");
+        assert!(!checked(&il,1,7),"a function designator does not convert to int");
+        assert!(!checked(&il,1,99),"missing actual type is invalid");
+        assert!(!checked(&il,99,1),"missing formal type is invalid");
+    }
+
+    #[test]
+    fn audit_call_argument_shape_keeps_c_pointer_and_bool_decays() {
+        let il=types();
+        assert!(checked(&il,5,6),"int array-to-int pointer decay");
+        assert!(checked(&il,11,6),"int array-to-void pointer decay");
+        assert!(checked(&il,8,7),"function designator-to-function pointer decay");
+        assert!(checked(&il,8,8),"function pointer parameter");
+        assert!(checked(&il,11,5),"object pointer-to-void pointer conversion");
+        assert!(checked(&il,9,6),"array-to-pointer-to-bool conversion");
+        assert!(checked(&il,9,7),"function-to-pointer-to-bool conversion");
+    }
+}
