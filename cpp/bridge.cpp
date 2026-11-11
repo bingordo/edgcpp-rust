@@ -467,6 +467,18 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       if (base_id != 0) {
         emit_record(19, {num(id), num(position), num(base_id),
                          num(base->is_virtual ? 1 : 0)});
+        // EDG's target object layout owns this byte offset. Do NOT
+        // interpret an unset offset as the valid offset zero, and never
+        // use a static byte adjustment for a virtual base.
+        bool offset_proven = !base->is_virtual && !type->incomplete;
+#if IA64_ABI
+        offset_proven = offset_proven && base->offset_is_set;
+#else
+        // The classic ABI lacks EDG's explicit offset_is_set proof.
+        offset_proven = false;
+#endif
+        emit_record(69, {num(id), num(position),
+                         offset_proven ? num(base->offset) : absent()});
         // For virtual bases there may be several derivation paths.
         // Choose the direct derivation when reporting the access written
         // on this base specifier, not an indirect access path.
