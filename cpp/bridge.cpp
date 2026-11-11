@@ -2156,6 +2156,36 @@ void back_end(void)
   emit_record(64, {num(C_mode() ? 0 : 1)});
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
+
+  // EDG explicitly owns this ordered runtime initialization schedule when
+  // the separate-file-scope-init configuration is enabled. Preserve the
+  // actual routine pointers and order, never reconstruct names/calls from
+  // source spelling. These records are diagnostic only: they are not a
+  // complete C++ startup/shutdown or ELF admission certificate.
+#if SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
+  a_routine_list_entry_ptr init_entry =
+      il_header.file_scope_dynamic_init_routines;
+  std::size_t init_position = 0;
+  for (; init_entry != nullptr && within_native_list_limit(init_position);
+       init_entry = init_entry->next, ++init_position) {
+    a_routine_ptr routine = init_entry->routine;
+    if (routine == nullptr) {
+      report_incomplete_snapshot();
+      break;
+    }
+    const char *raw = source_name(routine->source_corresp);
+    const std::string name = raw != nullptr ?
+        declaration_name(routine->source_corresp, true, true) :
+        "<EDG-file-scope-initializer>";
+    const uint32_t routine_symbol = emit_symbol(routine, 1, name);
+    emit_record(67, {num(static_cast<unsigned>(init_position)),
+                     num(routine_symbol)});
+  }
+  emit_record(66, {num(1), num(init_entry == nullptr ? 1 : 0)});
+#else
+  emit_record(66, {num(0), num(0)});
+#endif
+
   // After every routine has been registered, recover static locals that
   // EDG moved into the file-scope memory region. Their source correspondence
   // still points to the enclosing routine, but deliberately not to a
