@@ -1860,10 +1860,7 @@ fn lower_c_expression(
     locals: &[&crate::LocalVariable], il: &Il,
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
-    if let Some(site)=graph.calls.iter().find(|site|
-        site.function==node.data.function &&
-        site.statement_path==node.data.statement_path &&
-        site.path==node.data.path) {
+    if let Some(site)=graph.call_at(id) {
         if site.first_argument!=1 || node.operands.is_empty() {
             return Err(invalid("member call unsupported or missing callee"));
         }
