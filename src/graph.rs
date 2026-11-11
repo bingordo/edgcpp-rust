@@ -195,6 +195,9 @@ pub struct Graph {
     initializer_index: HashMap<(SymbolId, String), usize>,
     initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
     call_expression_ids: Vec<ExpressionId>,
+    // Dense ExpressionId -> call record index. Avoid O(expressions * calls)
+    // string-path scans during source expression lowering.
+    call_index_by_expression: Vec<Option<usize>>,
 }
 
 /// Borrowed expression captured within a function body.
@@ -1519,6 +1522,7 @@ impl Graph {
                 data: item.clone(), parent: None, operands: Vec::new(), statement,
             });
         }
+        graph.call_index_by_expression.resize(graph.expressions.len(), None);
         let mut call_paths = std::collections::HashSet::new();
         for call in &il.calls {
             let key = (call.function.clone(), call.statement_path.clone(), call.path.clone());
@@ -1532,7 +1536,9 @@ impl Graph {
                     function: key.0, statement: key.1, path: key.2,
                 });
             }
-            graph.call_expression_ids.push(emap[&key]);
+            let expression = emap[&key];
+            graph.call_index_by_expression[expression.0] = Some(graph.calls.len());
+            graph.call_expression_ids.push(expression);
             graph.calls.push(call.clone());
         }
         for idx in 0..graph.statements.len() {
@@ -2584,8 +2590,8 @@ impl Graph {
 
     /// Resolve a call record by its compilation-local expression identity.
     pub fn call_at(&self, id: ExpressionId) -> Option<&CallSite> {
-        self.call_expression_ids.iter().position(|&candidate| candidate == id)
-            .map(|index| &self.calls[index])
+        self.call_index_by_expression.get(id.0).copied().flatten()
+            .and_then(|index| self.calls.get(index))
     }
 
     /// Resolve the expression associated with a call-site record.
@@ -5039,6 +5045,63 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_object(call), None);
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(0)][..]));
+    }
+
+    #[test]
+    fn audit_indexed_call_lookups_preserve_identity_with_many_calls() {
+        let mut il = Il::default();
+        let (call_kind, call_operator) = native_call_kinds(false);
+        // Interleave calls with non-calls and deliver call records in the
+        // reverse order, independent of expression callback ordering.
+        for index in 0..256 {
+            let statement = index.to_string();
+            let is_call = index % 3 == 0;
+            il.statements.push(Statement {
+                function: "f".into(), path: statement.clone(),
+                parent: None, kind: 1,
+            });
+            il.expressions.push(Expression {
+                function: "f".into(), statement_path: statement.clone(),
+                path: "0".into(), parent: None,
+                kind: if is_call { call_kind } else { 1 },
+                operator: if is_call { Some(call_operator) } else { None },
+                type_kind: None, reference: None, type_size: None,
+                type_alignment: None, constant_kind: None,
+                constant_integer: None, related_type_role: None,
+                related_type_kind: None, type_id: None, symbol_id: None,
+            });
+            if is_call {
+                il.expressions.push(Expression {
+                    function: "f".into(), statement_path: statement.clone(),
+                    path: "0.0".into(), parent: Some("0".into()),
+                    kind: 1, operator: None, type_kind: None, reference: None,
+                    type_size: None, type_alignment: None, constant_kind: None,
+                    constant_integer: None, related_type_role: None,
+                    related_type_kind: None, type_id: None, symbol_id: None,
+                });
+                il.calls.push(CallSite {
+                    function: "f".into(), statement_path: statement,
+                    path: "0".into(), first_argument: 1,
+                });
+            }
+        }
+        il.calls.reverse();
+        let graph = Graph::from_il(&il).expect("valid interleaved call records");
+        assert_eq!(graph.call_index_by_expression.len(), graph.expressions.len());
+        for (index, node) in graph.expressions.iter().enumerate() {
+            let indexed = graph.call_at(ExpressionId(index));
+            if node.data.path == "0" && node.data.statement_path.parse::<usize>()
+                .is_ok_and(|position| position % 3 == 0)
+            {
+                let call = indexed.expect("every native call has metadata");
+                assert_eq!(call.statement_path, node.data.statement_path);
+                assert_eq!(graph.call_expression(call), Some(ExpressionId(index)));
+                assert_eq!(graph.call_arguments(call), Some(&[][..]));
+            } else {
+                assert!(indexed.is_none(), "non-call expressions have no call record");
+            }
+        }
+        assert!(graph.call_at(ExpressionId(graph.expressions.len())).is_none());
     }
 
     #[test]
