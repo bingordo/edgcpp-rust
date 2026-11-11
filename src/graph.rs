@@ -423,11 +423,40 @@ impl TypeDependencyIndex {
         let mut changed_sources = std::collections::HashSet::new();
         let mut touched_targets = std::collections::HashSet::new();
         let mut touched_symbol_types = std::collections::HashSet::new();
+
+        // Index only multi-edit batches. Single edits keep the existing
+        // low-allocation path; a large batch must not linearly search or
+        // shift the ordered vectors once per changed symbol/type.
+        let index_symbols = changes.iter().filter(|change|
+            matches!(change, TypeIndexChange::SetSymbolType { .. })).count() > 1;
+        let index_types = changes.len() > 1 && changes.iter().any(|change|
+            matches!(change, TypeIndexChange::RemoveType { .. }));
+        let mut symbol_slots: Vec<Option<(SymbolId, TypeId)>> = Vec::new();
+        let mut symbol_positions: HashMap<SymbolId, usize> = HashMap::new();
+        if index_symbols {
+            symbol_slots = std::mem::take(&mut self.symbol_order)
+                .into_iter().map(Some).collect();
+            symbol_positions.extend(symbol_slots.iter().enumerate()
+                .filter_map(|(i, slot)| slot.map(|(symbol, _)| (symbol, i))));
+        }
+        let mut type_slots: Vec<Option<TypeId>> = Vec::new();
+        let mut type_positions: HashMap<TypeId, usize> = HashMap::new();
+        if index_types {
+            type_slots = std::mem::take(&mut self.type_order)
+                .into_iter().map(Some).collect();
+            type_positions.extend(type_slots.iter().enumerate()
+                .filter_map(|(i, slot)| slot.map(|ty| (ty, i))));
+        }
         for change in changes {
             match change {
                 TypeIndexChange::ReplaceType { ty, dependencies } => {
                     if !self.forward.contains_key(ty) {
-                        self.type_order.push(*ty);
+                        if index_types {
+                            type_positions.insert(*ty, type_slots.len());
+                            type_slots.push(Some(*ty));
+                        } else {
+                            self.type_order.push(*ty);
+                        }
                     }
                     if let Some(previous) = self.forward.insert(*ty, dependencies.clone()) {
                         touched_targets.extend(previous.into_iter().map(|edge| edge.target));
@@ -437,33 +466,56 @@ impl TypeDependencyIndex {
                 }
                 TypeIndexChange::RemoveType { ty } => {
                     if let Some(previous) = self.forward.remove(ty) {
-                        self.type_order.retain(|source| source != ty);
+                        if index_types {
+                            if let Some(position) = type_positions.remove(ty) {
+                                type_slots[position] = None;
+                            }
+                        } else {
+                            self.type_order.retain(|source| source != ty);
+                        }
                         touched_targets.extend(previous.into_iter().map(|edge| edge.target));
                         changed_sources.insert(*ty);
                     }
                 }
                 TypeIndexChange::SetSymbolType { symbol, ty } => {
-                    if let Some(old_ty) = self.symbol_order.iter()
-                        .find(|(id, _)| id == symbol).map(|(_, ty)| *ty)
+                    if index_symbols {
+                        if let Some(&position) = symbol_positions.get(symbol) {
+                            let (_, old_ty) = symbol_slots[position]
+                                .expect("live symbol position");
+                            touched_symbol_types.insert(old_ty);
+                            if let Some(new_ty) = ty {
+                                symbol_slots[position] = Some((*symbol, *new_ty));
+                            } else {
+                                symbol_slots[position] = None;
+                                symbol_positions.remove(symbol);
+                            }
+                        } else if let Some(new_ty) = ty {
+                            symbol_positions.insert(*symbol, symbol_slots.len());
+                            symbol_slots.push(Some((*symbol, *new_ty)));
+                        }
+                    } else if let Some(position) = self.symbol_order.iter()
+                        .position(|(id, _)| id == symbol)
                     {
-                        touched_symbol_types.insert(old_ty);
+                        touched_symbol_types.insert(self.symbol_order[position].1);
+                        if let Some(new_ty) = ty {
+                            self.symbol_order[position].1 = *new_ty;
+                        } else {
+                            self.symbol_order.remove(position);
+                        }
+                    } else if let Some(new_ty) = ty {
+                        self.symbol_order.push((*symbol, *new_ty));
                     }
                     if let Some(new_ty) = ty {
                         touched_symbol_types.insert(*new_ty);
                     }
-                    if let Some(position) = self.symbol_order.iter()
-                        .position(|(id, _)| id == symbol)
-                    {
-                        if let Some(new_type) = ty {
-                            self.symbol_order[position].1 = *new_type;
-                        } else {
-                            self.symbol_order.remove(position);
-                        }
-                    } else if let Some(new_type) = ty {
-                        self.symbol_order.push((*symbol, *new_type));
-                    }
                 }
             }
+        }
+        if index_symbols {
+            self.symbol_order = symbol_slots.into_iter().flatten().collect();
+        }
+        if index_types {
+            self.type_order = type_slots.into_iter().flatten().collect();
         }
         if !changed_sources.is_empty() {
             let ranks: HashMap<TypeId, usize> = self.type_order.iter()
