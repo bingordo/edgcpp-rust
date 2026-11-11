@@ -146,6 +146,8 @@ pub struct Il {
     pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
     /// EDG's explicit file-scope init routine list in native order (if configured).
     pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
+    /// Native per-scope dynamic initializers in EDG's own list order.
+    pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
     /// Folded source expression constants holding C routine pointers.
@@ -351,6 +353,17 @@ pub struct FileScopeInitSchedule {
 pub struct FileScopeInitRoutine {
     pub position: u32,
     pub routine: SymbolId,
+}
+
+/// Source-level initialization entries in an EDG file/namespace scope.
+/// A scope-local ordinal does not establish a cross-scope ELF init priority.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct ScopeDynamicInitializer {
+    pub scope: String,
+    pub position: u32,
+    pub variable: Option<SymbolId>,
+    pub destructor: Option<SymbolId>,
+    pub kind: u32,
 }
 
 /// Address-valued constant in an expression snapshot.
@@ -1081,6 +1094,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         65 => Some(il.cxx_scalar_lifetime_admissions.len()),
         66 => Some(usize::from(il.file_scope_init_schedule.is_some())),
         67 => Some(il.file_scope_init_routines.len()),
+        68 => Some(il.scope_dynamic_initializers.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -1145,6 +1159,18 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                output.file_scope_init_schedule.is_some() {return;}
             output.file_scope_init_schedule=Some(FileScopeInitSchedule {
                 available:available==1,complete:complete==1,
+            });
+        }
+        68 => {
+            let (Some(scope),Some(position),Some(kind))=(t(0),n(1),n(4)) else {return;};
+            if scope.len()>1024 || kind==0 {return;}
+            let variable=n(2).map(SymbolId);
+            let destructor=n(3).map(SymbolId);
+            if variable==Some(SymbolId(0)) || destructor==Some(SymbolId(0)) {return;}
+            let prior=output.scope_dynamic_initializers.iter().filter(|e|e.scope==scope).count();
+            if position as usize != prior {return;}
+            output.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+                scope,position,variable,destructor,kind,
             });
         }
         67 => {
@@ -3042,7 +3068,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=67_u32 {
+        for kind in 1..=68_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3069,10 +3095,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,268);
+        assert_eq!(total,273);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(68).is_none());
+        assert!(expected_wire_field_tag_masks(69).is_none());
     }
 
     #[test]
