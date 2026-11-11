@@ -1096,6 +1096,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         }
         7 => {
             let (Some(id), Some(kind), Some(role), Some(child)) = (n(0), n(1), n(2), n(3)) else { return; };
+            if id==0 || output.types.iter().any(|ty|ty.id==TypeId(id)) {return;}
             output.types.push(TypeDef { id: TypeId(id), kind,
                 related_role: (role != 0).then_some(role),
                 related: (child != 0).then_some(TypeId(child)) });
@@ -1188,7 +1189,10 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         49 => {
             let (Some(owner), Some(bytes), Some(alignment)) =
                 (n(0), fields[1].unsigned(), fields[2].unsigned()) else { return; };
-            if owner == 0 || bytes == 0 || alignment == 0 { return; }
+            if owner == 0 || bytes == 0 || alignment == 0 ||
+                output.type_object_sizes.iter().any(|item|item.owner==TypeId(owner)) {
+                return;
+            }
             output.type_object_sizes.push(TypeObjectSize { owner: TypeId(owner), bytes, alignment });
         }
         48 => {
@@ -1520,7 +1524,10 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         }
         25 => {
             let (Some(symbol), Some(ty)) = (n(0), n(1)) else { return; };
-            if symbol == 0 || ty == 0 { return; }
+            if symbol == 0 || ty == 0 ||
+                output.symbol_types.iter().any(|item|item.symbol==SymbolId(symbol)) {
+                return;
+            }
             output.symbol_types.push(SymbolType { symbol: SymbolId(symbol), ty: TypeId(ty) });
         }
         24 => {
@@ -2563,6 +2570,66 @@ mod audit_unique_global_storage_wire_tests {
             send(&mut state,[13,3,0,0,0]);
             // Once malformed, no further records may be added.
             assert_eq!(state.il.global_variables.len(),1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_unique_native_type_identity_tests {
+    use super::*;
+
+    fn field(v:u64)->WireField {
+        WireField {data:std::ptr::null(),length:0,value:v,tag:wire_tags::UNSIGNED}
+    }
+    fn send<const N:usize>(state:&mut Collector,kind:u32,values:[u64;N]) {
+        let fields=values.map(field);
+        unsafe {collect((state as *mut Collector).cast(),kind,fields.as_ptr(),N,0);}
+    }
+    #[test]
+    fn different_native_type_and_symbol_identities_are_valid() {
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        send(&mut state,7,[1,1,0,0]);
+        send(&mut state,7,[2,1,0,0]);
+        send(&mut state,49,[1,8,8]);
+        send(&mut state,49,[2,4,4]);
+        send(&mut state,25,[21,1]);
+        send(&mut state,25,[22,2]);
+        assert!(!state.malformed);
+        assert_eq!(state.il.types.len(),2);
+        assert_eq!(state.il.type_object_sizes.len(),2);
+        assert_eq!(state.il.symbol_types.len(),2);
+    }
+    #[test]
+    fn duplicate_type_definitions_are_malformed() {
+        for duplicate in [[1,1,0,0],[1,5,1,2]] {
+            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            send(&mut state,7,[1,1,0,0]);
+            send(&mut state,7,duplicate);
+            assert!(state.malformed);
+            assert!(!state.panicked);
+            assert_eq!(state.il.types.len(),1);
+        }
+    }
+    #[test]
+    fn duplicate_type_layouts_are_malformed() {
+        for duplicate in [[1,8,8],[1,16,8]] {
+            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            send(&mut state,49,[1,8,8]);
+            send(&mut state,49,duplicate);
+            assert!(state.malformed);
+            assert!(!state.panicked);
+            assert_eq!(state.il.type_object_sizes.len(),1);
+        }
+    }
+    #[test]
+    fn duplicate_symbol_type_bindings_are_malformed() {
+        for duplicate in [[21,1],[21,2]] {
+            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            send(&mut state,25,[21,1]);
+            send(&mut state,25,duplicate);
+            assert!(state.malformed);
+            assert!(!state.panicked);
+            assert_eq!(state.il.symbol_types.len(),1);
         }
     }
 }
