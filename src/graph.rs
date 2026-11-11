@@ -5039,7 +5039,10 @@ mod tests {
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidCallOperands {..})));
         let mut il=call_snapshot(false);
-        il.expressions[0].kind=1; // a constant is not an operation
+        let constant=(0..4096).find(|&kind|
+            unsafe {edgcpp_codegen_kind(2,kind)}==1
+        ).expect("native EDG constant expression kind");
+        il.expressions[0].kind=constant; // a constant is not an operation
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidCallOperands {..})));
     }
