@@ -1834,6 +1834,39 @@ jobs:
             fi
           )
 
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
       - name: M8 native C11 struct field differential
         working-directory: edgcpp-rust
         env:
