@@ -3930,6 +3930,82 @@ mod tests {
     }
 
     #[test]
+    fn audit_indexed_mutation_batches_match_sequential_order_and_reverse_edges() {
+        let mut batch=TypeDependencyIndex::default();
+        for n in 1..=96 {
+            batch.replace_type_dependencies(TypeId(n),vec![TypeDependency {
+                target:TypeId(n%96+1),kind:TypeDependencyKind::Related,
+            }]);
+        }
+        for n in 1..=192 {
+            batch.set_symbol_type(SymbolId(n),Some(TypeId(n%96+1)));
+        }
+        let mut sequential=batch.clone();
+        let mut seed=0x9e3779b97f4a7c15u64;
+        let mut changes=Vec::new();
+        for i in 0..2400 {
+            seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let symbol=SymbolId(((seed>>16)%192+1) as u32);
+            let ty=TypeId(((seed>>32)%96+1) as u32);
+            let target=TypeId(((seed>>48)%96+1) as u32);
+            changes.push(match i%8 {
+                0|1|6 => TypeIndexChange::SetSymbolType {symbol,ty:Some(ty)},
+                2 => TypeIndexChange::SetSymbolType {symbol,ty:None},
+                3|7 => TypeIndexChange::RemoveType {ty},
+                _ => TypeIndexChange::ReplaceType {
+                    ty, dependencies:vec![TypeDependency {
+                        target,kind:TypeDependencyKind::Field,
+                    }],
+                },
+            });
+        }
+        batch.apply_changes(&changes);
+        for change in &changes {
+            // Deliberately exercise the single-edit path as an independent
+            // ordering oracle for the indexed multi-edit implementation.
+            sequential.apply_changes(std::slice::from_ref(change));
+        }
+        assert_eq!(batch.type_order,sequential.type_order);
+        assert_eq!(batch.symbol_order,sequential.symbol_order);
+        assert_eq!(batch.forward,sequential.forward);
+        assert_eq!(batch.reverse,sequential.reverse);
+        assert_eq!(batch.symbols_by_type,sequential.symbols_by_type);
+        for ty in 1..=96 {
+            assert_eq!(batch.affected_types(&[TypeId(ty)]),
+                sequential.affected_types(&[TypeId(ty)]));
+            assert_eq!(batch.affected_symbols(&[TypeId(ty)]),
+                sequential.affected_symbols(&[TypeId(ty)]));
+        }
+    }
+
+    #[test]
+    fn audit_mutation_batch_delete_and_readd_moves_symbols_and_types_to_end() {
+        let mut index=TypeDependencyIndex::default();
+        for id in 1..=3 {
+            index.replace_type_dependencies(TypeId(id),vec![]);
+            index.set_symbol_type(SymbolId(id),Some(TypeId(id)));
+        }
+        index.apply_changes(&[
+            TypeIndexChange::RemoveType {ty:TypeId(2)},
+            TypeIndexChange::ReplaceType {ty:TypeId(2),dependencies:vec![]},
+            TypeIndexChange::SetSymbolType {symbol:SymbolId(1),ty:None},
+            TypeIndexChange::SetSymbolType {symbol:SymbolId(1),ty:Some(TypeId(3))},
+            TypeIndexChange::SetSymbolType {symbol:SymbolId(2),ty:Some(TypeId(1))},
+            TypeIndexChange::RemoveType {ty:TypeId(3)},
+            TypeIndexChange::ReplaceType {ty:TypeId(3),dependencies:vec![]},
+        ]);
+        assert_eq!(index.type_order,[TypeId(1),TypeId(2),TypeId(3)]
+            .into_iter().filter(|ty| *ty!=TypeId(2) && *ty!=TypeId(3))
+            .chain([TypeId(2),TypeId(3)]).collect::<Vec<_>>());
+        assert_eq!(index.symbol_order,[
+            (SymbolId(2),TypeId(1)),
+            (SymbolId(3),TypeId(3)),
+            (SymbolId(1),TypeId(3)),
+        ]);
+        assert_eq!(index.symbols_with_type(TypeId(3)),[SymbolId(3),SymbolId(1)]);
+    }
+
+    #[test]
     fn differential_invalidation_reports_additions_removals_and_shortest_depths() {
         let mut graph = Graph::default();
         graph.types.extend([
