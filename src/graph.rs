@@ -3991,12 +3991,10 @@ mod tests {
             TypeIndexChange::SetSymbolType {symbol:SymbolId(1),ty:None},
             TypeIndexChange::SetSymbolType {symbol:SymbolId(1),ty:Some(TypeId(3))},
             TypeIndexChange::SetSymbolType {symbol:SymbolId(2),ty:Some(TypeId(1))},
-            TypeIndexChange::RemoveType {ty:TypeId(3)},
-            TypeIndexChange::ReplaceType {ty:TypeId(3),dependencies:vec![]},
+            TypeIndexChange::RemoveType {ty:TypeId(1)},
+            TypeIndexChange::ReplaceType {ty:TypeId(1),dependencies:vec![]},
         ]);
-        assert_eq!(index.type_order,[TypeId(1),TypeId(2),TypeId(3)]
-            .into_iter().filter(|ty| *ty!=TypeId(2) && *ty!=TypeId(3))
-            .chain([TypeId(2),TypeId(3)]).collect::<Vec<_>>());
+        assert_eq!(index.type_order,[TypeId(3),TypeId(2),TypeId(1)]);
         assert_eq!(index.symbol_order,[
             (SymbolId(2),TypeId(1)),
             (SymbolId(3),TypeId(3)),
