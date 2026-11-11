@@ -4078,6 +4078,48 @@ mod tests {
             let new=new_times[1].as_secs_f64()*1000.0;
             println!("type-index-batch count={count} old_ms={old:.3} indexed_ms={new:.3} speedup={:.2}x",old/new);
         }
+
+        // Type removals previously filtered the full ordered type vector
+        // once per deletion. Isolate that algorithm using edge-free types;
+        // no reverse-edge processing should distort either measurement.
+        for count in [1024_u32,4096,16384] {
+            let initial=TypeDependencyIndex {
+                type_order:(1..=count).map(TypeId).collect(),
+                forward:(1..=count).map(|id|(TypeId(id),Vec::new())).collect(),
+                ..Default::default()
+            };
+            let updates:Vec<_>=(1..=count).rev()
+                .map(|id|TypeIndexChange::RemoveType {ty:TypeId(id)}).collect();
+            let mut old_times=Vec::new();
+            let mut new_times=Vec::new();
+            for _ in 0..3 {
+                let mut old=initial.clone();
+                let mut new=initial.clone();
+                let started=std::time::Instant::now();
+                for update in &updates {
+                    let TypeIndexChange::RemoveType {ty}=update else {
+                        unreachable!("type removal benchmark");
+                    };
+                    if old.forward.remove(ty).is_some() {
+                        old.type_order.retain(|source|source!=ty);
+                    }
+                }
+                old_times.push(started.elapsed());
+                let started=std::time::Instant::now();
+                new.apply_changes(&updates);
+                new_times.push(started.elapsed());
+                std::hint::black_box(&old);
+                std::hint::black_box(&new);
+                assert_eq!(old.type_order,new.type_order);
+                assert_eq!(old.forward,new.forward);
+                assert_eq!(old.reverse,new.reverse);
+            }
+            old_times.sort_unstable();
+            new_times.sort_unstable();
+            let old=old_times[1].as_secs_f64()*1000.0;
+            let new=new_times[1].as_secs_f64()*1000.0;
+            println!("type-index-remove count={count} old_ms={old:.3} indexed_ms={new:.3} speedup={:.2}x",old/new);
+        }
     }
 
     #[test]
