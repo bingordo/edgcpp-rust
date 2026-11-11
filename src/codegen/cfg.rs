@@ -190,7 +190,7 @@ fn is_gnu_child(graph:&Graph,id:crate::graph::StatementId,parent:&str) -> bool {
 /// rejected, rather than assuming a source macro has no side effects.
 fn lower_gnu_block(
     graph:&Graph, id:crate::graph::StatementId,
-    params:&[crate::SymbolId], locals:&[&crate::LocalVariable], il:&Il,
+    params:&[crate::SymbolId], locals:&[&crate::LocalVariable], il:&Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Expr,CodegenError> {
     let root=graph.statement(id).ok_or_else(||invalid("missing GNU block"))?;
     if semantic(1,root.data.kind)!=2 {
@@ -206,10 +206,10 @@ fn lower_gnu_block(
         let node=graph.statement(child).ok_or_else(||invalid("missing GNU statement"))?;
         if result.is_some() {return Err(invalid("GNU block statements after result"));}
         match semantic(1,node.data.kind) {
-            4 => {let body=lower(graph,child,params,locals,il)?;
+            4 => {let body=lower(graph,child,params,locals,il, catalog)?;
                 if !body.is_empty() {return Err(invalid("executable GNU declaration"));}}
             5 => {
-                for action in lower(graph,child,params,locals,il)? {
+                for action in lower(graph,child,params,locals,il, catalog)? {
                     match action {
                         Stmt::Store(i,e) => {
                             let ty=if i<locals.len() {cfg_local_type(il,locals[i])?}
@@ -239,12 +239,12 @@ fn lower_gnu_block(
                     return Err(invalid("GNU expression has unexpected children"));
                 }
                 let expr=node.expression.ok_or_else(||invalid("GNU evaluation is missing"))?;
-                effects.push(lower_c_expression(graph,expr,params,locals,il)?);
+                effects.push(lower_c_expression(graph,expr,params,locals,il, catalog)?);
             }
             12 => {
                 let expr=node.expression.ok_or_else(||invalid(
                     "GNU statement-expression result is not scalar"))?;
-                result=Some(lower_c_expression(graph,expr,params,locals,il)?);
+                result=Some(lower_c_expression(graph,expr,params,locals,il, catalog)?);
                 if position+1!=semantic_children.len() {
                     return Err(invalid("GNU result is not last statement"));
                 }
@@ -258,12 +258,12 @@ fn lower_gnu_block(
 }
 fn lower(
     graph: &Graph, id: crate::graph::StatementId,
-    params: &[crate::SymbolId], locals: &[&crate::LocalVariable], il: &Il,
+    params: &[crate::SymbolId], locals: &[&crate::LocalVariable], il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Vec<Stmt>, CodegenError> {
     let node = graph.statement(id).ok_or_else(|| invalid("missing statement"))?;
     let path = &node.data.path;
     let function = &node.data.function;
-    let expr = |id| lower_c_expression(graph, id, params, locals, il);
+    let expr = |id| lower_c_expression(graph, id, params, locals, il, catalog);
     match semantic(1, node.data.kind) {
         1 => {
             if node.children.iter().any(|&c|!is_gnu_child(graph,c,path)) {
@@ -288,7 +288,7 @@ fn lower(
                             Ok(vec![Stmt::Return(returned)])
                         }
                     } else {
-                        let address=lower_address(graph,id,params,locals,il)?;
+                        let address=lower_address(graph,id,params,locals,il, catalog)?;
                         if size>8 {
                             Ok(vec![Stmt::ReturnAggregate(size,address)])
                         } else {
@@ -307,7 +307,7 @@ fn lower(
             let mut body = Vec::new();
             for &child in &node.children {
                 if is_gnu_child(graph,child,path) {continue;}
-                body.extend(lower(graph, child, params, locals, il)?);
+                body.extend(lower(graph, child, params, locals, il, catalog)?);
             }
             Ok(body)
         }
@@ -325,8 +325,8 @@ fn lower(
                 } else { return Err(invalid("unknown if child")); }
             }
             let yes = yes.ok_or_else(|| invalid("if has no then branch"))?;
-            let yes = lower(graph, yes, params, locals, il)?;
-            let no = match no { Some(id) => lower(graph, id, params, locals, il)?,
+            let yes = lower(graph, yes, params, locals, il, catalog)?;
+            let no = match no { Some(id) => lower(graph, id, params, locals, il, catalog)?,
                 None => Vec::new() };
             Ok(vec![Stmt::If(condition, yes, no)])
         }
@@ -400,7 +400,7 @@ fn lower(
                 if local_kind != 5 {
                     return Err(invalid("routine address initializer on non-pointer local"));
                 }
-                let target=direct_call_decl(il,reference.symbol)?;
+                let target=cached_call_decl(catalog,reference.symbol)?;
                 let declared=callable_type_abi(il,local_ty)?;
                 if target.abi!=declared {
                     return Err(invalid("function pointer initializer has incompatible ABI"));
@@ -435,7 +435,7 @@ fn lower(
             if !body.data.path.starts_with(&format!("{path}.body.")) {
                 return Err(invalid("unexpected while body"));
             }
-            let body = lower(graph, child, params, locals, il)?;
+            let body = lower(graph, child, params, locals, il, catalog)?;
             Ok(vec![if semantic(1, node.data.kind) == 8 {
                 Stmt::DoWhile(body, condition)
             } else {
@@ -465,11 +465,11 @@ fn lower(
                     if increment.replace(child).is_some() { return Err(invalid("duplicate for increment")); }
                 } else { return Err(invalid("unexpected for child")); }
             }
-            let init = match init { Some(id) => lower(graph, id, params, locals, il)?,
+            let init = match init { Some(id) => lower(graph, id, params, locals, il, catalog)?,
                 None => Vec::new() };
             let body = lower(graph, body.ok_or_else(|| invalid("for body missing"))?,
-                params, locals, il)?;
-            let increment = match increment { Some(id) => lower(graph, id, params, locals, il)?,
+                params, locals, il, catalog)?;
+            let increment = match increment { Some(id) => lower(graph, id, params, locals, il, catalog)?,
                 None => Vec::new() };
             Ok(vec![Stmt::For { init, condition, increment, body }])
         }
@@ -483,7 +483,7 @@ fn lower(
                     s.data.path.starts_with(&format!("{path}.body."))) {
                 return Err(invalid("switch body is not unique"));
             }
-            let body=lower(graph,children[0],params,locals,il)?;
+            let body=lower(graph,children[0],params,locals,il, catalog)?;
             // Initial scope: flat case/default labels of a compound body;
             // every other layout must fail clearly until its CFG entry
             // semantics have been checked.
@@ -1610,7 +1610,7 @@ fn bitfield_promoted_type(layout:BitFieldLayout,base:CAbiInt)->CAbiInt {
 /// operand position. The stride is the size of the pointer's element type.
 fn lower_address(
     graph:&Graph,id:ExpressionId,params:&[crate::SymbolId],
-    locals:&[&crate::LocalVariable],il:&Il,
+    locals:&[&crate::LocalVariable],il:&Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Expr,CodegenError> {
     let node=graph.expression(id).ok_or_else(||invalid("missing lvalue"))?;
     match semantic(2,node.data.kind) {
@@ -1632,7 +1632,7 @@ fn lower_address(
         }
         6 => {
             let symbol=node.data.symbol_id.ok_or_else(||invalid("routine address without symbol"))?;
-            direct_call_decl(il,symbol)?;
+            cached_call_decl(catalog,symbol)?;
             Ok(Expr::AddressFunction(symbol))
         }
         3 => {
@@ -1641,7 +1641,7 @@ fn lower_address(
                 44 if node.operands.len()==1 => {
                     let _=pointee_memory_access(il,
                         expression_type_id(graph,node.operands[0])?)?;
-                    lower_c_expression(graph,node.operands[0],params,locals,il)
+                    lower_c_expression(graph,node.operands[0],params,locals,il, catalog)
                 }
                 45 if node.operands.len()==2 => {
                     let a=node.operands[0]; let b=node.operands[1];
@@ -1650,12 +1650,12 @@ fn lower_address(
                         else { return Err(invalid("subscript has no pointer operand")); };
                     let _=pointee_memory_access(il,expression_type_id(graph,pointer)?)?;
                     let stride=pointer_stride(il,expression_type_id(graph,pointer)?)?;
-                    let base=lower_c_expression(graph,pointer,params,locals,il)?;
-                    let index=lower_c_expression(graph,index,params,locals,il)?;
+                    let base=lower_c_expression(graph,pointer,params,locals,il, catalog)?;
+                    let index=lower_c_expression(graph,index,params,locals,il, catalog)?;
                     Ok(Expr::PointerOffset(Box::new(base),Box::new(index),stride))
                 }
                 46 if node.operands.len()==1 =>
-                    lower_address(graph,node.operands[0],params,locals,il),
+                    lower_address(graph,node.operands[0],params,locals,il, catalog),
                 52 | 53 if node.operands.len()==2 => {
                     // EDG: dot_field(base, enk_field) or
                     // points_to_field(pointer, enk_field). The field identity
@@ -1693,16 +1693,16 @@ fn lower_address(
                     let offset=i64::try_from(field.byte_offset)
                         .map_err(|_|invalid("field offset exceeds address range"))?;
                     let base=if op==52 {
-                        lower_address(graph,node.operands[0],params,locals,il)?
+                        lower_address(graph,node.operands[0],params,locals,il, catalog)?
                     } else {
-                        lower_c_expression(graph,node.operands[0],params,locals,il)?
+                        lower_c_expression(graph,node.operands[0],params,locals,il, catalog)?
                     };
                     Ok(if offset==0 {base} else {
                         Expr::Add(Box::new(base),Box::new(Expr::Constant(offset)))
                     })
                 }
                 11 if node.operands.len()==1 =>
-                    lower_address(graph,node.operands[0],params,locals,il),
+                    lower_address(graph,node.operands[0],params,locals,il, catalog),
                 _ => Err(invalid("unsupported addressable expression")),
             }
         }
@@ -1714,6 +1714,15 @@ struct CallDeclaration {
     symbol: crate::SymbolId,
     name: String,
     abi: CAbi,
+}
+fn cached_call_decl<'a>(
+    catalog: &'a HashMap<crate::SymbolId,CallDeclaration>,
+    symbol: crate::SymbolId,
+) -> Result<&'a CallDeclaration,CodegenError> {
+    // compile_calls validates each native routine designator once. A call
+    // that was not in the catalog is malformed or intentionally unsupported.
+    catalog.get(&symbol).ok_or_else(||
+        invalid(format!("missing validated direct-call declaration {}",symbol.0)))
 }
 fn call_type_abi(il:&Il, ty:crate::TypeId) -> Result<CAbiInt,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
@@ -1857,7 +1866,7 @@ fn lowered_vla_slot(arg:&Expr) -> Option<usize> {
 }
 fn lower_c_expression(
     graph: &Graph, id: ExpressionId, params: &[crate::SymbolId],
-    locals: &[&crate::LocalVariable], il: &Il,
+    locals: &[&crate::LocalVariable], il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
     if let Some(site)=graph.call_at(id) {
@@ -1880,7 +1889,7 @@ fn lower_c_expression(
         let (declaration,abi)=if direct {
             let symbol=callee.data.symbol_id
                 .ok_or_else(||invalid("direct routine without symbol"))?;
-            let decl=direct_call_decl(il,symbol)?;
+            let decl=cached_call_decl(catalog,symbol)?;
             let abi=decl.abi.clone();
             (Some(decl),abi)
         } else {
@@ -1897,10 +1906,10 @@ fn lower_c_expression(
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
-                let address=lower_address(graph,operand,params,locals,il)?;
+                let address=lower_address(graph,operand,params,locals,il, catalog)?;
                 args.push(target::ABI.lower_aggregate_argument(*size,address));
             } else {
-                args.push(lower_c_expression(graph,operand,params,locals,il)?);
+                args.push(lower_c_expression(graph,operand,params,locals,il, catalog)?);
             }
         }
         return Ok(if let Some(decl)=declaration {
@@ -1920,7 +1929,7 @@ fn lower_c_expression(
             }
         } else {
             // Evaluate the function pointer exactly once at the call site.
-            let pointer=lower_c_expression(graph,node.operands[0],params,locals,il)?;
+            let pointer=lower_c_expression(graph,node.operands[0],params,locals,il, catalog)?;
             Expr::CallIndirect(Box::new(pointer),abi,args)
         });
     }
@@ -1929,7 +1938,7 @@ fn lower_c_expression(
     if semantic(2,node.data.kind)==6 {
         let symbol=node.data.symbol_id
             .ok_or_else(||invalid("routine designator has no symbol"))?;
-        direct_call_decl(il,symbol)?;
+        cached_call_decl(catalog,symbol)?;
         return Ok(Expr::AddressFunction(symbol));
     }
     // The result of *function_pointer is itself a function designator.
@@ -1939,7 +1948,7 @@ fn lower_c_expression(
         let ty=canonical_abi_type(il,expression_type_id(graph,id)?)?;
         if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==2) {
             callable_type_abi(il,ty)?;
-            return lower_c_expression(graph,node.operands[0],params,locals,il);
+            return lower_c_expression(graph,node.operands[0],params,locals,il, catalog);
         }
     }
     // C struct assignment is an aggregate operation, not an I64 expression.
@@ -1962,8 +1971,8 @@ fn lower_c_expression(
             let kind=il.types.iter().find(|d|d.id==ty)
                 .map(|d|semantic(4,d.kind)).ok_or_else(||
                     invalid("missing aggregate assignment type"))?;
-            let dst=lower_address(graph,node.operands[0],params,locals,il)?;
-            let src=lower_address(graph,node.operands[1],params,locals,il)?;
+            let dst=lower_address(graph,node.operands[0],params,locals,il, catalog)?;
+            let src=lower_address(graph,node.operands[1],params,locals,il, catalog)?;
             if kind==9 || has_native_bitfield(il,ty,0)? {
                 let bytes=byte_size(il,ty)?;
                 if bytes==0 || bytes>512 {
@@ -1986,7 +1995,7 @@ fn lower_c_expression(
         if unary || compound {
             let left=node.operands[0];
             if let Some(layout)=selected_bitfield(graph,left,il)? {
-                let address=Box::new(lower_address(graph,left,params,locals,il)?);
+                let address=Box::new(lower_address(graph,left,params,locals,il, catalog)?);
                 let ty=integer_expression_type(il,graph,left)?;
                 let promotion=bitfield_promoted_type(layout,ty);
                 let updated=if op==29 || op==30 {
@@ -2008,7 +2017,7 @@ fn lower_c_expression(
                         let compute_ty=if matches!(kind,CCompoundOp::Shl|CCompoundOp::Shr) {
                             promotion
                         } else {common_integer_type(promotion,rhs_ty)};
-                        (compute_ty,Box::new(lower_c_expression(graph,rhs,params,locals,il)?))
+                        (compute_ty,Box::new(lower_c_expression(graph,rhs,params,locals,il, catalog)?))
                     };
                     Expr::CompoundBitField(layout,compute_ty,kind,address,amount)
                 };
@@ -2023,7 +2032,7 @@ fn lower_c_expression(
             let stmt=graph.statements.iter().position(|entry|
                 entry.data.function==node.data.function && entry.data.path==path)
                 .ok_or_else(||invalid("GNU expression missing native statement block"))?;
-            return lower_gnu_block(graph,crate::graph::StatementId(stmt),params,locals,il);
+            return lower_gnu_block(graph,crate::graph::StatementId(stmt),params,locals,il, catalog);
         },
         1 => {
             if let Some(value)=node.data.constant_integer {
@@ -2031,7 +2040,7 @@ fn lower_c_expression(
             } else if let Some(address)=il.constant_routine_addresses.iter().find(|a|
                 a.function==node.data.function &&
                 a.statement_path==node.data.statement_path && a.path==node.data.path) {
-                let decl=direct_call_decl(il,address.symbol)?;
+                let decl=cached_call_decl(catalog,address.symbol)?;
                 let actual=callable_type_abi(il,expression_type_id(graph,id)?)?;
                 if actual!=decl.abi {
                     return Err(invalid("folded function-pointer constant type mismatch"));
@@ -2091,7 +2100,7 @@ fn lower_c_expression(
             if matches!(op,43|44|45|46|52|53) {
                 match op {
                     52 | 53 if operands.len()==2 => {
-                        let address=lower_address(graph,id,params,locals,il)?;
+                        let address=lower_address(graph,id,params,locals,il, catalog)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
                         if let Some(layout)=selected_bitfield(graph,id,il)? {
                             Expr::LoadBitField(layout,Box::new(address))
@@ -2112,10 +2121,10 @@ fn lower_c_expression(
                         if selected_bitfield(graph,operands[0],il)?.is_some() {
                             return Err(invalid("C bitfield address-of is forbidden"));
                         }
-                        lower_address(graph,operands[0],params,locals,il)?
+                        lower_address(graph,operands[0],params,locals,il, catalog)?
                     },
                     44 if operands.len()==1 => {
-                        let address=lower_address(graph,id,params,locals,il)?;
+                        let address=lower_address(graph,id,params,locals,il, catalog)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
@@ -2129,7 +2138,7 @@ fn lower_c_expression(
                         }
                     }
                     45 if operands.len()==2 => {
-                        let address=lower_address(graph,id,params,locals,il)?;
+                        let address=lower_address(graph,id,params,locals,il, catalog)?;
                         let canonical=canonical_abi_type(il,expression_type_id(graph,id)?)?;
                         if il.types.iter().any(|d|d.id==canonical && semantic(4,d.kind)==6) {
                             address
@@ -2143,7 +2152,7 @@ fn lower_c_expression(
                         }
                     }
                     46 if operands.len()==1 => lower_address(
-                        graph,operands[0],params,locals,il)?,
+                        graph,operands[0],params,locals,il, catalog)?,
                     _ => return Err(invalid("invalid pointer expression arity")),
                 }
             } else if matches!(op,47|48|49|50|51) {
@@ -2157,8 +2166,8 @@ fn lower_c_expression(
                         checked_ptrdiff_result(output)?;
                         let stride=pointer_difference_stride(
                             il,expression_type_id(graph,a)?,expression_type_id(graph,b)?)?;
-                        let left=lower_c_expression(graph,a,params,locals,il)?;
-                        let right=lower_c_expression(graph,b,params,locals,il)?;
+                        let left=lower_c_expression(graph,a,params,locals,il, catalog)?;
+                        let right=lower_c_expression(graph,b,params,locals,il, catalog)?;
                         Expr::IntegerBinary(CIntBinaryOp::SignedDivide,
                             Box::new(Expr::Sub(Box::new(left),Box::new(right))),
                             Box::new(Expr::Constant(stride as i64)))
@@ -2167,8 +2176,8 @@ fn lower_c_expression(
                             else if op==47 && rhs_ptr {(b,a)}
                             else {return Err(invalid("pointer arithmetic pointer missing"));};
                         let stride=pointer_stride(il,expression_type_id(graph,ptr)?)?;
-                        let base=lower_c_expression(graph,ptr,params,locals,il)?;
-                        let index=lower_c_expression(graph,idx,params,locals,il)?;
+                        let base=lower_c_expression(graph,ptr,params,locals,il, catalog)?;
+                        let index=lower_c_expression(graph,idx,params,locals,il, catalog)?;
                         let index=if op==48 {Expr::Neg(Box::new(index))} else {index};
                         Expr::PointerOffset(Box::new(base),Box::new(index),stride)
                     }
@@ -2182,7 +2191,7 @@ fn lower_c_expression(
                         ScalarPlace::Ssa(i)=>Expr::Local(i),
                         ScalarPlace::Memory(s)=>Expr::Global(s),
                     };
-                    let idx=lower_c_expression(graph,b,params,locals,il)?;
+                    let idx=lower_c_expression(graph,b,params,locals,il, catalog)?;
                     let idx=if op==51 {Expr::Neg(Box::new(idx))} else {idx};
                     let next=Box::new(Expr::PointerOffset(Box::new(base),Box::new(idx),stride));
                     match place {
@@ -2201,7 +2210,7 @@ fn lower_c_expression(
                         None => {
                             let ty=integer_expression_type(il,graph,operands[0])?;
                             // The expression must designate addressable storage.
-                            let _=lower_address(graph,operands[0],params,locals,il)?;
+                            let _=lower_address(graph,operands[0],params,locals,il, catalog)?;
                             (None,ty)
                         }
                     };
@@ -2209,7 +2218,7 @@ fn lower_c_expression(
                         pointer_stride(il,expression_type_id(graph,operands[0])?)? as i64
                     } else {1};
                     let address=if place.is_none() {
-                        Some(Box::new(lower_address(graph,operands[0],params,locals,il)?))
+                        Some(Box::new(lower_address(graph,operands[0],params,locals,il, catalog)?))
                     } else {None};
                     if matches!(op,29|30) {
                         let delta=if op==29 {stride} else {-stride};
@@ -2254,7 +2263,7 @@ fn lower_c_expression(
                         }
                     }
                 } else {
-                let a = lower_c_expression(graph, operands[0], params, locals, il)?;
+                let a = lower_c_expression(graph, operands[0], params, locals, il, catalog)?;
                 match op {
                     4 => Expr::Neg(Box::new(a)),
                     11 | 12 | 16 => a,
@@ -2271,9 +2280,9 @@ fn lower_c_expression(
                     return Err(invalid("conditional expression needs three operands"));
                 }
                 Expr::Conditional(
-                    Box::new(lower_c_expression(graph, operands[0], params, locals, il)?),
-                    Box::new(lower_c_expression(graph, operands[1], params, locals, il)?),
-                    Box::new(lower_c_expression(graph, operands[2], params, locals, il)?),
+                    Box::new(lower_c_expression(graph, operands[0], params, locals, il, catalog)?),
+                    Box::new(lower_c_expression(graph, operands[1], params, locals, il, catalog)?),
+                    Box::new(lower_c_expression(graph, operands[2], params, locals, il, catalog)?),
                 )
             } else if op == 18 || (31..=40).contains(&op) {
                 if operands.len() != 2 {
@@ -2286,13 +2295,13 @@ fn lower_c_expression(
                         let ty=integer_expression_type(il,graph,operands[0])?;
                         // Require a structurally valid dereference/subscript
                         // rather than turning arbitrary expressions into lvalues.
-                        let _=lower_address(graph,operands[0],params,locals,il)?;
+                        let _=lower_address(graph,operands[0],params,locals,il, catalog)?;
                         (None,ty)
                     }
                 };
-                let rhs = Box::new(lower_c_expression(graph,operands[1],params,locals,il)?);
+                let rhs = Box::new(lower_c_expression(graph,operands[1],params,locals,il, catalog)?);
                 let address=if place.is_none() {
-                    Some(Box::new(lower_address(graph,operands[0],params,locals,il)?))
+                    Some(Box::new(lower_address(graph,operands[0],params,locals,il, catalog)?))
                 } else {None};
                 if op==18 {
                     match place {
@@ -2344,8 +2353,8 @@ fn lower_c_expression(
                 if operands.len() != 2 {
                     return Err(invalid("logical/comma expression needs two operands"));
                 }
-                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il)?);
-                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il)?);
+                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il, catalog)?);
+                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il, catalog)?);
                 match op {
                     23 => Expr::Conditional(a,
                         Box::new(Expr::Compare(CompareOp::NotEqual, b,
@@ -2381,8 +2390,8 @@ fn lower_c_expression(
                         (operands[1],operands[0],expression_type_id(graph,operands[1])?)
                     } else { return Err(invalid("integer minus pointer unsupported")); };
                     let stride=pointer_stride(il,ptr_ty)?;
-                    let base=lower_c_expression(graph,ptr,params,locals,il)?;
-                    let offset=lower_c_expression(graph,offset,params,locals,il)?;
+                    let base=lower_c_expression(graph,ptr,params,locals,il, catalog)?;
+                    let offset=lower_c_expression(graph,offset,params,locals,il, catalog)?;
                     let offset=if op==2 {Expr::Neg(Box::new(offset))} else {offset};
                     return Ok(wrap(Expr::PointerOffset(Box::new(base),
                         Box::new(offset),stride)));
@@ -2408,8 +2417,8 @@ fn lower_c_expression(
                             9=>CompareOp::Greater,10=>CompareOp::GreaterEqual,
                             _=>unreachable!(),
                         };
-                        let a=lower_c_expression(graph,operands[0],params,locals,il)?;
-                        let b=lower_c_expression(graph,operands[1],params,locals,il)?;
+                        let a=lower_c_expression(graph,operands[0],params,locals,il, catalog)?;
+                        let b=lower_c_expression(graph,operands[1],params,locals,il, catalog)?;
                         return Ok(wrap(Expr::UnsignedCompare(cmp,Box::new(a),Box::new(b))));
                     }
                     return Err(invalid("unsupported pointer operation"));
@@ -2427,8 +2436,8 @@ fn lower_c_expression(
                     && output != lhs_ty {
                     return Err(invalid("arithmetic result/operand types disagree"));
                 }
-                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il)?);
-                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il)?);
+                let a = Box::new(lower_c_expression(graph, operands[0], params, locals, il, catalog)?);
+                let b = Box::new(lower_c_expression(graph, operands[1], params, locals, il, catalog)?);
                 match op {
                     1 => Expr::Add(a,b),
                     2 => Expr::Sub(a,b),
@@ -2504,7 +2513,7 @@ fn lower_qualified_initializers(
     }
     Ok(())
 }
-fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
+fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Result<Vec<Routine>, CodegenError> {
     let graph = Graph::from_il(il).map_err(|e| invalid(format!("EDG graph: {e:?}")))?;
     let mut out = Vec::new();
     for entity in &il.entities {
@@ -2542,7 +2551,7 @@ fn compile_il(il: &Il) -> Result<Vec<Routine>, CodegenError> {
             storage_alignment(il,arg.ty).map(|a|a.trailing_zeros() as u8))
             .collect::<Result<Vec<_>,_>>()?);
         local_types.extend(abi.parameters.iter().copied());
-        let mut body = lower(&graph, roots[0], &ids, &locals, il)?;
+        let mut body = lower(&graph, roots[0], &ids, &locals, il, catalog)?;
         let labels=source_labels(&body)?;
         let initialized: HashSet<usize> =
             (locals.len()..(locals.len()+ids.len())).collect();
@@ -3966,9 +3975,13 @@ fn emit_routines_with_globals(
     module.finish().emit().map_err(|e| CodegenError::Backend(e.to_string()))
 }
 pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
-    let routines = compile_il(il)?;
-    let globals = compile_globals(il)?;
+    // Use one validated declaration/ABI per direct-call target across
+    // every routine in this immutable native IL snapshot.
     let calls = compile_calls(il)?;
+    let catalog: HashMap<crate::SymbolId,CallDeclaration> = calls.iter()
+        .map(|decl| (decl.symbol, decl.clone())).collect();
+    let routines = compile_il(il,&catalog)?;
+    let globals = compile_globals(il)?;
     emit_routines_with_globals(&routines,&globals,&calls)
 }
 #[cfg(test)]
