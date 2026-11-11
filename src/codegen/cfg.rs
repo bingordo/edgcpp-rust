@@ -3614,6 +3614,20 @@ fn valid_aggregate_relocation_range(
     })
 }
 
+/// Unlike aggregate and IEEE global initialization, scalar integer
+/// initialization previously took the first matching native event. Multiple
+/// events for one symbol are ambiguous IL, not a source-order overwrite.
+fn checked_global_integer_initializer(
+    il: &Il, symbol: crate::SymbolId,
+) -> Result<Option<i64>, CodegenError> {
+    let mut matches=il.initializer_integers.iter().filter(|v|v.symbol==symbol);
+    let first=matches.next().map(|v|v.value);
+    if matches.next().is_some() {
+        return Err(invalid("duplicate native integer global initializer"));
+    }
+    Ok(first)
+}
+
 /// Resolve referenced globals, plus externally visible C definitions.
 /// Omit unsupported unrelated C++ types until full C++ global lowering exists.
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
@@ -3699,10 +3713,10 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
                 }
                 Some(image.bytes.clone())
             } else {
-                let entry = il.initializer_integers.iter().find(|v| v.symbol == id)
+                let value=checked_global_integer_initializer(il,id)?
                     .ok_or_else(|| invalid(format!(
                         "global {name} has unsupported non-integer initializer")))?;
-                let bytes = entry.value.to_le_bytes();
+                let bytes = value.to_le_bytes();
                 Some(bytes[..(ty.bits/8) as usize].to_vec())
             }
         } else { None };
@@ -4808,5 +4822,26 @@ mod audit_compound_narrow_integer_tests {
         assert!(run.status.success(),"compound GCC differential: {}",
             String::from_utf8_lossy(&run.stderr));
         let _=std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod audit_unique_scalar_global_initializer_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_native_initializer_must_have_unambiguous_identity() {
+        let id=crate::SymbolId(71);
+        let mut il=Il::default();
+        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),None);
+        il.initializer_integers.push(crate::InitializerInteger{symbol:id,value:-19});
+        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),Some(-19));
+        il.initializer_integers.push(crate::InitializerInteger{
+            symbol:crate::SymbolId(72),value:33,
+        });
+        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),Some(-19));
+        il.initializer_integers.push(crate::InitializerInteger{symbol:id,value:91});
+        assert!(checked_global_integer_initializer(&il,id).is_err());
+        assert_eq!(checked_global_integer_initializer(&il,crate::SymbolId(72)).unwrap(),Some(33));
     }
 }
