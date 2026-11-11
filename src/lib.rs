@@ -31,9 +31,15 @@ struct WireField {
 // The tags and record arities are generated from schema/wire_schema.json.
 include!("wire_schema_generated.rs");
 type Callback = unsafe extern "C" fn(*mut c_void, u32, *const WireField, usize, u32);
+// A malformed native text length must not produce an enormous or
+// out-of-bounds slice before UTF-8 validation. This is a defensive
+// implementation cap, not a C/C++ language token-length restriction.
+const MAX_WIRE_TEXT_BYTES: usize = 1024 * 1024;
+
 impl WireField {
     fn string(self) -> Option<String> {
-        if self.tag != wire_tags::TEXT || self.data.is_null() { return None; }
+        if self.tag != wire_tags::TEXT || self.data.is_null() ||
+            self.length > MAX_WIRE_TEXT_BYTES { return None; }
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(self.data, self.length) })
             .ok().map(str::to_owned)
     }
@@ -1065,7 +1071,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         std::slice::from_raw_parts(data, length)
     };
     if fields.iter().any(|f|
-        f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
+        f.tag > wire_tags::MAX ||
+        (f.tag == wire_tags::TEXT &&
+            (f.data.is_null() || f.length > MAX_WIRE_TEXT_BYTES))) { return; }
     if let Some(masks) = expected_wire_field_tag_masks(kind) {
         if fields.len() != masks.len() || fields.iter().zip(masks).any(|(field, mask)| {
             (mask & (1u8 << field.tag)) == 0
@@ -2910,5 +2918,56 @@ mod audit_complete_wire_field_tags_tests {
         }
         assert!(!state.malformed);
         assert_eq!(state.il.statements.len(),2);
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_text_length_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_native_text_length_is_rejected_before_slice_creation() {
+        let one = b"x";
+        let bad = WireField {
+            data:one.as_ptr(),
+            length:usize::MAX,
+            value:0,
+            tag:wire_tags::TEXT,
+        };
+        // The pointer designates only one byte: dereferencing the claimed
+        // length would be invalid, even for UTF-8 validation.
+        assert!(bad.string().is_none());
+        let bad = WireField {
+            length:MAX_WIRE_TEXT_BYTES + 1, ..bad
+        };
+        assert!(bad.string().is_none());
+    }
+
+    #[test]
+    fn text_length_limit_is_enforced_for_native_callbacks() {
+        let one=b"x";
+        let field=WireField {
+            data:one.as_ptr(),
+            length:MAX_WIRE_TEXT_BYTES + 1,
+            value:0,tag:wire_tags::TEXT,
+        };
+        let mut collector=Collector::default();
+        unsafe {
+            collect((&mut collector as *mut Collector).cast(),
+                    4,&field,1,0);
+        }
+        assert!(collector.malformed);
+        assert!(!collector.panicked);
+        assert!(collector.il.entities.is_empty());
+
+        let ordinary=WireField {length:1,..field};
+        let mut valid=Collector::default();
+        unsafe {
+            collect((&mut valid as *mut Collector).cast(),
+                    4,&ordinary,1,0);
+        }
+        assert!(!valid.malformed);
+        assert!(matches!(valid.il.entities.as_slice(),
+            [Entity::Namespace { name }] if name=="x"));
     }
 }
