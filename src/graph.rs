@@ -1388,8 +1388,21 @@ impl Graph {
             }
             graph.statement_switch_cases.push(case.clone());
         }
+        // C/C++ labels are function-scoped, even when every native label
+        // identity is unique across the full translation unit. A corrupted
+        // snapshot must not resolve a goto to a different function's label.
+        let mut label_function: HashMap<SymbolId, String> = HashMap::new();
         for label in &il.statement_labels {
             let key = (label.function.clone(), label.statement_path.clone());
+            if let Some(owner) = label_function.get(&label.label) {
+                if owner != &label.function {
+                    return Err(GraphError::InvalidStatementLabel {
+                        function: label.function.clone(), path: label.statement_path.clone(),
+                    });
+                }
+            } else {
+                label_function.insert(label.label, label.function.clone());
+            }
             let Some(&statement) = smap.get(&key) else {
                 return Err(GraphError::InvalidStatementLabel {
                     function: label.function.clone(), path: label.statement_path.clone(),
@@ -4591,6 +4604,37 @@ mod tests {
         il.symbols[0].kind = 1;
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::InvalidStatementLabel { .. })));
+    }
+
+    #[test]
+    fn audit_rejects_cross_function_goto_label_identity() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(4), kind: 4, name: "same_name".into(),
+        });
+        il.symbols.push(Symbol {
+            id: SymbolId(5), kind: 4, name: "same_name".into(),
+        });
+        for function in ["f", "g"] {
+            il.statements.push(Statement {
+                function: function.into(), path: "0".into(),
+                parent: None, kind: 7,
+            });
+            il.statement_labels.push(StatementLabel {
+                function: function.into(), statement_path: "0".into(),
+                label: SymbolId(4), definition: function == "g",
+            });
+        }
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidStatementLabel {
+                function: "g".into(), path: "0".into(),
+            });
+        // Equal source spellings are legal across functions, but only
+        // when their native label symbols have distinct identities.
+        il.statement_labels[1].label = SymbolId(5);
+        let graph = Graph::from_il(&il).expect("separate function-local labels");
+        assert_eq!(graph.label_target(SymbolId(5)), Some(StatementId(1)));
+        assert_eq!(graph.goto_target(StatementId(0)), None);
     }
 
     #[test]
