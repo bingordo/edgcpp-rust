@@ -249,11 +249,11 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
     // EDG routines, variables and fields all place source_corresp first.
     const auto *correspondence =
         reinterpret_cast<const a_source_correspondence *>(ptr);
-    // C++0: emit EDG's *actual* stored symbol spelling separately from
-    // any demangled display/source key. A C++ overload may have the same
+    // C++5: emit EDG's *actual* stored routine OR global-data spelling separately from
+    // any demangled display/source key. A C++ overload or global data may have the same
     // display base as other routines; only the source correspondence
     // carries the name EDG has already mangled. Do not re-mangle it here.
-    if (kind == 1 && correspondence->name != nullptr &&
+    if ((kind == 1 || kind == 2) && correspondence->name != nullptr &&
         correspondence->name[0] != '\0') {
       unsigned already_mangled = 0;
 #if NEED_NAME_MANGLING

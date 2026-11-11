@@ -1005,7 +1005,9 @@ struct WireSeen {
     cxx_lifetimes: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
-    routine_link_names: HashSet<SymbolId>,
+    /// Only source-correspondence routines and variables can carry raw linker names.
+    linkable_symbols: HashSet<SymbolId>,
+    source_link_names: HashSet<SymbolId>,
     base_subobject_offsets: HashSet<(TypeId,u32)>,
 }
 #[derive(Default)]
@@ -1801,6 +1803,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if id==0 || !(1..=4).contains(&kind) ||
                 !seen.symbols.insert(SymbolId(id)) {return;}
             if kind==1 {seen.routine_symbols.insert(SymbolId(id));}
+            if matches!(kind,1|2) {seen.linkable_symbols.insert(SymbolId(id));}
             output.symbols.push(Symbol { id: SymbolId(id), kind, name });
         }
         61 => {
@@ -1808,8 +1811,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 (n(0),t(1),n(2)) else {return;};
             if symbol==0 || link_name.is_empty() || link_name.len()>4096 ||
                 link_name.contains('\0') || mangled>1 ||
-                !seen.routine_symbols.contains(&SymbolId(symbol)) ||
-                !seen.routine_link_names.insert(SymbolId(symbol)) {
+                !seen.linkable_symbols.contains(&SymbolId(symbol)) ||
+                !seen.source_link_names.insert(SymbolId(symbol)) {
                 return;
             }
             output.symbol_link_names.push(SymbolLinkName {
@@ -2952,6 +2955,28 @@ mod audit_wire_identity_index_tests {
         unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
     }
     #[test]
+    fn accepts_only_source_owned_global_data_link_names() {
+        let mut state=Collector::default();
+        let fields=[number(17),number(2),text(b"std::cout")];
+        unsafe {collect((&mut state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+        let linked=[number(17),text(b"_ZSt4cout"),number(1)];
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbol_link_names,vec![SymbolLinkName{
+            symbol:SymbolId(17),link_name:"_ZSt4cout".into(),edg_mangled:true
+        }]);
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(state.malformed,"duplicate global data linker names are ambiguous");
+
+        let mut state=Collector::default();
+        let fields=[number(18),number(3),text(b"member")];
+        unsafe {collect((&mut state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+        let linked=[number(18),text(b"_ZN6memberE"),number(1)];
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(state.malformed,"record fields cannot masquerade as linker data");
+    }
+
+    #[test]
     fn unknown_or_duplicate_routine_link_names_fail_closed() {
         let mut state=Collector::default();
         send_link_name(&mut state,1);
@@ -2998,7 +3023,7 @@ mod audit_wire_identity_index_tests {
         assert_eq!(state.seen.cxx_records.len(),8192);
         assert_eq!(state.seen.cxx_lifetimes.len(),8192);
         assert_eq!(state.seen.routine_symbols.len(),8192);
-        assert_eq!(state.seen.routine_link_names.len(),8192);
+        assert_eq!(state.seen.source_link_names.len(),8192);
         assert_eq!(state.il.types[8191].id,TypeId(8192));
         // A duplicate after a large valid stream must still fail closed.
         send(&mut state,25,[8192,1]);
