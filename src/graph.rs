@@ -120,6 +120,7 @@ pub enum GraphError {
     DuplicateStaticLocalOwner(SymbolId),
     InvalidSymbolType(SymbolId),
     MissingSymbol(SymbolId),
+    InvalidInitializerSymbol(SymbolId),
     DuplicateVariableInitializer(SymbolId),
     DuplicateInitializerInteger(SymbolId),
     DuplicateDynamicInitializer(SymbolId),
@@ -1103,6 +1104,9 @@ impl Graph {
             if !symbol_index.contains_key(&init.symbol) {
                 return Err(GraphError::MissingSymbol(init.symbol));
             }
+            if !has_kind(init.symbol, 2) {
+                return Err(GraphError::InvalidInitializerSymbol(init.symbol));
+            }
             if !initialized.insert(init.symbol) {
                 return Err(GraphError::DuplicateVariableInitializer(init.symbol));
             }
@@ -1113,6 +1117,9 @@ impl Graph {
             if !symbol_index.contains_key(&val.symbol) {
                 return Err(GraphError::MissingSymbol(val.symbol));
             }
+            if !has_kind(val.symbol, 2) {
+                return Err(GraphError::InvalidInitializerSymbol(val.symbol));
+            }
             if !integer_inits.insert(val.symbol) {
                 return Err(GraphError::DuplicateInitializerInteger(val.symbol));
             }
@@ -1121,6 +1128,9 @@ impl Graph {
         let mut dynamic_inits = std::collections::HashSet::new();
         for init in &il.dynamic_initializers {
             if !symbol_index.contains_key(&init.symbol) { return Err(GraphError::MissingSymbol(init.symbol)); }
+            if !has_kind(init.symbol, 2) {
+                return Err(GraphError::InvalidInitializerSymbol(init.symbol));
+            }
             if !dynamic_inits.insert(init.symbol) {
                 return Err(GraphError::DuplicateDynamicInitializer(init.symbol));
             }
@@ -1130,6 +1140,9 @@ impl Graph {
         for node in &il.initializer_expressions {
             if !symbol_index.contains_key(&node.owner) {
                 return Err(GraphError::MissingSymbol(node.owner));
+            }
+            if !has_kind(node.owner, 2) {
+                return Err(GraphError::InvalidInitializerSymbol(node.owner));
             }
             if let Some(id) = node.symbol_id {
                 if !symbol_index.contains_key(&id) { return Err(GraphError::MissingSymbol(id)); }
@@ -5531,6 +5544,45 @@ mod tests {
         il.symbols.push(Symbol { id: SymbolId(7), kind: 2, name: "x".into() });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.symbol(SymbolId(7)).unwrap().name, "x");
+    }
+
+    #[test]
+    fn rejects_wrong_symbol_kinds_for_native_initializer_owners() {
+        // Only a variable (symbol kind 2) may own EDG initializer
+        // metadata. Existing routine and field symbols are not valid.
+        for wrong_kind in [1, 3, 4] {
+            let mut il = Il::default();
+            il.symbols.push(Symbol {
+                id: SymbolId(7), kind: wrong_kind, name: "not_a_variable".into(),
+            });
+            il.variable_initializers.push(VariableInitializer {
+                symbol: SymbolId(7), kind: 0,
+                explicit: true, uninitialized: false,
+            });
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidInitializerSymbol(SymbolId(7)));
+            il.variable_initializers.clear();
+            il.initializer_integers.push(InitializerInteger {
+                symbol: SymbolId(7), value: 1,
+            });
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidInitializerSymbol(SymbolId(7)));
+            il.initializer_integers.clear();
+            il.dynamic_initializers.push(DynamicInitializer {
+                symbol: SymbolId(7), kind: 3,
+                expression_kind: None, operator: None,
+            });
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidInitializerSymbol(SymbolId(7)));
+            il.dynamic_initializers.clear();
+            il.initializer_expressions.push(InitializerExpression {
+                owner: SymbolId(7), path: "0".into(),
+                parent: None, kind: 1, operator: None,
+                type_id: None, symbol_id: None,
+            });
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidInitializerSymbol(SymbolId(7)));
+        }
     }
 
     #[test]
