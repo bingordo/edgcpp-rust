@@ -24,6 +24,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      symbol.map(|s|s.name.as_str()));
         }
     }
+    println!("scope dynamic init entries={}",
+             result.il.scope_dynamic_initializers.len());
+    for init in &result.il.scope_dynamic_initializers {
+        let variable=result.il.symbols.iter().find(|s|Some(s.id)==init.variable);
+        let destructor=result.il.symbols.iter().find(|s|Some(s.id)==init.destructor);
+        println!("scope dynamic init scope={:?} position={} variable={:?} destructor={:?} kind={}",
+                 init.scope,init.position,variable.map(|s|s.name.as_str()),
+                 destructor.map(|s|s.name.as_str()),init.kind);
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>
