@@ -2345,6 +2345,13 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     // carrying an identity exported in the record-field table.
     if (value == static_cast<unsigned>(eok_dot_field)) return 52;
     if (value == static_cast<unsigned>(eok_points_to_field)) return 53;
+    // Record 18's first_argument must agree with the actual native call
+    // operator, not just with how many operands were copied into the graph.
+    if (value == static_cast<unsigned>(eok_call)) return 54;
+    if (value == static_cast<unsigned>(eok_dot_member_call) ||
+        value == static_cast<unsigned>(eok_points_to_member_call) ||
+        value == static_cast<unsigned>(eok_dot_pm_call) ||
+        value == static_cast<unsigned>(eok_points_to_pm_call)) return 55;
   } else if (category == 4) {
     if (value == static_cast<unsigned>(tk_void)) return 4;
     if (value == static_cast<unsigned>(tk_integer)) return 1;
