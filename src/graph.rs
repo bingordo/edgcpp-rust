@@ -84,6 +84,7 @@ pub enum GraphError {
     InvalidTypeParameterPosition(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    InvalidRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     DuplicateBaseClass { derived: TypeId, position: u32 },
     InvalidBaseClassAccess { derived: TypeId, position: u32 },
     DuplicateBaseClassAccess { derived: TypeId, position: u32 },
@@ -915,6 +916,16 @@ impl Graph {
         }
         let has_kind = |id: SymbolId, kind: u32| symbol_index.get(&id)
             .is_some_and(|&(actual, _)| actual == kind);
+        // Native record field metadata carries the exact field symbol
+        // emitted alongside the record; it cannot reference an unrelated
+        // variable, a zero ID or an absent symbol.
+        for field in &graph.record_fields {
+            if !has_kind(field.symbol, 3) {
+                return Err(GraphError::InvalidRecordFieldSymbol {
+                    owner: field.owner, symbol: field.symbol,
+                });
+            }
+        }
         for identity in &il.routine_identities {
             if !has_kind(identity.routine, 1)
                 || identity.function.is_empty() {
@@ -5349,10 +5360,25 @@ mod tests {
         let mut il = Il::default();
         il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
         il.types.push(TypeDef { id: TypeId(2), kind: 0, related_role: None, related: None });
-        il.record_fields.push(RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into(), byte_offset: 4, bit_offset: 0, bit_width: 0 });
-        il.record_fields.push(RecordField { symbol: SymbolId(0), owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
+        il.symbols.extend([
+            Symbol { id: SymbolId(10), kind: 3, name: "a".into() },
+            Symbol { id: SymbolId(11), kind: 3, name: "b".into() },
+        ]);
+        il.record_fields.push(RecordField { symbol: SymbolId(11), owner: TypeId(1), position: 1, ty: TypeId(2), name: "b".into(), byte_offset: 4, bit_offset: 0, bit_width: 0 });
+        il.record_fields.push(RecordField { symbol: SymbolId(10), owner: TypeId(1), position: 0, ty: TypeId(2), name: "a".into(), byte_offset: 0, bit_offset: 0, bit_width: 0 });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.fields(TypeId(1)).map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+
+        il.record_fields[0].symbol = SymbolId(0);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(0) });
+        il.record_fields[0].symbol = SymbolId(99);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(99) });
+        il.record_fields[0].symbol = SymbolId(11);
+        il.symbols[1].kind = 2;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(11) });
     }
 
     #[test]
