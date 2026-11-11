@@ -515,6 +515,8 @@ pub struct RoutineAttributes {
     pub defined: bool,
     pub explicit_constructor: bool,
     pub has_this_parameter: bool,
+    /// EDG-native compiler-generated function classification; never infer from spelling.
+    pub compiler_generated: bool,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -1682,7 +1684,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         22 => {
             let (Some(routine), Some(special_kind), Some(flags)) =
                 (n(0), n(1), n(2)) else { return; };
-            if flags & !1023 != 0 { return; }
+            if flags & !2047 != 0 { return; }
             output.routine_attributes.push(RoutineAttributes {
                 routine: SymbolId(routine), special_kind,
                 is_virtual: flags & 1 != 0, pure_virtual: flags & 2 != 0,
@@ -1692,6 +1694,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 defined: flags & 128 != 0,
                 explicit_constructor: flags & 256 != 0,
                 has_this_parameter: flags & 512 != 0,
+                compiler_generated: flags & 1024 != 0,
             });
         }
         21 => {
