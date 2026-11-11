@@ -84,6 +84,8 @@ pub enum GraphError {
     InvalidTypeParameterPosition(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
+    InvalidRecordFieldBitOffset { owner: TypeId, position: u32 },
     InvalidRecordFieldPosition(TypeId),
     InvalidRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     DuplicateBaseClass { derived: TypeId, position: u32 },
@@ -796,11 +798,24 @@ impl Graph {
             graph.array_bounds.push(bound.clone());
         }
         let mut field_positions = std::collections::HashSet::new();
+        let mut field_symbol_positions = std::collections::HashSet::new();
         for field in &il.record_fields {
             for id in [field.owner, field.ty] {
                 if !type_map.contains_key(&id) {
                     return Err(GraphError::MissingType(id));
                 }
+            }
+            // EDG's offset_bit_remainder is the sub-byte remainder of
+            // an 8-bit byte offset; only 0..7 are representable.
+            if field.bit_offset >= 8 {
+                return Err(GraphError::InvalidRecordFieldBitOffset {
+                    owner: field.owner, position: field.position,
+                });
+            }
+            if !field_symbol_positions.insert((field.owner, field.symbol)) {
+                return Err(GraphError::DuplicateRecordFieldSymbol {
+                    owner: field.owner, symbol: field.symbol,
+                });
             }
             if !field_positions.insert((field.owner, field.position)) {
                 return Err(GraphError::DuplicateRecordField {
@@ -5470,6 +5485,18 @@ mod tests {
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(99) });
         il.record_fields[0].symbol = SymbolId(11);
+        il.record_fields[1].symbol = SymbolId(11);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::DuplicateRecordFieldSymbol {
+                owner: TypeId(1), symbol: SymbolId(11),
+            });
+        il.record_fields[1].symbol = SymbolId(10);
+        il.record_fields[0].bit_offset = 8;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldBitOffset {
+                owner: TypeId(1), position: 1,
+            });
+        il.record_fields[0].bit_offset = 0;
         il.symbols[1].kind = 2;
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(11) });
