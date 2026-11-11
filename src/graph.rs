@@ -4981,6 +4981,80 @@ mod tests {
             Err(GraphError::InvalidCallOperands { .. })));
     }
 
+
+    fn call_snapshot(member:bool) -> Il {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:1,
+        });
+        let (kind,op)=native_call_kinds(member);
+        for (path,parent) in [
+            ("0",None),("0.0",Some("0")),("0.1",Some("0")),
+        ] {
+            il.expressions.push(Expression {
+                function:"f".into(),statement_path:"0".into(),
+                path:path.into(),parent:parent.map(str::to_owned),
+                kind:if path=="0" {kind} else {1},
+                operator:if path=="0" {Some(op)} else {None},
+                type_kind:None,reference:None,type_size:None,
+                type_alignment:None,constant_kind:None,
+                constant_integer:None,related_type_role:None,
+                related_type_kind:None,type_id:None,symbol_id:None,
+            });
+        }
+        il.calls.push(CallSite {
+            function:"f".into(),statement_path:"0".into(),
+            path:"0".into(),first_argument:if member {2} else {1},
+        });
+        il
+    }
+
+    #[test]
+    fn rejects_call_expression_when_call_event_is_missing() {
+        for member in [false,true] {
+            let mut il=call_snapshot(member);
+            il.calls.clear();
+            assert!(matches!(Graph::from_il(&il),
+                Err(GraphError::MissingCallMetadata {..})));
+        }
+    }
+
+    #[test]
+    fn call_record_must_match_native_operator_and_expression_kind() {
+        let mut il=call_snapshot(false);
+        il.calls[0].first_argument=2; // two operands are present
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidCallOperands {..})));
+        let mut il=call_snapshot(true);
+        il.calls[0].first_argument=1;
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidCallOperands {..})));
+        let mut il=call_snapshot(false);
+        // A non-call operation with sufficient operands cannot borrow a
+        // call event and silently change callee / argument interpretation.
+        let add=(0..4096).find(|&op|
+            unsafe {edgcpp_codegen_kind(3,op)}==1
+        ).unwrap();
+        il.expressions[0].operator=Some(add);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidCallOperands {..})));
+        let mut il=call_snapshot(false);
+        il.expressions[0].kind=1; // a constant is not an operation
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidCallOperands {..})));
+    }
+
+    #[test]
+    fn native_call_arguments_do_not_require_an_explicit_argument() {
+        let mut il=call_snapshot(false);
+        il.expressions.pop(); // remove 0.1, retaining the callee at 0.0
+        let graph=Graph::from_il(&il).expect("valid zero-argument call");
+        let call=&graph.calls[0];
+        assert_eq!(graph.call_arguments(call),Some(&[][..]));
+        assert_eq!(graph.call_callee(call),Some(ExpressionId(1)));
+        assert_eq!(graph.call_object(call),None);
+    }
+
     #[test]
     fn rejects_non_descendant_parents() {
         let mut il = Il::default();
