@@ -199,7 +199,9 @@ pub struct Graph {
     constructor_expr_children: HashMap<(SymbolId, u32, String), Vec<usize>>,
     initializer_index: HashMap<(SymbolId, String), usize>,
     initializer_children: HashMap<(SymbolId, String), Vec<usize>>,
-    call_expression_ids: Vec<ExpressionId>,
+    // Resolve a native call's precise owner expression without a linear
+    // scan of all call-site records. Keep borrowed/equal CallSite queries.
+    call_expression_by_site: HashMap<CallSite, ExpressionId>,
     // Dense ExpressionId -> call record index. Avoid O(expressions * calls)
     // string-path scans during source expression lowering.
     call_index_by_expression: Vec<Option<usize>>,
@@ -1606,7 +1608,7 @@ impl Graph {
             }
             let expression = emap[&key];
             graph.call_index_by_expression[expression.0] = Some(graph.calls.len());
-            graph.call_expression_ids.push(expression);
+            graph.call_expression_by_site.insert(call.clone(), expression);
             graph.calls.push(call.clone());
         }
         for idx in 0..graph.statements.len() {
@@ -2662,8 +2664,7 @@ impl Graph {
     ///
     /// Call-site references should come from this graph's `calls` slice.
     pub fn call_expression(&self, call: &CallSite) -> Option<ExpressionId> {
-        self.calls.iter().position(|candidate| candidate == call)
-            .map(|index| self.call_expression_ids[index])
+        self.call_expression_by_site.get(call).copied()
     }
 
     /// Callee expression (operand zero) of an EDG call.
@@ -5258,6 +5259,13 @@ mod tests {
         let root = graph.call_expression(call).unwrap();
         assert_eq!(root, ExpressionId(1));
         assert_eq!(graph.call_at(root), Some(call));
+        // Equal detached records are intentionally accepted; the complete
+        // identity (including semantic operand offset) must still match.
+        let cloned=call.clone();
+        assert_eq!(graph.call_expression(&cloned), Some(root));
+        let mut incompatible=cloned.clone();
+        incompatible.first_argument=2;
+        assert_eq!(graph.call_expression(&incompatible), None);
         assert_eq!(graph.call_callee(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_object(call), None);
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(0)][..]));
