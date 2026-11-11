@@ -1379,12 +1379,19 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         11 => {
             let (Some(owner), Some(flags)) = (n(0), n(1)) else { return; };
+            // Native EDG only emits reference/rvalue-reference bits 0 and 1.
+            // Unknown bits must not be silently ignored.
+            if owner == 0 || flags & !3 != 0 { return; }
             output.type_details.push(TypeDetail {
                 owner: TypeId(owner), is_reference: flags & 1 != 0,
                 is_rvalue_reference: flags & 2 != 0, qualifiers: n(2) });
         }
         12 => {
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
+            // Neither field is a truthy integer: the wire schema specifies
+            // native boolean flags 0/1, and a malformed value changes ABI
+            // prototype/variadic interpretation.
+            if owner == 0 || prototyped > 1 || variadic > 1 { return; }
             output.function_signatures.push(FunctionSignature {
                 owner: TypeId(owner), prototyped: prototyped != 0, variadic: variadic != 0 });
         }
@@ -2587,6 +2594,45 @@ mod audit_wire_preflight_tests {
         callback_rejects(65,std::ptr::null(),0);
         callback_rejects(u32::MAX,std::ptr::null(),0);
         callback_rejects(13,std::ptr::null(),3);
+    }
+
+    #[test]
+    fn rejects_out_of_range_native_type_flags_and_signature_booleans() {
+        let number = |value:u64| WireField {
+            data:std::ptr::null(),length:0,value,
+            tag:wire_tags::UNSIGNED,
+        };
+        let absent = WireField {
+            data:std::ptr::null(),length:0,value:0,
+            tag:wire_tags::ABSENT,
+        };
+        // Valid reference flags and prototype booleans still decode.
+        for flags in 0..=3 {
+            let fields=[number(1),number(flags),absent];
+            let mut state=Collector::default();
+            unsafe {collect((&mut state as *mut Collector).cast(),
+                11,fields.as_ptr(),fields.len(),0);}
+            assert!(!state.malformed);
+            assert_eq!(state.il.type_details.len(),1);
+        }
+        for (prototype,variadic) in [(0,0),(1,0),(1,1)] {
+            let fields=[number(1),number(prototype),number(variadic)];
+            let mut state=Collector::default();
+            unsafe {collect((&mut state as *mut Collector).cast(),
+                12,fields.as_ptr(),fields.len(),0);}
+            assert!(!state.malformed);
+            assert_eq!(state.il.function_signatures.len(),1);
+        }
+        for flags in [4,u64::MAX] {
+            let fields=[number(1),number(flags),absent];
+            callback_rejects(11,fields.as_ptr(),fields.len());
+        }
+        for (owner,prototype,variadic) in [
+            (0,1,0),(1,2,0),(1,1,2),(1,u64::MAX,0),
+        ] {
+            let fields=[number(owner),number(prototype),number(variadic)];
+            callback_rejects(12,fields.as_ptr(),fields.len());
+        }
     }
 
     #[test]
