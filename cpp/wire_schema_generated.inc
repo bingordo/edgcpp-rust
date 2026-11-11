@@ -695,6 +695,16 @@ static bool wire_record_field_tags_valid(
     }
     return true;
   }
+  case 69: {
+    const uint8_t masks[] = {4, 4, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   default: return true;
   }
 }
