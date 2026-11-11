@@ -13,6 +13,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if result.status != 0 {
         return Err(format!("EDG reported compilation failure: {}", result.status).into());
     }
+    if let Some(schedule) = result.il.file_scope_init_schedule {
+        println!("file scope init scheduler available={} complete={} roots={}",
+                 schedule.available,schedule.complete,
+                 result.il.file_scope_init_routines.len());
+        for root in &result.il.file_scope_init_routines {
+            let symbol = result.il.symbols.iter().find(|s|s.id==root.routine);
+            println!("file scope init root position={} id={} name={:?}",
+                     root.position,root.routine.0,
+                     symbol.map(|s|s.name.as_str()));
+        }
+    }
+    println!("scope dynamic init entries={}",
+             result.il.scope_dynamic_initializers.len());
+    for init in &result.il.scope_dynamic_initializers {
+        let variable=result.il.symbols.iter().find(|s|Some(s.id)==init.variable);
+        let destructor=result.il.symbols.iter().find(|s|Some(s.id)==init.destructor);
+        println!("scope dynamic init scope={:?} position={} variable={:?} destructor={:?} kind={}",
+                 init.scope,init.position,variable.map(|s|s.name.as_str()),
+                 destructor.map(|s|s.name.as_str()),init.kind);
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>

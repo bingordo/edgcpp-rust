@@ -1865,6 +1865,40 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   // a seemingly complete snapshot when it is exceeded.
   if (depth > 256) { report_incomplete_snapshot(); return; }
   visited_scopes.insert(scope);
+  // In the standard EDG configuration this scope-owned list, not the
+  // optional separate-routine scheduler, holds the actual initialization
+  // entries. Each file or namespace list is explicitly ordered by EDG.
+  // Keep scopes distinct; this is *not* a cross-namespace startup order.
+  if (scope->kind == sck_file || scope->kind == sck_namespace) {
+    const std::string scope_key =
+        std::to_string(visited_scopes.size()) + ":" + prefix;
+    std::size_t position = 0;
+    for (a_dynamic_init_ptr init = scope->dynamic_inits;
+         init != nullptr && within_native_list_limit(position);
+         init = init->next, ++position) {
+      uint32_t variable_id = 0;
+      uint32_t destructor_id = 0;
+      if (init->variable != nullptr) {
+        a_variable_ptr v = init->variable;
+        const char *raw = source_name(v->source_corresp);
+        variable_id = emit_symbol(v, 2, raw != nullptr ?
+            declaration_name(v->source_corresp, false) :
+            "<EDG-global-init-variable>");
+      }
+      if (init->destructor != nullptr) {
+        a_routine_ptr r = init->destructor;
+        const char *raw = source_name(r->source_corresp);
+        destructor_id = emit_symbol(r, 1, raw != nullptr ?
+            declaration_name(r->source_corresp, true, true) :
+            "<EDG-global-init-destructor>");
+      }
+      emit_record(68, {txt(scope_key),num(static_cast<unsigned>(position)),
+                       variable_id ? num(variable_id) : absent(),
+                       destructor_id ? num(destructor_id) : absent(),
+                       num(static_cast<unsigned>(init->kind))});
+    }
+  }
+
   // Overloaded functions cannot be keyed solely by qualified base name:
   // preserve demangled parameter signatures only when the base is ambiguous.
   std::unordered_map<std::string, unsigned> routine_counts;
@@ -2156,6 +2190,36 @@ void back_end(void)
   emit_record(64, {num(C_mode() ? 0 : 1)});
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
+
+  // EDG explicitly owns this ordered runtime initialization schedule when
+  // the separate-file-scope-init configuration is enabled. Preserve the
+  // actual routine pointers and order, never reconstruct names/calls from
+  // source spelling. These records are diagnostic only: they are not a
+  // complete C++ startup/shutdown or ELF admission certificate.
+#if SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
+  a_routine_list_entry_ptr init_entry =
+      il_header.file_scope_dynamic_init_routines;
+  std::size_t init_position = 0;
+  for (; init_entry != nullptr && within_native_list_limit(init_position);
+       init_entry = init_entry->next, ++init_position) {
+    a_routine_ptr routine = init_entry->routine;
+    if (routine == nullptr) {
+      report_incomplete_snapshot();
+      break;
+    }
+    const char *raw = source_name(routine->source_corresp);
+    const std::string name = raw != nullptr ?
+        declaration_name(routine->source_corresp, true, true) :
+        "<EDG-file-scope-initializer>";
+    const uint32_t routine_symbol = emit_symbol(routine, 1, name);
+    emit_record(67, {num(static_cast<unsigned>(init_position)),
+                     num(routine_symbol)});
+  }
+  emit_record(66, {num(1), num(init_entry == nullptr ? 1 : 0)});
+#else
+  emit_record(66, {num(0), num(0)});
+#endif
+
   // After every routine has been registered, recover static locals that
   // EDG moved into the file-scope memory region. Their source correspondence
   // still points to the enclosing routine, but deliberately not to a

@@ -142,6 +142,12 @@ pub struct Il {
     /// Byte-exact native IEEE file-scope definition image, event 60.
     pub global_float_initializers: Vec<GlobalFloatInitializer>,
     pub global_variables: Vec<GlobalVariable>,
+    /// Diagnostic EDG global-init scheduler mode and completeness, never an ELF admission proof.
+    pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
+    /// EDG's explicit file-scope init routine list in native order (if configured).
+    pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
+    /// Native per-scope dynamic initializers in EDG's own list order.
+    pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
     /// Folded source expression constants holding C routine pointers.
@@ -331,6 +337,33 @@ pub struct GlobalVariable {
     pub explicit_initializer: bool,
     pub thread_local: bool,
     pub local_to_function: bool,
+}
+
+/// Whether EDG's separately scheduled file-scope initialization list is available.
+/// Even a complete empty list does not certify a program as free of effects
+/// unless all other EDG initialization modes are accounted for.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeInitSchedule {
+    pub available: bool,
+    pub complete: bool,
+}
+
+/// Source-owned ordered routine ID, not an inferred constructor ABI call.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeInitRoutine {
+    pub position: u32,
+    pub routine: SymbolId,
+}
+
+/// Source-level initialization entries in an EDG file/namespace scope.
+/// A scope-local ordinal does not establish a cross-scope ELF init priority.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct ScopeDynamicInitializer {
+    pub scope: String,
+    pub position: u32,
+    pub variable: Option<SymbolId>,
+    pub destructor: Option<SymbolId>,
+    pub kind: u32,
 }
 
 /// Address-valued constant in an expression snapshot.
@@ -1059,6 +1092,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         63 => Some(il.cxx_record_admissions.len()),
         64 => Some(usize::from(il.cpp_language.is_some())),
         65 => Some(il.cxx_scalar_lifetime_admissions.len()),
+        66 => Some(usize::from(il.file_scope_init_schedule.is_some())),
+        67 => Some(il.file_scope_init_routines.len()),
+        68 => Some(il.scope_dynamic_initializers.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -1117,6 +1153,33 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
+        66 => {
+            let (Some(available),Some(complete))=(n(0),n(1)) else {return;};
+            if available>1 || complete>1 || (available==0 && complete!=0) ||
+               output.file_scope_init_schedule.is_some() {return;}
+            output.file_scope_init_schedule=Some(FileScopeInitSchedule {
+                available:available==1,complete:complete==1,
+            });
+        }
+        68 => {
+            let (Some(scope),Some(position),Some(kind))=(t(0),n(1),n(4)) else {return;};
+            if scope.len()>1024 {return;}
+            let variable=n(2).map(SymbolId);
+            let destructor=n(3).map(SymbolId);
+            if variable==Some(SymbolId(0)) || destructor==Some(SymbolId(0)) {return;}
+            let prior=output.scope_dynamic_initializers.iter().filter(|e|e.scope==scope).count();
+            if position as usize != prior {return;}
+            output.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+                scope,position,variable,destructor,kind,
+            });
+        }
+        67 => {
+            let (Some(position),Some(routine))=(n(0),n(1)) else {return;};
+            if routine==0 || position as usize != output.file_scope_init_routines.len() {return;}
+            output.file_scope_init_routines.push(FileScopeInitRoutine {
+                position,routine:SymbolId(routine)
+            });
+        }
         1..=4 => {
             let Some(name) = t(0) else { return; };
             // Only routine-definition records carry a boolean auxiliary
@@ -3005,7 +3068,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=65_u32 {
+        for kind in 1..=68_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3032,10 +3095,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,264);
+        assert_eq!(total,273);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(66).is_none());
+        assert!(expected_wire_field_tag_masks(69).is_none());
     }
 
     #[test]
@@ -3175,5 +3238,74 @@ mod audit_scalar_type_identity_tests {
         assert_eq!(state.il.c_integer_types.len(),2);
         assert_eq!(state.il.c_float_types.len(),2);
         assert_eq!(state.il.signed_i64_types.len(),1);
+    }
+}
+
+
+#[cfg(test)]
+mod file_scope_init_schedule_wire_tests {
+    use super::*;
+    fn send(state:&mut Collector,kind:u32,values:[u32;2]) {
+        let fields=values.map(|value|WireField {
+            data:std::ptr::null(),length:0,value:u64::from(value),
+            tag:wire_tags::UNSIGNED,
+        });
+        unsafe {
+            collect((state as *mut Collector).cast(),
+                    kind,fields.as_ptr(),fields.len(),0);
+        }
+    }
+    #[test]
+    fn ordered_roots_preserve_native_sequence_and_config_proof() {
+        let mut state=Collector::default();
+        send(&mut state,67,[0,100]);
+        send(&mut state,67,[1,42]);
+        send(&mut state,66,[1,1]);
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.file_scope_init_schedule,
+                   Some(FileScopeInitSchedule{available:true,complete:true}));
+        assert_eq!(state.il.file_scope_init_routines,
+                   vec![FileScopeInitRoutine{position:0,routine:SymbolId(100)},
+                        FileScopeInitRoutine{position:1,routine:SymbolId(42)}]);
+        send(&mut state,67,[1,43]); // cannot duplicate or skip an ordinal
+        assert!(state.malformed);
+    }
+    #[test]
+    fn scope_initializers_keep_destructor_identity_and_order() {
+        let mut state=Collector::default();
+        let key=b"1:std::";
+        let mk=|position:u64,variable:u64,destructor:u64|{
+            [
+                WireField{data:key.as_ptr(),length:key.len(),value:0,tag:wire_tags::TEXT},
+                WireField{data:std::ptr::null(),length:0,value:position,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:variable,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:destructor,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:0,tag:wire_tags::UNSIGNED},
+            ]
+        };
+        for (position,variable,destructor) in [(0,11,31),(1,12,32)] {
+            let fields=mk(position,variable,destructor);
+            unsafe {collect((&mut state as *mut Collector).cast(),68,
+                            fields.as_ptr(),fields.len(),0);}
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.scope_dynamic_initializers.len(),2);
+        assert_eq!(state.il.scope_dynamic_initializers[1].destructor,Some(SymbolId(32)));
+        let fields=mk(1,13,33);
+        unsafe {collect((&mut state as *mut Collector).cast(),68,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(state.malformed,"duplicate per-scope initializer ordinal accepted");
+    }
+    #[test]
+    fn unavailable_scheduler_is_not_a_no_effects_certificate() {
+        let mut state=Collector::default();
+        send(&mut state,66,[0,0]);
+        assert_eq!(state.il.file_scope_init_schedule,
+                   Some(FileScopeInitSchedule{available:false,complete:false}));
+        assert!(state.il.file_scope_init_routines.is_empty());
+        assert!(!state.malformed);
+        send(&mut state,66,[1,1]); // exactly one availability record
+        assert!(state.malformed);
     }
 }
