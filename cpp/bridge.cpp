@@ -67,6 +67,12 @@ static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint
 static edgcpp_field absent() { return {nullptr, 0, 0, WIRE_ABSENT}; }
 static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
+  if (!wire_record_field_tags_valid(kind, fields)) {
+    // Report a malformed snapshot instead of sending a mis-tagged record
+    // that might be misinterpreted by a different native/managed version.
+    current_callback(current_user_data, RECORD_INCOMPLETE_SNAPSHOT, nullptr, 0, 0);
+    return;
+  }
   current_callback(current_user_data, kind, fields.begin(), fields.size(), aux);
 }
 static void report_incomplete_snapshot()

@@ -308,9 +308,16 @@ python3 tools/check_wire_schema.py
 
 CI checks that generated outputs match the schema, then independently
 verifies that every native C++ `emit_record` call supplies the expected
-number of fields. The schema currently covers **tags, record IDs and arities**;
-per-field signedness, optionality, and conditional variants still require
-explicit Rust decoder/native emitter tests and are tracked by issue #87.
+number of fields. The `record_field_tags` table additionally defines the
+allowed tags (including signedness and text-vs-number distinction) for the
+first 13 fully typed record kinds. Both native emission and Rust decoding
+reject wrong tags for these records; `|` in a descriptor denotes an allowed
+alternative such as `UNSIGNED|ABSENT`.
+
+The remaining record kinds retain the previous decoder-side validation
+while their per-field descriptors are migrated. Record-specific value
+constraints, optionality and conditional variants not yet specified in the
+schema are tracked in issue #87.
 
 ## Milestone 1: EDG → Cranelift → ELF
 

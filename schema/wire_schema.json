@@ -77,5 +77,68 @@
     "63": 2,
     "64": 1,
     "65": 2
+  },
+  "record_field_tags": {
+    "7": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "13": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT"
+    ],
+    "15": [
+      "UNSIGNED",
+      "SIGNED"
+    ],
+    "25": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "43": [
+      "UNSIGNED"
+    ],
+    "47": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "49": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "51": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT"
+    ],
+    "52": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "SIGNED"
+    ],
+    "61": [
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "63": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "64": [
+      "UNSIGNED"
+    ],
+    "65": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ]
   }
 }

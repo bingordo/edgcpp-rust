@@ -1066,6 +1066,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     };
     if fields.iter().any(|f|
         f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
+    if let Some(masks) = expected_wire_field_tag_masks(kind) {
+        if fields.len() != masks.len() || fields.iter().zip(masks).any(|(field, mask)| {
+            (mask & (1u8 << field.tag)) == 0
+        }) {
+            return;
+        }
+    }
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
@@ -2755,5 +2762,73 @@ mod audit_wire_identity_index_tests {
         assert!(state.malformed);
         assert!(!state.panicked);
         assert_eq!(state.il.symbol_types.len(),8192);
+    }
+}
+
+
+#[cfg(test)]
+mod audit_typed_wire_field_tests {
+    use super::*;
+
+    fn number(value: u64) -> WireField {
+        WireField {data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED}
+    }
+    fn signed(value: i64) -> WireField {
+        WireField {data:std::ptr::null(),length:0,value:value as u64,tag:wire_tags::SIGNED}
+    }
+    fn text(value:&'static [u8]) -> WireField {
+        WireField {data:value.as_ptr(),length:value.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]) {
+        unsafe {collect((state as *mut Collector).cast(),kind,fields.as_ptr(),fields.len(),0);}
+    }
+
+    #[test]
+    fn every_typed_record_rejects_absent_fields() {
+        // All currently typed records have mandatory fields. The generated
+        // validation must reject a correctly sized event with invalid tags
+        // *before* any decoder-specific logic can accept a default value.
+        for kind in [7,13,15,25,43,47,49,51,52,61,63,64,65] {
+            let len=expected_wire_field_count(kind).unwrap();
+            assert_eq!(expected_wire_field_tag_masks(kind).unwrap().len(),len);
+            let invalid=vec![WireField {
+                data:std::ptr::null(),length:0,value:0,tag:wire_tags::ABSENT,
+            };len];
+            let mut state=Collector::default();
+            send(&mut state,kind,&invalid);
+            assert!(state.malformed,"record {kind} accepted absent fields");
+            assert!(!state.panicked);
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_numeric_signedness_and_text_tags() {
+        let mut state=Collector::default();
+        send(&mut state,15,&[number(1),number(42)]);
+        assert!(state.malformed);
+        assert!(state.il.initializer_integers.is_empty());
+
+        let mut state=Collector::default();
+        send(&mut state,52,&[number(1),number(0),number(2),number(0)]);
+        assert!(state.malformed);
+        assert!(state.il.global_aggregate_relocations.is_empty());
+
+        let mut state=Collector::default();
+        send(&mut state,13,&[number(1),number(1),number(99)]);
+        assert!(state.malformed);
+        assert!(state.il.symbols.is_empty());
+    }
+
+    #[test]
+    fn accepts_correctly_typed_numeric_and_text_records() {
+        let mut state=Collector::default();
+        send(&mut state,13,&[number(1),number(2),text(b"global")]);
+        send(&mut state,15,&[number(1),signed(-9)]);
+        send(&mut state,47,&[number(1),number(3),number(1),number(0),number(0)]);
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.symbols.len(),1);
+        assert_eq!(state.il.initializer_integers[0].value,-9);
+        assert_eq!(state.il.global_variables.len(),1);
     }
 }
