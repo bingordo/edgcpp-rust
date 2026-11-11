@@ -15,8 +15,118 @@ static bool wire_record_field_tags_valid(
     uint32_t kind, std::initializer_list<edgcpp_field> fields)
 {
   switch (kind) {
+  case 1: {
+    const uint8_t masks[] = {2};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 2: {
+    const uint8_t masks[] = {2};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 3: {
+    const uint8_t masks[] = {2};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 4: {
+    const uint8_t masks[] = {2};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 5: {
+    const uint8_t masks[] = {2, 2, 3};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 6: {
+    const uint8_t masks[] = {2, 2, 2, 3, 5, 5, 3, 5, 5, 5, 9, 5, 5, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   case 7: {
     const uint8_t masks[] = {4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 8: {
+    const uint8_t masks[] = {4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 9: {
+    const uint8_t masks[] = {4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 10: {
+    const uint8_t masks[] = {4, 4, 4, 2, 4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 11: {
+    const uint8_t masks[] = {4, 4, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 12: {
+    const uint8_t masks[] = {4, 4, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
@@ -35,8 +145,108 @@ static bool wire_record_field_tags_valid(
     }
     return true;
   }
+  case 14: {
+    const uint8_t masks[] = {4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   case 15: {
     const uint8_t masks[] = {4, 8};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 16: {
+    const uint8_t masks[] = {4, 4, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 17: {
+    const uint8_t masks[] = {4, 2, 3, 4, 5, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 18: {
+    const uint8_t masks[] = {2, 2, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 19: {
+    const uint8_t masks[] = {4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 20: {
+    const uint8_t masks[] = {4, 4, 4, 5, 5, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 21: {
+    const uint8_t masks[] = {4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 22: {
+    const uint8_t masks[] = {4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 23: {
+    const uint8_t masks[] = {4, 4, 2, 3, 4, 5, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 24: {
+    const uint8_t masks[] = {4, 4, 5, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
@@ -55,8 +265,208 @@ static bool wire_record_field_tags_valid(
     }
     return true;
   }
+  case 26: {
+    const uint8_t masks[] = {2, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 27: {
+    const uint8_t masks[] = {2, 2, 4, 2, 3, 4, 5, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 28: {
+    const uint8_t masks[] = {2, 2, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 29: {
+    const uint8_t masks[] = {4, 5, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 30: {
+    const uint8_t masks[] = {4, 4, 5, 4, 3};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 31: {
+    const uint8_t masks[] = {4, 4, 4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 32: {
+    const uint8_t masks[] = {4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 33: {
+    const uint8_t masks[] = {2, 2, 4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 34: {
+    const uint8_t masks[] = {2, 2, 5, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 35: {
+    const uint8_t masks[] = {2, 2, 4, 4, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 36: {
+    const uint8_t masks[] = {4, 4, 4, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 37: {
+    const uint8_t masks[] = {2, 2, 4, 2, 4, 4, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 38: {
+    const uint8_t masks[] = {4, 4, 5, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 39: {
+    const uint8_t masks[] = {4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 40: {
+    const uint8_t masks[] = {2, 2, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 41: {
+    const uint8_t masks[] = {4, 4, 4, 5, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 42: {
+    const uint8_t masks[] = {4, 2};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   case 43: {
     const uint8_t masks[] = {4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 44: {
+    const uint8_t masks[] = {2, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 45: {
+    const uint8_t masks[] = {2, 2, 8};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 46: {
+    const uint8_t masks[] = {4, 4, 4, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
@@ -75,8 +485,28 @@ static bool wire_record_field_tags_valid(
     }
     return true;
   }
+  case 48: {
+    const uint8_t masks[] = {2, 2, 2, 4, 8};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   case 49: {
     const uint8_t masks[] = {4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 50: {
+    const uint8_t masks[] = {2, 2, 4, 4, 2};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
@@ -105,8 +535,98 @@ static bool wire_record_field_tags_valid(
     }
     return true;
   }
+  case 53: {
+    const uint8_t masks[] = {2, 2, 4, 9};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 54: {
+    const uint8_t masks[] = {2, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 55: {
+    const uint8_t masks[] = {2, 2, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 56: {
+    const uint8_t masks[] = {2, 2, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 57: {
+    const uint8_t masks[] = {4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 58: {
+    const uint8_t masks[] = {2, 2, 2, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 59: {
+    const uint8_t masks[] = {2, 2, 4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 60: {
+    const uint8_t masks[] = {4, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
   case 61: {
     const uint8_t masks[] = {4, 2, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 62: {
+    const uint8_t masks[] = {2, 2, 2, 4, 2};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {

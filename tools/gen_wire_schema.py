@@ -52,6 +52,8 @@ def render(schema):
                 raise ValueError(f"record {kind} has invalid field tag: {accepted}")
             masks.append(sum(1 << tags[name] for name in options))
         fields[kind] = masks
+    if set(fields) != set(arities):
+        raise ValueError("all wire record kinds must have field tag descriptors")
 
     rust = (
         PREFIX
