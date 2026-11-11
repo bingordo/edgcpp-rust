@@ -4381,3 +4381,117 @@ mod audit_c_external_global_definition_tests {
         assert!(!requires_c_global_definition(&local,Some(false)));
     }
 }
+
+#[cfg(test)]
+mod audit_conditional_integer_tests {
+    use super::*;
+
+    fn word(bits:u8,signed:bool,is_bool:bool)->CAbiInt {
+        CAbiInt{bits,signed,is_bool}
+    }
+    fn assign(value:i64)->Expr {
+        Expr::AssignLocal(0,word(64,true,false),Box::new(Expr::Constant(value)))
+    }
+    fn watched(result:Expr)->Expr {
+        // The selected arm writes local[0].  Reading it after the conditional
+        // distinguishes lazy evaluation from incorrectly evaluating both arms.
+        Expr::Add(
+            Box::new(Expr::Mul(Box::new(result),Box::new(Expr::Constant(100)))),
+            Box::new(Expr::Local(0)),
+        )
+    }
+    fn routine(name:&str,result:Expr,uses_local:bool)->Routine {
+        let mut body=Vec::new();
+        if uses_local {
+            body.push(Stmt::Store(0,Expr::Constant(0)));
+        }
+        body.push(Stmt::Return(result));
+        Routine{
+            name:name.into(),parameters:1,locals:usize::from(uses_local),
+            body,abi:None,local_types:None,local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        }
+    }
+
+    #[test]
+    fn c_promotions_obey_lp64_mixed_signedness() {
+        let i8=word(8,true,false);
+        let u8=word(8,false,false);
+        let u16=word(16,false,false);
+        let i32=word(32,true,false);
+        let u32=word(32,false,false);
+        let i64=word(64,true,false);
+        let u64=word(64,false,false);
+        assert_eq!(common_integer_type(i8,u8),i32);
+        assert_eq!(common_integer_type(u16,i32),i32);
+        assert_eq!(common_integer_type(i32,u32),u32);
+        assert_eq!(common_integer_type(u32,i64),i64);
+        assert_eq!(common_integer_type(i64,u64),u64);
+        assert_eq!(common_integer_type(word(8,false,true),u8),i32);
+    }
+
+    #[test]
+    fn native_conditional_and_logical_paths_preserve_lazy_effects_and_casts() {
+        let is_true=|value:Expr|Expr::Compare(
+            CompareOp::NotEqual,Box::new(value),Box::new(Expr::Constant(0)));
+        let conditional=routine("audit_ternary",watched(Expr::Conditional(
+            Box::new(Expr::Parameter(0)),Box::new(assign(5)),Box::new(assign(9)))),true);
+        let land=routine("audit_logical_and",watched(Expr::Conditional(
+            Box::new(Expr::Parameter(0)),
+            Box::new(is_true(assign(7))),Box::new(Expr::Constant(0)))),true);
+        let lor=routine("audit_logical_or",watched(Expr::Conditional(
+            Box::new(Expr::Parameter(0)),Box::new(Expr::Constant(1)),
+            Box::new(is_true(assign(7))))),true);
+        let cast=routine("audit_unsigned_conditional",Expr::Normalize(
+            word(32,false,false),Box::new(Expr::Conditional(
+                Box::new(Expr::Parameter(0)),Box::new(Expr::Constant(-1)),
+                Box::new(Expr::Constant(2))))),false);
+        let sign= routine("audit_signed_cast",Expr::Normalize(
+            word(32,true,false),Box::new(Expr::Constant(0x8000_0000))),false);
+        let boolcast=routine("audit_bool_cast",Expr::Normalize(
+            word(8,false,true),Box::new(Expr::Parameter(0))),false);
+        let routines=[conditional,land,lor,cast,sign,boolcast];
+        for fun in &routines {
+            assert!(!check(&fun.body,&mut HashSet::new(),1,fun.locals,0).unwrap(),
+                "{}",fun.name);
+        }
+        let object=emit_routines(&routines).expect("CFG should emit lazy C conditional expressions");
+        assert_eq!(&object[..4],b"\x7fELF");
+        let dir=std::env::temp_dir().join(format!(
+            "edg-audit-conditional-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj=dir.join("conditional.o");
+        let driver=dir.join("driver.c");
+        let executable=dir.join("conditional-test");
+        std::fs::write(&obj,object).unwrap();
+        std::fs::write(&driver,r#"
+            #include <stdint.h>
+            #include <stdlib.h>
+            extern long long audit_ternary(long long);
+            extern long long audit_logical_and(long long);
+            extern long long audit_logical_or(long long);
+            extern long long audit_unsigned_conditional(long long);
+            extern long long audit_signed_cast(long long);
+            extern long long audit_bool_cast(long long);
+            int main(void) {
+                if (audit_ternary(0) != 909 || audit_ternary(1) != 505) abort();
+                if (audit_logical_and(0) != 0 || audit_logical_and(1) != 107) abort();
+                if (audit_logical_or(0) != 107 || audit_logical_or(1) != 100) abort();
+                if (audit_unsigned_conditional(0) != 2 ||
+                    audit_unsigned_conditional(1) != UINT32_MAX) abort();
+                if (audit_signed_cast(0) != INT32_MIN) abort();
+                if (audit_bool_cast(0) != 0 || audit_bool_cast(-1) != 1 ||
+                    audit_bool_cast(42) != 1) abort();
+                return 0;
+            }
+        "#).unwrap();
+        let cc=std::process::Command::new("gcc")
+            .arg("-std=c11").arg("-O2").arg(&obj).arg(&driver)
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(cc.status.success(),"C link: {}",String::from_utf8_lossy(&cc.stderr));
+        let run=std::process::Command::new(&executable).output().unwrap();
+        assert!(run.status.success(),"C conditional differential: {}",
+            String::from_utf8_lossy(&run.stderr));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+}
