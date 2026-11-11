@@ -142,6 +142,10 @@ pub struct Il {
     /// Byte-exact native IEEE file-scope definition image, event 60.
     pub global_float_initializers: Vec<GlobalFloatInitializer>,
     pub global_variables: Vec<GlobalVariable>,
+    /// Diagnostic EDG global-init scheduler mode and completeness, never an ELF admission proof.
+    pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
+    /// EDG's explicit file-scope init routine list in native order (if configured).
+    pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
     /// Folded source expression constants holding C routine pointers.
@@ -331,6 +335,22 @@ pub struct GlobalVariable {
     pub explicit_initializer: bool,
     pub thread_local: bool,
     pub local_to_function: bool,
+}
+
+/// Whether EDG's separately scheduled file-scope initialization list is available.
+/// Even a complete empty list does not certify a program as free of effects
+/// unless all other EDG initialization modes are accounted for.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeInitSchedule {
+    pub available: bool,
+    pub complete: bool,
+}
+
+/// Source-owned ordered routine ID, not an inferred constructor ABI call.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeInitRoutine {
+    pub position: u32,
+    pub routine: SymbolId,
 }
 
 /// Address-valued constant in an expression snapshot.
@@ -1059,6 +1079,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         63 => Some(il.cxx_record_admissions.len()),
         64 => Some(usize::from(il.cpp_language.is_some())),
         65 => Some(il.cxx_scalar_lifetime_admissions.len()),
+        66 => Some(usize::from(il.file_scope_init_schedule.is_some())),
+        67 => Some(il.file_scope_init_routines.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -1117,6 +1139,21 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
+        66 => {
+            let (Some(available),Some(complete))=(n(0),n(1)) else {return;};
+            if available>1 || complete>1 || (available==0 && complete!=0) ||
+               output.file_scope_init_schedule.is_some() {return;}
+            output.file_scope_init_schedule=Some(FileScopeInitSchedule {
+                available:available==1,complete:complete==1,
+            });
+        }
+        67 => {
+            let (Some(position),Some(routine))=(n(0),n(1)) else {return;};
+            if routine==0 || position as usize != output.file_scope_init_routines.len() {return;}
+            output.file_scope_init_routines.push(FileScopeInitRoutine {
+                position,routine:SymbolId(routine)
+            });
+        }
         1..=4 => {
             let Some(name) = t(0) else { return; };
             // Only routine-definition records carry a boolean auxiliary
