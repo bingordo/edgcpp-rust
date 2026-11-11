@@ -4322,6 +4322,7 @@ mod tests {
             for (label, targets) in [("repeated", &repeated),("distinct", &distinct)] {
                 let mut old_times=Vec::new();
                 let mut indexed_times=Vec::new();
+                let mut distinct_index_times=Vec::new();
                 for _ in 0..3 {
                     let started=std::time::Instant::now();
                     let old:Vec<_>=targets.iter()
@@ -4339,7 +4340,23 @@ mod tests {
                         .map(|&symbol|cached_call_decl(&catalog,symbol).unwrap())
                         .collect();
                     indexed_times.push(started.elapsed());
+                    let started=std::time::Instant::now();
+                    let mut lookup=DirectCallIndex::new(&il);
+                    let mut optimized=HashMap::new();
+                    for &symbol in targets {
+                        if !optimized.contains_key(&symbol) {
+                            optimized.insert(symbol,lookup.declaration(symbol).unwrap());
+                        }
+                    }
+                    let optimized_calls:Vec<_>=targets.iter()
+                        .map(|&symbol|cached_call_decl(&optimized,symbol).unwrap()).collect();
+                    distinct_index_times.push(started.elapsed());
                     assert_eq!(old.len(),indexed.len());
+                    for (a,b) in old.iter().zip(optimized_calls) {
+                        assert_eq!(a.symbol,b.symbol);
+                        assert_eq!(a.name,b.name);
+                        assert_eq!(a.abi,b.abi);
+                    }
                     for (a,b) in old.iter().zip(indexed) {
                         assert_eq!(a.symbol,b.symbol);
                         assert_eq!(a.name,b.name);
@@ -4347,12 +4364,16 @@ mod tests {
                     }
                     std::hint::black_box(&old);
                     std::hint::black_box(&catalog);
+                    std::hint::black_box(&optimized);
                 }
                 old_times.sort_unstable();
                 indexed_times.sort_unstable();
+                distinct_index_times.sort_unstable();
                 let before=old_times[1].as_secs_f64()*1000.0;
                 let after=indexed_times[1].as_secs_f64()*1000.0;
+                let fast=distinct_index_times[1].as_secs_f64()*1000.0;
                 println!("call-abi kind={label} symbols={count} old_ms={before:.3} indexed_ms={after:.3} speedup={:.2}x",before/after);
+                println!("call-abi-new kind={label} symbols={count} old_ms={before:.3} prior_cached_ms={after:.3} new_index_ms={fast:.3} speedup_vs_old={:.2}x speedup_vs_prior={:.2}x",before/fast,after/fast);
             }
         }
     }
