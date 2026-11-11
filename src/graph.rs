@@ -88,6 +88,7 @@ pub enum GraphError {
     DuplicateArrayBound(TypeId),
     InvalidArrayBoundOwner(TypeId),
     InvalidTypeDetailOwner(TypeId),
+    InvalidTypeDetailFlags(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     InvalidRecordFieldBitOffset { owner: TypeId, position: u32 },
@@ -950,8 +951,19 @@ impl Graph {
             };
             // The bridge emits event 11 only for pointer and typeref
             // nodes; it cannot describe a record, array or integer.
-            if !matches!(unsafe { edgcpp_codegen_kind(4, graph.types[index].kind) }, 3|5) {
+            let owner_kind=unsafe { edgcpp_codegen_kind(4, graph.types[index].kind) };
+            if !matches!(owner_kind, 3|5) {
                 return Err(GraphError::InvalidTypeDetailOwner(detail.owner));
+            }
+            // The native pointer emits reference bits but no qualifiers.
+            // The native typeref emits qualifiers (including zero) but never
+            // reference bits. Lost/shifted field tags must fail closed.
+            if (owner_kind==5 && detail.qualifiers.is_some())
+                || (owner_kind==3 &&
+                    (detail.qualifiers.is_none() ||
+                     detail.is_reference || detail.is_rvalue_reference))
+            {
+                return Err(GraphError::InvalidTypeDetailFlags(detail.owner));
             }
             if !detailed.insert(detail.owner) {
                 return Err(GraphError::DuplicateTypeDetail(detail.owner));
@@ -5825,9 +5837,39 @@ mod tests {
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidTypeDetailOwner(TypeId(1)));
         il.types[0].kind=native_type_kind_for_semantic(3);
+        il.type_details[0].qualifiers=Some(0);
         Graph::from_il(&il).expect("typeref detail");
         il.types[0].kind=native_type_kind_for_semantic(5);
+        il.type_details[0].qualifiers=None;
         Graph::from_il(&il).expect("pointer detail");
+    }
+
+    #[test]
+    fn rejects_impossible_native_type_detail_flag_combinations() {
+        let mut il=Il::default();
+        il.types.push(TypeDef {
+            id:TypeId(1),kind:native_type_kind_for_semantic(5),
+            related_role:None,related:None,
+        });
+        il.type_details.push(TypeDetail {
+            owner:TypeId(1),is_reference:true,
+            is_rvalue_reference:false,qualifiers:Some(0),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailFlags(TypeId(1)));
+        il.type_details[0].qualifiers=None;
+        Graph::from_il(&il).expect("native pointer reference detail");
+        il.types[0].kind=native_type_kind_for_semantic(3);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailFlags(TypeId(1)));
+        il.type_details[0].is_reference=false;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailFlags(TypeId(1)));
+        il.type_details[0].qualifiers=Some(0);
+        Graph::from_il(&il).expect("native typeref qualifiers");
+        il.type_details[0].is_rvalue_reference=true;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailFlags(TypeId(1)));
     }
 
     #[test]
