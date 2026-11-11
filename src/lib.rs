@@ -1073,6 +1073,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             return;
         }
     }
+    if !wire_record_cross_fields_valid(kind, fields) { return; }
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
