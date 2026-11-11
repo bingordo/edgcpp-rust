@@ -1566,13 +1566,17 @@ impl Graph {
         // Preserve operand order from sequence-indexed paths (not callback order).
         let expr_order: Vec<usize> = graph.expressions.iter()
             .map(|n| graph_path_index(&n.data.path)).collect();
-        let stmt_order: Vec<usize> = graph.statements.iter()
-            .map(|n| graph_path_index(&n.data.path)).collect();
+        // Structured statements use parent.edge.index paths. Sorting only
+        // the last component interleaves different branches (e.g. 0.1.0
+        // before 0.0.1), depending on native callback arrival order.
+        let stmt_paths: Vec<String> = graph.statements.iter()
+            .map(|n| n.data.path.clone()).collect();
         for node in &mut graph.expressions {
             node.operands.sort_by_key(|id| expr_order[id.0]);
         }
         for node in &mut graph.statements {
-            node.children.sort_by_key(|id| stmt_order[id.0]);
+            node.children.sort_by(|a,b|
+                compare_tree_paths(&stmt_paths[a.0],&stmt_paths[b.0]));
         }
         // A call's first operand is its callee; member calls additionally
         // carry an object operand. Missing required operands indicate a
@@ -1984,9 +1988,13 @@ impl Graph {
     /// Root statements belonging to the specified function.
     pub fn roots<'a>(&'a self, function: &'a str)
         -> impl Iterator<Item = (StatementId, &'a StatementNode)> + 'a {
-        self.statements.iter().enumerate()
+        // A native callback can deliver complete statement records out of
+        // order. In particular, top-level roots have no parent to sort them.
+        let mut roots: Vec<_> = self.statements.iter().enumerate()
             .filter(move |(_, n)| n.parent.is_none() && n.data.function == function)
-            .map(|(i, n)| (StatementId(i), n))
+            .map(|(i, n)| (StatementId(i), n)).collect();
+        roots.sort_by(|a,b|compare_tree_paths(&a.1.data.path,&b.1.data.path));
+        roots.into_iter()
     }
     /// Visit structured statements in depth-first pre-order, retaining the
     /// original child order. The callback can stop traversal early by returning
@@ -5151,5 +5159,79 @@ mod audit_expression_root_tests {
                 Err(GraphError::InvalidExpressionParent { .. })
             ), "noncanonical orphan expression root {invalid:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_statement_source_order_tests {
+    use super::*;
+
+    fn shuffled_source_graph() -> Graph {
+        let mut il=Il::default();
+        // Deliberately scramble callback delivery. Edge 0 has two
+        // children and edge 1 has two, all sharing terminal indices.
+        for (path,parent) in [
+            ("1",None),("0.1.1",Some("0")),
+            ("0.1.0",Some("0")),("0.0.1",Some("0")),
+            ("0.0.0.0.0",Some("0.0.0")),
+            ("0",None),("0.0.0",Some("0")),
+        ] {
+            il.statements.push(Statement{
+                function:"f".into(),path:path.into(),
+                parent:parent.map(str::to_owned),kind:1,
+            });
+        }
+        Graph::from_il(&il).expect("well-formed EDG source paths")
+    }
+
+    #[test]
+    fn roots_and_preorder_use_full_numeric_source_paths() {
+        let graph=shuffled_source_graph();
+        let roots:Vec<_>=graph.roots("f")
+            .map(|(_,s)|s.data.path.as_str()).collect();
+        assert_eq!(roots,["0","1"]);
+        let mut visited=Vec::new();
+        graph.walk_statements("f",|_,s|{
+            visited.push(s.data.path.clone());
+            true
+        });
+        assert_eq!(visited,[
+            "0","0.0.0","0.0.0.0.0","0.0.1",
+            "0.1.0","0.1.1","1"
+        ]);
+        let mut early=Vec::new();
+        graph.walk_statements("f",|_,s|{
+            early.push(s.data.path.clone());
+            early.len()<4
+        });
+        assert_eq!(early,["0","0.0.0","0.0.0.0.0","0.0.1"]);
+    }
+
+    #[test]
+    fn postorder_preserves_branch_and_root_sequence() {
+        let graph=shuffled_source_graph();
+        let mut visited=Vec::new();
+        graph.walk_statements_postorder("f",|_,s|{
+            visited.push(s.data.path.clone());
+            true
+        });
+        assert_eq!(visited,[
+            "0.0.0.0.0","0.0.0","0.0.1",
+            "0.1.0","0.1.1","0","1"
+        ]);
+    }
+
+    #[test]
+    fn numeric_source_order_handles_double_digit_siblings() {
+        let mut il=Il::default();
+        for path in ["10","2","0","1"] {
+            il.statements.push(Statement {
+                function:"f".into(),path:path.into(),parent:None,kind:1,
+            });
+        }
+        let graph=Graph::from_il(&il).unwrap();
+        let paths:Vec<_>=graph.roots("f")
+            .map(|(_,s)|s.data.path.as_str()).collect();
+        assert_eq!(paths,["0","1","2","10"]);
     }
 }
