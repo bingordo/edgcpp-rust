@@ -81,6 +81,7 @@ pub enum GraphError {
     MissingType(TypeId),
     InvalidTypeId(TypeId),
     DuplicateParameter { owner: TypeId, position: u32 },
+    InvalidTypeParameterPosition(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateBaseClass { derived: TypeId, position: u32 },
@@ -752,6 +753,7 @@ impl Graph {
             }
         }
         let mut parameters = std::collections::HashSet::new();
+        let mut parameter_positions: HashMap<TypeId, Vec<u32>> = HashMap::new();
         for param in &il.type_parameters {
             for id in [param.owner, param.ty] {
                 if !type_map.contains_key(&id) {
@@ -763,7 +765,18 @@ impl Graph {
                     owner: param.owner, position: param.position,
                 });
             }
+            parameter_positions.entry(param.owner).or_default().push(param.position);
             graph.type_parameters.push(param.clone());
+        }
+        // Native EDG emits each function type's parameters at 0..N in
+        // declaration order. Gaps indicate a missing/truncated wire record.
+        for (owner, positions) in &mut parameter_positions {
+            positions.sort_unstable();
+            if positions.iter().enumerate().any(|(index, &position)|
+                position != index as u32)
+            {
+                return Err(GraphError::InvalidTypeParameterPosition(*owner));
+            }
         }
         graph.type_parameters.sort_by_key(|p| (p.owner.0, p.position));
         let mut bounded = std::collections::HashSet::new();
@@ -4340,6 +4353,32 @@ mod tests {
         il.symbol_types[1].ty = TypeId(2);
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidLocalVariable(SymbolId(3)));
+    }
+
+    #[test]
+    fn audit_function_type_parameters_require_dense_positions() {
+        let mut il = Il::default();
+        for id in [1, 2] {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 2, related_role: None, related: None,
+            });
+        }
+        il.type_parameters.push(TypeParameter {
+            owner: TypeId(1), position: 1, ty: TypeId(2),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeParameterPosition(TypeId(1)));
+        il.type_parameters[0].position = 0;
+        Graph::from_il(&il).expect("valid one-parameter native function type");
+
+        il.type_parameters.push(TypeParameter {
+            owner: TypeId(1), position: 2, ty: TypeId(2),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeParameterPosition(TypeId(1)));
+        il.type_parameters[1].position = 1;
+        il.type_parameters.swap(0, 1);
+        Graph::from_il(&il).expect("complete out-of-order wire records");
     }
 
     #[test]
