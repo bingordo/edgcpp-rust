@@ -90,6 +90,7 @@ pub enum GraphError {
     InvalidTypeDetailOwner(TypeId),
     InvalidTypeDetailFlags(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    InvalidRecordFieldOwner(TypeId),
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     InvalidRecordFieldBitOffset { owner: TypeId, position: u32 },
     InvalidRecordFieldPosition(TypeId),
@@ -837,6 +838,12 @@ impl Graph {
                 if !type_map.contains_key(&id) {
                     return Err(GraphError::MissingType(id));
                 }
+            }
+            // Event 10 is emitted only for tk_struct, tk_class or tk_union.
+            // An integer/array/pointer cannot own a native field layout.
+            let owner=&graph.types[type_map[&field.owner]];
+            if !matches!(unsafe {edgcpp_codegen_kind(4, owner.kind)},7..=9) {
+                return Err(GraphError::InvalidRecordFieldOwner(field.owner));
             }
             // EDG's offset_bit_remainder is the sub-byte remainder of
             // an 8-bit byte offset; only 0..7 are representable.
@@ -5131,7 +5138,9 @@ mod tests {
         let mut il = Il::default();
         for id in 1..=3 {
             il.types.push(TypeDef {
-                id: TypeId(id), kind: 1, related_role: None, related: None,
+                id: TypeId(id),
+                kind: if id < 3 {native_type_kind_for_semantic(7)} else {1},
+                related_role: None, related: None,
             });
         }
         for (id, kind, name) in [
@@ -5756,9 +5765,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_record_fields_attached_to_non_record_types() {
+        let mut il=Il::default();
+        il.symbols.push(Symbol {
+            id:SymbolId(9),kind:3,name:"field".into(),
+        });
+        il.types.extend([
+            TypeDef { id:TypeId(1),kind:native_type_kind_for_semantic(1),
+                related_role:None,related:None },
+            TypeDef { id:TypeId(2),kind:native_type_kind_for_semantic(1),
+                related_role:None,related:None },
+        ]);
+        il.record_fields.push(RecordField {
+            symbol:SymbolId(9),owner:TypeId(1),position:0,ty:TypeId(2),
+            name:"field".into(),byte_offset:0,bit_offset:0,bit_width:0,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldOwner(TypeId(1)));
+        for semantic in [7,8,9] {
+            il.types[0].kind=native_type_kind_for_semantic(semantic);
+            Graph::from_il(&il).expect("struct, class and union field owner");
+        }
+    }
+
+    #[test]
     fn record_fields_are_linked_and_ordered() {
         let mut il = Il::default();
-        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.types.push(TypeDef { id: TypeId(1), kind: native_type_kind_for_semantic(7), related_role: None, related: None });
         il.types.push(TypeDef { id: TypeId(2), kind: 0, related_role: None, related: None });
         il.symbols.extend([
             Symbol { id: SymbolId(10), kind: 3, name: "a".into() },
