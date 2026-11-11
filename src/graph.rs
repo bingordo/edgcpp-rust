@@ -84,6 +84,7 @@ pub enum GraphError {
     InvalidTypeParameterPosition(TypeId),
     InvalidTypeParameterOwner(TypeId),
     InvalidFunctionSignatureOwner(TypeId),
+    MissingFunctionSignature(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
@@ -946,6 +947,14 @@ impl Graph {
                 return Err(GraphError::DuplicateFunctionSignature(sig.owner));
             }
             graph.function_signatures.push(sig.clone());
+        }
+        // The native emitter only writes parameter edges inside the same
+        // tk_routine.extra_info block that always emits event 12. A type
+        // with parameter events but no signature is a truncated snapshot.
+        for owner in parameter_positions.keys() {
+            if !signatures.contains(owner) {
+                return Err(GraphError::MissingFunctionSignature(*owner));
+            }
         }
         // Native symbol identities are unique across all declaration kinds.
         // Retain their kind and position once: validating every parameter,
@@ -4589,6 +4598,9 @@ mod tests {
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidTypeParameterPosition(TypeId(1)));
         il.type_parameters[0].position = 0;
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
         Graph::from_il(&il).expect("valid one-parameter native function type");
 
         il.type_parameters.push(TypeParameter {
@@ -5664,6 +5676,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_type_parameters_missing_native_function_signature() {
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef { id:TypeId(1),kind:native_routine_type_kind(),
+                related_role:None,related:None },
+            TypeDef { id:TypeId(2),kind:2,
+                related_role:None,related:None },
+        ]);
+        il.type_parameters.push(TypeParameter {
+            owner:TypeId(1),position:0,ty:TypeId(2),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::MissingFunctionSignature(TypeId(1)));
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
+        Graph::from_il(&il).expect("matching native signature and parameters");
+    }
+
+    #[test]
     fn validates_parameter_edges() {
         let mut il = Il::default();
         il.types.push(TypeDef { id: TypeId(1), kind: 0,
@@ -5675,6 +5707,9 @@ mod tests {
         il.types.push(TypeDef { id: TypeId(2), kind: 0,
             related_role: None, related: None });
         il.types[0].kind = native_routine_type_kind();
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.parameters(TypeId(1)).next().unwrap().ty, TypeId(2));
     }
