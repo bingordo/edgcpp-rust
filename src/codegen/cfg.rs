@@ -1830,17 +1830,17 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
+    // One native routine may appear in thousands of designator expressions.
+    // Validate and construct its declaration just once per immutable IL.
+    let mut seen_symbols=HashSet::new();
     for symbol in symbols {
+        if !seen_symbols.insert(symbol) {continue;}
         // The pinned EDG projection uses intrinsic-looking routine identities.
         // These are handled in atomic_builtin, never ELF libatomic imports.
         if il.symbols.iter().any(|s|s.id==symbol &&
             s.name.starts_with("__atomic_")) {continue;}
         let decl=direct_call_decl(il,symbol)?;
-        if let Some(previous)=found.get(&symbol) {
-            if previous.abi!=decl.abi || previous.name!=decl.name {
-                return Err(invalid("inconsistent routine reference type"));
-            }
-        } else {found.insert(symbol,decl);}
+        found.insert(symbol,decl);
     }
     let mut result:Vec<CallDeclaration>=found.into_values().collect();
     result.sort_by(|a,b|a.name.cmp(&b.name));
@@ -1877,11 +1877,12 @@ fn lower_c_expression(
                 }
             }
         }
-        let (symbol,abi)=if direct {
+        let (declaration,abi)=if direct {
             let symbol=callee.data.symbol_id
                 .ok_or_else(||invalid("direct routine without symbol"))?;
             let decl=direct_call_decl(il,symbol)?;
-            (Some(symbol),decl.abi)
+            let abi=decl.abi.clone();
+            (Some(decl),abi)
         } else {
             (None,callable_type_abi(il,expression_type_id(graph,node.operands[0])?)?)
         };
@@ -1902,8 +1903,8 @@ fn lower_c_expression(
                 args.push(lower_c_expression(graph,operand,params,locals,il)?);
             }
         }
-        return Ok(if let Some(symbol)=symbol {
-            let decl=direct_call_decl(il,symbol)?;
+        return Ok(if let Some(decl)=declaration {
+            let symbol=decl.symbol;
             if decl.name=="__vla_alloc" {
                 let caller=graph.routine_for_function(&node.data.function)
                     .ok_or_else(||invalid("VLA helper call has no owning function"))?;
