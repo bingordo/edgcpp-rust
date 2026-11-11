@@ -2923,6 +2923,13 @@ fn emit_expr(
                     _ => {
                         let ty=entry.pieces.first().ok_or_else(||
                             invalid("missing scalar ABI piece"))?.ty;
+                        // C _Bool converts every nonzero source integer or
+                        // pointer to 1 *before* ABI narrowing to i8. Merely
+                        // reducing the low byte turns values like 256 and
+                        // -256 into false, unlike the C implicit conversion.
+                        let value=if ty.is_bool {
+                            normalize_c_value(fb,value,ty)
+                        } else {value};
                         values.push(if ty.bits==64 {value}
                             else {fb.ins().ireduce(ty.cranelift(),value)});
                     }
@@ -4974,5 +4981,126 @@ mod audit_call_result_type_tests {
         assert!(checked_call_result_type(&il,crate::TypeId(8),crate::TypeId(1)).is_err());
         assert!(checked_call_result_type(&il,crate::TypeId(9),crate::TypeId(1)).is_err());
         assert!(checked_call_result_type(&il,crate::TypeId(4),crate::TypeId(999)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod audit_call_argument_abi_tests {
+    use super::*;
+
+    fn integer(bits:u8,signed:bool,is_bool:bool)->CAbiInt {
+        CAbiInt{bits,signed,is_bool}
+    }
+    fn call_abi(param:CAbiInt)->CAbi {
+        CAbi {
+            parameters:vec![param],
+            aggregate_parameters:vec![None],
+            result:Some(integer(64,true,false)),
+            aggregate_result:None,
+        }
+    }
+    fn wrapper(name:&str,parameter_count:usize,expr:Expr)->Routine {
+        Routine {
+            name:name.into(),parameters:parameter_count,locals:0,
+            body:vec![Stmt::Return(expr)],
+            abi:None,local_types:None,local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        }
+    }
+    fn native_call_object()->Vec<u8> {
+        let sinks=[
+            ("audit_sink_bool",1001,integer(8,false,true)),
+            ("audit_sink_i8",1002,integer(8,true,false)),
+            ("audit_sink_u16",1003,integer(16,false,false)),
+            ("audit_sink_ptr",1004,integer(64,false,false)),
+        ];
+        let calls:Vec<_>=sinks.iter().map(|&(name,sym,ty)|CallDeclaration {
+            symbol:crate::SymbolId(sym),name:name.into(),abi:call_abi(ty),
+        }).collect();
+        let mut routines:Vec<_>=sinks.iter().map(|&(name,sym,ty)|wrapper(
+            &format!("audit_call_{}",name.strip_prefix("audit_sink_").unwrap()),
+            1,Expr::Call(crate::SymbolId(sym),call_abi(ty),
+                vec![Expr::Parameter(0)])
+        )).collect();
+        routines.push(wrapper("audit_call_bool_indirect",2,Expr::CallIndirect(
+            Box::new(Expr::Parameter(1)),call_abi(integer(8,false,true)),
+            vec![Expr::Parameter(0)])));
+        emit_routines_with_globals(&routines,&[],&calls)
+            .expect("x86 SysV scalar ABI call object")
+    }
+    const C_SINKS:&str=r#"
+        #include <stdint.h>
+        #include <limits.h>
+        #include <stdlib.h>
+        long long audit_sink_bool(_Bool v) {return v ? 341 : -97;}
+        long long audit_sink_i8(signed char v) {return (long long)v * 17;}
+        long long audit_sink_u16(unsigned short v) {return (long long)v * 13;}
+        long long audit_sink_ptr(const long long *p) {return *p ^ 0x1234LL;}
+        extern long long audit_call_bool(long long);
+        extern long long audit_call_bool_indirect(long long,long long (*)(_Bool));
+        extern long long audit_call_i8(long long);
+        extern long long audit_call_u16(long long);
+        extern long long audit_call_ptr(const long long *);
+    "#;
+    fn gcc_link_and_run(test:&str,main:&str) {
+        let dir=std::env::temp_dir().join(format!(
+            "edg-audit-call-args-{}-{}",test,std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj=dir.join("generated.o");
+        let driver=dir.join("driver.c");
+        let executable=dir.join("call-args");
+        let object=native_call_object();
+        assert_eq!(&object[..4],b"\x7fELF");
+        std::fs::write(&obj,object).unwrap();
+        std::fs::write(&driver,format!("{C_SINKS}\n{main}")).unwrap();
+        let cc=std::process::Command::new("gcc")
+            .args(["-std=c11","-O2"])
+            .arg(&obj).arg(&driver).arg("-o").arg(&executable)
+            .output().unwrap();
+        assert!(cc.status.success(),"native C linker: {}",
+            String::from_utf8_lossy(&cc.stderr));
+        let run=std::process::Command::new(&executable).output().unwrap();
+        assert!(run.status.success(),"native call ABI mismatch for {test}: {}",
+            String::from_utf8_lossy(&run.stderr));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_call_argument_bool_direct_and_indirect_converts_before_narrowing() {
+        gcc_link_and_run("bool",r#"
+            int main(void) {
+                const long long inputs[] = {
+                    0,1,-1,255,256,-256,512,65536,-65536,
+                    0x100000000LL,-0x100000000LL,LLONG_MAX,LLONG_MIN
+                };
+                for (unsigned i=0;i<sizeof inputs/sizeof inputs[0];i++) {
+                    long long x=inputs[i];
+                    long long reference=audit_sink_bool((_Bool)x);
+                    if (audit_call_bool(x)!=reference) abort();
+                    if (audit_call_bool_indirect(x,audit_sink_bool)!=reference) abort();
+                }
+                return 0;
+            }
+        "#);
+    }
+
+    #[test]
+    fn audit_call_argument_narrow_scalars_and_pointer_keep_sysv_values() {
+        gcc_link_and_run("scalar-pointer",r#"
+            int main(void) {
+                const long long inputs[] = {
+                    0,1,-1,255,256,-256,512,65536,-65536,
+                    0x100000000LL,-0x100000000LL,LLONG_MAX,LLONG_MIN
+                };
+                for (unsigned i=0;i<sizeof inputs/sizeof inputs[0];i++) {
+                    long long x=inputs[i];
+                    if (audit_call_i8(x)!=audit_sink_i8((signed char)x)) abort();
+                    if (audit_call_u16(x)!=audit_sink_u16((unsigned short)x)) abort();
+                }
+                long long value=0x123456789ABCDEFLL;
+                if (audit_call_ptr(&value)!=audit_sink_ptr(&value)) abort();
+                return 0;
+            }
+        "#);
     }
 }
