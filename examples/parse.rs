@@ -62,6 +62,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  link.map(|v|v.link_name.as_str()),link.map(|v|v.edg_mangled),
                  global.map(|g|g.linkage),ty.map(|t|t.ty.0));
     }
+    // Print the exact overload formal type graph involved in the actual
+    // std::cout << const char* call; a C++ reference is not a C pointer.
+    for routine in result.il.routine_identities.iter().filter(|r|
+        r.function.contains("std::operator<<") &&
+        r.function.contains("basic_ostream") &&
+        r.function.contains("char const*")).take(8) {
+        if let Some(function_ty)=result.il.symbol_types.iter()
+            .find(|s|s.symbol==routine.routine).map(|s|s.ty) {
+            println!("EDG_CXX5_OSTREAM_OPERATOR routine={} ty={}",
+                     routine.routine.0,function_ty.0);
+            for parameter in result.il.type_parameters.iter()
+                .filter(|p|p.owner==function_ty) {
+                let ty=result.il.types.iter().find(|t|t.id==parameter.ty);
+                let detail=result.il.type_details.iter()
+                    .find(|d|d.owner==parameter.ty);
+                println!("  EDG_CXX5_OSTREAM_FORMAL position={} ty={} kind={:?} related={:?} role={:?} reference={:?} rvalue={:?} qualifiers={:?}",
+                         parameter.position,parameter.ty.0,ty.map(|t|t.kind),
+                         ty.and_then(|t|t.related).map(|t|t.0),
+                         ty.and_then(|t|t.related_role),
+                         detail.map(|d|d.is_reference),
+                         detail.map(|d|d.is_rvalue_reference),
+                         detail.and_then(|d|d.qualifiers));
+            }
+        }
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>
