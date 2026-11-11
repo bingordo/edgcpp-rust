@@ -4586,6 +4586,246 @@ mod audit_conditional_integer_tests {
 }
 
 #[cfg(test)]
+mod audit_compound_narrow_integer_tests {
+    use super::*;
+
+    fn int(bits:u8,signed:bool)->CAbiInt {
+        CAbiInt{bits,signed,is_bool:false}
+    }
+    fn routine(name:&str,types:Vec<CAbiInt>,body:Vec<Stmt>)->Routine {
+        Routine {
+            name:name.into(),parameters:1,locals:types.len(),body,
+            abi:None,local_types:Some(types),local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        }
+    }
+    fn local_compound(
+        name:&str,dest:CAbiInt,compute:CAbiInt,op:CCompoundOp,rhs:i64,
+    )->Routine {
+        routine(name,vec![dest],vec![
+            Stmt::Store(0,Expr::Parameter(0)),
+            Stmt::Return(Expr::CompoundLocal(
+                0,dest,compute,op,Box::new(Expr::Constant(rhs)))),
+        ])
+    }
+    fn local_post(name:&str,dest:CAbiInt)->Routine {
+        let before=Expr::PostLocal(0,dest,1);
+        let result=Expr::Add(
+            Box::new(Expr::Mul(Box::new(before),Box::new(Expr::Constant(1000)))),
+            Box::new(Expr::Local(0)),
+        );
+        routine(name,vec![dest],vec![
+            Stmt::Store(0,Expr::Parameter(0)),
+            Stmt::Return(result),
+        ])
+    }
+
+    #[test]
+    fn narrow_compound_uses_promoted_intermediate_types() {
+        let i8=int(8,true);
+        let u8=int(8,false);
+        let u16=int(16,false);
+        let i32=int(32,true);
+        let u32=int(32,false);
+        let i64=int(64,true);
+        assert_eq!(common_integer_type(u16,i32),i32);
+        assert_eq!(common_integer_type(u32,i64),i64);
+        assert_eq!(common_integer_type(i8,u8),i32);
+    }
+
+    #[test]
+    fn native_compound_updates_match_gcc_and_evaluate_lvalues_once() {
+        let i8=int(8,true);
+        let u8=int(8,false);
+        let u16=int(16,false);
+        let i32=int(32,true);
+        let u32=int(32,false);
+        let i64=int(64,true);
+        let address=Expr::Sequence(
+            Box::new(Expr::PostLocal(1,i64,1)),
+            Box::new(Expr::AddressLocal(0)),
+        );
+        let addressed=routine("audit_address_once",vec![u8,i64],vec![
+            Stmt::Store(0,Expr::Parameter(0)),
+            Stmt::Store(1,Expr::Constant(0)),
+            Stmt::Eval(Expr::CompoundAddress(
+                u8,i32,CCompoundOp::Add,
+                Box::new(address),Box::new(Expr::Constant(10)))),
+            Stmt::Return(Expr::Add(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Local(0)),Box::new(Expr::Constant(100)))),
+                Box::new(Expr::Local(1)))),
+        ]);
+        let rhs_effect=Expr::Sequence(
+            Box::new(Expr::PostLocal(1,i64,1)),
+            Box::new(Expr::Constant(10)),
+        );
+        let rhs_once=routine("audit_rhs_once",vec![u8,i64],vec![
+            Stmt::Store(0,Expr::Parameter(0)),
+            Stmt::Store(1,Expr::Constant(0)),
+            Stmt::Eval(Expr::CompoundAddress(
+                u8,i32,CCompoundOp::Add,Box::new(Expr::AddressLocal(0)),
+                Box::new(rhs_effect))),
+            Stmt::Return(Expr::Add(
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Local(0)),Box::new(Expr::Constant(100)))),
+                Box::new(Expr::Local(1)))),
+        ]);
+        let layout=BitFieldLayout{shift:0,width:5,bytes:1,signed:false};
+        let bitfield=routine("audit_bitfield_div",vec![u8],vec![
+            Stmt::Store(0,Expr::Constant(31)),
+            Stmt::Eval(Expr::CompoundBitField(
+                layout,i32,CCompoundOp::Div,
+                Box::new(Expr::AddressLocal(0)),
+                Box::new(Expr::Constant(-2)))),
+            Stmt::Return(Expr::LoadBitField(
+                layout,Box::new(Expr::AddressLocal(0)))),
+        ]);
+        let volatile=routine("audit_volatile_u16_div",vec![u16],vec![
+            Stmt::Store(0,Expr::Parameter(0)),
+            Stmt::Return(Expr::CompoundQualified(
+                u16,i32,MemoryAccess::Volatile,CCompoundOp::Div,
+                Box::new(Expr::AddressLocal(0)),
+                Box::new(Expr::Constant(-2)))),
+        ]);
+        let funcs=vec![
+            local_compound("audit_u8_add",u8,i32,CCompoundOp::Add,10),
+            local_compound("audit_u16_div_neg",u16,i32,CCompoundOp::Div,-2),
+            local_compound("audit_u32_div_i64neg",u32,i64,CCompoundOp::Div,-2),
+            local_compound("audit_i8_div",i8,i32,CCompoundOp::Div,-3),
+            local_compound("audit_i8_shr",i8,i32,CCompoundOp::Shr,2),
+            local_compound("audit_u32_shr",u32,u32,CCompoundOp::Shr,1),
+            local_compound("audit_u16_rem_neg",u16,i32,CCompoundOp::Rem,-7),
+            local_post("audit_u8_post",u8),
+            local_post("audit_i8_post",i8),
+            addressed,rhs_once,bitfield,volatile,
+        ];
+        for fun in &funcs {
+            assert!(!check(&fun.body,&mut HashSet::new(),1,fun.locals,0).unwrap(),
+                "invalid function {}",fun.name);
+        }
+        let object=emit_routines(&funcs).expect("emit narrow and promoted C compound updates");
+        assert_eq!(&object[..4],b"\x7fELF");
+        let dir=std::env::temp_dir().join(format!(
+            "edg-audit-compound-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj=dir.join("compound.o");
+        let driver=dir.join("driver.c");
+        let executable=dir.join("compound-test");
+        std::fs::write(&obj,object).unwrap();
+        std::fs::write(&driver,r#"
+            #include <stdint.h>
+            #include <stdlib.h>
+            #define DECL(name) extern long long name(long long)
+            DECL(audit_u8_add);
+            DECL(audit_u16_div_neg);
+            DECL(audit_u32_div_i64neg);
+            DECL(audit_i8_div);
+            DECL(audit_i8_shr);
+            DECL(audit_u32_shr);
+            DECL(audit_u16_rem_neg);
+            DECL(audit_u8_post);
+            DECL(audit_i8_post);
+            DECL(audit_address_once);
+            DECL(audit_rhs_once);
+            DECL(audit_bitfield_div);
+            DECL(audit_volatile_u16_div);
+
+            static long long gcc_u8_add(long long a) {
+                unsigned char x=(unsigned char)a; return (x+=10);
+            }
+            static long long gcc_u16_div_neg(long long a) {
+                unsigned short x=(unsigned short)a; return (x/=-2);
+            }
+            static long long gcc_u32_div_i64neg(long long a) {
+                unsigned int x=(unsigned int)a; return (x/=-2LL);
+            }
+            static long long gcc_i8_div(long long a) {
+                signed char x=(signed char)a; return (x/=-3);
+            }
+            static long long gcc_i8_shr(long long a) {
+                signed char x=(signed char)a; return (x>>=2);
+            }
+            static long long gcc_u32_shr(long long a) {
+                unsigned int x=(unsigned int)a; return (x>>=1);
+            }
+            static long long gcc_u16_rem_neg(long long a) {
+                unsigned short x=(unsigned short)a; return (x%=-7);
+            }
+            static long long gcc_u8_post(long long a) {
+                unsigned char x=(unsigned char)a; unsigned char old=x++;
+                return (long long)old*1000+x;
+            }
+            static long long gcc_i8_post(long long a) {
+                signed char x=(signed char)a; signed char old=x++;
+                return (long long)old*1000+x;
+            }
+            static unsigned char *tick_address(unsigned char *p,long long *count) {
+                ++*count; return p;
+            }
+            static long long gcc_address_once(long long a) {
+                unsigned char x=(unsigned char)a; long long count=0;
+                *tick_address(&x,&count)+=10;
+                return (long long)x*100+count;
+            }
+            static long long tick_rhs(long long *count) {
+                ++*count; return 10;
+            }
+            static long long gcc_rhs_once(long long a) {
+                unsigned char x=(unsigned char)a; long long count=0;
+                x+=tick_rhs(&count);
+                return (long long)x*100+count;
+            }
+            static long long gcc_bitfield_div(long long a) {
+                (void)a;
+                struct {unsigned value:5;} bits={31};
+                bits.value/=-2; return bits.value;
+            }
+            static long long gcc_volatile_u16_div(long long a) {
+                volatile unsigned short x=(unsigned short)a;
+                return (x/=-2);
+            }
+            typedef long long (*test_fn)(long long);
+            static const struct {
+                test_fn generated, reference;
+                long long inputs[5];
+            } tests[] = {
+                {audit_u8_add,gcc_u8_add,{0,1,250,254,255}},
+                {audit_u16_div_neg,gcc_u16_div_neg,{0,1,255,32768,65000}},
+                {audit_u32_div_i64neg,gcc_u32_div_i64neg,{0,1,65535,2147483648LL,4294967295LL}},
+                {audit_i8_div,gcc_i8_div,{-100,-12,0,12,100}},
+                {audit_i8_shr,gcc_i8_shr,{-64,-1,0,32,127}},
+                {audit_u32_shr,gcc_u32_shr,{0,1,65535,2147483648LL,4294967295LL}},
+                {audit_u16_rem_neg,gcc_u16_rem_neg,{0,1,1234,32768,65530}},
+                {audit_u8_post,gcc_u8_post,{0,1,127,254,255}},
+                {audit_i8_post,gcc_i8_post,{-120,-1,0,1,126}},
+                {audit_address_once,gcc_address_once,{0,1,127,250,255}},
+                {audit_rhs_once,gcc_rhs_once,{0,1,127,250,255}},
+                {audit_bitfield_div,gcc_bitfield_div,{0,1,127,250,255}},
+                {audit_volatile_u16_div,gcc_volatile_u16_div,{0,1,255,32768,65000}}
+            };
+            int main(void) {
+                for (unsigned i=0;i<sizeof(tests)/sizeof(tests[0]);i++)
+                    for (unsigned j=0;j<5;j++) {
+                        long long input=tests[i].inputs[j];
+                        if (tests[i].generated(input)!=tests[i].reference(input))
+                            abort();
+                    }
+                return 0;
+            }
+        "#).unwrap();
+        let cc=std::process::Command::new("gcc")
+            .arg("-std=c11").arg("-O2").arg(&obj).arg(&driver)
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(cc.status.success(),"GCC link: {}",String::from_utf8_lossy(&cc.stderr));
+        let run=std::process::Command::new(&executable).output().unwrap();
+        assert!(run.status.success(),"compound GCC differential: {}",
+            String::from_utf8_lossy(&run.stderr));
+        let _=std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod audit_unique_scalar_global_initializer_tests {
     use super::*;
 
