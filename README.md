@@ -293,6 +293,25 @@ The existing frontend structures are retained to avoid destabilizing the
 working native interface. They are **not** a commitment to use or extend
 incremental analysis.
 
+### EDG wire record schema
+
+Wire protocol discriminants, named event IDs and all record field counts are
+defined in `schema/wire_schema.json`. The language-specific views are
+checked-in generated files: `src/wire_schema_generated.rs` and
+`cpp/wire_schema_generated.inc`. To change the wire protocol:
+
+```sh
+python3 tools/gen_wire_schema.py
+python3 tools/gen_wire_schema.py --check
+python3 tools/check_wire_schema.py
+```
+
+CI checks that generated outputs match the schema, then independently
+verifies that every native C++ `emit_record` call supplies the expected
+number of fields. The schema currently covers **tags, record IDs and arities**;
+per-field signedness, optionality, and conditional variants still require
+explicit Rust decoder/native emitter tests and are tracked by issue #87.
+
 ## Milestone 1: EDG → Cranelift → ELF
 
 Build a new, deliberately small lowering module and optional codegen binary:

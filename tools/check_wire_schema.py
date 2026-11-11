@@ -1,36 +1,26 @@
 #!/usr/bin/env python3
 """Check that every C++ EDG wire record matches Rust's expected arity.
 
-This intentionally does not infer a shared schema from the other language:
-the independently maintained call sites and decoder are compared in CI.
-It is a guard until the native/Rust wire schema is generated from one source.
+Compare each C++ emission site's field count with the canonical record arities.
+Run gen_wire_schema.py --check first to verify generated C++/Rust views.
 """
 from pathlib import Path
+import json
 import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 CPP = (ROOT / "cpp" / "bridge.cpp").read_text(encoding="utf-8")
-RUST = (ROOT / "src" / "lib.rs").read_text(encoding="utf-8")
+# Named C++ protocol constants now reside in the generated include. Appending
+# it does not affect line numbers reported for native emission call sites.
+CPP += "\n" + (ROOT / "cpp" / "wire_schema_generated.inc").read_text(encoding="utf-8")
+SCHEMA = json.loads((ROOT / "schema" / "wire_schema.json").read_text(encoding="utf-8"))
 
 
 def rust_arities():
-    marker = "fn expected_wire_field_count(kind: u32)"
-    if marker not in RUST:
-        raise ValueError("Rust expected_wire_field_count function was removed")
-    block = RUST.split(marker, 1)[1].split("unsafe fn collect_event", 1)[0]
-    values = {}
-    for match in re.finditer(r"(\d+)(?:\.\.=(\d+))?\s*=>\s*(\d+)", block):
-        first = int(match[1])
-        last = int(match[2]) if match[2] else first
-        count = int(match[3])
-        for kind in range(first, last + 1):
-            if kind in values:
-                raise ValueError(f"duplicate Rust wire kind {kind}")
-            values[kind] = count
-    if not values or min(values) != 1:
-        raise ValueError("cannot locate Rust wire arity table")
-    return values
+    # The CI generator --check verifies Rust's generated function matches
+    # this same canonical arity table before the cross-language site audit.
+    return {int(k): v for k, v in SCHEMA["record_arities"].items()}
 
 
 def fields_and_end(source, start):
