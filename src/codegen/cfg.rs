@@ -2151,6 +2151,12 @@ fn checked_call_argument_shape(
     };
     let expected=kind(formal)?;
     let provided=kind(actual)?;
+    // A void call may be evaluated for side effects, but never supplies a
+    // C argument value. The expression emitter uses an internal i64 zero
+    // for void results; allowing this case would silently pass that zero.
+    if expected==4 || provided==4 {
+        return Err(invalid("void expression cannot be a C call argument"));
+    }
     let bool_formal=expected==1 && il.c_integer_types.iter()
         .any(|info|info.id==formal && info.is_bool);
     if expected==7 {
@@ -5831,6 +5837,11 @@ mod audit_call_argument_shape_tests {
         assert!(!checked(&il,1,7),"a function designator does not convert to int");
         assert!(!checked(&il,1,99),"missing actual type is invalid");
         assert!(!checked(&il,99,1),"missing formal type is invalid");
+        assert!(!checked(&il,1,10),"void call result is not an integer argument");
+        assert!(!checked(&il,9,10),"void call result is not a _Bool argument");
+        assert!(!checked(&il,10,1),"void is not a by-value parameter");
+        assert!(checked(&il,1,1),"ordinary integer arguments remain supported");
+        assert!(checked(&il,9,1),"integer to _Bool conversion remains supported");
     }
 
 
