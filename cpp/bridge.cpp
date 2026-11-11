@@ -1865,6 +1865,40 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
   // a seemingly complete snapshot when it is exceeded.
   if (depth > 256) { report_incomplete_snapshot(); return; }
   visited_scopes.insert(scope);
+  // In the standard EDG configuration this scope-owned list, not the
+  // optional separate-routine scheduler, holds the actual initialization
+  // entries. Each file or namespace list is explicitly ordered by EDG.
+  // Keep scopes distinct; this is *not* a cross-namespace startup order.
+  if (scope->kind == sck_file || scope->kind == sck_namespace) {
+    const std::string scope_key =
+        std::to_string(visited_scopes.size()) + ":" + prefix;
+    std::size_t position = 0;
+    for (a_dynamic_init_ptr init = scope->dynamic_inits;
+         init != nullptr && within_native_list_limit(position);
+         init = init->next, ++position) {
+      uint32_t variable_id = 0;
+      uint32_t destructor_id = 0;
+      if (init->variable != nullptr) {
+        a_variable_ptr v = init->variable;
+        const char *raw = source_name(v->source_corresp);
+        variable_id = emit_symbol(v, 2, raw != nullptr ?
+            declaration_name(v->source_corresp, false) :
+            "<EDG-global-init-variable>");
+      }
+      if (init->destructor != nullptr) {
+        a_routine_ptr r = init->destructor;
+        const char *raw = source_name(r->source_corresp);
+        destructor_id = emit_symbol(r, 1, raw != nullptr ?
+            declaration_name(r->source_corresp, true, true) :
+            "<EDG-global-init-destructor>");
+      }
+      emit_record(68, {txt(scope_key),num(static_cast<unsigned>(position)),
+                       variable_id ? num(variable_id) : absent(),
+                       destructor_id ? num(destructor_id) : absent(),
+                       num(static_cast<unsigned>(init->kind))});
+    }
+  }
+
   // Overloaded functions cannot be keyed solely by qualified base name:
   // preserve demangled parameter signatures only when the base is ambiguous.
   std::unordered_map<std::string, unsigned> routine_counts;
