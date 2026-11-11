@@ -4388,6 +4388,48 @@ mod tests {
     }
 
     #[test]
+    fn audit_adaptive_call_catalog_preserves_few_and_many_target_semantics() {
+        let kind=|semantic_kind| (0..4096).find(|&value|
+            semantic(4,value)==semantic_kind).expect("native EDG type kind");
+        for count in [1_u32, 63, 64, 128] {
+            let mut il=Il::default();
+            il.types.extend([
+                crate::TypeDef {id:crate::TypeId(1),kind:kind(4),
+                    related_role:None,related:None},
+                crate::TypeDef {id:crate::TypeId(2),kind:kind(2),
+                    related_role:Some(3),related:Some(crate::TypeId(1))},
+            ]);
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(2),prototyped:true,variadic:false,
+            });
+            let mut symbols=Vec::new();
+            for id in 1..=count {
+                let sym=crate::SymbolId(id);
+                il.symbols.push(crate::Symbol {
+                    id:sym,kind:1,name:format!("callee_{id}"),
+                });
+                il.symbol_types.push(crate::SymbolType {
+                    symbol:sym,ty:crate::TypeId(2),
+                });
+                symbols.extend([sym,sym]);
+            }
+            let catalog=direct_call_catalog(&il,&symbols).unwrap();
+            assert_eq!(catalog.len(),count as usize);
+            for id in 1..=count {
+                let sym=crate::SymbolId(id);
+                let legacy=direct_call_decl(&il,sym).unwrap();
+                let indexed=catalog.get(&sym).unwrap();
+                assert_eq!(legacy.symbol,indexed.symbol);
+                assert_eq!(legacy.name,indexed.name);
+                assert_eq!(legacy.abi,indexed.abi);
+            }
+            let nothing=direct_call_catalog(&il,&[]).unwrap();
+            assert!(nothing.is_empty());
+        }
+        assert!(compile_calls(&Il::default()).unwrap().is_empty());
+    }
+
+    #[test]
     fn audit_indexed_direct_call_preserves_legacy_validation_and_typerefs() {
         let kind=|semantic_kind| (0..4096).find(|&value|
             semantic(4,value)==semantic_kind).expect("pinned native EDG kind");
