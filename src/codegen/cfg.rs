@@ -3988,6 +3988,38 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 mod tests {
     use super::*;
     #[test]
+    fn audit_cached_direct_call_declarations_are_snapshot_local() {
+        let word=CAbiInt {bits:64,signed:true,is_bool:false};
+        let first=CallDeclaration {
+            symbol:crate::SymbolId(7),name:"repeated_target".into(),
+            abi:CAbi {
+                parameters:vec![word],result:Some(word),
+                aggregate_parameters:vec![None],aggregate_result:None,
+            },
+        };
+        let second=CallDeclaration {
+            symbol:crate::SymbolId(7),name:"changed_target".into(),
+            abi:CAbi {
+                parameters:vec![],result:None,
+                aggregate_parameters:vec![],aggregate_result:None,
+            },
+        };
+        let catalog=HashMap::from([(first.symbol,first)]);
+        let alternate=HashMap::from([(second.symbol,second)]);
+        let original=cached_call_decl(&catalog,crate::SymbolId(7)).unwrap();
+        for _ in 0..1024 {
+            assert!(std::ptr::eq(
+                cached_call_decl(&catalog,crate::SymbolId(7)).unwrap(),original));
+        }
+        assert_eq!(original.name,"repeated_target");
+        assert_eq!(original.abi.parameters.len(),1);
+        assert_eq!(
+            cached_call_decl(&alternate,crate::SymbolId(7)).unwrap().name,
+            "changed_target",
+        );
+        assert!(cached_call_decl(&catalog,crate::SymbolId(999)).is_err());
+    }
+    #[test]
     fn m12_atomic_compare_exchange_returns_status_and_updates_expected_on_failure() {
         use crate::memory_order::MemoryOrder;
         let ty=CAbiInt{bits:32,signed:true,is_bool:false};
