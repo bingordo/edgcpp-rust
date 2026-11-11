@@ -174,13 +174,20 @@ impl TargetAbi for SysV {
             parameters.push(ParameterPlan{source_index,mode,pieces});
         }
         self.validate_aggregate_return(abi.aggregate_result)?;
+        if abi.aggregate_result.is_some() && abi.result.is_none() {
+            return Err(CodegenError::InvalidFunction(
+                "aggregate ABI return is missing its machine result".into()));
+        }
         let result=if let Some(ty)=abi.result {
             // An aggregate's machine pieces are i64; for a scalar return the
             // type must be a supported native integer width before we build
             // its Cranelift signature.
-            if abi.aggregate_result.is_none() {
-                checked_scalar_abi(ty)?;
-            }
+            if abi.aggregate_result.is_some() {
+                if ty.bits!=64 {
+                    return Err(CodegenError::InvalidFunction(
+                        "aggregate ABI return must use i64 machine pieces".into()));
+                }
+            } else { checked_scalar_abi(ty)?; }
             match abi.aggregate_result {
                 Some(bytes) if bytes>8 => vec![
                     MachinePiece{
@@ -368,6 +375,13 @@ mod tests {
             "a C _Bool scalar cannot have a 64-bit native width");
         abi.result=Some(CAbiInt{bits:8,signed:false,is_bool:true});
         assert!(SysV.passing_plan(&abi).is_ok());
+        // A malformed aggregate descriptor must never evade the scalar
+        // width check by taking a one-register return path.
+        abi.aggregate_result=Some(2);
+        abi.result=Some(CAbiInt{bits:24,signed:false,is_bool:false});
+        assert!(SysV.passing_plan(&abi).is_err());
+        abi.result=None;
+        assert!(SysV.passing_plan(&abi).is_err());
     }
 
     #[test]
