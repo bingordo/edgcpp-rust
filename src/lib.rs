@@ -1119,6 +1119,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     match kind {
         1..=4 => {
             let Some(name) = t(0) else { return; };
+            // Only routine-definition records carry a boolean auxiliary
+            // value; all other entity kinds reserve it as zero.
+            if (kind == 1 && aux > 1) || (kind != 1 && aux != 0) { return; }
             output.entities.push(match kind {
                 1 => Entity::Routine { name, has_definition: aux != 0 },
                 2 => Entity::Variable { name },
@@ -1696,6 +1699,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         14 => {
             let (Some(symbol), Some(kind), Some(explicit), Some(uninitialized)) =
                 (n(0), n(1), n(2), n(3)) else { return; };
+            if symbol == 0 || explicit > 1 || uninitialized > 1 { return; }
             output.variable_initializers.push(VariableInitializer {
                 symbol: SymbolId(symbol), kind, explicit: explicit != 0,
                 uninitialized: uninitialized != 0,
@@ -2632,6 +2636,24 @@ mod audit_wire_preflight_tests {
         ] {
             let fields=[number(owner),number(prototype),number(variadic)];
             callback_rejects(12,fields.as_ptr(),fields.len());
+        }
+        for (explicit,uninitialized) in [(2,0),(1,2),(u64::MAX,0)] {
+            let fields=[number(1),number(0),number(explicit),number(uninitialized)];
+            callback_rejects(14,fields.as_ptr(),fields.len());
+        }
+        let name=WireField {
+            data:b"f".as_ptr(),length:1,value:0,tag:wire_tags::TEXT,
+        };
+        let mut state=Collector::default();
+        unsafe {collect((&mut state as *mut Collector).cast(),
+            1,&name,1,1);}
+        assert_eq!(state.il.entities,
+            vec![Entity::Routine{name:"f".into(),has_definition:true}]);
+        for (kind,aux) in [(1,2),(2,1),(3,1),(4,1)] {
+            let mut state=Collector::default();
+            unsafe {collect((&mut state as *mut Collector).cast(),
+                kind,&name,1,aux);}
+            assert!(state.malformed,"entity event {kind} aux {aux}");
         }
     }
 
