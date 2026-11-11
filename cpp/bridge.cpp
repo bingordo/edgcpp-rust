@@ -277,10 +277,26 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
 // EDG's complete member scope includes methods which may be inlined away
 // before the native frontend sees an expression. Never infer triviality
 // merely from the absence of output routine bodies or record-field shapes.
-static bool plain_cpp_record(a_type_ptr type) {
+// EDG's is_pod_class() recurses through class symbol supplements; that
+// semantic routine is not safe for every notional/template-prototype type
+// exposed by full GNU C++ library headers during the *output* snapshot.
+// Native C++0/1/2 do not admit template class object layouts yet. Reject
+// these before invoking any EDG lifetime or POD introspection, rather than
+// treating an unsupported template as ordinary/POD or dereferencing a
+// missing supplement in the compiler's foreign-language bridge.
+static bool supported_concrete_class_proof_root(a_type_ptr type) {
   if (type == nullptr ||
-      (type->kind != tk_struct && type->kind != tk_class) ||
-      type->incomplete) return false;
+      (type->kind != tk_class && type->kind != tk_struct) ||
+      type->incomplete ||
+      type->variant.class_struct_union.is_nonreal_class) return false;
+  a_symbol_ptr sym = symbol_for(type);
+  if (sym == nullptr || sym->kind != sk_class_or_struct_tag) return false;
+  const auto *supplement = class_symbol_supp(sym);
+  return supplement != nullptr && supplement->class_template == nullptr;
+}
+
+static bool plain_cpp_record(a_type_ptr type) {
+  if (!supported_concrete_class_proof_root(type)) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
   if (extra == nullptr || extra->assoc_scope == nullptr ||
       extra->direct_base_classes != nullptr ||
@@ -342,10 +358,8 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
-  if (type == nullptr ||
-      (type->kind != tk_class && type->kind != tk_struct) ||
-      type->incomplete || type->size != 4 || type->alignment != 4 ||
-      symbol_for(type) == nullptr) return false;
+  if (!supported_concrete_class_proof_root(type) ||
+      type->size != 4 || type->alignment != 4) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
   if (extra == nullptr || extra->assoc_scope == nullptr ||
       extra->direct_base_classes != nullptr ||
