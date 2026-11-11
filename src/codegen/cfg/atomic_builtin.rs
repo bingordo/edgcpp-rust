@@ -101,6 +101,7 @@ fn source_pointee(
 pub(super) fn lower(
     graph:&Graph,name:&str,args:&[ExpressionId],
     params:&[crate::SymbolId],locals:&[&crate::LocalVariable],il:&Il,
+    catalog:&HashMap<crate::SymbolId,CallDeclaration>,
 ) -> Result<Expr,CodegenError> {
     use crate::memory_order::{AtomicOperation,validate_compare_exchange};
     let arg=|i:usize| -> Result<ExpressionId,CodegenError> {
@@ -130,7 +131,7 @@ pub(super) fn lower(
     if ty.is_bool || usize::from(ty.bits)!=bytes*8 {
         return Err(invalid("source atomic builtin pointee width/type mismatch"));
     }
-    let lower=|id|lower_c_expression(graph,id,params,locals,il).map(Box::new);
+    let lower=|id|lower_c_expression(graph,id,params,locals,il,catalog).map(Box::new);
     match family {
         "__atomic_load" if args.len()==2 => Ok(Expr::AtomicLoad(
             ty,order(graph,arg(1)?,AtomicOperation::Load)?,lower(object)?)),
