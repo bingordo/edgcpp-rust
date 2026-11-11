@@ -902,16 +902,21 @@ impl Graph {
             }
             graph.function_signatures.push(sig.clone());
         }
-        let mut symbol_ids = std::collections::HashSet::new();
+        // Native symbol identities are unique across all declaration kinds.
+        // Retain their kind and position once: validating every parameter,
+        // local, label or lifetime must not rescan the full symbol vector.
+        let mut symbol_index: HashMap<SymbolId, (u32, usize)> = HashMap::new();
         for symbol in &il.symbols {
-            if symbol.id.0 == 0 || !symbol_ids.insert(symbol.id) {
+            if symbol.id.0 == 0 ||
+               symbol_index.insert(symbol.id, (symbol.kind, graph.symbols.len())).is_some() {
                 return Err(GraphError::DuplicateSymbol(symbol.id));
             }
             graph.symbols.push(symbol.clone());
         }
+        let has_kind = |id: SymbolId, kind: u32| symbol_index.get(&id)
+            .is_some_and(|&(actual, _)| actual == kind);
         for identity in &il.routine_identities {
-            if !graph.symbols.iter().any(|sym|
-                    sym.id == identity.routine && sym.kind == 1)
+            if !has_kind(identity.routine, 1)
                 || identity.function.is_empty() {
                 return Err(GraphError::InvalidRoutineIdentity(identity.routine));
             }
@@ -929,7 +934,7 @@ impl Graph {
         }
         let mut typed_symbols = std::collections::HashSet::new();
         for edge in &il.symbol_types {
-            if !symbol_ids.contains(&edge.symbol) || !type_map.contains_key(&edge.ty) {
+            if !symbol_index.contains_key(&edge.symbol) || !type_map.contains_key(&edge.ty) {
                 return Err(GraphError::InvalidSymbolType(edge.symbol));
             }
             if !typed_symbols.insert(edge.symbol) {
@@ -944,8 +949,7 @@ impl Graph {
             .map(|edge| (edge.symbol, edge.ty)).collect();
         let mut annotated_routines = std::collections::HashSet::new();
         for attributes in &il.routine_attributes {
-            if !graph.symbols.iter().any(|symbol|
-                symbol.id == attributes.routine && symbol.kind == 1)
+            if !has_kind(attributes.routine, 1)
                 || (attributes.pure_virtual && !attributes.is_virtual)
                 || (attributes.is_override && !attributes.is_virtual)
                 || (attributes.is_final && !attributes.is_virtual)
@@ -961,7 +965,7 @@ impl Graph {
         let mut member_owners = std::collections::HashSet::new();
         for member in &il.member_functions {
             if !type_map.contains_key(&member.owner) ||
-                !graph.symbols.iter().any(|s| s.id == member.routine && s.kind == 1) {
+                !has_kind(member.routine, 1) {
                 return Err(GraphError::InvalidMemberFunction {
                     owner: member.owner, routine: member.routine,
                 });
@@ -975,13 +979,11 @@ impl Graph {
         // or record types. Check the complete snapshot before indexing them.
         let mut ctor_positions = std::collections::HashSet::new();
         for init in &il.constructor_initializers {
-            let valid_routine = graph.symbols.iter()
-                .any(|s| s.id == init.routine && s.kind == 1);
+            let valid_routine = has_kind(init.routine, 1);
             let valid_target = match init.kind {
                 0 | 1 => init.target_type.is_some_and(|ty| type_map.contains_key(&ty))
                     && init.target_field.is_none(),
-                2 => init.target_field.is_some_and(|field| graph.symbols.iter()
-                    .any(|s| s.id == field && s.kind == 3))
+                2 => init.target_field.is_some_and(|field| has_kind(field, 3))
                     && init.target_type.is_none(),
                 3 => init.target_type.is_none() && init.target_field.is_none(),
                 _ => false,
@@ -1017,7 +1019,7 @@ impl Graph {
         for expr in &il.constructor_initializer_expressions {
             let key = (expr.routine, expr.position, expr.path.clone());
             if !ctor_positions.contains(&(expr.routine, expr.position))
-                || expr.symbol_id.is_some_and(|id| !symbol_ids.contains(&id))
+                || expr.symbol_id.is_some_and(|id| !symbol_index.contains_key(&id))
                 || expr.type_id.is_some_and(|id| !type_map.contains_key(&id))
             {
                 return Err(GraphError::InvalidConstructorExpression {
@@ -1075,7 +1077,7 @@ impl Graph {
         }
         let mut initialized = std::collections::HashSet::new();
         for init in &il.variable_initializers {
-            if !symbol_ids.contains(&init.symbol) {
+            if !symbol_index.contains_key(&init.symbol) {
                 return Err(GraphError::MissingSymbol(init.symbol));
             }
             if !initialized.insert(init.symbol) {
@@ -1085,7 +1087,7 @@ impl Graph {
         }
         let mut integer_inits = std::collections::HashSet::new();
         for val in &il.initializer_integers {
-            if !symbol_ids.contains(&val.symbol) {
+            if !symbol_index.contains_key(&val.symbol) {
                 return Err(GraphError::MissingSymbol(val.symbol));
             }
             if !integer_inits.insert(val.symbol) {
@@ -1095,7 +1097,7 @@ impl Graph {
         }
         let mut dynamic_inits = std::collections::HashSet::new();
         for init in &il.dynamic_initializers {
-            if !symbol_ids.contains(&init.symbol) { return Err(GraphError::MissingSymbol(init.symbol)); }
+            if !symbol_index.contains_key(&init.symbol) { return Err(GraphError::MissingSymbol(init.symbol)); }
             if !dynamic_inits.insert(init.symbol) {
                 return Err(GraphError::DuplicateDynamicInitializer(init.symbol));
             }
@@ -1103,11 +1105,11 @@ impl Graph {
         }
         let mut init_paths = std::collections::HashSet::new();
         for node in &il.initializer_expressions {
-            if !symbol_ids.contains(&node.owner) {
+            if !symbol_index.contains_key(&node.owner) {
                 return Err(GraphError::MissingSymbol(node.owner));
             }
             if let Some(id) = node.symbol_id {
-                if !symbol_ids.contains(&id) { return Err(GraphError::MissingSymbol(id)); }
+                if !symbol_index.contains_key(&id) { return Err(GraphError::MissingSymbol(id)); }
             }
             if let Some(id) = node.type_id {
                 if !type_map.contains_key(&id) { return Err(GraphError::MissingType(id)); }
@@ -1168,7 +1170,7 @@ impl Graph {
         }
         for expr in &il.expressions {
             if let Some(id) = expr.symbol_id {
-                if !symbol_ids.contains(&id) { return Err(GraphError::MissingSymbol(id)); }
+                if !symbol_index.contains_key(&id) { return Err(GraphError::MissingSymbol(id)); }
             }
         }
         for expr in &il.expressions {
@@ -1188,10 +1190,8 @@ impl Graph {
         // Scope IDs are dense per routine in the native snapshot and
         // parents precede their children. Validate after collecting all
         // statements and symbols, since EDG emits these independently.
-        let is_routine = |id: SymbolId| graph.symbols.iter()
-            .any(|s| s.id == id && s.kind == 1);
-        let is_variable = |id: SymbolId| graph.symbols.iter()
-            .any(|s| s.id == id && s.kind == 2);
+        let is_routine = |id: SymbolId| has_kind(id, 1);
+        let is_variable = |id: SymbolId| has_kind(id, 2);
         let mut scope_keys = std::collections::HashSet::new();
         for scope in &il.local_scopes {
             if !is_routine(scope.routine)
@@ -1218,9 +1218,8 @@ impl Graph {
             let valid_statement = scope.statement_path.as_ref().is_none_or(|path| {
                 let name = graph.routine_function_by_id.get(&scope.routine)
                     .map(String::as_str)
-                    .or_else(|| graph.symbols.iter()
-                        .find(|sym| sym.id == scope.routine)
-                        .map(|sym| sym.name.as_str()));
+                    .or_else(|| symbol_index.get(&scope.routine)
+                        .map(|&(_, index)| graph.symbols[index].name.as_str()));
                 name.is_some_and(|function|
                     smap.contains_key(&(function.to_owned(), path.clone())))
             });
@@ -1329,8 +1328,7 @@ impl Graph {
                     function: label.function.clone(), path: label.statement_path.clone(),
                 });
             };
-            if !graph.symbols.iter().any(|symbol|
-                symbol.id == label.label && symbol.kind == 4)
+            if !has_kind(label.label, 4)
             {
                 return Err(GraphError::InvalidStatementLabel {
                     function: label.function.clone(), path: label.statement_path.clone(),
@@ -1354,7 +1352,7 @@ impl Graph {
         for decl in &il.statement_declarations {
             let key = (decl.function.clone(), decl.statement_path.clone());
             if !smap.contains_key(&key)
-                || !graph.symbols.iter().any(|sym| sym.id == decl.symbol && sym.kind == 2)
+                || !has_kind(decl.symbol, 2)
                 || !type_map.contains_key(&decl.ty)
             {
                 return Err(GraphError::InvalidStatementDeclaration {
@@ -1406,8 +1404,7 @@ impl Graph {
         for init in &il.statement_initializations {
             let key = (init.function.clone(), init.statement_path.clone());
             if !smap.contains_key(&key) || init.role > 2 ||
-               init.symbol.is_some_and(|symbol| !graph.symbols.iter()
-                   .any(|sym| sym.id == symbol && sym.kind == 2)) {
+               init.symbol.is_some_and(|symbol| !has_kind(symbol, 2)) {
                 return Err(GraphError::InvalidStatementInitialization {
                     function: key.0, path: key.1,
                 });
@@ -1447,7 +1444,7 @@ impl Graph {
                     expr.function.clone(), expr.statement_path.clone())))
                 || !smap.contains_key(&(expr.function.clone(), expr.statement_path.clone()))
                 || expr.type_id.is_some_and(|id| !type_map.contains_key(&id))
-                || expr.symbol_id.is_some_and(|id| !symbol_ids.contains(&id))
+                || expr.symbol_id.is_some_and(|id| !symbol_index.contains_key(&id))
             {
                 return Err(GraphError::InvalidControlExpression {
                     function: expr.function.clone(), statement: expr.statement_path.clone(),
@@ -1749,8 +1746,7 @@ impl Graph {
         // each function. Parent regions always appear before their children.
         let mut lifetime_positions: HashMap<SymbolId, Vec<u32>> = HashMap::new();
         for region in &il.object_lifetimes {
-            if !graph.symbols.iter().any(|symbol|
-                    symbol.id == region.routine && symbol.kind == 1) ||
+            if !has_kind(region.routine, 1) ||
                 region.parent.is_some_and(|parent| parent >= region.id)
             {
                 return Err(GraphError::InvalidLifetime {
@@ -1817,7 +1813,7 @@ impl Graph {
                 || item.lifetime.is_some_and(|id|
                     owner.is_none_or(|routine| !graph.lifetime_index.contains_key(&(*routine, id))))
                 || item.destructor.is_some_and(|symbol|
-                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 1))
+                    !has_kind(symbol, 1))
             {
                 return Err(GraphError::InvalidInitializationLifetime {
                     function: key.0, path: key.1,
@@ -1837,9 +1833,9 @@ impl Graph {
             let key = (item.routine, item.lifetime);
             if !graph.lifetime_index.contains_key(&key)
                 || item.variable.is_some_and(|symbol|
-                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 2))
+                    !has_kind(symbol, 2))
                 || item.destructor.is_some_and(|symbol|
-                    !graph.symbols.iter().any(|s| s.id == symbol && s.kind == 1))
+                    !has_kind(symbol, 1))
             {
                 return Err(GraphError::InvalidLifetimeDestruction {
                     routine: item.routine, lifetime: item.lifetime,
@@ -1883,7 +1879,7 @@ impl Graph {
             graph.statement_sources.push(record.clone());
         }
         for record in &il.symbol_sources {
-            if !valid_position(&record.location) || !symbol_ids.contains(&record.symbol) {
+            if !valid_position(&record.location) || !symbol_index.contains_key(&record.symbol) {
                 return Err(GraphError::InvalidSymbolSource(record.symbol));
             }
             if graph.symbol_source_index.insert(record.symbol, graph.symbol_sources.len()).is_some() {
@@ -4315,6 +4311,50 @@ mod tests {
         il.local_variables.push(il.local_variables[0].clone());
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::DuplicateLocalVariable(SymbolId(4)))));
+    }
+
+    #[test]
+    fn audit_symbol_index_validates_many_parameter_and_local_kinds() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1, name: "f".into(),
+        });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None, kind: 17,
+            statement_path: None,
+        });
+        for position in 0..128 {
+            let symbol = SymbolId(position + 2);
+            il.symbols.push(Symbol {
+                id: symbol, kind: 2, name: format!("arg_{position}"),
+            });
+            il.function_parameters.push(FunctionParameter {
+                routine: SymbolId(1), position: Some(position),
+                symbol, ty: TypeId(1), implicit_this: false,
+                compiler_generated: false,
+            });
+        }
+        for index in 0..128 {
+            let symbol = SymbolId(index + 130);
+            il.symbols.push(Symbol {
+                id: symbol, kind: 2, name: format!("local_{index}"),
+            });
+            il.local_variables.push(LocalVariable {
+                routine: SymbolId(1), scope: 0, symbol, ty: TypeId(1),
+                storage_class: 0, compiler_generated: false,
+                static_storage: false, structured_binding: false,
+                handler_parameter: false,
+            });
+        }
+        let graph = Graph::from_il(&il).expect("many valid native declarations");
+        assert_eq!(graph.function_parameters.len(), 128);
+        assert_eq!(graph.local_variables.len(), 128);
+        il.symbols[129].kind = 3;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidLocalVariable(SymbolId(130)));
     }
 
     #[test]
