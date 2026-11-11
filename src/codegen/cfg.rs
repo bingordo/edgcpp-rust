@@ -2068,10 +2068,15 @@ fn lower_c_expression(
         if direct {
             let symbol=callee.data.symbol_id
                 .ok_or_else(||invalid("direct atomic callee without native symbol"))?;
-            if let Some(name)=il.symbols.iter().find(|s|s.id==symbol)
-                .map(|s|s.name.as_str()) {
-                if name.starts_with("__atomic_") {
-                    return atomic_builtin::lower(graph,name,&node.operands[1..],params,locals,il,catalog);
+            // Ordinary direct calls have already been checked and cached by
+            // compile_calls. Only excluded intrinsic names need a fallback
+            // symbol lookup; do not scan every native symbol for every call.
+            if !catalog.contains_key(&symbol) {
+                if let Some(name)=il.symbols.iter().find(|s|s.id==symbol)
+                    .map(|s|s.name.as_str()) {
+                    if name.starts_with("__atomic_") {
+                        return atomic_builtin::lower(graph,name,&node.operands[1..],params,locals,il,catalog);
+                    }
                 }
             }
         }
