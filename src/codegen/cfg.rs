@@ -993,13 +993,9 @@ fn scalar_memory_access(il:&Il,ty:crate::TypeId)
 /// for the memory access, so never inspect only the result expression.
 fn pointee_memory_access(il:&Il,pointer_ty:crate::TypeId)
     -> Result<MemoryAccess,CodegenError> {
-    let canonical=canonical_abi_type(il,pointer_ty)?;
-    let def=il.types.iter().find(|t|t.id==canonical)
-        .ok_or_else(||invalid("missing pointer/array operand type"))?;
-    if !matches!(semantic(4,def.kind),5|6) {
-        return Err(invalid("indirect access has non-pointer type"));
-    }
-    let element=def.related.ok_or_else(||invalid("indirect access has no pointee type"))?;
+    // Retain the raw native element TypeId while inspecting qualifiers:
+    // canonicalization would erase volatile/atomic typeref metadata.
+    let element=checked_native_pointer_element(il,pointer_ty)?;
     let access=scalar_memory_access(il,element)?;
     if access!=MemoryAccess::Ordinary {
         let size=byte_size(il,element)?;
@@ -1211,7 +1207,7 @@ fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,Codeg
         }
         5 => Ok(8),
         6 => {
-            let element = def.related.ok_or_else(|| invalid("array has no element type"))?;
+            let element=checked_native_pointer_element(il,ty)?;
             let count = il.array_bounds.iter().find(|b| b.array == ty)
                 .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
             let n = byte_size_depth(il,element,depth+1)?;
@@ -1436,8 +1432,7 @@ fn flatten_copy_type(
             out.push((abi,field_offset));
         }
         6 => {
-            let element=def.related
-                .ok_or_else(||invalid("aggregate array has no element type"))?;
+            let element=checked_native_pointer_element(il,ty)?;
             let count=il.array_bounds.iter().find(|b|b.array==ty)
                 .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
             if count==0 || count>MAX_AGGREGATE_SCALAR_ELEMENTS {
@@ -1463,20 +1458,29 @@ fn flatten_copy_type(
     }
     Ok(())
 }
-/// Resolve a native pointer/array edge, including its relation discriminator.
- /// A type with an unrelated edge cannot be used for pointer arithmetic or
- /// comparison, even when the referenced type happens to exist and match.
-fn checked_pointer_element_type(
+/// The native EDG bridge uses role 1 for pointer pointees and role 2
+/// for array elements. Return the *raw* element TypeId so users that care
+/// about qualifiers can inspect native typeref metadata before stripping it.
+fn checked_native_pointer_element(
     il:&Il, ty:crate::TypeId,
 ) -> Result<crate::TypeId,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing pointer/array type"))?;
-    if !matches!(semantic(4,def.kind),5|6) || def.related_role!=Some(1) {
-        return Err(invalid("pointer/array lacks native pointee relation"));
+    let expected_role=match semantic(4,def.kind) {
+        5=>1, // tk_pointer
+        6=>2, // tk_array
+        _=>return Err(invalid("expected pointer/array type")),
+    };
+    if def.related_role!=Some(expected_role) {
+        return Err(invalid("pointer/array lacks native pointee/element relation"));
     }
-    canonical_abi_type(il,def.related
-        .ok_or_else(||invalid("missing pointed-to type"))?)
+    def.related.ok_or_else(||invalid("missing pointed-to/array element type"))
+}
+fn checked_pointer_element_type(
+    il:&Il, ty:crate::TypeId,
+) -> Result<crate::TypeId,CodegenError> {
+    canonical_abi_type(il,checked_native_pointer_element(il,ty)?)
 }
 fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
     byte_size(il,checked_pointer_element_type(il,ty)?)
@@ -2054,9 +2058,7 @@ fn checked_call_pointer_argument(
     let expected_target=checked_call_pointer_formal_target(il,formal)?;
     let provided=lookup(actual)?;
     let actual_target=match semantic(4,provided.kind) {
-        5|6 if provided.related_role==Some(1) =>
-            canonical_abi_type(il,provided.related
-                .ok_or_else(||invalid("call pointer actual pointee missing"))?)?,
+        5|6=>checked_pointer_element_type(il,actual)?,
         2=>actual,  // function designator decays to function pointer
         _=>return Err(invalid("call pointer actual is not a pointer/array/function")),
     };
@@ -4950,10 +4952,13 @@ mod audit_pointer_difference_tests {
                 related_role:None,related:Some(crate::TypeId(1))},
             crate::TypeDef{id:crate::TypeId(22),kind:native_kind(5),
                 related_role:Some(1),related:Some(crate::TypeId(999))},
+            // Wrong native array role: role 1 is for pointers, not arrays.
+            crate::TypeDef{id:crate::TypeId(23),kind:native_kind(6),
+                related_role:Some(1),related:Some(crate::TypeId(1))},
         ]);
         // Without the discriminator check, comparing/subtracting the same
         // malformed pointer type incorrectly succeeded by TypeId equality.
-        for malformed in [20,21,22] {
+        for malformed in [20,21,22,23] {
             let ty=crate::TypeId(malformed);
             assert!(pointer_stride(&il,ty).is_err());
             assert!(pointer_difference_stride(&il,ty,ty).is_err());
@@ -4965,6 +4970,35 @@ mod audit_pointer_difference_tests {
             &il,crate::TypeId(3),crate::TypeId(6)).is_ok());
         assert!(checked_pointer_comparison(
             &il,crate::TypeId(3),crate::TypeId(6),5).is_ok());
+    }
+
+    #[test]
+    fn native_arrays_decay_and_compare_with_matching_object_pointers() {
+        let mut il=pointer_types();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(7),kind:native_kind(6),
+                related_role:Some(2),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(8),kind:native_kind(6),
+                related_role:Some(2),related:Some(crate::TypeId(5))},
+        ]);
+        il.array_bounds.extend([
+            crate::ArrayBound{array:crate::TypeId(7),elements:4},
+            crate::ArrayBound{array:crate::TypeId(8),elements:4},
+        ]);
+        assert_eq!(pointer_stride(&il,crate::TypeId(7)).unwrap(),4);
+        assert_eq!(byte_size(&il,crate::TypeId(7)).unwrap(),16);
+        assert_eq!(pointer_difference_stride(
+            &il,crate::TypeId(7),crate::TypeId(3)).unwrap(),4);
+        assert_eq!(pointer_difference_stride(
+            &il,crate::TypeId(8),crate::TypeId(3)).unwrap(),4);
+        for op in 5..=10 {
+            assert!(checked_pointer_comparison(
+                &il,crate::TypeId(7),crate::TypeId(3),op).is_ok());
+        }
+        assert_eq!(pointee_memory_access(
+            &il,crate::TypeId(7)).unwrap(),MemoryAccess::Ordinary);
+        // Graph::from_il also admits the native array-element relationship.
+        assert!(Graph::from_il(&il).is_ok());
     }
 
     #[test]
@@ -5673,7 +5707,7 @@ mod audit_call_argument_shape_tests {
             ty(3,7,None,None),            // distinct struct B, same layout
             ty(4,3,Some(4),Some(2)),      // typedef struct A Alias
             ty(5,5,Some(1),Some(1)),      // int*
-            ty(6,6,Some(1),Some(1)),      // int[4]
+            ty(6,6,Some(2),Some(1)),      // int[4], native array-element role
             ty(7,2,Some(3),Some(1)),      // int function(void)
             ty(8,5,Some(1),Some(7)),      // int (*)(void)
             ty(9,1,None,None),            // C _Bool
@@ -5831,6 +5865,18 @@ mod audit_call_argument_shape_tests {
         assert!(!checked(&il,1,5),"raw pointer cannot implicitly become int");
         assert!(!checked(&il,5,26),"pointer actual with malformed related role");
         assert!(!checked(&il,5,27),"pointer actual with missing pointee");
+    }
+
+    #[test]
+    fn audit_array_argument_decay_uses_native_array_element_role() {
+        let il=types(); // native int[4] has related_role=2.
+        assert!(checked(&il,5,6),"int[4] must decay to int*");
+        assert!(checked(&il,11,6),"int[4] must convert to void*");
+        let mut malformed=il;
+        malformed.types.iter_mut()
+            .find(|t|t.id==crate::TypeId(6)).unwrap().related_role=Some(1);
+        assert!(!checked(&malformed,5,6),"array with pointer-only role cannot decay");
+        assert!(!checked(&malformed,11,6),"bad array role cannot become void*");
     }
 
     #[test]
