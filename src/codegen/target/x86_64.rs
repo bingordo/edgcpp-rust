@@ -23,6 +23,17 @@ fn pack_bytes(fb:&mut FunctionBuilder<'_>, address:Value,
     packed
 }
 
+// Check machine widths at BOTH sides of an ABI boundary. An invalid
+// scalar return width previously passed the return-piece layout checks,
+// then could reach CAbiInt::cranelift's unreachable!() during code emission.
+fn checked_scalar_abi(ty:CAbiInt) -> Result<(),CodegenError> {
+    if !matches!(ty.bits,8|16|32|64) || (ty.is_bool && ty.bits!=8) {
+        return Err(CodegenError::InvalidFunction(
+            "unsupported SysV scalar integer/bool width".into()));
+    }
+    Ok(())
+}
+
 impl TargetAbi for SysV {
     fn isa_name(&self) -> &'static str { "x86_64" }
 
@@ -146,10 +157,7 @@ impl TargetAbi for SysV {
                     }])
                 }
             } else {
-                if !matches!(ty.bits,8|16|32|64) {
-                    return Err(CodegenError::InvalidFunction(
-                        "unsupported scalar machine width".into()));
-                }
+                checked_scalar_abi(ty)?;
                 let location=if gpr<6 {
                     let reg=integer(gpr);
                     gpr+=1;
@@ -167,6 +175,12 @@ impl TargetAbi for SysV {
         }
         self.validate_aggregate_return(abi.aggregate_result)?;
         let result=if let Some(ty)=abi.result {
+            // An aggregate's machine pieces are i64; for a scalar return the
+            // type must be a supported native integer width before we build
+            // its Cranelift signature.
+            if abi.aggregate_result.is_none() {
+                checked_scalar_abi(ty)?;
+            }
             match abi.aggregate_result {
                 Some(bytes) if bytes>8 => vec![
                     MachinePiece{
@@ -332,6 +346,45 @@ mod tests {
         abi.aggregate_result=Some(9);
         let plan=SysV.passing_plan(&abi).unwrap();
         assert_eq!(plan.result[1].object_bytes,1);
+    }
+
+    #[test]
+    fn audit_call_scalar_return_widths_fail_before_codegen() {
+        let mut abi=signature(&[]);
+        for bits in [8,16,32,64] {
+            abi.result=Some(CAbiInt{bits,signed:true,is_bool:false});
+            assert!(SysV.passing_plan(&abi).is_ok(),
+                "valid SysV return width {bits}");
+        }
+        // These previously passed the return-piece check, but could panic
+        // when CAbiInt::cranelift() was used for the actual function return.
+        for bits in [1,7,24,48,128] {
+            abi.result=Some(CAbiInt{bits,signed:true,is_bool:false});
+            assert!(SysV.passing_plan(&abi).is_err(),
+                "invalid SysV return width {bits} must fail closed");
+        }
+        abi.result=Some(CAbiInt{bits:64,signed:false,is_bool:true});
+        assert!(SysV.passing_plan(&abi).is_err(),
+            "a C _Bool scalar cannot have a 64-bit native width");
+        abi.result=Some(CAbiInt{bits:8,signed:false,is_bool:true});
+        assert!(SysV.passing_plan(&abi).is_ok());
+    }
+
+    #[test]
+    fn audit_call_scalar_parameter_widths_use_same_validation() {
+        let mut abi=signature(&[None]);
+        for bits in [8,16,32,64] {
+            abi.parameters[0]=CAbiInt{bits,signed:true,is_bool:false};
+            assert!(SysV.passing_plan(&abi).is_ok());
+        }
+        for bits in [1,24,48,128] {
+            abi.parameters[0]=CAbiInt{bits,signed:true,is_bool:false};
+            assert!(SysV.passing_plan(&abi).is_err());
+        }
+        abi.parameters[0]=CAbiInt{bits:32,signed:false,is_bool:true};
+        assert!(SysV.passing_plan(&abi).is_err());
+        abi.parameters[0]=CAbiInt{bits:8,signed:false,is_bool:true};
+        assert!(SysV.passing_plan(&abi).is_ok());
     }
 
     #[test]
