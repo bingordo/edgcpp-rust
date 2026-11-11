@@ -4308,6 +4308,50 @@ mod tests {
     }
 
     #[test]
+    fn audit_symbol_index_validates_many_parameter_and_local_kinds() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol {
+            id: SymbolId(1), kind: 1, name: "f".into(),
+        });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None, kind: 17,
+            statement_path: None,
+        });
+        for position in 0..128 {
+            let symbol = SymbolId(position + 2);
+            il.symbols.push(Symbol {
+                id: symbol, kind: 2, name: format!("arg_{position}"),
+            });
+            il.function_parameters.push(FunctionParameter {
+                routine: SymbolId(1), position: Some(position),
+                symbol, ty: TypeId(1), implicit_this: false,
+                compiler_generated: false,
+            });
+        }
+        for index in 0..128 {
+            let symbol = SymbolId(index + 130);
+            il.symbols.push(Symbol {
+                id: symbol, kind: 2, name: format!("local_{index}"),
+            });
+            il.local_variables.push(LocalVariable {
+                routine: SymbolId(1), scope: 0, symbol, ty: TypeId(1),
+                storage_class: 0, compiler_generated: false,
+                static_storage: false, structured_binding: false,
+                handler_parameter: false,
+            });
+        }
+        let graph = Graph::from_il(&il).expect("many valid native declarations");
+        assert_eq!(graph.function_parameters.len(), 128);
+        assert_eq!(graph.local_variables.len(), 128);
+        il.symbols[129].kind = 3;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidLocalVariable(SymbolId(130)));
+    }
+
+    #[test]
     fn audit_parameter_and_local_types_match_native_symbol_types() {
         let mut il = Il::default();
         il.symbols.extend([
