@@ -840,6 +840,34 @@ impl Scope {
     }
 }
 
+// Return the components of a demangled qualified name before its
+// top-level parameter list. "::" inside template arguments is not a
+// namespace boundary of the containing declaration.
+fn qualified_scope_components(name: &str) -> (Vec<&str>, usize) {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut template_depth = 0usize;
+    let bytes = name.as_bytes();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => template_depth += 1,
+            b'>' => template_depth = template_depth.saturating_sub(1),
+            b'(' if template_depth == 0 => break,
+            b':' if template_depth == 0 && bytes.get(i + 1) == Some(&b':') => {
+                parts.push(&name[start..i]);
+                i += 2;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&name[start..i]);
+    (parts, i)
+}
+
 impl Il {
     /// Reconstruct a structured namespace tree from the snapshot.
     ///
@@ -852,10 +880,12 @@ impl Il {
                 | Entity::Type { name } => (name.as_str(), false),
                 Entity::Namespace { name } => (name.as_str(), true),
             };
-            // Ignore namespace delimiters inside function parameter types.
-            let prefix_end = qualified.find('(').unwrap_or(qualified.len());
-            let prefix = &qualified[..prefix_end];
-            let parts: Vec<&str> = prefix.split("::").collect();
+            // Only split top-level scope separators. C++ class names can
+            // contain qualified template arguments (Map<other::Key>), and
+            // function signatures can contain qualified parameter types.
+            // The caller still treats the portion after a top-level '(' as
+            // part of the final declaration name, not a namespace.
+            let (parts, prefix_end) = qualified_scope_components(qualified);
             let mut scope = &mut root;
             let limit = if is_namespace { parts.len() } else { parts.len().saturating_sub(1) };
             for part in &parts[..limit] {
@@ -1744,6 +1774,49 @@ mod tests {
             name: "f(other::Widget)".into(), has_definition: true,
         }));
         assert!(tree.namespace(&["outer", "f(other"]).is_none());
+    }
+
+    #[test]
+    fn scope_tree_does_not_split_qualified_template_arguments() {
+        let mut il = Il::default();
+        il.entities.extend([
+            Entity::Variable {
+                name: "outer::Map<types::Key, std::vector<types::Value>>::member".into(),
+            },
+            Entity::Routine {
+                name: "outer::Map<types::Key, std::vector<types::Value>>::read(arg::Token)".into(),
+                has_definition: true,
+            },
+            Entity::Routine {
+                name: "outer::Functor<other::Fn(int)>::apply(arg::Token)".into(),
+                has_definition: true,
+            },
+        ]);
+        let tree = il.scope_tree();
+        let outer = tree.namespace(&["outer"]).expect("outer namespace");
+        let map = outer.namespace(&["Map<types::Key, std::vector<types::Value>>"])
+            .expect("templated class scope");
+        assert_eq!(map.declarations, vec![
+            Entity::Variable { name: "member".into() },
+            Entity::Routine { name: "read(arg::Token)".into(), has_definition: true },
+        ]);
+        let functor = outer.namespace(&["Functor<other::Fn(int)>"])
+            .expect("function-type template argument");
+        assert_eq!(functor.declarations, vec![
+            Entity::Routine { name: "apply(arg::Token)".into(), has_definition: true },
+        ]);
+        assert!(outer.namespace(&["Map<types"]).is_none());
+        assert!(outer.namespace(&["Functor<other"]).is_none());
+    }
+
+    #[test]
+    fn qualified_scope_parser_keeps_operator_names_and_plain_declarations() {
+        assert_eq!(qualified_scope_components("outer::operator<(other::Token)"),
+            (vec!["outer", "operator<(other::Token)"], "outer::operator<(other::Token)".len()));
+        assert_eq!(qualified_scope_components("plain"),
+            (vec!["plain"], 5));
+        assert_eq!(qualified_scope_components("ns::f(other::X)"),
+            (vec!["ns", "f"], "ns::f".len()));
     }
 
     #[test]
