@@ -3335,3 +3335,46 @@ mod file_scope_init_schedule_wire_tests {
         assert!(state.malformed);
     }
 }
+
+
+#[cfg(test)]
+mod cxx5_base_subobject_offset_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,derived:u32,position:u32,offset:Option<u64>) {
+        let fields=[
+            WireField{data:std::ptr::null(),length:0,value:u64::from(derived),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(position),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:offset.unwrap_or_default(),
+                      tag:if offset.is_some() {wire_tags::UNSIGNED} else {wire_tags::ABSENT}},
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),69,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+    #[test]
+    fn distinguishes_known_zero_and_unknown_offset() {
+        let mut state=Collector::default();
+        send(&mut state,118,0,Some(0));
+        send(&mut state,118,1,Some(64));
+        send(&mut state,119,0,None);
+        assert!(!state.malformed);
+        assert_eq!(state.il.base_subobject_offsets,vec![
+            BaseSubobjectOffset{derived:TypeId(118),position:0,byte_offset:Some(0)},
+            BaseSubobjectOffset{derived:TypeId(118),position:1,byte_offset:Some(64)},
+            BaseSubobjectOffset{derived:TypeId(119),position:0,byte_offset:None},
+        ]);
+        send(&mut state,118,0,Some(8));
+        assert!(state.malformed,"duplicate base position must fail closed");
+    }
+    #[test]
+    fn reject_zero_owner() {
+        let mut state=Collector::default();
+        send(&mut state,0,0,Some(0));
+        assert!(state.malformed);
+        assert!(state.il.base_subobject_offsets.is_empty());
+    }
+}
