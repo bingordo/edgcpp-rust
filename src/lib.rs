@@ -2955,6 +2955,28 @@ mod audit_wire_identity_index_tests {
         unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
     }
     #[test]
+    fn accepts_only_source_owned_global_data_link_names() {
+        let mut state=Collector::default();
+        let fields=[number(17),number(2),text(b"std::cout")];
+        unsafe {collect((&mut state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+        let linked=[number(17),text(b"_ZSt4cout"),number(1)];
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.symbol_link_names,vec![SymbolLinkName{
+            symbol:SymbolId(17),link_name:"_ZSt4cout".into(),edg_mangled:true
+        }]);
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(state.malformed,"duplicate global data linker names are ambiguous");
+
+        let mut state=Collector::default();
+        let fields=[number(18),number(3),text(b"member")];
+        unsafe {collect((&mut state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+        let linked=[number(18),text(b"_ZN6memberE"),number(1)];
+        unsafe {collect((&mut state as *mut Collector).cast(),61,linked.as_ptr(),3,0);}
+        assert!(state.malformed,"record fields cannot masquerade as linker data");
+    }
+
+    #[test]
     fn unknown_or_duplicate_routine_link_names_fail_closed() {
         let mut state=Collector::default();
         send_link_name(&mut state,1);
