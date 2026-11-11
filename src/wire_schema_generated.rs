@@ -148,3 +148,21 @@ fn expected_wire_field_tag_masks(kind: u32) -> Option<&'static [u8]> {
         _ => None,
     }
 }
+
+fn wire_record_cross_fields_valid(kind: u32, fields: &[WireField]) -> bool {
+    match kind {
+        6 => fields.len() == 15 && (
+            ((fields[7].tag != wire_tags::ABSENT) == (fields[8].tag != wire_tags::ABSENT))
+        ),
+        16 => fields.len() == 4 && (
+            (!(fields[3].tag != wire_tags::ABSENT) || (fields[2].tag != wire_tags::ABSENT))
+        ),
+        29 => fields.len() == 5 && (
+            ((fields[1].tag != wire_tags::ABSENT) == ((fields[4].value & 1) == 0))
+        ),
+        53 => fields.len() == 4 && (
+            ((fields[3].tag != wire_tags::ABSENT) == (fields[2].value == 1))
+        ),
+        _ => true,
+    }
+}
