@@ -1066,6 +1066,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     };
     if fields.iter().any(|f|
         f.tag > wire_tags::MAX || (f.tag == wire_tags::TEXT && f.data.is_null())) { return; }
+    if let Some(masks) = expected_wire_field_tag_masks(kind) {
+        if fields.len() != masks.len() || fields.iter().zip(masks).any(|(field, mask)| {
+            (mask & (1u8 << field.tag)) == 0
+        }) {
+            return;
+        }
+    }
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
