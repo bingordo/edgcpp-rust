@@ -668,3 +668,24 @@ static bool wire_record_field_tags_valid(
   default: return true;
   }
 }
+
+// Enforce schema-defined relationships between optional fields.
+static bool wire_record_cross_fields_valid(
+    uint32_t kind, std::initializer_list<edgcpp_field> fields)
+{
+  switch (kind) {
+  case 6:
+    return fields.size() == 15 &&
+      ((fields.begin()[7].tag != WIRE_ABSENT) == (fields.begin()[8].tag != WIRE_ABSENT));
+  case 16:
+    return fields.size() == 4 &&
+      (!(fields.begin()[3].tag != WIRE_ABSENT) || (fields.begin()[2].tag != WIRE_ABSENT));
+  case 29:
+    return fields.size() == 5 &&
+      ((fields.begin()[1].tag != WIRE_ABSENT) == ((fields.begin()[4].value & 1) == 0));
+  case 53:
+    return fields.size() == 4 &&
+      ((fields.begin()[3].tag != WIRE_ABSENT) == (fields.begin()[2].value == 1));
+  default: return true;
+  }
+}
