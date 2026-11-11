@@ -82,6 +82,8 @@ pub enum GraphError {
     InvalidTypeId(TypeId),
     DuplicateParameter { owner: TypeId, position: u32 },
     InvalidTypeParameterPosition(TypeId),
+    InvalidTypeParameterOwner(TypeId),
+    InvalidFunctionSignatureOwner(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
@@ -762,6 +764,12 @@ impl Graph {
                 if !type_map.contains_key(&child) { return Err(GraphError::MissingType(child)); }
             }
         }
+        // The native bridge emits signature and parameter records only for
+        // tk_routine. Decode native kind through the pinned semantic table,
+        // not a hardcoded EDG enum discriminant.
+        let routine_types: std::collections::HashSet<TypeId> = graph.types.iter()
+            .filter(|ty| unsafe { edgcpp_codegen_kind(4, ty.kind) } == 2)
+            .map(|ty| ty.id).collect();
         let mut parameters = std::collections::HashSet::new();
         let mut parameter_positions: HashMap<TypeId, Vec<u32>> = HashMap::new();
         for param in &il.type_parameters {
@@ -769,6 +777,9 @@ impl Graph {
                 if !type_map.contains_key(&id) {
                     return Err(GraphError::MissingType(id));
                 }
+            }
+            if !routine_types.contains(&param.owner) {
+                return Err(GraphError::InvalidTypeParameterOwner(param.owner));
             }
             if !parameters.insert((param.owner, param.position)) {
                 return Err(GraphError::DuplicateParameter {
@@ -927,6 +938,9 @@ impl Graph {
         for sig in &il.function_signatures {
             if !type_map.contains_key(&sig.owner) {
                 return Err(GraphError::MissingType(sig.owner));
+            }
+            if !routine_types.contains(&sig.owner) {
+                return Err(GraphError::InvalidFunctionSignatureOwner(sig.owner));
             }
             if !signatures.insert(sig.owner) {
                 return Err(GraphError::DuplicateFunctionSignature(sig.owner));
@@ -3245,6 +3259,10 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn native_routine_type_kind() -> u32 {
+        (0..4096).find(|&kind| unsafe { edgcpp_codegen_kind(4,kind) } == 2)
+            .expect("native EDG routine type kind")
+    }
     fn native_call_kinds(member: bool) -> (u32, u32) {
         let native_kind=(0..4096).find(|&kind|
             unsafe { edgcpp_codegen_kind(2,kind) }==3
@@ -4561,7 +4579,8 @@ mod tests {
         let mut il = Il::default();
         for id in [1, 2] {
             il.types.push(TypeDef {
-                id: TypeId(id), kind: 2, related_role: None, related: None,
+                id: TypeId(id), kind: if id == 1 { native_routine_type_kind() } else { 2 },
+                related_role: None, related: None,
             });
         }
         il.type_parameters.push(TypeParameter {
@@ -5615,6 +5634,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_routine_owners_for_function_metadata() {
+        let routine=native_routine_type_kind();
+        let nonroutine=(0..4096).find(|&kind|
+            unsafe {edgcpp_codegen_kind(4,kind)} == 1
+        ).expect("native EDG integer type kind");
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef { id:TypeId(1), kind:nonroutine, related_role:None, related:None },
+            TypeDef { id:TypeId(2), kind:nonroutine, related_role:None, related:None },
+        ]);
+        il.type_parameters.push(TypeParameter {
+            owner:TypeId(1), position:0, ty:TypeId(2),
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeParameterOwner(TypeId(1)));
+        il.type_parameters.clear();
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1), prototyped:true, variadic:false,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidFunctionSignatureOwner(TypeId(1)));
+        il.types[0].kind=routine;
+        Graph::from_il(&il).expect("routine signature metadata");
+        il.type_parameters.push(TypeParameter {
+            owner:TypeId(1), position:0, ty:TypeId(2),
+        });
+        Graph::from_il(&il).expect("routine parameter edges");
+    }
+
+    #[test]
     fn validates_parameter_edges() {
         let mut il = Il::default();
         il.types.push(TypeDef { id: TypeId(1), kind: 0,
@@ -5625,6 +5674,7 @@ mod tests {
         assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingType(TypeId(2)));
         il.types.push(TypeDef { id: TypeId(2), kind: 0,
             related_role: None, related: None });
+        il.types[0].kind = native_routine_type_kind();
         let graph = Graph::from_il(&il).unwrap();
         assert_eq!(graph.parameters(TypeId(1)).next().unwrap().ty, TypeId(2));
     }
@@ -5684,7 +5734,7 @@ mod tests {
     #[test]
     fn routine_signature_metadata() {
         let mut il = Il::default();
-        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.types.push(TypeDef { id: TypeId(1), kind: native_routine_type_kind(), related_role: None, related: None });
         il.function_signatures.push(FunctionSignature { owner: TypeId(1),
             prototyped: true, variadic: true });
         assert!(Graph::from_il(&il).unwrap().signature(TypeId(1)).unwrap().variadic);
