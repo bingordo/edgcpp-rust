@@ -2832,3 +2832,82 @@ mod audit_typed_wire_field_tests {
         assert_eq!(state.il.global_variables.len(),1);
     }
 }
+
+
+#[cfg(test)]
+mod audit_complete_wire_field_tags_tests {
+    use super::*;
+
+    fn wire_field(tag:u32)->WireField {
+        let sample=b"x";
+        WireField {
+            data:if tag==wire_tags::TEXT {sample.as_ptr()} else {std::ptr::null()},
+            length:if tag==wire_tags::TEXT {sample.len()} else {0},
+            value:1,tag,
+        }
+    }
+
+    #[test]
+    fn every_record_field_rejects_an_incorrect_but_defined_tag() {
+        let mut total=0;
+        let mut optional=0;
+        for kind in 1..=65_u32 {
+            let expected=expected_wire_field_tag_masks(kind)
+                .expect("all native wire record kinds have typed fields");
+            assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
+            for field_index in 0..expected.len() {
+                let allowed=expected[field_index];
+                assert!(allowed!=0 && allowed & !0x0f==0);
+                if allowed & 1!=0 {optional+=1;}
+                let baseline:Vec<_>=expected.iter().map(|mask|{
+                    wire_field(mask.trailing_zeros())
+                }).collect();
+                let bad_tag=(0..=wire_tags::MAX).find(|tag|{
+                    allowed & (1u8 << tag)==0
+                }).expect("must have a disallowed defined tag");
+                let mut bad=baseline;
+                bad[field_index]=wire_field(bad_tag);
+                let mut state=Collector::default();
+                unsafe {
+                    collect((&mut state as *mut Collector).cast(),
+                            kind,bad.as_ptr(),bad.len(),0);
+                }
+                assert!(state.malformed,
+                    "record {kind} field {field_index} accepted illegal tag {bad_tag}");
+                assert!(!state.panicked);
+                total+=1;
+            }
+        }
+        assert_eq!(total,264);
+        assert!(optional>0);
+        assert!(expected_wire_field_tag_masks(0).is_none());
+        assert!(expected_wire_field_tag_masks(66).is_none());
+    }
+
+    #[test]
+    fn optional_field_accepts_absent_or_present_text() {
+        let mut state=Collector::default();
+        let sample=b"f",path=b"0";
+        let text=|s:&'static [u8]|WireField{
+            data:s.as_ptr(),length:s.len(),value:0,tag:wire_tags::TEXT
+        };
+        let absent=WireField{
+            data:std::ptr::null(),length:0,value:0,tag:wire_tags::ABSENT
+        };
+        let event=[text(sample),text(path),absent];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),
+                    5,event.as_ptr(),event.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statements.len(),1);
+
+        let event=[text(sample),text(b"1"),text(path)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),
+                    5,event.as_ptr(),event.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.statements.len(),2);
+    }
+}
