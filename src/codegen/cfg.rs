@@ -5161,7 +5161,7 @@ mod audit_call_argument_shape_tests {
     }
     fn types() -> Il {
         let mut il=Il::default();
-        let ty=|id,kind,role,related| crate::TypeDef {
+        let ty=|id:u32,kind:u32,role:Option<u32>,related:Option<u32>| crate::TypeDef {
             id:crate::TypeId(id),kind:native_type_kind(kind),
             related_role:role,related:related.map(crate::TypeId),
         };
@@ -5189,7 +5189,7 @@ mod audit_call_argument_shape_tests {
             });
             il.record_fields.push(crate::RecordField {
                 owner:crate::TypeId(owner),position:0,ty:crate::TypeId(1),
-                symbol:crate::SymbolId(owner as u64),name:"value".into(),
+                symbol:crate::SymbolId(owner),name:"value".into(),
                 byte_offset:0,bit_offset:0,bit_width:0,
             });
         }
@@ -5198,7 +5198,7 @@ mod audit_call_argument_shape_tests {
         });
         il
     }
-    fn checked(il:&Il,expected:u64,actual:u64)->bool {
+    fn checked(il:&Il,expected:u32,actual:u32)->bool {
         checked_call_argument_shape(il,crate::TypeId(expected),crate::TypeId(actual)).is_ok()
     }
 
