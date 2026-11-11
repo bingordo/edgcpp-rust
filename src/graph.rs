@@ -5753,6 +5753,82 @@ mod tests {
         assert!(graph.call_at(ExpressionId(graph.expressions.len())).is_none());
     }
 
+    /// Same-runner measurement of the pre-#141/#157 linear scans versus
+    /// the current call-expression and call-site indexes. Run manually with
+    /// --ignored --nocapture; this is a lookup microbenchmark, not full CFG.
+    #[test]
+    #[ignore = "opt-in call lookup scaling measurement"]
+    fn audit_call_lookup_scaling() {
+        for count in [512_usize, 2048, 4096] {
+            let mut graph=Graph::default();
+            graph.call_index_by_expression=vec![None;count*2];
+            let mut keys=Vec::with_capacity(count*2);
+            for i in 0..count {
+                let statement=i.to_string();
+                let call=CallSite {
+                    function:"benchmark".into(), statement_path:statement.clone(),
+                    path:"0".into(), first_argument:1,
+                };
+                let index=graph.calls.len();
+                graph.call_index_by_expression[i*2]=Some(index);
+                graph.call_expression_by_site.insert(call.clone(),ExpressionId(i*2));
+                graph.calls.push(call);
+                keys.push(("benchmark".to_owned(),statement,"0".to_owned()));
+                keys.push(("benchmark".to_owned(),format!("missing_{i}"),"0".to_owned()));
+            }
+            let mut old_forward=Vec::new();
+            let mut indexed_forward=Vec::new();
+            let mut old_reverse=Vec::new();
+            let mut indexed_reverse=Vec::new();
+            for _ in 0..3 {
+                let started=std::time::Instant::now();
+                let legacy:Vec<_>=keys.iter().map(|(function,statement,path)|
+                    graph.calls.iter().find(|call|
+                        call.function==*function && call.statement_path==*statement &&
+                        call.path==*path)).collect();
+                old_forward.push(started.elapsed());
+                let started=std::time::Instant::now();
+                let indexed:Vec<_>=(0..keys.len())
+                    .map(|i|graph.call_at(ExpressionId(i))).collect();
+                indexed_forward.push(started.elapsed());
+                assert_eq!(legacy,indexed);
+                std::hint::black_box(&legacy);
+                std::hint::black_box(&indexed);
+
+                let started=std::time::Instant::now();
+                let legacy:Vec<_>=graph.calls.iter().map(|call|
+                    graph.calls.iter().position(|candidate|candidate==call)
+                        .map(|position|ExpressionId(position*2))).collect();
+                old_reverse.push(started.elapsed());
+                let started=std::time::Instant::now();
+                let indexed:Vec<_>=graph.calls.iter()
+                    .map(|call|graph.call_expression(call)).collect();
+                indexed_reverse.push(started.elapsed());
+                assert_eq!(legacy,indexed);
+                std::hint::black_box(&legacy);
+                std::hint::black_box(&indexed);
+            }
+            for (label,old,new) in [
+                ("forward", &mut old_forward, &mut indexed_forward),
+                ("reverse", &mut old_reverse, &mut indexed_reverse),
+            ] {
+                old.sort_unstable();new.sort_unstable();
+                let before=old[1].as_secs_f64()*1000.0;
+                let after=new[1].as_secs_f64()*1000.0;
+                println!("call-lookup kind={label} calls={count} old_ms={before:.3} indexed_ms={after:.3} speedup={:.2}x",before/after);
+            }
+            // No-call control: the indexed path should also handle ordinary
+            // expression IDs whose call slot is empty.
+            let empty=Graph {
+                call_index_by_expression:vec![None;count*2],
+                ..Default::default()
+            };
+            for i in 0..count*2 {
+                assert!(empty.call_at(ExpressionId(i)).is_none());
+            }
+        }
+    }
+
     #[test]
     fn rejects_initializer_operand_gaps() {
         let mut il = Il::default();
