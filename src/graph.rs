@@ -1537,6 +1537,54 @@ impl Graph {
                 graph.statements[id.0].children.push(StatementId(idx));
             }
         }
+        // Native statement paths use dense sequence indices per edge:
+        // root statement indexes are 0,1,... and every parent.edge child
+        // sequence independently starts at 0. A missing sibling can change
+        // execution order or silently remove a statement from the snapshot.
+        let mut root_positions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut child_positions: HashMap<(String, String, String), Vec<usize>> =
+            HashMap::new();
+        for node in &graph.statements {
+            let item = &node.data;
+            let parsed = if let Some(parent) = &item.parent {
+                let rest = item.path.strip_prefix(&(parent.clone() + "."));
+                rest.and_then(|r| r.split_once('.')).and_then(|(edge, index)| {
+                    let position = index.parse::<usize>().ok()?;
+                    if edge.is_empty() || position.to_string() != index {
+                        return None;
+                    }
+                    child_positions.entry((
+                        item.function.clone(), parent.clone(), edge.to_owned(),
+                    )).or_default().push(position);
+                    Some(())
+                })
+            } else {
+                item.path.parse::<usize>().ok().and_then(|position| {
+                    if position.to_string() != item.path { return None; }
+                    root_positions.entry(item.function.clone())
+                        .or_default().push(position);
+                    Some(())
+                })
+            };
+            if parsed.is_none() {
+                return Err(GraphError::InvalidStatementParent {
+                    function: item.function.clone(), path: item.path.clone(),
+                });
+            }
+        }
+        for positions in root_positions.values_mut()
+            .chain(child_positions.values_mut())
+        {
+            positions.sort_unstable();
+            if positions.iter().enumerate().any(|(expected, actual)|
+                expected != *actual)
+            {
+                return Err(GraphError::InvalidStatementParent {
+                    function: "non-dense statement sequence".into(),
+                    path: format!("{positions:?}"),
+                });
+            }
+        }
         for idx in 0..graph.expressions.len() {
             let item = &graph.expressions[idx].data;
             if let Some(ref path) = item.parent {
@@ -5363,5 +5411,49 @@ mod audit_statement_source_order_tests {
         let paths:Vec<_>=graph.roots("f")
             .map(|(_,s)|s.data.path.as_str()).collect();
         assert_eq!(paths,["0","1","2","10"]);
+    }
+}
+
+#[cfg(test)]
+mod audit_statement_sequence_tests {
+    use super::*;
+
+    fn from_paths(items: &[(&str, Option<&str>)]) -> Result<Graph, GraphError> {
+        let mut il = Il::default();
+        for &(path, parent) in items {
+            il.statements.push(Statement {
+                function: "f".into(),
+                path: path.into(),
+                parent: parent.map(str::to_owned),
+                kind: 1,
+            });
+        }
+        Graph::from_il(&il)
+    }
+
+    #[test]
+    fn accepts_dense_roots_and_independently_numbered_statement_edges() {
+        assert!(from_paths(&[
+            ("1",None), ("0",None),
+            ("0.then.0",Some("0")), ("0.then.1",Some("0")),
+            ("0.else.0",Some("0")), ("1.block.0",Some("1")),
+        ]).is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_first_or_middle_native_statement() {
+        for paths in [
+            vec![("1",None)],
+            vec![("0",None),("2",None)],
+            vec![("0",None),("0.block.1",Some("0"))],
+            vec![("0",None),("0.block.0",Some("0")),
+                 ("0.block.2",Some("0"))],
+            vec![("0",None),("0.block.00",Some("0"))],
+            vec![("00",None)],
+        ] {
+            assert!(matches!(from_paths(&paths),
+                Err(GraphError::InvalidStatementParent { .. })),
+                "malformed statement path sequence was accepted: {paths:?}");
+        }
     }
 }
