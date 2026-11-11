@@ -2193,7 +2193,16 @@ fn pointer_source_from_edg(
     Ok((source,ty))
 }
 /// Source-owned named C FP object import, never an arbitrary memory address.
-fn source_fp_global(
+/// Recognize source-verified C F32/F64 types without treating arbitrary
+/// FP-sized native types (long double, SIMD, complex) as IEEE scalar data.
+pub(super) fn is_standard_fp_global_type(il:&Il,symbol:crate::SymbolId)->bool {
+    il.symbol_types.iter().find(|entry|entry.symbol==symbol)
+        .is_some_and(|entry|type_from_edg(il,entry.ty).is_ok())
+}
+
+// Reused by the integer CFG emitter for unreferenced, externally visible
+// C float/double definitions that still need an ELF data symbol.
+pub(super) fn source_fp_global(
     il:&Il,symbol:crate::SymbolId,
 )->Result<(String,FloatType,Linkage,Option<Vec<u8>>),CodegenError> {
     let mut metas=il.global_variables.iter().filter(|g|g.symbol==symbol);
