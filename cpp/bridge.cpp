@@ -13,6 +13,7 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -342,6 +343,48 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  // Temporary EDG-probe-only diagnostics, enabled by the isolated CI job.
+  // Never affect eligibility or native compilation decisions.
+  if (std::getenv("EDG_CXX2_DEBUG") != nullptr && type != nullptr &&
+      (type->kind == tk_class || type->kind == tk_struct) &&
+      type->size == 4 && type->alignment == 4) {
+    const auto *extra = type->variant.class_struct_union.extra_info;
+    const auto *field = type->variant.class_struct_union.field_list;
+    std::fprintf(stderr,
+      "EDG_CXX2_DEBUG size=%llu align=%llu incomplete=%u symbol=%u"
+      " extra=%u scope=%u bases=%u field_init=%u virtual=%u"
+      " static_vars=%u nontrivial_dtor=%u field=%u field_next=%u"
+      " field_type=%u field_offset=%llu\n",
+      static_cast<unsigned long long>(type->size),
+      static_cast<unsigned long long>(type->alignment),
+      static_cast<unsigned>(type->incomplete),symbol_for(type)!=nullptr,
+      extra!=nullptr,extra!=nullptr && extra->assoc_scope!=nullptr,
+      extra!=nullptr && extra->direct_base_classes!=nullptr,
+      extra!=nullptr && extra->has_field_initializer,
+      static_cast<unsigned>(type->variant.class_struct_union.any_virtual_functions),
+      extra!=nullptr && extra->assoc_scope!=nullptr &&
+          extra->assoc_scope->variables!=nullptr,
+      static_cast<unsigned>(type_has_nontrivial_destructor(type)),
+      field!=nullptr,field!=nullptr && field->next!=nullptr,
+      field!=nullptr && field->type!=nullptr ?
+          static_cast<unsigned>(field->type->kind):0,
+      field!=nullptr ? static_cast<unsigned long long>(field->offset):0);
+    if (extra!=nullptr && extra->assoc_scope!=nullptr) {
+      unsigned logged=0;
+      for (a_routine_ptr r=extra->assoc_scope->routines;
+           r!=nullptr && logged++<15; r=r->next) {
+        std::fprintf(stderr,
+          "EDG_CXX2_DEBUG routine kind=%u provided=%u trivial_default=%u"
+          " trivial_copy=%u trivial_dtor=%u virtual=%u\n",
+          static_cast<unsigned>(r->special_kind),
+          special_member_is_user_provided(r),
+          static_cast<unsigned>(r->is_trivial_default_constructor),
+          static_cast<unsigned>(r->is_trivial_copy_function),
+          static_cast<unsigned>(r->is_trivial_destructor),
+          static_cast<unsigned>(r->is_virtual));
+      }
+    }
+  }
   if (type == nullptr ||
       (type->kind != tk_class && type->kind != tk_struct) ||
       type->incomplete || type->size != 4 || type->alignment != 4 ||
