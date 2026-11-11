@@ -1848,6 +1848,41 @@ fn checked_call_result_type(
     }
     Ok(())
 }
+/// Check the *source* argument category independently of the machine ABI.
+///
+/// An equal-size but unrelated C struct is not an interchangeable by-value
+/// argument. Conversely, C array/function designators decay when passed to
+/// pointer formals, and any scalar/pointer value can convert to C _Bool.
+/// Keep those implicit conversions legal rather than comparing scalar TypeIds.
+fn checked_call_argument_shape(
+    il:&Il, formal_ty:crate::TypeId, actual_ty:crate::TypeId,
+) -> Result<(),CodegenError> {
+    let formal=canonical_abi_type(il,formal_ty)?;
+    let actual=canonical_abi_type(il,actual_ty)?;
+    let kind=|ty| -> Result<u32,CodegenError> {
+        il.types.iter().find(|d|d.id==ty)
+            .map(|d|semantic(4,d.kind))
+            .ok_or_else(||invalid("missing call argument C type"))
+    };
+    let expected=kind(formal)?;
+    let provided=kind(actual)?;
+    if expected==7 {
+        if actual!=formal || provided!=7 {
+            return Err(invalid("call argument aggregate type differs from declared parameter"));
+        }
+    } else if matches!(provided,7|9) {
+        return Err(invalid("aggregate argument passed to scalar/pointer parameter"));
+    } else if matches!(provided,6|2) && expected!=5 {
+        // An array or function designator may decay into a pointer,
+        // including when the pointer is then converted to _Bool.
+        let bool_formal=expected==1 && il.c_integer_types.iter()
+            .any(|info|info.id==formal && info.is_bool);
+        if !bool_formal {
+            return Err(invalid("array/function designator passed to nonpointer parameter"));
+        }
+    }
+    Ok(())
+}
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Member calls remain a separate C++ ABI/lifetime feature.
     for site in &il.calls {
@@ -1930,11 +1965,22 @@ fn lower_c_expression(
         };
         checked_call_result_type(il,callee_ty,
             node.data.type_id.ok_or_else(||invalid("call expression has no result type"))?)?;
+        // The ABI erases C type identity. Check it against the canonical
+        // parameter types before converting or copying any actual argument.
+        let function_ty=callable_function_type(il,callee_ty)?;
+        let mut formal_types:Vec<_>=il.type_parameters.iter()
+            .filter(|p|p.owner==function_ty).collect();
+        formal_types.sort_by_key(|p|p.position);
+        if formal_types.len()!=abi.parameters.len() {
+            return Err(invalid("call prototype parameter metadata disagrees with ABI"));
+        }
         let mut args=Vec::with_capacity(abi.parameters.len());
-        for (&operand,aggregate) in node.operands[1..].iter()
-            .zip(&abi.aggregate_parameters) {
+        for ((&operand,aggregate),formal) in node.operands[1..].iter()
+            .zip(&abi.aggregate_parameters).zip(&formal_types) {
+            let actual_ty=expression_type_id(graph,operand)?;
+            checked_call_argument_shape(il,formal.ty,actual_ty)?;
             if let Some(size)=aggregate {
-                let actual=target::ABI.classify_aggregate(il,expression_type_id(graph,operand)?)?;
+                let actual=target::ABI.classify_aggregate(il,actual_ty)?;
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
@@ -5102,5 +5148,103 @@ mod audit_call_argument_abi_tests {
                 return 0;
             }
         "#);
+    }
+}
+
+#[cfg(test)]
+mod audit_call_argument_shape_tests {
+    use super::*;
+
+    fn native_type_kind(kind:u32)->u32 {
+        (0..4096).find(|&value|semantic(4,value)==kind)
+            .expect("native EDG type kind")
+    }
+    fn types() -> Il {
+        let mut il=Il::default();
+        let ty=|id:u32,kind:u32,role:Option<u32>,related:Option<u32>| crate::TypeDef {
+            id:crate::TypeId(id),kind:native_type_kind(kind),
+            related_role:role,related:related.map(crate::TypeId),
+        };
+        il.types.extend([
+            ty(1,1,None,None),            // 32-bit signed int
+            ty(2,7,None,None),            // struct A { int value; }
+            ty(3,7,None,None),            // distinct struct B, same layout
+            ty(4,3,Some(4),Some(2)),      // typedef struct A Alias
+            ty(5,5,Some(1),Some(1)),      // int*
+            ty(6,6,Some(1),Some(1)),      // int[4]
+            ty(7,2,Some(3),Some(1)),      // int function(void)
+            ty(8,5,Some(1),Some(7)),      // int (*)(void)
+            ty(9,1,None,None),            // C _Bool
+            ty(10,4,None,None),           // void
+            ty(11,5,Some(1),Some(10)),    // void*
+            ty(12,9,None,None),           // union
+        ]);
+        il.c_integer_types.extend([
+            crate::CIntegerType{id:crate::TypeId(1),bits:32,signed:true,is_bool:false},
+            crate::CIntegerType{id:crate::TypeId(9),bits:8,signed:false,is_bool:true},
+        ]);
+        for owner in [2,3] {
+            il.type_object_sizes.push(crate::TypeObjectSize {
+                owner:crate::TypeId(owner),bytes:4,alignment:4,
+            });
+            il.record_fields.push(crate::RecordField {
+                owner:crate::TypeId(owner),position:0,ty:crate::TypeId(1),
+                symbol:crate::SymbolId(owner),name:"value".into(),
+                byte_offset:0,bit_offset:0,bit_width:0,
+            });
+        }
+        il.array_bounds.push(crate::ArrayBound {
+            array:crate::TypeId(6),elements:4,
+        });
+        il
+    }
+    fn checked(il:&Il,expected:u32,actual:u32)->bool {
+        checked_call_argument_shape(il,crate::TypeId(expected),crate::TypeId(actual)).is_ok()
+    }
+
+    #[test]
+    fn audit_call_argument_shape_rejects_distinct_equal_size_structs() {
+        let il=types();
+        // Both are classified as the same four-byte SysV INTEGER aggregate.
+        assert_eq!(target::ABI.classify_aggregate(&il,crate::TypeId(2)).unwrap(),Some(4));
+        assert_eq!(target::ABI.classify_aggregate(&il,crate::TypeId(3)).unwrap(),Some(4));
+        assert!(!checked(&il,2,3),"different struct tags are not compatible by value");
+        assert!(!checked(&il,3,2));
+        assert!(checked(&il,2,2));
+        assert!(checked(&il,2,4),"typedef of exactly the same struct is compatible");
+        assert!(checked(&il,4,2));
+        assert!(!checked(&il,2,1));
+        assert!(!checked(&il,2,5));
+        assert!(!checked(&il,2,6));
+    }
+
+    #[test]
+    fn audit_call_argument_shape_rejects_records_in_scalar_abi_slots() {
+        let il=types();
+        for formal in [1,5,8,9,11] {
+            for actual in [2,3,4,12] {
+                assert!(!checked(&il,formal,actual),
+                    "aggregate {actual} cannot silently become scalar {formal}");
+            }
+        }
+        assert!(checked(&il,1,1));
+        assert!(checked(&il,9,1),"scalar integer converts to _Bool");
+        assert!(checked(&il,9,5),"object pointer converts to _Bool");
+        assert!(!checked(&il,1,6),"an array does not convert to int");
+        assert!(!checked(&il,1,7),"a function designator does not convert to int");
+        assert!(!checked(&il,1,99),"missing actual type is invalid");
+        assert!(!checked(&il,99,1),"missing formal type is invalid");
+    }
+
+    #[test]
+    fn audit_call_argument_shape_keeps_c_pointer_and_bool_decays() {
+        let il=types();
+        assert!(checked(&il,5,6),"int array-to-int pointer decay");
+        assert!(checked(&il,11,6),"int array-to-void pointer decay");
+        assert!(checked(&il,8,7),"function designator-to-function pointer decay");
+        assert!(checked(&il,8,8),"function pointer parameter");
+        assert!(checked(&il,11,5),"object pointer-to-void pointer conversion");
+        assert!(checked(&il,9,6),"array-to-pointer-to-bool conversion");
+        assert!(checked(&il,9,7),"function-to-pointer-to-bool conversion");
     }
 }
