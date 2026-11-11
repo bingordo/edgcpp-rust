@@ -337,6 +337,69 @@ static bool plain_cpp_record(a_type_ptr type) {
   return true;
 }
 
+// C++2 P2.1a: separate *nontrivial* class-scope evidence. Do not
+// relabel a user-defined constructor/destructor as POD or share P1's
+// plain_cpp_record gate. This only certifies a narrow candidate for a
+// later path-sensitive native lifetime verifier, NOT executable admission.
+static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  if (type == nullptr ||
+      (type->kind != tk_class && type->kind != tk_struct) ||
+      type->incomplete || type->size != 4 || type->alignment != 4 ||
+      symbol_for(type) == nullptr) return false;
+  const auto *extra = type->variant.class_struct_union.extra_info;
+  if (extra == nullptr || extra->assoc_scope == nullptr ||
+      extra->direct_base_classes != nullptr ||
+      extra->has_field_initializer || extra->is_lambda_closure_class ||
+      type->variant.class_struct_union.any_virtual_functions ||
+      type->variant.class_struct_union.any_virtual_base_classes ||
+      extra->assoc_scope->variables != nullptr ||
+      !type_has_nontrivial_destructor(type)) return false;
+  // One ordinary 32-bit scalar, at byte offset zero; no bitfields,
+  // subobjects or hidden layout that our first native P2 caller could
+  // initialize or destroy accidentally.
+  a_field_ptr field = type->variant.class_struct_union.field_list;
+  if (field == nullptr || field->next != nullptr ||
+      field->type == nullptr || field->type->kind != tk_integer ||
+      field->type->size != 4 || field->type->alignment != 4 ||
+      field->offset != 0 || field->offset_bit_remainder != 0 ||
+      field->is_bit_field) return false;
+#if MAINTAIN_CLASS_MEMBER_LIST
+  unsigned declarations = 0;
+  for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
+       entry != nullptr; entry = entry->next) {
+    if (++declarations > 128 ||
+        (entry->entity.kind != iek_field &&
+         entry->entity.kind != iek_routine)) return false;
+  }
+#endif
+  unsigned constructors = 0, destructors = 0, visited = 0;
+  for (a_routine_ptr method = extra->assoc_scope->routines;
+       method != nullptr; method = method->next) {
+    if (++visited > 128 || method->is_virtual) return false;
+    switch (method->special_kind) {
+      case sfk_constructor:
+        if (special_member_is_user_provided(method)) {
+          ++constructors;
+        } else if (!method->is_trivial_default_constructor &&
+                   !method->is_trivial_copy_function) {
+          return false;
+        }
+        break;
+      case sfk_destructor:
+        if (!special_member_is_user_provided(method) ||
+            method->is_trivial_destructor) return false;
+        ++destructors;
+        break;
+      case sfk_none:
+        // Ordinary nonvirtual methods retain their separate ABI gates.
+        break;
+      default:
+        return false; // Copy/move/operator/other special semantics.
+    }
+  }
+  return constructors == 1 && destructors == 1;
+}
+
 // Assign dense IDs during compilation; never export EDG type addresses.
 static uint32_t emit_type(a_type_ptr type, unsigned depth)
 {
@@ -372,6 +435,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   // constructor was optimized into ordinary scalar stores.
   if (type->kind == tk_class || type->kind == tk_struct) {
     emit_record(63, {num(id), num(plain_cpp_record(type) ? 1 : 0)});
+    emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
   // An alignment of zero is not a usable layout.
