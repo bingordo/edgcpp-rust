@@ -1292,13 +1292,14 @@ impl Graph {
         }
         graph.local_scopes.sort_by_key(|scope| (scope.routine.0, scope.id));
         graph.local_variables.sort_by_key(|var| (var.routine.0, var.scope, var.symbol.0));
+        let locals_by_symbol: HashMap<SymbolId, (SymbolId, bool)> =
+            graph.local_variables.iter().map(|local|
+                (local.symbol, (local.routine, local.static_storage))).collect();
         let mut static_owner_symbols = std::collections::HashSet::new();
         for entry in &il.static_local_owners {
             if !is_routine(entry.routine) || !is_variable(entry.symbol) ||
-                graph.local_variables.iter().any(|local| {
-                    local.symbol == entry.symbol &&
-                    (local.routine != entry.routine || !local.static_storage)
-                })
+                locals_by_symbol.get(&entry.symbol).is_some_and(|&(routine, is_static)|
+                    routine != entry.routine || !is_static)
             {
                 return Err(GraphError::InvalidStaticLocalOwner(entry.symbol));
             }
@@ -1379,14 +1380,18 @@ impl Graph {
 
         // A VLA dimension belongs to a particular *execution statement*,
         // not to a declaration's source spelling or global type lifetime.
+        // VLA dimension validation needs only the existence of a native
+        // root expression at each statement, not repeated scans of every
+        // expression in the entire translation unit.
+        let source_expression_roots: std::collections::HashSet<(String, String)> =
+            il.expressions.iter().filter(|e| e.path == "0" && e.parent.is_none())
+            .map(|e| (e.function.clone(), e.statement_path.clone())).collect();
         let mut vla_sites=std::collections::HashSet::new();
         for dim in &il.vla_dimensions {
             let key=(dim.function.clone(),dim.statement_path.clone());
             if !smap.contains_key(&key) || !type_map.contains_key(&dim.array_type) ||
                 (dim.copied && dim.has_expression) ||
-                (dim.has_expression && !il.expressions.iter().any(|e|
-                    e.function==dim.function && e.statement_path==dim.statement_path &&
-                    e.path=="0" && e.parent.is_none()))
+                (dim.has_expression && !source_expression_roots.contains(&key))
             {
                 return Err(GraphError::InvalidVlaDimension {
                     function:key.0,path:key.1,
@@ -1778,8 +1783,7 @@ impl Graph {
             }
         }
         for item in &il.scope_lifetimes {
-            if !graph.local_scopes.iter().any(|scope|
-                 scope.routine == item.routine && scope.id == item.scope)
+            if !scope_keys.contains(&(item.routine, item.scope))
                 || !graph.lifetime_index.contains_key(&(item.routine, item.lifetime))
             {
                 return Err(GraphError::InvalidScopeLifetime {
@@ -1807,9 +1811,7 @@ impl Graph {
             let owner = routine_names.get(&item.function);
             if owner.is_none()
                 || (item.lifetime.is_none() && item.destructor.is_none())
-                || !graph.statement_initializations.iter().any(|init|
-                    init.function == item.function &&
-                    init.statement_path == item.statement_path)
+                || !init_keys.contains(&key)
                 || item.lifetime.is_some_and(|id|
                     owner.is_none_or(|routine| !graph.lifetime_index.contains_key(&(*routine, id))))
                 || item.destructor.is_some_and(|symbol|
@@ -1829,6 +1831,7 @@ impl Graph {
             graph.initialization_lifetimes.push(item.clone());
         }
         let mut destruction_positions: HashMap<(SymbolId, u32), Vec<u32>> = HashMap::new();
+        let mut seen_destructions = std::collections::HashSet::new();
         for item in &il.lifetime_destructions {
             let key = (item.routine, item.lifetime);
             if !graph.lifetime_index.contains_key(&key)
@@ -1841,14 +1844,13 @@ impl Graph {
                     routine: item.routine, lifetime: item.lifetime,
                 });
             }
-            let positions = destruction_positions.entry(key).or_default();
-            if positions.contains(&item.position) {
+            if !seen_destructions.insert((item.routine, item.lifetime, item.position)) {
                 return Err(GraphError::DuplicateLifetimeDestruction {
                     routine: item.routine, lifetime: item.lifetime,
                     position: item.position,
                 });
             }
-            positions.push(item.position);
+            destruction_positions.entry(key).or_default().push(item.position);
             graph.lifetime_destruction_index.entry(key).or_default()
                 .push(graph.lifetime_destructions.len());
             graph.lifetime_destructions.push(item.clone());
