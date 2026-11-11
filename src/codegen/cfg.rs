@@ -1713,6 +1713,11 @@ fn lower_address(
 struct CallDeclaration {
     symbol: crate::SymbolId,
     name: String,
+    /// Preserve EDG's source type, including possible typedef identity.
+    /// This metadata is immutable for one compilation; never rescan per call.
+    source_type: crate::TypeId,
+    /// Ordered, verified source formal types; machine ABI alone loses C types.
+    formal_types: Vec<crate::TypeId>,
     abi: CAbi,
 }
 fn cached_call_decl<'a>(
@@ -1756,22 +1761,29 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
        !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
         return Err(invalid(format!("non-C/ambiguous direct-call symbol {name}")));
     }
-    let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
+    let source_type=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("call has no routine type"))?.ty;
-    let ty=canonical_abi_type(il,ty)?;
+    let ty=canonical_abi_type(il,source_type)?;
     let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing called function type"))?;
     if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
         return Err(invalid("indirect/function-pointer calls not implemented"));
     }
-    let abi=function_type_abi(il,ty)?;
-    Ok(CallDeclaration {symbol,name,abi})
+    let (abi,formal_types)=function_type_abi_with_formals(il,ty)?;
+    Ok(CallDeclaration {symbol,name,source_type,formal_types,abi})
 }
 
 /// Validate a C function prototype independently of whether the callee is a
 /// named symbol or a function-pointer expression. ABI placement remains owned
 /// by the selected target and is never inferred from the callee's spelling.
 fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
+    Ok(function_type_abi_with_formals(il,ty)?.0)
+}
+/// Build ABI and ordered source formal types in one validated pass. Direct
+/// call sites reuse both, rather than filtering and sorting global metadata.
+fn function_type_abi_with_formals(
+    il:&Il,ty:crate::TypeId,
+) -> Result<(CAbi,Vec<crate::TypeId>),CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing called function type"))?;
@@ -1789,6 +1801,7 @@ fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
     if !proto.prototyped && !declared.is_empty() {
         return Err(invalid("unprototyped C calls with arguments unsupported"));
     }
+    let formal_types=declared.iter().map(|p|p.ty).collect();
     let mut parameters=Vec::with_capacity(declared.len());
     let mut aggregate_parameters=Vec::with_capacity(declared.len());
     for p in declared {
@@ -1808,7 +1821,7 @@ fn function_type_abi(il:&Il,ty:crate::TypeId) -> Result<CAbi,CodegenError> {
     } else {Some(call_type_abi(il,ret)?)};
     let abi=CAbi{aggregate_parameters,aggregate_result,parameters,result};
     abi.passing_plan()?;
-    Ok(abi)
+    Ok((abi,formal_types))
 }
 /// Accept only a real function type or a pointer to a function. Do not
 /// reinterpret an arbitrary data pointer as a callable C prototype.
@@ -2074,9 +2087,8 @@ fn lower_c_expression(
         if abi.parameters.len()!=node.operands.len()-1 {
             return Err(invalid("call argument count disagrees with EDG prototype"));
         }
-        let callee_ty=if let Some(decl)=&declaration {
-            il.symbol_types.iter().find(|d|d.symbol==decl.symbol)
-                .ok_or_else(||invalid("direct call has no source declaration type"))?.ty
+        let callee_ty=if let Some(decl)=declaration {
+            decl.source_type
         } else {
             expression_type_id(graph,node.operands[0])?
         };
@@ -2084,16 +2096,22 @@ fn lower_c_expression(
             node.data.type_id.ok_or_else(||invalid("call expression has no result type"))?)?;
         // The ABI erases C type identity. Check it against the canonical
         // parameter types before converting or copying any actual argument.
-        let function_ty=callable_function_type(il,callee_ty)?;
-        let mut formal_types:Vec<_>=il.type_parameters.iter()
-            .filter(|p|p.owner==function_ty).collect();
-        formal_types.sort_by_key(|p|p.position);
+        let formal_types:std::borrow::Cow<'_,[crate::TypeId]> = if let Some(decl)=declaration {
+            std::borrow::Cow::Borrowed(decl.formal_types.as_slice())
+        } else {
+            // Indirect calls have no validated per-symbol catalog entry.
+            let function_ty=callable_function_type(il,callee_ty)?;
+            let mut entries:Vec<_>=il.type_parameters.iter()
+                .filter(|p|p.owner==function_ty).collect();
+            entries.sort_by_key(|p|p.position);
+            std::borrow::Cow::Owned(entries.into_iter().map(|p|p.ty).collect())
+        };
         if formal_types.len()!=abi.parameters.len() {
             return Err(invalid("call prototype parameter metadata disagrees with ABI"));
         }
         let mut args=Vec::with_capacity(abi.parameters.len());
-        for ((&operand,aggregate),formal) in node.operands[1..].iter()
-            .zip(&abi.aggregate_parameters).zip(&formal_types) {
+        for ((&operand,aggregate),&formal_ty) in node.operands[1..].iter()
+            .zip(&abi.aggregate_parameters).zip(formal_types.iter()) {
             let actual_ty=expression_type_id(graph,operand)?;
             // A type-only check cannot distinguish a C null-pointer constant
             // from an arbitrary integer. Accept only a literal zero, never a
@@ -2101,7 +2119,7 @@ fn lower_c_expression(
             let literal_null_pointer=graph.expression(operand).is_some_and(|n|
                 semantic(2,n.data.kind)==1 && n.data.constant_integer==Some(0)
                 && n.operands.is_empty());
-            checked_call_argument_shape(il,formal.ty,actual_ty,literal_null_pointer)?;
+            checked_call_argument_shape(il,formal_ty,actual_ty,literal_null_pointer)?;
             if let Some(size)=aggregate {
                 let actual=target::ABI.classify_aggregate(il,actual_ty)?;
                 if actual!=Some(*size) {
@@ -4200,6 +4218,8 @@ mod tests {
         let word=CAbiInt {bits:64,signed:true,is_bool:false};
         let first=CallDeclaration {
             symbol:crate::SymbolId(7),name:"repeated_target".into(),
+            source_type:crate::TypeId(17),
+            formal_types:vec![crate::TypeId(21)],
             abi:CAbi {
                 parameters:vec![word],result:Some(word),
                 aggregate_parameters:vec![None],aggregate_result:None,
@@ -4207,6 +4227,8 @@ mod tests {
         };
         let second=CallDeclaration {
             symbol:crate::SymbolId(7),name:"changed_target".into(),
+            source_type:crate::TypeId(33),
+            formal_types:vec![],
             abi:CAbi {
                 parameters:vec![],result:None,
                 aggregate_parameters:vec![],aggregate_result:None,
@@ -4220,6 +4242,8 @@ mod tests {
                 cached_call_decl(&catalog,crate::SymbolId(7)).unwrap(),original));
         }
         assert_eq!(original.name,"repeated_target");
+        assert_eq!(original.source_type,crate::TypeId(17));
+        assert_eq!(original.formal_types,vec![crate::TypeId(21)]);
         assert_eq!(original.abi.parameters.len(),1);
         assert_eq!(
             cached_call_decl(&alternate,crate::SymbolId(7)).unwrap().name,
@@ -5184,7 +5208,10 @@ mod audit_call_argument_abi_tests {
             ("audit_sink_ptr",1004,integer(64,false,false)),
         ];
         let calls:Vec<_>=sinks.iter().map(|&(name,sym,ty)|CallDeclaration {
-            symbol:crate::SymbolId(sym),name:name.into(),abi:call_abi(ty),
+            symbol:crate::SymbolId(sym),name:name.into(),
+            // Synthetic object-level tests construct their own machine ABI.
+            source_type:crate::TypeId(0),formal_types:vec![],
+            abi:call_abi(ty),
         }).collect();
         let mut routines:Vec<_>=sinks.iter().map(|&(name,sym,ty)|wrapper(
             &format!("audit_call_{}",name.strip_prefix("audit_sink_").unwrap()),
@@ -5396,6 +5423,43 @@ mod audit_call_argument_shape_tests {
             owner:crate::TypeId(21),position:0,ty:crate::TypeId(1),
         });
         il
+    }
+
+    #[test]
+    fn audit_direct_call_metadata_matches_validated_prototype() {
+        let mut il=pointer_signature_types();
+        il.symbols.extend([
+            crate::Symbol{id:crate::SymbolId(200),kind:1,name:"audit_callee_a".into()},
+            crate::Symbol{id:crate::SymbolId(201),kind:1,name:"audit_callee_b".into()},
+        ]);
+        il.symbol_types.extend([
+            crate::SymbolType{symbol:crate::SymbolId(200),ty:crate::TypeId(21)},
+            crate::SymbolType{symbol:crate::SymbolId(201),ty:crate::TypeId(17)},
+        ]);
+        let a=direct_call_decl(&il,crate::SymbolId(200)).unwrap();
+        let b=direct_call_decl(&il,crate::SymbolId(201)).unwrap();
+        assert_eq!(a.source_type,crate::TypeId(21));
+        assert_eq!(a.formal_types,vec![crate::TypeId(1)]);
+        assert_eq!(a.abi,function_type_abi(&il,crate::TypeId(21)).unwrap());
+        assert_eq!(b.source_type,crate::TypeId(17));
+        assert!(b.formal_types.is_empty());
+        assert_eq!(b.abi,function_type_abi(&il,crate::TypeId(17)).unwrap());
+        let catalog=HashMap::from([(a.symbol,a),(b.symbol,b)]);
+        for _ in 0..1024 {
+            assert_eq!(cached_call_decl(&catalog,crate::SymbolId(200)).unwrap()
+                .formal_types,vec![crate::TypeId(1)]);
+            assert!(cached_call_decl(&catalog,crate::SymbolId(201)).unwrap()
+                .formal_types.is_empty());
+        }
+        let mut invalid=il.clone();
+        invalid.type_parameters.push(crate::TypeParameter {
+            owner:crate::TypeId(21),position:3,ty:crate::TypeId(1),
+        });
+        assert!(direct_call_decl(&invalid,crate::SymbolId(200)).is_err(),
+            "malformed native prototype must never populate the catalog");
+        let mut invalid=il;
+        invalid.function_signatures.retain(|s|s.owner!=crate::TypeId(17));
+        assert!(direct_call_decl(&invalid,crate::SymbolId(201)).is_err());
     }
 
     #[test]
