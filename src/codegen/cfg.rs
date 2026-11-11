@@ -2092,6 +2092,33 @@ fn checked_call_argument_shape(
     }
     Ok(())
 }
+/// Build one compilation-local call catalog with the cheapest lookup path
+/// for this immutable IL. Repeated/small target sets do not pay for indexing
+/// the entire source symbol/type tables; large distinct sets do.
+fn direct_call_catalog(
+    il:&Il, symbols:&[crate::SymbolId],
+) -> Result<HashMap<crate::SymbolId,CallDeclaration>,CodegenError> {
+    let mut seen=HashSet::new();
+    let unique:Vec<_>=symbols.iter().copied()
+        .filter(|sym|seen.insert(*sym)).collect();
+    const INDEX_MIN_DISTINCT_ROUTINES:usize=64;
+    let mut index=(unique.len()>=INDEX_MIN_DISTINCT_ROUTINES)
+        .then(||DirectCallIndex::new(il));
+    let mut found=HashMap::with_capacity(unique.len());
+    for symbol in unique {
+        if let Some(lookup)=index.as_mut() {
+            if lookup.is_native_atomic(symbol) {continue;}
+            found.insert(symbol,lookup.declaration(symbol)?);
+        } else {
+            // Preserve the old low-overhead path for one or a few call
+            // targets, including the original any()-based atomic exclusion.
+            if il.symbols.iter().any(|s|s.id==symbol &&
+                s.name.starts_with("__atomic_")) {continue;}
+            found.insert(symbol,direct_call_decl(il,symbol)?);
+        }
+    }
+    Ok(found)
+}
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Member calls remain a separate C++ ABI/lifetime feature.
     for site in &il.calls {
@@ -2099,7 +2126,6 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     }
     // Include ordinary calls AND function designators whose addresses are
     // taken but never directly called. Both need FuncRefs and ELF relocations.
-    let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
     let mut symbols:Vec<_>=il.expressions.iter()
         .filter(|expr|semantic(2,expr.kind)==6)
         .map(|expr|expr.symbol_id.ok_or_else(||
@@ -2107,18 +2133,7 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
-    if symbols.is_empty() {return Ok(Vec::new());}
-    // Index native declarations once for this immutable IL. Distinct call
-    // targets no longer require linear symbol/type scans for each routine.
-    let mut lookup=DirectCallIndex::new(il);
-    let mut seen_symbols=HashSet::new();
-    for symbol in symbols {
-        if !seen_symbols.insert(symbol) {continue;}
-        // Native atomic builtins remain owned by checked atomic lowering.
-        if lookup.is_native_atomic(symbol) {continue;}
-        let decl=lookup.declaration(symbol)?;
-        found.insert(symbol,decl);
-    }
+    let found=direct_call_catalog(il,&symbols)?;
     let mut result:Vec<CallDeclaration>=found.into_values().collect();
     result.sort_by(|a,b|a.name.cmp(&b.name));
     Ok(result)
@@ -4341,13 +4356,7 @@ mod tests {
                         .collect();
                     indexed_times.push(started.elapsed());
                     let started=std::time::Instant::now();
-                    let mut lookup=DirectCallIndex::new(&il);
-                    let mut optimized=HashMap::new();
-                    for &symbol in targets {
-                        if !optimized.contains_key(&symbol) {
-                            optimized.insert(symbol,lookup.declaration(symbol).unwrap());
-                        }
-                    }
+                    let optimized=direct_call_catalog(&il,targets).unwrap();
                     let optimized_calls:Vec<_>=targets.iter()
                         .map(|&symbol|cached_call_decl(&optimized,symbol).unwrap()).collect();
                     distinct_index_times.push(started.elapsed());
