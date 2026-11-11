@@ -152,6 +152,7 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/parse --c++17 cxx2_scalar_lifetime_proof.cpp >cxx2-proof.log
+            grep -E '^(cxx scalar lifetime|routine Marker|type Marker)' cxx2-proof.log || true
             grep -Fq 'routine Marker::Marker' cxx2-proof.log
             grep -Fq 'routine Marker::~Marker' cxx2-proof.log
             grep -Eq '^cxx scalar lifetime owner=[0-9]+ candidate=true$' cxx2-proof.log
