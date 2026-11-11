@@ -1,6 +1,21 @@
 //! Indexed, owned view of the EDG statement and expression snapshots.
 //! IDs are stable within one `Graph`, not across compilations.
 use std::collections::HashMap;
+// The bridge normalizes configuration-dependent EDG operation numbers.
+// Record 18 must describe the native call operator, not an arbitrary tree.
+extern "C" {
+    fn edgcpp_codegen_kind(category: u32, value: u32) -> u32;
+}
+
+fn native_call_argument_offset(expr: &Expression) -> Option<u32> {
+    let op = expr.operator?;
+    match unsafe { edgcpp_codegen_kind(3, op) } {
+        54 if unsafe { edgcpp_codegen_kind(2, expr.kind) } == 3 => Some(1),
+        55 if unsafe { edgcpp_codegen_kind(2, expr.kind) } == 3 => Some(2),
+        _ => None,
+    }
+}
+
 use crate::{VlaDimension, Il, Statement, StatementAttributes, ControlExpression, StatementLabel, StatementDeclaration, StatementInitialization, SourceLocation, StatementSource, StatementSwitchCase, SymbolSource, ExpressionSource, RoutineIdentity, ObjectLifetime, ScopeLifetime, InitializationLifetime, LifetimeDestruction, FunctionParameter, LocalScope, LocalVariable, StaticLocalOwner, Expression, TypeDef, TypeId, TypeParameter, ArrayBound, RecordField, BaseClass, BaseClassAccess, ConstructorInitializer, ConstructorInitializerExpression, MemberFunction, RoutineAttributes, TypeDetail, FunctionSignature, Symbol, SymbolId, SymbolType, VariableInitializer, InitializerInteger, DynamicInitializer, InitializerExpression, CallSite};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -110,6 +125,7 @@ pub enum GraphError {
     MissingInitializerRoot(SymbolId),
     InvalidInitializerOperandPath { owner: SymbolId, path: String },
     MissingCallExpression { function: String, statement: String, path: String },
+    MissingCallMetadata { function: String, statement: String, path: String },
     DuplicateCallExpression { function: String, statement: String, path: String },
     InvalidCallOperands { function: String, statement: String, path: String },
     InvalidCallOperandPath { function: String, statement: String, path: String },
@@ -1578,13 +1594,32 @@ impl Graph {
             node.children.sort_by(|a,b|
                 compare_tree_paths(&stmt_paths[a.0],&stmt_paths[b.0]));
         }
+        // Every call expression must carry its semantic operand offset.
+        // A lost call-site event must not silently turn an ordinary function
+        // call into an unrelated expression tree.
+        for node in &graph.expressions {
+            if native_call_argument_offset(&node.data).is_some()
+                && !call_paths.contains(&(
+                    node.data.function.clone(),
+                    node.data.statement_path.clone(),
+                    node.data.path.clone(),
+                ))
+            {
+                return Err(GraphError::MissingCallMetadata {
+                    function: node.data.function.clone(),
+                    statement: node.data.statement_path.clone(),
+                    path: node.data.path.clone(),
+                });
+            }
+        }
         // A call's first operand is its callee; member calls additionally
         // carry an object operand. Missing required operands indicate a
         // truncated native snapshot rather than a valid zero-argument call.
         for call in &graph.calls {
             let key = (call.function.clone(), call.statement_path.clone(), call.path.clone());
             let id = emap[&key];
-            if !(call.first_argument == 1 || call.first_argument == 2)
+            if native_call_argument_offset(&graph.expressions[id.0].data)
+                != Some(call.first_argument)
                 || graph.expressions[id.0].operands.len() < call.first_argument as usize
             {
                 return Err(GraphError::InvalidCallOperands {
@@ -3043,6 +3078,16 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn native_call_kinds(member: bool) -> (u32, u32) {
+        let native_kind=(0..4096).find(|&kind|
+            unsafe { edgcpp_codegen_kind(2,kind) }==3
+        ).expect("native EDG operation expression kind");
+        let expected=if member {55} else {54};
+        let native_operator=(0..4096).find(|&op|
+            unsafe { edgcpp_codegen_kind(3,op) }==expected
+        ).expect("native EDG call operator");
+        (native_kind,native_operator)
+    }
     #[test]
     fn constructor_symbol_references_are_ordered_and_unique() {
         let mut il = Il::default();
@@ -4798,7 +4843,9 @@ mod tests {
             il.expressions.push(Expression {
                 function: "f".into(), statement_path: "0".into(),
                 path: path.into(), parent: parent.map(str::to_owned),
-                kind: 1, operator: None, type_kind: None, reference: None,
+                kind: if path=="0" { native_call_kinds(true).0 } else {1},
+                operator: (path=="0").then(||native_call_kinds(true).1),
+                type_kind: None, reference: None,
                 type_size: None, type_alignment: None, constant_kind: None,
                 constant_integer: None, related_type_role: None,
                 related_type_kind: None, type_id: None, symbol_id: None,
@@ -4825,7 +4872,9 @@ mod tests {
             il.expressions.push(Expression {
                 function: "f".into(), statement_path: "0".into(),
                 path: path.into(), parent: parent.map(str::to_owned),
-                kind: 1, operator: None, type_kind: None, reference: None,
+                kind: if path=="0" {native_call_kinds(false).0} else {1},
+                operator: (path=="0").then(||native_call_kinds(false).1),
+                type_kind: None, reference: None,
                 type_size: None, type_alignment: None, constant_kind: None,
                 constant_integer: None, related_type_role: None,
                 related_type_kind: None, type_id: None, symbol_id: None,
@@ -4892,7 +4941,9 @@ mod tests {
             il.expressions.push(Expression {
                 function: "f".into(), statement_path: "0".into(),
                 path: path.into(), parent: parent.map(str::to_owned),
-                kind: 1, operator: None, type_kind: None, reference: None,
+                kind: if path=="0" {native_call_kinds(false).0} else {1},
+                operator: (path=="0").then(||native_call_kinds(false).1),
+                type_kind: None, reference: None,
                 type_size: None, type_alignment: None, constant_kind: None,
                 constant_integer: None, related_type_role: None,
                 related_type_kind: None, type_id: None, symbol_id: None,
@@ -4915,7 +4966,9 @@ mod tests {
         il.expressions.push(Expression {
             function: "f".into(), statement_path: "0".into(),
             path: "0".into(), parent: None,
-            kind: 1, operator: None, type_kind: None, reference: None,
+            kind: native_call_kinds(false).0,
+            operator: Some(native_call_kinds(false).1),
+            type_kind: None, reference: None,
             type_size: None, type_alignment: None, constant_kind: None,
             constant_integer: None, related_type_role: None,
             related_type_kind: None, type_id: None, symbol_id: None,
