@@ -84,6 +84,7 @@ pub enum GraphError {
     InvalidTypeParameterPosition(TypeId),
     DuplicateArrayBound(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
+    InvalidRecordFieldPosition(TypeId),
     InvalidRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     DuplicateBaseClass { derived: TypeId, position: u32 },
     InvalidBaseClassAccess { derived: TypeId, position: u32 },
@@ -808,6 +809,17 @@ impl Graph {
             graph.record_fields.push(field.clone());
         }
         graph.record_fields.sort_by_key(|f| (f.owner.0, f.position));
+        // The C++ emitter indexes each record's fields densely from zero;
+        // gaps imply that native metadata was lost, even if the surviving
+        // field has a plausible offset and field symbol.
+        let mut field_counts: HashMap<TypeId, usize> = HashMap::new();
+        for field in &graph.record_fields {
+            let expected = field_counts.entry(field.owner).or_default();
+            if field.position as usize != *expected {
+                return Err(GraphError::InvalidRecordFieldPosition(field.owner));
+            }
+            *expected += 1;
+        }
         let mut base_positions = std::collections::HashSet::new();
         for edge in &il.base_classes {
             if !type_map.contains_key(&edge.derived) {
@@ -5379,6 +5391,10 @@ mod tests {
         il.symbols[1].kind = 2;
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldSymbol { owner: TypeId(1), symbol: SymbolId(11) });
+        il.symbols[1].kind = 3;
+        il.record_fields.remove(1); // missing position zero
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRecordFieldPosition(TypeId(1)));
     }
 
     #[test]
