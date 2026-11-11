@@ -2002,7 +2002,10 @@ fn compatible_call_nested_types(
     if depth>16 {return Err(invalid("nested call pointer type exceeds audit limit"));}
     let lhs=canonical_abi_type(il,lhs)?;
     let rhs=canonical_abi_type(il,rhs)?;
-    if lhs==rhs {return Ok(true);}
+    // TypeId equality is not proof that a malformed nested pointer or a
+    // truncated function signature is usable. Walk these structured types
+    // even when both sides designate precisely the same native TypeId.
+    let identical=lhs==rhs;
     let definition=|ty|->Result<&crate::TypeDef,CodegenError> {
         il.types.iter().find(|d|d.id==ty)
             .ok_or_else(||invalid("missing nested call pointer type"))
@@ -2011,12 +2014,15 @@ fn compatible_call_nested_types(
     let right=definition(rhs)?;
     match (semantic(4,left.kind),semantic(4,right.kind)) {
         (2,2)=>compatible_call_function_types(il,lhs,rhs,depth+1),
-        (5,5) if left.related_role==Some(1) && right.related_role==Some(1) => {
+        (5,5) => {
+            if left.related_role!=Some(1) || right.related_role!=Some(1) {
+                return Err(invalid("nested C pointer lacks native pointee relation"));
+            }
             let lhs=left.related.ok_or_else(||invalid("left pointer pointee missing"))?;
             let rhs=right.related.ok_or_else(||invalid("right pointer pointee missing"))?;
             compatible_call_nested_types(il,lhs,rhs,depth+1)
         }
-        _=>Ok(false),
+        _=>Ok(identical),
     }
 }
 
@@ -5847,6 +5853,18 @@ mod audit_call_argument_shape_tests {
         let mut il=pointer_signature_types();
         il.function_signatures.retain(|s|s.owner!=crate::TypeId(17));
         assert!(!checked(&il,8,18),"missing second prototype must fail closed");
+        let mut il=pointer_signature_types();
+        il.function_signatures.retain(|s|s.owner!=crate::TypeId(7));
+        assert!(!checked(&il,8,8),
+            "even identical function-pointer TypeIds need signature metadata");
+        let mut il=pointer_signature_types();
+        il.types.push(crate::TypeDef {
+            id:crate::TypeId(28),kind:native_type_kind(5),
+            related_role:Some(1),related:Some(crate::TypeId(26)),
+        });
+        assert!(!checked(&il,28,28),
+            "identical nested pointer TypeIds cannot bypass missing pointee role");
+        assert!(checked(&il,23,23),"valid nested int** remains accepted");
         let mut il=pointer_signature_types();
         il.type_parameters.push(crate::TypeParameter {
             owner:crate::TypeId(17),position:2,ty:crate::TypeId(1),
