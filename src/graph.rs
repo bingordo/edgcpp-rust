@@ -763,6 +763,18 @@ impl Graph {
             if ty.related.is_some() != ty.related_role.is_some() {
                 return Err(GraphError::InvalidTypeRelation(ty.id));
             }
+            // Native role numbers are pinned by cpp/bridge.cpp::emit_type:
+            // 1 pointer pointee, 2 array element, 3 routine return,
+            // 4 typedef/qualified underlying type. Other owner kinds
+            // cannot have relationships in the exported wire format.
+            if let Some(role)=ty.related_role {
+                let expected=match unsafe { edgcpp_codegen_kind(4,ty.kind) } {
+                    5 => 1, 6 => 2, 2 => 3, 3 => 4, _ => 0,
+                };
+                if role != expected {
+                    return Err(GraphError::InvalidTypeRelation(ty.id));
+                }
+            }
             if let Some(child) = ty.related {
                 if !type_map.contains_key(&child) { return Err(GraphError::MissingType(child)); }
             }
@@ -5649,7 +5661,9 @@ mod tests {
     fn rejects_missing_type_references() {
         let mut il = Il::default();
         il.types.push(TypeDef {
-            id: TypeId(1), kind: 5, related_role: Some(1),
+            id: TypeId(1), kind: (0..4096).find(|&kind|
+                unsafe {edgcpp_codegen_kind(4,kind)}==5
+            ).expect("native pointer kind"), related_role: Some(1),
             related: Some(TypeId(2)),
         });
         assert_eq!(Graph::from_il(&il).unwrap_err(), GraphError::MissingType(TypeId(2)));
@@ -5825,6 +5839,30 @@ mod tests {
         });
         il.array_bounds.push(ArrayBound { array: TypeId(1), elements: 12 });
         assert_eq!(Graph::from_il(&il).unwrap().array_bound(TypeId(1)), Some(12));
+    }
+
+    #[test]
+    fn audit_type_relationship_roles_match_native_owner_kind() {
+        let native=|semantic| (0..4096).find(|&kind|
+            unsafe {edgcpp_codegen_kind(4,kind)}==semantic
+        ).expect("pinned native type kind");
+        for (semantic, role) in [(5,1), (6,2), (2,3), (3,4)] {
+            let mut il=Il::default();
+            il.types.push(TypeDef {
+                id:TypeId(1), kind:native(semantic), related_role:Some(role),
+                related:Some(TypeId(2)),
+            });
+            il.types.push(TypeDef {
+                id:TypeId(2), kind:native(1), related_role:None,related:None,
+            });
+            Graph::from_il(&il).expect("matching EDG native relationship");
+            il.types[0].related_role=Some((role%4)+1);
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidTypeRelation(TypeId(1)));
+            il.types[0].kind=native(1);
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidTypeRelation(TypeId(1)));
+        }
     }
 
     #[test]
