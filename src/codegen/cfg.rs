@@ -1977,7 +1977,9 @@ fn compatible_call_function_types(
         .ok_or_else(||invalid("function pointer signature metadata missing"))?;
     if lhs_sig.variadic!=rhs_sig.variadic ||
         lhs_sig.prototyped!=rhs_sig.prototyped ||
-        !compatible_call_nested_types(il,lhs_ret,rhs_ret,depth+1)? {
+        !compatible_call_nested_types(il,
+            call_cv_qualified_type(il,lhs_ret)?.0,
+            call_cv_qualified_type(il,rhs_ret)?.0,depth+1)? {
         return Ok(false);
     }
     let parameters=|owner| {
@@ -1993,7 +1995,12 @@ fn compatible_call_function_types(
         if a.position!=position as u32 || b.position!=position as u32 {
             return Err(invalid("noncontiguous function pointer parameters"));
         }
-        if !compatible_call_nested_types(il,a.ty,b.ty,depth+1)? {return Ok(false);}
+        // Top-level qualifiers on function parameter *values* do not
+        // participate in C function type compatibility; qualifiers under
+        // pointer indirection still do.
+        let lhs=call_cv_qualified_type(il,a.ty)?.0;
+        let rhs=call_cv_qualified_type(il,b.ty)?.0;
+        if !compatible_call_nested_types(il,lhs,rhs,depth+1)? {return Ok(false);}
     }
     Ok(true)
 }
@@ -2004,8 +2011,12 @@ fn compatible_call_nested_types(
     il:&Il, lhs:crate::TypeId, rhs:crate::TypeId, depth:usize,
 ) -> Result<bool,CodegenError> {
     if depth>16 {return Err(invalid("nested call pointer type exceeds audit limit"));}
-    let lhs=canonical_abi_type(il,lhs)?;
-    let rhs=canonical_abi_type(il,rhs)?;
+    let (lhs,lhs_cv)=call_cv_qualified_type(il,lhs)?;
+    let (rhs,rhs_cv)=call_cv_qualified_type(il,rhs)?;
+    // Deeper indirection levels require exact qualification; allowing
+    // int** -> const int** would be unsound even though adding const to
+    // a direct int* argument is permitted.
+    if lhs_cv!=rhs_cv {return Ok(false);}
     // TypeId equality is not proof that a malformed nested pointer or a
     // truncated function signature is usable. Walk these structured types
     // even when both sides designate precisely the same native TypeId.
@@ -2030,6 +2041,37 @@ fn compatible_call_nested_types(
     }
 }
 
+/// Collect native C const/volatile qualifications from a typedef/qualified
+/// wrapper *before* ABI canonicalization erases them. Flags are EDG-native:
+/// 1 = const, 2 = volatile; other flags need independent semantics.
+fn call_cv_qualified_type(
+    il:&Il,mut ty:crate::TypeId,
+) -> Result<(crate::TypeId,u32),CodegenError> {
+    let mut cv=0;
+    for _ in 0..=il.types.len() {
+        let definition=il.types.iter().find(|t|t.id==ty)
+            .ok_or_else(||invalid("missing qualified call C type"))?;
+        if semantic(4,definition.kind)!=3 {return Ok((ty,cv));}
+        if definition.related_role!=Some(4) {
+            return Err(invalid("malformed qualified call typeref relationship"));
+        }
+        if let Some(detail)=il.type_details.iter().find(|d|d.owner==ty) {
+            if detail.is_reference || detail.is_rvalue_reference {
+                return Err(invalid("C call qualification contains a reference"));
+            }
+            let flags=detail.qualifiers.ok_or_else(||
+                invalid("qualified typeref lacks native C qualifiers"))?;
+            if flags & !3 != 0 {
+                return Err(invalid("unsupported C call pointer qualifier flags"));
+            }
+            cv|=flags;
+        }
+        ty=definition.related.ok_or_else(||
+            invalid("qualified C call typeref has no underlying type"))?;
+    }
+    Err(invalid("cyclic qualified C call type"))
+}
+
 /// Even a null-pointer constant needs a valid pointer *formal*. Without this
 /// check malformed native pointer metadata could be accepted by skipping the
 /// ordinary pointer-to-pointer compatibility path.
@@ -2042,11 +2084,11 @@ fn checked_call_pointer_formal_target(
     if semantic(4,expected.kind)!=5 || expected.related_role!=Some(1) {
         return Err(invalid("call pointer formal lacks pointer-to-type metadata"));
     }
-    let target=canonical_abi_type(il,expected.related
-        .ok_or_else(||invalid("call pointer formal pointee missing"))?)?;
-    if !il.types.iter().any(|t|t.id==target) {
-        return Err(invalid("call pointer formal pointee type is unknown"));
-    }
+    let target=expected.related
+        .ok_or_else(||invalid("call pointer formal pointee missing"))?;
+    // Check the underlying TypeId without throwing away the raw qualified
+    // type needed by the subsequent C source compatibility checks.
+    call_cv_qualified_type(il,target)?;
     Ok(target)
 }
 /// The explicit argument has been lowered by EDG, including any cast. For
@@ -2061,18 +2103,25 @@ fn checked_call_pointer_argument(
         il.types.iter().find(|t|t.id==id)
             .ok_or_else(||invalid("call pointer argument references unknown type"))
     };
-    let expected_target=checked_call_pointer_formal_target(il,formal)?;
+    let expected_pointee=checked_call_pointer_formal_target(il,formal)?;
     let provided=lookup(actual)?;
-    let actual_target=match semantic(4,provided.kind) {
-        5|6=>checked_pointer_element_type(il,actual)?,
+    let actual_pointee=match semantic(4,provided.kind) {
+        5|6=>checked_native_pointer_element(il,actual)?,
         2=>actual,  // function designator decays to function pointer
         _=>return Err(invalid("call pointer actual is not a pointer/array/function")),
     };
+    let (expected_target,expected_cv)=call_cv_qualified_type(il,expected_pointee)?;
+    let (actual_target,actual_cv)=call_cv_qualified_type(il,actual_pointee)?;
+    // C permits adding const/volatile to the immediate object pointee,
+    // never silently dropping them. This applies to void* conversions too.
+    if actual_cv & !expected_cv != 0 {
+        return Err(invalid("C pointer argument discards const/volatile qualifier"));
+    }
     let expected_kind=semantic(4,lookup(expected_target)?.kind);
     let actual_kind=semantic(4,lookup(actual_target)?.kind);
     if expected_kind==4 || actual_kind==4 {
-        // ISO C permits void* conversions for object pointers, but never
-        // function pointers. Converting void** to T** is not permitted here.
+        // ISO C permits first-level object-pointer <-> void* conversion
+        // with qualifiers preserved, but not function pointers or void**.
         if expected_kind!=2 && actual_kind!=2 {return Ok(());}
         return Err(invalid("function pointer passed as void object pointer"));
     }
@@ -5889,6 +5938,78 @@ mod audit_call_argument_shape_tests {
             .find(|t|t.id==crate::TypeId(6)).unwrap().related_role=Some(1);
         assert!(!checked(&malformed,5,6),"array with pointer-only role cannot decay");
         assert!(!checked(&malformed,11,6),"bad array role cannot become void*");
+    }
+
+    #[test]
+    fn audit_pointer_const_volatile_arguments_keep_qualification() {
+        let mut il=pointer_signature_types();
+        let def=|id:u32,kind,related:u32,role|crate::TypeDef {
+            id:crate::TypeId(id),kind:native_type_kind(kind),
+            related_role:Some(role),related:Some(crate::TypeId(related)),
+        };
+        il.types.extend([
+            def(29,3,1,4), // const int
+            def(30,3,1,4), // volatile int
+            def(31,3,10,4),// const void
+            def(32,5,29,1),// const int*
+            def(33,5,30,1),// volatile int*
+            def(34,5,31,1),// const void*
+            def(35,5,32,1),// const int**
+            def(36,3,5,4), // int* const (top-level const pointer)
+            def(37,2,1,3), // int f(int*)
+            def(38,2,1,3), // int f(const int*)
+            def(39,5,37,1),// pointer to f(int*)
+            def(40,5,38,1),// pointer to f(const int*)
+            def(41,2,1,3), // int f(int* const)
+            def(42,5,41,1),
+            def(43,6,29,2),// const int[4]
+            def(44,3,1,4), // unsupported atomic-qualified int
+            def(45,5,44,1),
+        ]);
+        il.type_details.extend([
+            crate::TypeDetail{owner:crate::TypeId(29),qualifiers:Some(1),
+                is_reference:false,is_rvalue_reference:false},
+            crate::TypeDetail{owner:crate::TypeId(30),qualifiers:Some(2),
+                is_reference:false,is_rvalue_reference:false},
+            crate::TypeDetail{owner:crate::TypeId(31),qualifiers:Some(1),
+                is_reference:false,is_rvalue_reference:false},
+            crate::TypeDetail{owner:crate::TypeId(36),qualifiers:Some(1),
+                is_reference:false,is_rvalue_reference:false},
+            crate::TypeDetail{owner:crate::TypeId(44),qualifiers:Some(8),
+                is_reference:false,is_rvalue_reference:false},
+        ]);
+        for ty in [37,38,41] {
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(ty),prototyped:true,variadic:false,
+            });
+        }
+        for (owner,ty) in [(37,5),(38,32),(41,36)] {
+            il.type_parameters.push(crate::TypeParameter {
+                owner:crate::TypeId(owner),position:0,ty:crate::TypeId(ty),
+            });
+        }
+        il.array_bounds.push(crate::ArrayBound {
+            array:crate::TypeId(43),elements:4,
+        });
+        assert!(checked(&il,32,5),"int* -> const int* adds const");
+        assert!(!checked(&il,5,32),"const int* -> int* drops const");
+        assert!(checked(&il,33,5),"int* -> volatile int* adds volatile");
+        assert!(!checked(&il,5,33),"volatile int* -> int* drops volatile");
+        assert!(checked(&il,34,32),"const int* -> const void* retains const");
+        assert!(checked(&il,34,5),"int* -> const void* adds const");
+        assert!(!checked(&il,11,32),"const int* -> void* drops const");
+        assert!(!checked(&il,5,34),"const void* -> int* drops const");
+        assert!(checked(&il,32,43),"const int[] decays to const int*");
+        assert!(!checked(&il,5,43),"const int[] cannot decay to mutable int*");
+        assert!(!checked(&il,35,23),"int** -> const int** is not implicit");
+        assert!(!checked(&il,23,35),"const int** -> int** is not implicit");
+        assert!(!checked(&il,39,40),"different nested parameter pointee qualifiers");
+        assert!(!checked(&il,40,39),"function prototypes cannot discard nested const");
+        assert!(checked(&il,39,42),
+            "top-level const on function pointer parameter is ignored");
+        assert!(checked(&il,42,39));
+        assert!(!checked(&il,45,45),"unsupported qualifier fails closed");
+        assert!(checked(&il,23,23),"ordinary valid nested pointers still work");
     }
 
     #[test]
