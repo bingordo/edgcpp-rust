@@ -50,6 +50,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      offset.byte_offset);
         }
     }
+    // C++5 std::cout is an imported *data* symbol, not a function.
+    // Display raw EDG linkage as evidence only, never invent an ABI name.
+    for sym in result.il.symbols.iter().filter(|s|
+        s.kind==2 && s.name.contains("cout")) {
+        let link=result.il.symbol_link_names.iter().find(|v|v.symbol==sym.id);
+        let global=result.il.global_variables.iter().find(|g|g.symbol==sym.id);
+        let ty=result.il.symbol_types.iter().find(|t|t.symbol==sym.id);
+        println!("EDG_CXX5_DATA_SYMBOL id={} name={:?} raw={:?} mangled={:?} global_linkage={:?} ty={:?}",
+                 sym.id.0,sym.name,
+                 link.map(|v|v.link_name.as_str()),link.map(|v|v.edg_mangled),
+                 global.map(|g|g.linkage),ty.map(|t|t.ty.0));
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>
