@@ -1205,7 +1205,13 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         47 => {
             let (Some(symbol), Some(linkage), Some(init), Some(tls), Some(local)) =
                 (n(0), n(1), n(2), n(3), n(4)) else { return; };
-            if symbol == 0 || !(1..=3).contains(&linkage) || init > 1 || tls > 1 || local > 1 { return; }
+            if symbol == 0 || !(1..=3).contains(&linkage) || init > 1 || tls > 1 || local > 1 ||
+                output.global_variables.iter().any(|entry|entry.symbol==SymbolId(symbol)) {
+                // Even identical duplicate metadata would make this source
+                // identity ambiguous; collect() treats a rejected event as
+                // malformed instead of silently trusting whichever came first.
+                return;
+            }
             output.global_variables.push(GlobalVariable {
                 symbol: SymbolId(symbol), linkage,
                 explicit_initializer: init == 1,
@@ -2515,5 +2521,48 @@ mod audit_native_aggregate_image_cap_tests {
         assert!(decode_aggregate_hex("0").is_none());
         assert!(decode_aggregate_hex("gg").is_none());
         assert!(decode_aggregate_hex("AA").is_none());
+    }
+}
+
+#[cfg(test)]
+mod audit_unique_global_storage_wire_tests {
+    use super::*;
+
+    fn field(value:u64)->WireField {
+        WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        }
+    }
+    fn send(state:&mut Collector, values:[u64;5]) {
+        let fields=values.map(field);
+        unsafe {
+            collect((state as *mut Collector).cast(),47,fields.as_ptr(),fields.len(),0);
+        }
+    }
+    #[test]
+    fn distinct_global_symbols_are_accepted() {
+        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        send(&mut state,[12,3,1,0,0]);
+        send(&mut state,[13,1,0,0,0]);
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.global_variables.len(),2);
+        assert!(state.il.global_variables[0].explicit_initializer);
+        assert!(!state.il.global_variables[1].explicit_initializer);
+    }
+    #[test]
+    fn duplicate_or_conflicting_global_metadata_fails_closed() {
+        for duplicate in [[12,3,1,0,0],[12,1,0,0,0],[12,2,1,1,0]] {
+            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            send(&mut state,[12,3,1,0,0]);
+            assert!(!state.malformed);
+            send(&mut state,duplicate);
+            assert!(state.malformed,"duplicate metadata {duplicate:?} accepted");
+            assert!(!state.panicked);
+            assert_eq!(state.il.global_variables.len(),1);
+            send(&mut state,[13,3,0,0,0]);
+            // Once malformed, no further records may be added.
+            assert_eq!(state.il.global_variables.len(),1);
+        }
     }
 }
