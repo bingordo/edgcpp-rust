@@ -1463,14 +1463,23 @@ fn flatten_copy_type(
     }
     Ok(())
 }
-fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
-    let ty = canonical_abi_type(il,ty)?;
-    let def = il.types.iter().find(|t| t.id == ty)
-        .ok_or_else(|| invalid("missing pointer type"))?;
-    match semantic(4,def.kind) {
-        5 | 6 => byte_size(il,def.related.ok_or_else(|| invalid("missing pointed-to type"))?),
-        _ => Err(invalid("expected pointer/array type for subscript")),
+/// Resolve a native pointer/array edge, including its relation discriminator.
+ /// A type with an unrelated edge cannot be used for pointer arithmetic or
+ /// comparison, even when the referenced type happens to exist and match.
+fn checked_pointer_element_type(
+    il:&Il, ty:crate::TypeId,
+) -> Result<crate::TypeId,CodegenError> {
+    let ty=canonical_abi_type(il,ty)?;
+    let def=il.types.iter().find(|t|t.id==ty)
+        .ok_or_else(||invalid("missing pointer/array type"))?;
+    if !matches!(semantic(4,def.kind),5|6) || def.related_role!=Some(1) {
+        return Err(invalid("pointer/array lacks native pointee relation"));
     }
+    canonical_abi_type(il,def.related
+        .ok_or_else(||invalid("missing pointed-to type"))?)
+}
+fn pointer_stride(il:&Il, ty:crate::TypeId) -> Result<u64,CodegenError> {
+    byte_size(il,checked_pointer_element_type(il,ty)?)
 }
 /// A pointer difference is measured in elements of one compatible complete
 /// object type. Comparing only stride would also accept incompatible C
@@ -1485,12 +1494,7 @@ fn checked_pointer_comparison(
         return Err(invalid("unsupported pointer comparison operator"));
     }
     let pointee=|ty| -> Result<(crate::TypeId,u32),CodegenError> {
-        let ty=canonical_abi_type(il,ty)?;
-        let ptr=il.types.iter().find(|d|d.id==ty &&
-            matches!(semantic(4,d.kind),5|6))
-            .ok_or_else(||invalid("pointer comparison requires pointer/array operands"))?;
-        let element=canonical_abi_type(il,ptr.related
-            .ok_or_else(||invalid("pointer comparison lacks pointee type"))?)?;
+        let element=checked_pointer_element_type(il,ty)?;
         let kind=il.types.iter().find(|d|d.id==element)
             .map(|d|semantic(4,d.kind))
             .ok_or_else(||invalid("pointer comparison pointee type missing"))?;
@@ -1516,16 +1520,8 @@ fn checked_pointer_comparison(
 fn pointer_difference_stride(
     il:&Il,lhs:crate::TypeId,rhs:crate::TypeId,
 ) -> Result<u64,CodegenError> {
-    let element=|ty| -> Result<crate::TypeId,CodegenError> {
-        let ty=canonical_abi_type(il,ty)?;
-        let pointer=il.types.iter().find(|t|t.id==ty &&
-            matches!(semantic(4,t.kind),5|6))
-            .ok_or_else(||invalid("pointer difference requires pointer/array operands"))?;
-        canonical_abi_type(il,pointer.related
-            .ok_or_else(||invalid("pointer difference lacks pointee type"))?)
-    };
-    let lhs_element=element(lhs)?;
-    let rhs_element=element(rhs)?;
+    let lhs_element=checked_pointer_element_type(il,lhs)?;
+    let rhs_element=checked_pointer_element_type(il,rhs)?;
     if lhs_element!=rhs_element {
         return Err(invalid("pointer difference has incompatible pointee types"));
     }
@@ -4897,6 +4893,33 @@ mod audit_pointer_difference_tests {
             crate::CIntegerType{id:crate::TypeId(2),bits:32,signed:false,is_bool:false},
         ]);
         il
+    }
+
+    #[test]
+    fn malformed_native_pointer_edges_fail_closed_for_arithmetic_and_comparisons() {
+        let mut il=pointer_types();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(20),kind:native_kind(5),
+                related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(21),kind:native_kind(6),
+                related_role:None,related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(22),kind:native_kind(5),
+                related_role:Some(1),related:Some(crate::TypeId(999))},
+        ]);
+        // Without the discriminator check, comparing/subtracting the same
+        // malformed pointer type incorrectly succeeded by TypeId equality.
+        for malformed in [20,21,22] {
+            let ty=crate::TypeId(malformed);
+            assert!(pointer_stride(&il,ty).is_err());
+            assert!(pointer_difference_stride(&il,ty,ty).is_err());
+            for op in 5..=10 {
+                assert!(checked_pointer_comparison(&il,ty,ty,op).is_err());
+            }
+        }
+        assert!(pointer_difference_stride(
+            &il,crate::TypeId(3),crate::TypeId(6)).is_ok());
+        assert!(checked_pointer_comparison(
+            &il,crate::TypeId(3),crate::TypeId(6),5).is_ok());
     }
 
     #[test]
