@@ -1163,7 +1163,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         68 => {
             let (Some(scope),Some(position),Some(kind))=(t(0),n(1),n(4)) else {return;};
-            if scope.len()>1024 || kind==0 {return;}
+            if scope.len()>1024 {return;}
             let variable=n(2).map(SymbolId);
             let destructor=n(3).map(SymbolId);
             if variable==Some(SymbolId(0)) || destructor==Some(SymbolId(0)) {return;}
@@ -3270,6 +3270,32 @@ mod file_scope_init_schedule_wire_tests {
                         FileScopeInitRoutine{position:1,routine:SymbolId(42)}]);
         send(&mut state,67,[1,43]); // cannot duplicate or skip an ordinal
         assert!(state.malformed);
+    }
+    #[test]
+    fn scope_initializers_keep_destructor_identity_and_order() {
+        let mut state=Collector::default();
+        let key=b"1:std::";
+        let mk=|position:u64,variable:u64,destructor:u64|{
+            [
+                WireField{data:key.as_ptr(),length:key.len(),value:0,tag:wire_tags::TEXT},
+                WireField{data:std::ptr::null(),length:0,value:position,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:variable,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:destructor,tag:wire_tags::UNSIGNED},
+                WireField{data:std::ptr::null(),length:0,value:0,tag:wire_tags::UNSIGNED},
+            ]
+        };
+        for (position,variable,destructor) in [(0,11,31),(1,12,32)] {
+            let fields=mk(position,variable,destructor);
+            unsafe {collect((&mut state as *mut Collector).cast(),68,
+                            fields.as_ptr(),fields.len(),0);}
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.scope_dynamic_initializers.len(),2);
+        assert_eq!(state.il.scope_dynamic_initializers[1].destructor,Some(SymbolId(32)));
+        let fields=mk(1,13,33);
+        unsafe {collect((&mut state as *mut Collector).cast(),68,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(state.malformed,"duplicate per-scope initializer ordinal accepted");
     }
     #[test]
     fn unavailable_scheduler_is_not_a_no_effects_certificate() {
