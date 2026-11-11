@@ -227,9 +227,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for attributes in &graph.routine_attributes {
         let routine = graph.symbol(attributes.routine).ok_or("missing routine attributes symbol")?;
-        println!("routine attributes name={} special={} virtual={} override={} final={} this={}",
+        println!("routine attributes name={} special={} virtual={} override={} final={} this={} generated={} defined={}",
                  routine.name, attributes.special_kind, attributes.is_virtual,
-                 attributes.is_override, attributes.is_final, attributes.has_this_parameter);
+                 attributes.is_override, attributes.is_final, attributes.has_this_parameter,
+                 attributes.compiler_generated, attributes.defined);
     }
     for expr in &graph.constructor_initializer_expressions {
         let routine = graph.symbol(expr.routine).ok_or("missing initializer routine")?;
