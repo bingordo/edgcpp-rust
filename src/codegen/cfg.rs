@@ -2182,6 +2182,11 @@ fn checked_call_argument_shape(
         checked_call_pointer_formal_target(il,formal)?;
     } else if expected==5 {
         return Err(invalid("nonpointer/non-null argument passed to C pointer parameter"));
+    } else if bool_formal && matches!(provided,5|6) {
+        // C permits implicit pointer/array-to-_Bool conversion. That does
+        // not turn a malformed native pointer or array relationship into a
+        // valid value: validate the source type before lowering its bits.
+        checked_pointer_element_type(il,actual)?;
     } else if matches!(provided,5|6|2) && !bool_formal {
         return Err(invalid("pointer/array/function passed to nonpointer C parameter"));
     }
@@ -6111,5 +6116,16 @@ mod audit_call_argument_shape_tests {
         assert!(checked(&il,11,5),"object pointer-to-void pointer conversion");
         assert!(checked(&il,9,6),"array-to-pointer-to-bool conversion");
         assert!(checked(&il,9,7),"function-to-pointer-to-bool conversion");
+        let mut il=pointer_signature_types();
+        assert!(checked(&il,9,14),"well-formed pointer still converts to _Bool");
+        for malformed in [26,27] {
+            assert!(!checked(&il,9,malformed),
+                "malformed native pointer must not convert to _Bool");
+        }
+        il.types.push(crate::TypeDef {
+            id:crate::TypeId(28),kind:native_type_kind(5),
+            related_role:Some(1),related:Some(crate::TypeId(777)),
+        });
+        assert!(!checked(&il,9,28),"dangling pointer pointee must fail closed");
     }
 }
