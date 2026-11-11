@@ -28,14 +28,8 @@ struct WireField {
     value: u64,
     tag: u32,
 }
-// Keep these wire protocol discriminants synchronized with cpp/bridge.cpp.
-mod wire_tags {
-    pub const ABSENT:u32=0;
-    pub const TEXT:u32=1;
-    pub const UNSIGNED:u32=2;
-    pub const SIGNED:u32=3;
-    pub const MAX:u32=SIGNED;
-}
+// The tags and record arities are generated from schema/wire_schema.json.
+include!("wire_schema_generated.rs");
 type Callback = unsafe extern "C" fn(*mut c_void, u32, *const WireField, usize, u32);
 impl WireField {
     fn string(self) -> Option<String> {
@@ -1060,14 +1054,6 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
 
 // Keep the decoder's arity table separately testable from record collection.
 // Every kind with a wire arity must also have a destination count below.
-fn expected_wire_field_count(kind: u32) -> Option<usize> {
-    Some(match kind {
-        1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, 65 => 2, _ => return None,
-    })
-
-}
-
 unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                         data: *const WireField, length: usize, aux: u32) {
     // This preflight must precede from_raw_parts even for direct callers
