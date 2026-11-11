@@ -5704,6 +5704,12 @@ mod audit_call_argument_shape_tests {
         il.array_bounds.push(crate::ArrayBound {
             array:crate::TypeId(6),elements:4,
         });
+        // A native function type is not valid without its signature record.
+        // The earlier test fixture omitted this and accidentally relied on
+        // the premature TypeId identity shortcut for function-pointer decay.
+        il.function_signatures.push(crate::FunctionSignature {
+            owner:crate::TypeId(7),prototyped:true,variadic:false,
+        });
         il
     }
     fn checked(il:&Il,expected:u32,actual:u32)->bool {
@@ -5772,7 +5778,7 @@ mod audit_call_argument_shape_tests {
         il.c_integer_types.push(crate::CIntegerType {
             id:crate::TypeId(13),bits:32,signed:false,is_bool:false,
         });
-        for owner in [7,17,19,21] {
+        for owner in [17,19,21] {
             il.function_signatures.push(crate::FunctionSignature {
                 owner:crate::TypeId(owner),prototyped:true,variadic:false,
             });
