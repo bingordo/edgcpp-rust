@@ -4379,6 +4379,70 @@ mod tests {
     }
 
     #[test]
+    fn audit_indexed_direct_call_preserves_legacy_validation_and_typerefs() {
+        let kind=|semantic_kind| (0..4096).find(|&value|
+            semantic(4,value)==semantic_kind).expect("pinned native EDG kind");
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef {id:crate::TypeId(1),kind:kind(4),
+                related_role:None,related:None},
+            crate::TypeDef {id:crate::TypeId(2),kind:kind(2),
+                related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef {id:crate::TypeId(3),kind:kind(2),
+                related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef {id:crate::TypeId(4),kind:kind(3),
+                related_role:Some(4),related:Some(crate::TypeId(2))},
+        ]);
+        il.function_signatures.push(crate::FunctionSignature {
+            owner:crate::TypeId(2),prototyped:true,variadic:false,
+        });
+        for (id,sym_kind,name,ty) in [
+            (1,1,"ordinary",2),(2,1,"aliased",4),
+            (3,1,"not.valid",2),(4,2,"local_not_routine",2),
+            (5,1,"no_prototype",3),(6,1,"__sync_probe",2),
+            (7,1,"__atomic_probe",2),
+        ] {
+            il.symbols.push(crate::Symbol {
+                id:crate::SymbolId(id),kind:sym_kind,name:name.into(),
+            });
+            il.symbol_types.push(crate::SymbolType {
+                symbol:crate::SymbolId(id),ty:crate::TypeId(ty),
+            });
+        }
+        let mut index=DirectCallIndex::new(&il);
+        for id in [1,2] {
+            let symbol=crate::SymbolId(id);
+            let before=direct_call_decl(&il,symbol).unwrap();
+            let after=index.declaration(symbol).unwrap();
+            assert_eq!(before.name,after.name);
+            assert_eq!(before.symbol,after.symbol);
+            assert_eq!(before.abi,after.abi);
+        }
+        assert_eq!(index.abis.len(),1,"typedef-equivalent routines reuse one checked ABI");
+        for id in [3,4,5,6,7,999] {
+            let symbol=crate::SymbolId(id);
+            let old=format!("{:?}",direct_call_decl(&il,symbol).unwrap_err());
+            let new=format!("{:?}",index.declaration(symbol).unwrap_err());
+            assert_eq!(old,new,"different validation error for symbol {id}");
+        }
+        assert!(index.is_native_atomic(crate::SymbolId(7)));
+        assert!(!index.is_native_atomic(crate::SymbolId(6)));
+
+        // Old compile_calls() used any() over all duplicate symbol records
+        // for the native atomic exclusion; index construction must preserve
+        // that behavior until the Graph rejects malformed duplicate IDs.
+        let mut malformed=Il::default();
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(8),kind:1,name:"ordinary".into(),
+        });
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(8),kind:1,name:"__atomic_add".into(),
+        });
+        assert!(DirectCallIndex::new(&malformed)
+            .is_native_atomic(crate::SymbolId(8)));
+    }
+
+    #[test]
     fn audit_cached_direct_call_declarations_are_snapshot_local() {
         let word=CAbiInt {bits:64,signed:true,is_bool:false};
         let first=CallDeclaration {
