@@ -949,6 +949,9 @@ pub enum Error {
 struct WireSeen {
     types: HashSet<TypeId>,
     layouts: HashSet<TypeId>,
+    c_integer_types: HashSet<TypeId>,
+    c_float_types: HashSet<TypeId>,
+    signed_i64_types: HashSet<TypeId>,
     symbol_types: HashSet<SymbolId>,
     globals: HashSet<SymbolId>,
     cxx_records: HashSet<TypeId>,
@@ -1153,7 +1156,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         43 => {
             let Some(id) = n(0) else { return; };
-            if id == 0 { return; }
+            if id == 0 || !seen.signed_i64_types.insert(TypeId(id)) { return; }
             output.signed_i64_types.push(TypeId(id));
         }
         44 => {
@@ -1276,7 +1279,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 (n(0), n(1), n(2), n(3)) else { return; };
             if id == 0 || !matches!(bits, 8 | 16 | 32 | 64) ||
                signed > 1 || boolean > 1 ||
-               (boolean == 1 && (bits != 8 || signed != 0)) {
+               (boolean == 1 && (bits != 8 || signed != 0)) ||
+               !seen.c_integer_types.insert(TypeId(id)) {
                 return;
             }
             output.c_integer_types.push(CIntegerType {
@@ -1286,7 +1290,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         57 => {
             let (Some(id),Some(bits))=(n(0),n(1)) else {return;};
-            if id==0 || !matches!(bits,32|64) {return;}
+            if id==0 || !matches!(bits,32|64) ||
+                !seen.c_float_types.insert(TypeId(id)) {return;}
             output.c_float_types.push(CFloatType{id:TypeId(id),bits:bits as u8});
         }
         58 => {
@@ -3042,5 +3047,65 @@ mod audit_wire_text_length_tests {
         assert!(!valid.malformed);
         assert!(matches!(valid.il.entities.as_slice(),
             [Entity::Namespace { name }] if name=="x"));
+    }
+}
+
+#[cfg(test)]
+mod audit_scalar_type_identity_tests {
+    use super::*;
+
+    fn number(value:u64) -> WireField {
+        WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        }
+    }
+
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]) {
+        unsafe {
+            collect((state as *mut Collector).cast(),
+                    kind,fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_or_conflicting_c_integer_type_metadata() {
+        let mut state=Collector::default();
+        send(&mut state,46,&[number(7),number(32),number(1),number(0)]);
+        assert!(!state.malformed);
+        assert_eq!(state.il.c_integer_types.len(),1);
+        send(&mut state,46,&[number(7),number(64),number(0),number(0)]);
+        assert!(state.malformed);
+        assert_eq!(state.il.c_integer_types.len(),1);
+    }
+
+    #[test]
+    fn rejects_duplicate_float_width_and_signed_i64_proofs() {
+        let mut state=Collector::default();
+        send(&mut state,57,&[number(8),number(32)]);
+        assert!(!state.malformed);
+        send(&mut state,57,&[number(8),number(64)]);
+        assert!(state.malformed);
+        assert_eq!(state.il.c_float_types.len(),1);
+
+        let mut state=Collector::default();
+        send(&mut state,43,&[number(9)]);
+        assert!(!state.malformed);
+        send(&mut state,43,&[number(9)]);
+        assert!(state.malformed);
+        assert_eq!(state.il.signed_i64_types.len(),1);
+    }
+
+    #[test]
+    fn distinct_scalar_type_proofs_remain_accepted() {
+        let mut state=Collector::default();
+        send(&mut state,46,&[number(7),number(32),number(1),number(0)]);
+        send(&mut state,46,&[number(8),number(64),number(0),number(0)]);
+        send(&mut state,57,&[number(9),number(32)]);
+        send(&mut state,57,&[number(10),number(64)]);
+        send(&mut state,43,&[number(8)]);
+        assert!(!state.malformed);
+        assert_eq!(state.il.c_integer_types.len(),2);
+        assert_eq!(state.il.c_float_types.len(),2);
+        assert_eq!(state.il.signed_i64_types.len(),1);
     }
 }
