@@ -4003,6 +4003,125 @@ mod tests {
         assert_eq!(index.symbols_with_type(TypeId(3)),[SymbolId(3),SymbolId(1)]);
     }
 
+    /// Run manually with:
+    /// cargo test --lib --features codegen audit_type_index_batch_scaling -- --ignored --nocapture
+    /// Old path is a frozen reproduction of the pre-#174 scan-based symbol
+    /// mutation logic. Keep the same input and runner for both measurements.
+    #[test]
+    #[ignore = "profiling-only; run explicitly with --ignored --nocapture"]
+    fn audit_type_index_batch_scaling() {
+        fn legacy_symbol_batch(index:&mut TypeDependencyIndex,changes:&[TypeIndexChange]) {
+            let mut touched=std::collections::HashSet::new();
+            for change in changes {
+                let TypeIndexChange::SetSymbolType {symbol,ty}=change else {
+                    panic!("benchmark accepts symbol edits only");
+                };
+                if let Some(old_ty)=index.symbol_order.iter()
+                    .find(|(id,_)|id==symbol).map(|(_,old_ty)|*old_ty)
+                {
+                    touched.insert(old_ty);
+                }
+                if let Some(new_ty)=ty {touched.insert(*new_ty);}
+                if let Some(position)=index.symbol_order.iter()
+                    .position(|(id,_)|id==symbol)
+                {
+                    if let Some(new_ty)=ty {
+                        index.symbol_order[position].1 = *new_ty;
+                    } else {
+                        index.symbol_order.remove(position);
+                    }
+                } else if let Some(new_ty)=ty {
+                    index.symbol_order.push((*symbol,*new_ty));
+                }
+            }
+            for &ty in &touched {index.symbols_by_type.remove(&ty);}
+            for &(symbol,ty) in &index.symbol_order {
+                if touched.contains(&ty) {
+                    index.symbols_by_type.entry(ty).or_default().push(symbol);
+                }
+            }
+        }
+
+        for count in [1024_u32,4096,16384] {
+            let mut initial=TypeDependencyIndex {
+                symbol_order:(1..=count)
+                    .map(|id|(SymbolId(id),TypeId(id%32+1))).collect(),
+                ..Default::default()
+            };
+            for &(symbol,ty) in &initial.symbol_order {
+                initial.symbols_by_type.entry(ty).or_default().push(symbol);
+            }
+            let updates:Vec<_>=(1..=count).rev().map(|id|
+                TypeIndexChange::SetSymbolType {
+                    symbol:SymbolId(id),
+                    ty:Some(TypeId((id.wrapping_mul(7))%32+1)),
+                }).collect();
+            let mut old_times=Vec::new();
+            let mut new_times=Vec::new();
+            for _ in 0..3 {
+                let mut old=initial.clone();
+                let mut new=initial.clone();
+                let started=std::time::Instant::now();
+                legacy_symbol_batch(&mut old,&updates);
+                old_times.push(started.elapsed());
+                let started=std::time::Instant::now();
+                new.apply_changes(&updates);
+                new_times.push(started.elapsed());
+                std::hint::black_box(&old);
+                std::hint::black_box(&new);
+                assert_eq!(old.symbol_order,new.symbol_order);
+                assert_eq!(old.symbols_by_type,new.symbols_by_type);
+            }
+            old_times.sort_unstable();
+            new_times.sort_unstable();
+            let old=old_times[1].as_secs_f64()*1000.0;
+            let new=new_times[1].as_secs_f64()*1000.0;
+            println!("type-index-batch count={count} old_ms={old:.3} indexed_ms={new:.3} speedup={:.2}x",old/new);
+        }
+
+        // Type removals previously filtered the full ordered type vector
+        // once per deletion. Isolate that algorithm using edge-free types;
+        // no reverse-edge processing should distort either measurement.
+        for count in [1024_u32,4096,16384] {
+            let initial=TypeDependencyIndex {
+                type_order:(1..=count).map(TypeId).collect(),
+                forward:(1..=count).map(|id|(TypeId(id),Vec::new())).collect(),
+                ..Default::default()
+            };
+            let updates:Vec<_>=(1..=count).rev()
+                .map(|id|TypeIndexChange::RemoveType {ty:TypeId(id)}).collect();
+            let mut old_times=Vec::new();
+            let mut new_times=Vec::new();
+            for _ in 0..3 {
+                let mut old=initial.clone();
+                let mut new=initial.clone();
+                let started=std::time::Instant::now();
+                for update in &updates {
+                    let TypeIndexChange::RemoveType {ty}=update else {
+                        unreachable!("type removal benchmark");
+                    };
+                    if old.forward.remove(ty).is_some() {
+                        old.type_order.retain(|source|source!=ty);
+                    }
+                }
+                old_times.push(started.elapsed());
+                let started=std::time::Instant::now();
+                new.apply_changes(&updates);
+                new_times.push(started.elapsed());
+                std::hint::black_box(&old);
+                std::hint::black_box(&new);
+                assert_eq!(old.type_order,new.type_order);
+                assert_eq!(old.forward,new.forward);
+                assert_eq!(old.reverse,new.reverse);
+            }
+            old_times.sort_unstable();
+            new_times.sort_unstable();
+            let old=old_times[1].as_secs_f64()*1000.0;
+            let new=new_times[1].as_secs_f64()*1000.0;
+            println!("type-index-remove count={count} old_ms={old:.3} indexed_ms={new:.3} speedup={:.2}x",old/new);
+        }
+    }
+
     #[test]
     fn differential_invalidation_reports_additions_removals_and_shortest_depths() {
         let mut graph = Graph::default();
