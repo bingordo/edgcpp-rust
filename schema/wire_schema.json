@@ -79,8 +79,71 @@
     "65": 2
   },
   "record_field_tags": {
+    "1": [
+      "TEXT"
+    ],
+    "2": [
+      "TEXT"
+    ],
+    "3": [
+      "TEXT"
+    ],
+    "4": [
+      "TEXT"
+    ],
+    "5": [
+      "TEXT",
+      "TEXT",
+      "ABSENT|TEXT"
+    ],
+    "6": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "ABSENT|TEXT",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|SIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
     "7": [
       "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "8": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "9": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "10": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "11": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "12": [
       "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
@@ -90,15 +153,214 @@
       "UNSIGNED",
       "TEXT"
     ],
+    "14": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
     "15": [
       "UNSIGNED",
       "SIGNED"
+    ],
+    "16": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "17": [
+      "UNSIGNED",
+      "TEXT",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "18": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "19": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "20": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED"
+    ],
+    "21": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "22": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "23": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "24": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED"
     ],
     "25": [
       "UNSIGNED",
       "UNSIGNED"
     ],
+    "26": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "27": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "TEXT",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "28": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "29": [
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "30": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|TEXT"
+    ],
+    "31": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "32": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "33": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "34": [
+      "TEXT",
+      "TEXT",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "35": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "36": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "37": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "38": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED"
+    ],
+    "39": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "40": [
+      "TEXT",
+      "TEXT",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "41": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
+    ],
+    "42": [
+      "UNSIGNED",
+      "TEXT"
+    ],
     "43": [
+      "UNSIGNED"
+    ],
+    "44": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "45": [
+      "TEXT",
+      "TEXT",
+      "SIGNED"
+    ],
+    "46": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
       "UNSIGNED"
     ],
     "47": [
@@ -108,10 +370,24 @@
       "UNSIGNED",
       "UNSIGNED"
     ],
+    "48": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "SIGNED"
+    ],
     "49": [
       "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
+    ],
+    "50": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT"
     ],
     "51": [
       "UNSIGNED",
@@ -124,10 +400,67 @@
       "UNSIGNED",
       "SIGNED"
     ],
+    "53": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "ABSENT|SIGNED"
+    ],
+    "54": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "55": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "56": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "57": [
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "58": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "59": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "60": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
     "61": [
       "UNSIGNED",
       "TEXT",
       "UNSIGNED"
+    ],
+    "62": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "TEXT"
     ],
     "63": [
       "UNSIGNED",
