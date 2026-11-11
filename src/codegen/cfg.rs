@@ -1766,6 +1766,7 @@ struct DirectCallIndex<'a> {
     types: HashMap<crate::TypeId, &'a crate::TypeDef>,
     canonical: HashMap<crate::TypeId, crate::TypeId>,
     abis: HashMap<crate::TypeId, CAbi>,
+    native_atomic_symbols: HashSet<crate::SymbolId>,
 }
 
 impl<'a> DirectCallIndex<'a> {
@@ -1773,16 +1774,26 @@ impl<'a> DirectCallIndex<'a> {
         let mut symbols=HashMap::with_capacity(il.symbols.len());
         let mut symbol_types=HashMap::with_capacity(il.symbol_types.len());
         let mut types=HashMap::with_capacity(il.types.len());
-        // Preserve first-entry lookup semantics of the original iter().find,
-        // including when graph validation later rejects duplicated IL IDs.
-        for sym in &il.symbols {symbols.entry(sym.id).or_insert(sym);}
+        let mut native_atomic_symbols=HashSet::new();
+        // Preserve the first-entry lookup semantics of iter().find, but
+        // preserve the old any()-based builtin exclusion even for duplicate
+        // IDs (which Graph validation will separately reject).
+        for sym in &il.symbols {
+            symbols.entry(sym.id).or_insert(sym);
+            if sym.name.starts_with("__atomic_") {
+                native_atomic_symbols.insert(sym.id);
+            }
+        }
         for edge in &il.symbol_types {symbol_types.entry(edge.symbol).or_insert(edge.ty);}
         for ty in &il.types {types.entry(ty.id).or_insert(ty);}
-        Self {il,symbols,symbol_types,types,canonical:HashMap::new(),abis:HashMap::new()}
+        Self {
+            il,symbols,symbol_types,types,canonical:HashMap::new(),
+            abis:HashMap::new(),native_atomic_symbols,
+        }
     }
 
     fn is_native_atomic(&self, symbol: crate::SymbolId) -> bool {
-        self.symbols.get(&symbol).is_some_and(|sym|sym.name.starts_with("__atomic_"))
+        self.native_atomic_symbols.contains(&symbol)
     }
 
     fn canonical_type(&mut self, source: crate::TypeId) -> Result<crate::TypeId,CodegenError> {
@@ -2096,6 +2107,7 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
+    if symbols.is_empty() {return Ok(Vec::new());}
     // Index native declarations once for this immutable IL. Distinct call
     // targets no longer require linear symbol/type scans for each routine.
     let mut lookup=DirectCallIndex::new(il);
