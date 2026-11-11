@@ -841,7 +841,7 @@ impl Graph {
             // Event 10 is emitted only for tk_struct, tk_class or tk_union.
             // An integer/array/pointer cannot own a native field layout.
             let owner=&graph.types[type_map[&field.owner]];
-            if !matches!(unsafe {edgcpp_codegen_kind(4, owner.kind)},7|8|9) {
+            if !matches!(unsafe {edgcpp_codegen_kind(4, owner.kind)},7..=9) {
                 return Err(GraphError::InvalidRecordFieldOwner(field.owner));
             }
             // EDG's offset_bit_remainder is the sub-byte remainder of
