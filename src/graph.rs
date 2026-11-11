@@ -5010,7 +5010,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_call_expression_when_call_event_is_missing() {
+    fn audit_call_metadata_rejects_missing_event() {
         for member in [false,true] {
             let mut il=call_snapshot(member);
             il.calls.clear();
@@ -5020,7 +5020,7 @@ mod tests {
     }
 
     #[test]
-    fn call_record_must_match_native_operator_and_expression_kind() {
+    fn audit_call_metadata_checks_operator_and_offset() {
         let mut il=call_snapshot(false);
         il.calls[0].first_argument=2; // two operands are present
         assert!(matches!(Graph::from_il(&il),
@@ -5045,7 +5045,7 @@ mod tests {
     }
 
     #[test]
-    fn native_call_arguments_do_not_require_an_explicit_argument() {
+    fn audit_call_metadata_allows_zero_argument_call() {
         let mut il=call_snapshot(false);
         il.expressions.pop(); // remove 0.1, retaining the callee at 0.0
         let graph=Graph::from_il(&il).expect("valid zero-argument call");
