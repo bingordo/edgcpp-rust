@@ -4360,6 +4360,73 @@ mod tests {
     }
 
     #[test]
+    fn audit_indexed_scope_and_lifetime_validation_on_many_records() {
+        let mut il = Il::default();
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "f".into() });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: 1, related_role: None, related: None,
+        });
+        for i in 0..128u32 {
+            let statement = i.to_string();
+            let symbol = SymbolId(i + 2);
+            il.symbols.push(Symbol {
+                id: symbol, kind: 2, name: format!("static_{i}"),
+            });
+            il.local_scopes.push(LocalScope {
+                routine: SymbolId(1), id: i,
+                parent: if i == 0 { None } else { Some(i - 1) },
+                kind: 17, statement_path: None,
+            });
+            il.local_variables.push(LocalVariable {
+                routine: SymbolId(1), scope: i, symbol, ty: TypeId(1),
+                storage_class: 0, compiler_generated: false,
+                static_storage: true, structured_binding: false,
+                handler_parameter: false,
+            });
+            il.static_local_owners.push(StaticLocalOwner {
+                routine: SymbolId(1), symbol,
+            });
+            il.object_lifetimes.push(ObjectLifetime {
+                routine: SymbolId(1), id: i,
+                parent: if i == 0 { None } else { Some(i - 1) }, kind: 0,
+            });
+            il.scope_lifetimes.push(ScopeLifetime {
+                routine: SymbolId(1), scope: i, lifetime: i,
+            });
+            il.lifetime_destructions.push(LifetimeDestruction {
+                routine: SymbolId(1), lifetime: i, position: 0,
+                variable: Some(symbol), destructor: None,
+            });
+            il.statements.push(Statement {
+                function: "f".into(), path: statement.clone(),
+                parent: None, kind: 1,
+            });
+            il.statement_initializations.push(StatementInitialization {
+                function: "f".into(), statement_path: statement.clone(),
+                symbol: Some(symbol), kind: 1, follows_execution: false,
+                braced: false, role: 0,
+            });
+            il.initialization_lifetimes.push(InitializationLifetime {
+                function: "f".into(), statement_path: statement.clone(),
+                lifetime: Some(i), destructor: None,
+            });
+            il.vla_dimensions.push(VlaDimension {
+                function: "f".into(), statement_path: statement,
+                array_type: TypeId(1), has_expression: false, copied: false,
+            });
+        }
+        let graph = Graph::from_il(&il).expect("valid indexed native metadata");
+        assert_eq!(graph.scope_lifetimes.len(), 128);
+        assert_eq!(graph.initialization_lifetimes.len(), 128);
+        assert_eq!(graph.static_local_owners.len(), 128);
+        il.lifetime_destructions.push(il.lifetime_destructions[0].clone());
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::DuplicateLifetimeDestruction {
+                routine: SymbolId(1), lifetime: 0, position: 0,
+            });
+    }
+
+    #[test]
     fn audit_parameter_and_local_types_match_native_symbol_types() {
         let mut il = Il::default();
         il.symbols.extend([
