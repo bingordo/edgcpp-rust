@@ -13,7 +13,6 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
-#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -343,48 +342,6 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
-  // Temporary EDG-probe-only diagnostics, enabled by the isolated CI job.
-  // Never affect eligibility or native compilation decisions.
-  if (std::getenv("EDG_CXX2_DEBUG") != nullptr && type != nullptr &&
-      (type->kind == tk_class || type->kind == tk_struct) &&
-      type->size == 4 && type->alignment == 4) {
-    const auto *extra = type->variant.class_struct_union.extra_info;
-    const auto *field = type->variant.class_struct_union.field_list;
-    std::fprintf(stderr,
-      "EDG_CXX2_DEBUG size=%llu align=%llu incomplete=%u symbol=%u"
-      " extra=%u scope=%u bases=%u field_init=%u virtual=%u"
-      " static_vars=%u nontrivial_dtor=%u field=%u field_next=%u"
-      " field_type=%u field_offset=%llu\n",
-      static_cast<unsigned long long>(type->size),
-      static_cast<unsigned long long>(type->alignment),
-      static_cast<unsigned>(type->incomplete),symbol_for(type)!=nullptr,
-      extra!=nullptr,extra!=nullptr && extra->assoc_scope!=nullptr,
-      extra!=nullptr && extra->direct_base_classes!=nullptr,
-      extra!=nullptr && extra->has_field_initializer,
-      static_cast<unsigned>(type->variant.class_struct_union.any_virtual_functions),
-      extra!=nullptr && extra->assoc_scope!=nullptr &&
-          extra->assoc_scope->variables!=nullptr,
-      static_cast<unsigned>(type_has_nontrivial_destructor(type)),
-      field!=nullptr,field!=nullptr && field->next!=nullptr,
-      field!=nullptr && field->type!=nullptr ?
-          static_cast<unsigned>(field->type->kind):0,
-      field!=nullptr ? static_cast<unsigned long long>(field->offset):0);
-    if (extra!=nullptr && extra->assoc_scope!=nullptr) {
-      unsigned logged=0;
-      for (a_routine_ptr r=extra->assoc_scope->routines;
-           r!=nullptr && logged++<15; r=r->next) {
-        std::fprintf(stderr,
-          "EDG_CXX2_DEBUG routine kind=%u provided=%u trivial_default=%u"
-          " trivial_copy=%u trivial_dtor=%u virtual=%u\n",
-          static_cast<unsigned>(r->special_kind),
-          special_member_is_user_provided(r),
-          static_cast<unsigned>(r->is_trivial_default_constructor),
-          static_cast<unsigned>(r->is_trivial_copy_function),
-          static_cast<unsigned>(r->is_trivial_destructor),
-          static_cast<unsigned>(r->is_virtual));
-      }
-    }
-  }
   if (type == nullptr ||
       (type->kind != tk_class && type->kind != tk_struct) ||
       type->incomplete || type->size != 4 || type->alignment != 4 ||
@@ -415,32 +372,14 @@ static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
          entry->entity.kind != iek_routine)) return false;
   }
 #endif
-  unsigned constructors = 0, destructors = 0, visited = 0;
-  for (a_routine_ptr method = extra->assoc_scope->routines;
-       method != nullptr; method = method->next) {
-    if (++visited > 128 || method->is_virtual) return false;
-    switch (method->special_kind) {
-      case sfk_constructor:
-        if (special_member_is_user_provided(method)) {
-          ++constructors;
-        } else if (!method->is_trivial_default_constructor &&
-                   !method->is_trivial_copy_function) {
-          return false;
-        }
-        break;
-      case sfk_destructor:
-        if (!special_member_is_user_provided(method) ||
-            method->is_trivial_destructor) return false;
-        ++destructors;
-        break;
-      case sfk_none:
-        // Ordinary nonvirtual methods retain their separate ABI gates.
-        break;
-      default:
-        return false; // Copy/move/operator/other special semantics.
-    }
-  }
-  return constructors == 1 && destructors == 1;
+  // EDG may prune the class routine list before this type is serialized:
+  // an empty list is NOT evidence that the user constructor/destructor
+  // or any other special members are absent. The native TypeId caller
+  // must independently verify exact routine ownership, special_kind,
+  // ABI and executable call/cleanup paths from retained IL metadata.
+  // Thus this event is only a structural *candidate*, never authority
+  // to emit a nontrivial object by itself.
+  return true;
 }
 
 // Assign dense IDs during compilation; never export EDG type addresses.
