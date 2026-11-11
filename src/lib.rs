@@ -3214,3 +3214,46 @@ mod audit_scalar_type_identity_tests {
         assert_eq!(state.il.signed_i64_types.len(),1);
     }
 }
+
+
+#[cfg(test)]
+mod file_scope_init_schedule_wire_tests {
+    use super::*;
+    fn send(state:&mut Collector,kind:u32,values:[u32;2]) {
+        let fields=values.map(|value|WireField {
+            data:std::ptr::null(),length:0,value:u64::from(value),
+            tag:wire_tags::UNSIGNED,
+        });
+        unsafe {
+            collect((state as *mut Collector).cast(),
+                    kind,fields.as_ptr(),fields.len(),0);
+        }
+    }
+    #[test]
+    fn ordered_roots_preserve_native_sequence_and_config_proof() {
+        let mut state=Collector::default();
+        send(&mut state,67,[0,100]);
+        send(&mut state,67,[1,42]);
+        send(&mut state,66,[1,1]);
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.file_scope_init_schedule,
+                   Some(FileScopeInitSchedule{available:true,complete:true}));
+        assert_eq!(state.il.file_scope_init_routines,
+                   vec![FileScopeInitRoutine{position:0,routine:SymbolId(100)},
+                        FileScopeInitRoutine{position:1,routine:SymbolId(42)}]);
+        send(&mut state,67,[1,43]); // cannot duplicate or skip an ordinal
+        assert!(state.malformed);
+    }
+    #[test]
+    fn unavailable_scheduler_is_not_a_no_effects_certificate() {
+        let mut state=Collector::default();
+        send(&mut state,66,[0,0]);
+        assert_eq!(state.il.file_scope_init_schedule,
+                   Some(FileScopeInitSchedule{available:false,complete:false}));
+        assert!(state.il.file_scope_init_routines.is_empty());
+        assert!(!state.malformed);
+        send(&mut state,66,[1,1]); // exactly one availability record
+        assert!(state.malformed);
+    }
+}
