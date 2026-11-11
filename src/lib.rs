@@ -397,10 +397,12 @@ pub struct CxxRecordAdmission {
     pub plain_object: bool,
 }
 
-/// EDG class-member-scope proof for precisely one scalar field and one
-/// user-defined ctor + dtor, with no bases, virtual dispatch, default
-/// field initializers or unsupported special members. False rejects; true
-/// is *only* eligibility evidence for a separate native lifetime verifier.
+/// EDG source-layout proof for a nontrivial-dtor record containing
+/// exactly one 32-bit scalar field, no bases, virtual dispatch, static
+/// members or default field initializers. The class routine list may
+/// already be pruned: true does NOT prove the constructor/destructor
+/// count or semantics. A separate native TypeId verifier must check
+/// retained member identities, special-member ABI and every cleanup path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CxxScalarLifetimeAdmission {
     pub owner: TypeId,
