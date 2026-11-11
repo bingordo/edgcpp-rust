@@ -921,6 +921,11 @@ impl Graph {
             }
             graph.symbol_types.push(edge.clone());
         }
+        // The native bridge emits symbol types and parameter/local metadata
+        // from the same EDG variable declaration. Their identities must not
+        // disagree, even when the prototype would independently be accepted.
+        let symbol_type_by_id: HashMap<SymbolId, TypeId> = graph.symbol_types.iter()
+            .map(|edge| (edge.symbol, edge.ty)).collect();
         let mut annotated_routines = std::collections::HashSet::new();
         for attributes in &il.routine_attributes {
             if !graph.symbols.iter().any(|symbol|
@@ -1226,6 +1231,8 @@ impl Graph {
             if !is_routine(param.routine) || !is_variable(param.symbol)
                 || !type_map.contains_key(&param.ty)
                 || param.implicit_this != param.position.is_none()
+                || symbol_type_by_id.get(&param.symbol)
+                    .is_some_and(|&ty| ty != param.ty)
             {
                 return Err(GraphError::InvalidFunctionParameter {
                     routine: param.routine, symbol: param.symbol,
@@ -1258,6 +1265,8 @@ impl Graph {
                 || !type_map.contains_key(&var.ty)
                 || !scope_keys.contains(&(var.routine, var.scope))
                 || parameter_symbols.contains(&var.symbol)
+                || symbol_type_by_id.get(&var.symbol)
+                    .is_some_and(|&ty| ty != var.ty)
             {
                 return Err(GraphError::InvalidLocalVariable(var.symbol));
             }
@@ -4287,6 +4296,50 @@ mod tests {
         il.local_variables.push(il.local_variables[0].clone());
         assert!(matches!(Graph::from_il(&il),
             Err(GraphError::DuplicateLocalVariable(SymbolId(4)))));
+    }
+
+    #[test]
+    fn audit_parameter_and_local_types_match_native_symbol_types() {
+        let mut il = Il::default();
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "f".into() },
+            Symbol { id: SymbolId(2), kind: 2, name: "argument".into() },
+            Symbol { id: SymbolId(3), kind: 2, name: "local".into() },
+        ]);
+        for id in [1, 2] {
+            il.types.push(TypeDef {
+                id: TypeId(id), kind: 2, related_role: None, related: None,
+            });
+        }
+        il.function_parameters.push(FunctionParameter {
+            routine: SymbolId(1), position: Some(0), symbol: SymbolId(2),
+            ty: TypeId(1), implicit_this: false, compiler_generated: false,
+        });
+        il.local_scopes.push(LocalScope {
+            routine: SymbolId(1), id: 0, parent: None,
+            kind: 17, statement_path: None,
+        });
+        il.local_variables.push(LocalVariable {
+            routine: SymbolId(1), scope: 0, symbol: SymbolId(3),
+            ty: TypeId(1), storage_class: 0, compiler_generated: false,
+            static_storage: false, structured_binding: false,
+            handler_parameter: false,
+        });
+        il.symbol_types.extend([
+            SymbolType { symbol: SymbolId(2), ty: TypeId(1) },
+            SymbolType { symbol: SymbolId(3), ty: TypeId(1) },
+        ]);
+        Graph::from_il(&il).expect("matching native variable type records");
+
+        il.symbol_types[0].ty = TypeId(2);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidFunctionParameter {
+                routine: SymbolId(1), symbol: SymbolId(2),
+            })));
+        il.symbol_types[0].ty = TypeId(1);
+        il.symbol_types[1].ty = TypeId(2);
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidLocalVariable(SymbolId(3)));
     }
 
     #[test]
