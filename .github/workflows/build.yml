@@ -327,7 +327,7 @@ jobs:
 
       # Reproducible measurement on demand; routine CI never runs this.
       - name: "Audit call index and ABI cache scaling (opt-in)"
-        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.audit_call_lookup_benchmark) || (github.event_name == 'pull_request' && github.head_ref == 'audit/index-distinct-direct-call-targets-20261111') }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.audit_call_lookup_benchmark }}
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
