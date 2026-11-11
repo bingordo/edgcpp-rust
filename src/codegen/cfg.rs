@@ -2064,17 +2064,20 @@ fn call_cv_qualified_type(
         if definition.related_role!=Some(4) {
             return Err(invalid("malformed qualified call typeref relationship"));
         }
-        if let Some(detail)=il.type_details.iter().find(|d|d.owner==ty) {
-            if detail.is_reference || detail.is_rvalue_reference {
-                return Err(invalid("C call qualification contains a reference"));
-            }
-            let flags=detail.qualifiers.ok_or_else(||
-                invalid("qualified typeref lacks native C qualifiers"))?;
-            if flags & !3 != 0 {
-                return Err(invalid("unsupported C call pointer qualifier flags"));
-            }
-            cv|=flags;
+        // The native bridge emits event 11 for every typeref, including
+        // unqualified typedef aliases (qualifiers=0). If the event is lost,
+        // treating its absence as zero silently discards const/volatile.
+        let detail=il.type_details.iter().find(|d|d.owner==ty)
+            .ok_or_else(||invalid("C call typeref lacks native qualifier detail"))?;
+        if detail.is_reference || detail.is_rvalue_reference {
+            return Err(invalid("C call qualification contains a reference"));
         }
+        let flags=detail.qualifiers.ok_or_else(||
+            invalid("qualified typeref lacks native C qualifiers"))?;
+        if flags & !3 != 0 {
+            return Err(invalid("unsupported C call pointer qualifier flags"));
+        }
+        cv|=flags;
         ty=definition.related.ok_or_else(||
             invalid("qualified C call typeref has no underlying type"))?;
     }
@@ -5791,6 +5794,11 @@ mod audit_call_argument_shape_tests {
             ty(11,5,Some(1),Some(10)),    // void*
             ty(12,9,None,None),           // union
         ]);
+        // Native EDG emits qualifier records even for plain typedef aliases.
+        il.type_details.push(crate::TypeDetail {
+            owner:crate::TypeId(4),qualifiers:Some(0),
+            is_reference:false,is_rvalue_reference:false,
+        });
         il.c_integer_types.extend([
             crate::CIntegerType{id:crate::TypeId(1),bits:32,signed:true,is_bool:false},
             crate::CIntegerType{id:crate::TypeId(9),bits:8,signed:false,is_bool:true},
@@ -6036,6 +6044,16 @@ mod audit_call_argument_shape_tests {
         assert!(checked(&il,42,39));
         assert!(!checked(&il,45,45),"unsupported qualifier fails closed");
         assert!(checked(&il,23,23),"ordinary valid nested pointers still work");
+        let mut missing=il.clone();
+        missing.type_details.retain(|d|d.owner!=crate::TypeId(29));
+        assert!(!checked(&missing,5,32),
+            "missing const typeref detail must not erase source const");
+        assert!(!checked(&missing,32,5),
+            "missing native C qualifier detail must fail closed even if conversion adds const");
+        let mut missing=il;
+        missing.type_details.retain(|d|d.owner!=crate::TypeId(4));
+        assert!(!checked(&missing,15,25),
+            "missing unqualified typedef detail also indicates a truncated snapshot");
     }
 
     #[test]
