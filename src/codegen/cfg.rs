@@ -1848,6 +1848,41 @@ fn checked_call_result_type(
     }
     Ok(())
 }
+/// Check the *source* argument category independently of the machine ABI.
+///
+/// An equal-size but unrelated C struct is not an interchangeable by-value
+/// argument. Conversely, C array/function designators decay when passed to
+/// pointer formals, and any scalar/pointer value can convert to C _Bool.
+/// Keep those implicit conversions legal rather than comparing scalar TypeIds.
+fn checked_call_argument_shape(
+    il:&Il, formal_ty:crate::TypeId, actual_ty:crate::TypeId,
+) -> Result<(),CodegenError> {
+    let formal=canonical_abi_type(il,formal_ty)?;
+    let actual=canonical_abi_type(il,actual_ty)?;
+    let kind=|ty| -> Result<u32,CodegenError> {
+        il.types.iter().find(|d|d.id==ty)
+            .map(|d|semantic(4,d.kind))
+            .ok_or_else(||invalid("missing call argument C type"))
+    };
+    let expected=kind(formal)?;
+    let provided=kind(actual)?;
+    if expected==7 {
+        if actual!=formal || provided!=7 {
+            return Err(invalid("call argument aggregate type differs from declared parameter"));
+        }
+    } else if matches!(provided,7|9) {
+        return Err(invalid("aggregate argument passed to scalar/pointer parameter"));
+    } else if matches!(provided,6|2) && expected!=5 {
+        // An array or function designator may decay into a pointer,
+        // including when the pointer is then converted to _Bool.
+        let bool_formal=expected==1 && il.c_integer_types.iter()
+            .any(|info|info.id==formal && info.is_bool);
+        if !bool_formal {
+            return Err(invalid("array/function designator passed to nonpointer parameter"));
+        }
+    }
+    Ok(())
+}
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Member calls remain a separate C++ ABI/lifetime feature.
     for site in &il.calls {
@@ -1930,11 +1965,22 @@ fn lower_c_expression(
         };
         checked_call_result_type(il,callee_ty,
             node.data.type_id.ok_or_else(||invalid("call expression has no result type"))?)?;
+        // The ABI erases C type identity. Check it against the canonical
+        // parameter types before converting or copying any actual argument.
+        let function_ty=callable_function_type(il,callee_ty)?;
+        let mut formal_types:Vec<_>=il.type_parameters.iter()
+            .filter(|p|p.owner==function_ty).collect();
+        formal_types.sort_by_key(|p|p.position);
+        if formal_types.len()!=abi.parameters.len() {
+            return Err(invalid("call prototype parameter metadata disagrees with ABI"));
+        }
         let mut args=Vec::with_capacity(abi.parameters.len());
-        for (&operand,aggregate) in node.operands[1..].iter()
-            .zip(&abi.aggregate_parameters) {
+        for ((&operand,aggregate),formal) in node.operands[1..].iter()
+            .zip(&abi.aggregate_parameters).zip(&formal_types) {
+            let actual_ty=expression_type_id(graph,operand)?;
+            checked_call_argument_shape(il,formal.ty,actual_ty)?;
             if let Some(size)=aggregate {
-                let actual=target::ABI.classify_aggregate(il,expression_type_id(graph,operand)?)?;
+                let actual=target::ABI.classify_aggregate(il,actual_ty)?;
                 if actual!=Some(*size) {
                     return Err(invalid("aggregate call argument ABI type/size mismatch"));
                 }
