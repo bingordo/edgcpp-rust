@@ -58,15 +58,9 @@ thread_local std::unordered_map<std::string, uint32_t> named_class_types;
 }
 
 namespace edg {
-// Wire protocol values; must match Rust's wire_tags module.
-enum : uint32_t {
-  WIRE_ABSENT = 0, WIRE_TEXT = 1, WIRE_UNSIGNED = 2, WIRE_SIGNED = 3,
-  RECORD_SYMBOL = 13, RECORD_STATEMENT_SOURCE = 35,
-  RECORD_EXPRESSION_SOURCE = 37,
-  // Deliberately invalid event kind: the Rust collector rejects this as a
-  // malformed callback, so incomplete native snapshots cannot be compiled.
-  RECORD_INCOMPLETE_SNAPSHOT = 0,
-};
+// Wire tags and selected record IDs share schema/wire_schema.json with Rust.
+// Deliberately invalid RECORD_INCOMPLETE_SNAPSHOT (kind 0) is reserved.
+#include "wire_schema_generated.inc"
 static edgcpp_field txt(const std::string &s) { return {s.data(), s.size(), 0, WIRE_TEXT}; }
 static edgcpp_field num(uint64_t n) { return {nullptr, 0, n, WIRE_UNSIGNED}; }
 static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint64_t>(n), WIRE_SIGNED}; }
