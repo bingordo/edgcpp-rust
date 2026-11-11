@@ -13,6 +13,7 @@ pub mod scalar_abi;
 pub mod codegen;
 
 use std::{
+    collections::HashSet,
     ffi::{c_char, c_int, c_void, CString},
     sync::Mutex,
 };
@@ -910,10 +911,25 @@ pub enum Error {
     MalformedCallback,
 }
 
+// Native EDG record identities are unique within one compilation. Indexing
+// them during callback collection avoids rescanning all prior records for
+// every emitted type, symbol, layout, or C++ admission (quadratic growth).
+// The final public Il remains the same ordered Vec-backed snapshot.
+#[derive(Default)]
+struct WireSeen {
+    types: HashSet<TypeId>,
+    layouts: HashSet<TypeId>,
+    symbol_types: HashSet<SymbolId>,
+    globals: HashSet<SymbolId>,
+    cxx_records: HashSet<TypeId>,
+    cxx_lifetimes: HashSet<TypeId>,
+}
+#[derive(Default)]
 struct Collector {
     il: Il,
     panicked: bool,
     malformed: bool,
+    seen: WireSeen,
 }
 
 /// Never allow a Rust panic to cross the C ABI into EDG.
@@ -936,7 +952,7 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
         return;
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        collect_event(&mut state.il, kind, name, length, defined);
+        collect_event(&mut state.il, &mut state.seen, kind, name, length, defined);
     }));
     if result.is_err() {
         state.panicked = true;
@@ -1050,7 +1066,7 @@ fn expected_wire_field_count(kind: u32) -> Option<usize> {
 
 }
 
-unsafe fn collect_event(output: &mut Il, kind: u32,
+unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                         data: *const WireField, length: usize, aux: u32) {
     // This preflight must precede from_raw_parts even for direct callers
     // of collect_event: never construct a slice with an untrusted arity.
@@ -1096,7 +1112,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         }
         7 => {
             let (Some(id), Some(kind), Some(role), Some(child)) = (n(0), n(1), n(2), n(3)) else { return; };
-            if id==0 || output.types.iter().any(|ty|ty.id==TypeId(id)) {return;}
+            if id==0 || !seen.types.insert(TypeId(id)) {return;}
             output.types.push(TypeDef { id: TypeId(id), kind,
                 related_role: (role != 0).then_some(role),
                 related: (child != 0).then_some(TypeId(child)) });
@@ -1134,7 +1150,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         63 => {
             let (Some(owner),Some(plain)) = (n(0),n(1)) else {return;};
             if owner==0 || plain>1 ||
-                output.cxx_record_admissions.iter().any(|v|v.owner==TypeId(owner)) {
+                !seen.cxx_records.insert(TypeId(owner)) {
                 return;
             }
             output.cxx_record_admissions.push(CxxRecordAdmission {
@@ -1144,8 +1160,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         65 => {
             let (Some(owner),Some(proven)) = (n(0),n(1)) else {return;};
             if owner==0 || proven>1 ||
-                output.cxx_scalar_lifetime_admissions.iter()
-                    .any(|v|v.owner==TypeId(owner)) {return;}
+                !seen.cxx_lifetimes.insert(TypeId(owner)) {return;}
             output.cxx_scalar_lifetime_admissions.push(CxxScalarLifetimeAdmission {
                 owner:TypeId(owner),candidate:proven==1,
             });
@@ -1190,7 +1205,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(owner), Some(bytes), Some(alignment)) =
                 (n(0), fields[1].unsigned(), fields[2].unsigned()) else { return; };
             if owner == 0 || bytes == 0 || alignment == 0 ||
-                output.type_object_sizes.iter().any(|item|item.owner==TypeId(owner)) {
+                !seen.layouts.insert(TypeId(owner)) {
                 return;
             }
             output.type_object_sizes.push(TypeObjectSize { owner: TypeId(owner), bytes, alignment });
@@ -1210,7 +1225,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             let (Some(symbol), Some(linkage), Some(init), Some(tls), Some(local)) =
                 (n(0), n(1), n(2), n(3), n(4)) else { return; };
             if symbol == 0 || !(1..=3).contains(&linkage) || init > 1 || tls > 1 || local > 1 ||
-                output.global_variables.iter().any(|entry|entry.symbol==SymbolId(symbol)) {
+                !seen.globals.insert(SymbolId(symbol)) {
                 // Even identical duplicate metadata would make this source
                 // identity ambiguous; collect() treats a rejected event as
                 // malformed instead of silently trusting whichever came first.
@@ -1525,7 +1540,7 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
         25 => {
             let (Some(symbol), Some(ty)) = (n(0), n(1)) else { return; };
             if symbol == 0 || ty == 0 ||
-                output.symbol_types.iter().any(|item|item.symbol==SymbolId(symbol)) {
+                !seen.symbol_types.insert(SymbolId(symbol)) {
                 return;
             }
             output.symbol_types.push(SymbolType { symbol: SymbolId(symbol), ty: TypeId(ty) });
@@ -1681,7 +1696,7 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     let mut argv: Vec<*mut c_char> =
         cstrings.iter().map(|s| s.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
-    let mut collector = Collector { il: Il::default(), panicked: false, malformed: false };
+    let mut collector = Collector::default();
     let code = unsafe {
         edgcpp_compile(cstrings.len() as c_int, argv.as_mut_ptr(),
                        Some(collect), &mut collector as *mut Collector as *mut c_void)
@@ -1776,7 +1791,7 @@ mod tests {
     fn typed_callback_preserves_tabs_and_nul_bytes() {
         let name = b"outer::a\tb\0c";
         let fields = [WireField { data: name.as_ptr(), length: name.len(), value: 0, tag: 1 }];
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         unsafe { collect((&mut state as *mut Collector).cast(), 2, fields.as_ptr(), 1, 0); }
         assert_eq!(state.il.entities, vec![Entity::Variable {
             name: String::from_utf8(name.to_vec()).unwrap()
@@ -1797,9 +1812,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
+        let mut state = Collector::default();
         let statement = [string(text), string(path), absent];
         unsafe {
             collect((&mut state as *mut Collector).cast(), 5,
@@ -1838,9 +1851,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
+        let mut state = Collector::default();
         let attributes = [number(3), number(1), number(1 | 4 | 8 | 512)];
         unsafe {
             collect((&mut state as *mut Collector).cast(), 22,
@@ -1879,7 +1890,7 @@ mod tests {
         let number = |value| WireField {
             data:std::ptr::null(),length:0,value,tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let cpp=[number(1)];
         let triv=[number(42),number(1)];
         let ctor=[number(43),number(0)];
@@ -1918,7 +1929,7 @@ mod tests {
         let number = |value| WireField {
             data:std::ptr::null(),length:0,value,tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let first=[number(10),number(1),string(b"ns::f")];
         let second=[number(11),number(1),string(b"ns::f")];
         let c=[number(12),number(1),string(b"extern_c")];
@@ -1954,7 +1965,7 @@ mod tests {
         let number = |value| WireField {
             data: std::ptr::null(), length: 0, value, tag: 2,
         };
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         let fields = [number(5), string(b"ns::overloaded")];
         unsafe {
             collect((&mut state as *mut Collector).cast(), 42, fields.as_ptr(), fields.len(), 0);
@@ -1975,9 +1986,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
+        let mut state = Collector::default();
         let statement = [string(b"f"), string(b"0"), number(10),
                          number(3), string(b"test.cpp"), number(4)];
         let symbol = [number(2), number(9), number(1),
@@ -2027,7 +2036,7 @@ mod tests {
         let number = |value| WireField {
             data: std::ptr::null(), length:0, value, tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let valid=[number(7),number(32)];
         unsafe { collect((&mut state as *mut Collector).cast(),57,
             valid.as_ptr(),valid.len(),0); }
@@ -2047,7 +2056,7 @@ mod tests {
         let number = |value| WireField {
             data:std::ptr::null(),length:0,value,tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let negative_zero=[
             string(b"fp"),string(b"0.block.1"),string(b"0.1"),
             number(44),number(32),number(0x8000_0000),
@@ -2084,7 +2093,7 @@ mod tests {
         let number = |value| WireField {
             data:std::ptr::null(),length:0,value,tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let valid=[
             string(b"m14_test"),string(b"0.block.1"),number(17),
             number(23),number(64),number(0x8000_0000_0000_0000),
@@ -2111,7 +2120,7 @@ mod tests {
         let number=|value| WireField {
             data:std::ptr::null(),length:0,value,tag:2,
         };
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         let valid=[number(17),number(23),number(64),
                    number(0x8000_0000_0000_0000)];
         unsafe {collect((&mut state as *mut Collector).cast(),60,
@@ -2128,7 +2137,7 @@ mod tests {
                         bad.as_ptr(),bad.len(),0);}
         assert!(state.malformed);
         assert_eq!(state.il.global_float_initializers.len(),1);
-        let mut malformed=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut malformed=Collector::default();
         unsafe {collect((&mut malformed as *mut Collector).cast(),60,
                         valid.as_ptr(),3,0);}
         assert!(malformed.malformed);
@@ -2142,7 +2151,7 @@ mod tests {
         let number = |value| WireField {
             data: std::ptr::null(), length: 0, value, tag: 2,
         };
-        let mut state = Collector { il: Il::default(), panicked:false, malformed:false };
+        let mut state = Collector::default();
         let valid=[string(b"f"),string(b"0.block.1"),
                    number(42),number(1),number(0)];
         unsafe {
@@ -2175,7 +2184,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         let decl = [string(b"f"), string(b"0"), number(0),
                     number(11), number(12), number(1)];
         let init = [string(b"f"), string(b"1"), number(11),
@@ -2238,7 +2247,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         let parameter = [number(1), number(0), number(2), number(3), number(0)];
         let implicit = [number(1), absent, number(4), number(5), number(3)];
         let root = [number(1), number(0), absent, number(17), string(b"0")];
@@ -2284,9 +2293,7 @@ mod tests {
         let absent = WireField {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
-        let mut state = Collector {
-            il: Il::default(), panicked: false, malformed: false,
-        };
+        let mut state = Collector::default();
         let attrs = [string(b"f"), string(b"0"), number(1 | 8 | 32)];
         let control = [
             string(b"f"), string(b"0"), number(1), string(b"0"), absent,
@@ -2321,14 +2328,14 @@ mod tests {
     fn invalid_utf8_callback_is_reported() {
         let bad = [0xff_u8];
         let fields = [WireField { data: bad.as_ptr(), length: 1, value: 0, tag: 1 }];
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         unsafe { collect((&mut state as *mut Collector).cast(), 1, fields.as_ptr(), 1, 0); }
         assert!(state.malformed);
     }
 
     #[test]
     fn malformed_callback_is_reported() {
-        let mut state = Collector { il: Il::default(), panicked: false, malformed: false };
+        let mut state = Collector::default();
         unsafe { collect((&mut state as *mut Collector).cast(), 7, std::ptr::null(), 0, 0); }
         assert!(state.malformed);
     }
@@ -2418,9 +2425,7 @@ mod audit_wire_record_count_tests {
         let text = |bytes: &'static [u8]| WireField {
             data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT,
         };
-        let mut state=Collector {
-            il:Il::default(),panicked:false,malformed:false,
-        };
+        let mut state=Collector::default();
         let symbol=[number(42),number(1),text(b"f")];
         let name=[number(42),text(b"_Z1fv"),number(1)];
         let string=[text(b"f"),text(b"0"),text(b"0"),number(1),text(b"6100")];
@@ -2479,9 +2484,7 @@ mod audit_wire_preflight_tests {
     use super::*;
 
     fn callback_rejects(kind:u32, ptr:*const WireField, count:usize) {
-        let mut state=Collector {
-            il:Il::default(),panicked:false,malformed:false,
-        };
+        let mut state=Collector::default();
         unsafe {
             collect((&mut state as *mut Collector).cast(),kind,ptr,count,0);
         }
@@ -2548,7 +2551,7 @@ mod audit_unique_global_storage_wire_tests {
     }
     #[test]
     fn distinct_global_symbols_are_accepted() {
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         send(&mut state,[12,3,1,0,0]);
         send(&mut state,[13,1,0,0,0]);
         assert!(!state.malformed);
@@ -2560,7 +2563,7 @@ mod audit_unique_global_storage_wire_tests {
     #[test]
     fn duplicate_or_conflicting_global_metadata_fails_closed() {
         for duplicate in [[12,3,1,0,0],[12,1,0,0,0],[12,2,1,1,0]] {
-            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            let mut state=Collector::default();
             send(&mut state,[12,3,1,0,0]);
             assert!(!state.malformed);
             send(&mut state,duplicate);
@@ -2587,7 +2590,7 @@ mod audit_unique_native_type_identity_tests {
     }
     #[test]
     fn different_native_type_and_symbol_identities_are_valid() {
-        let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+        let mut state=Collector::default();
         send(&mut state,7,[1,1,0,0]);
         send(&mut state,7,[2,1,0,0]);
         send(&mut state,49,[1,8,8]);
@@ -2602,7 +2605,7 @@ mod audit_unique_native_type_identity_tests {
     #[test]
     fn duplicate_type_definitions_are_malformed() {
         for duplicate in [[1,1,0,0],[1,5,1,2]] {
-            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            let mut state=Collector::default();
             send(&mut state,7,[1,1,0,0]);
             send(&mut state,7,duplicate);
             assert!(state.malformed);
@@ -2613,7 +2616,7 @@ mod audit_unique_native_type_identity_tests {
     #[test]
     fn duplicate_type_layouts_are_malformed() {
         for duplicate in [[1,8,8],[1,16,8]] {
-            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            let mut state=Collector::default();
             send(&mut state,49,[1,8,8]);
             send(&mut state,49,duplicate);
             assert!(state.malformed);
@@ -2624,12 +2627,62 @@ mod audit_unique_native_type_identity_tests {
     #[test]
     fn duplicate_symbol_type_bindings_are_malformed() {
         for duplicate in [[21,1],[21,2]] {
-            let mut state=Collector {il:Il::default(),panicked:false,malformed:false};
+            let mut state=Collector::default();
             send(&mut state,25,[21,1]);
             send(&mut state,25,duplicate);
             assert!(state.malformed);
             assert!(!state.panicked);
             assert_eq!(state.il.symbol_types.len(),1);
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_wire_identity_index_tests {
+    use super::*;
+
+    fn number(v: u64) -> WireField {
+        WireField { data:std::ptr::null(),length:0,value:v,tag:wire_tags::UNSIGNED }
+    }
+    fn send<const N: usize>(state:&mut Collector,kind:u32,values:[u64;N]) {
+        let fields=values.map(number);
+        unsafe {
+            collect((state as *mut Collector).cast(),kind,fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn indexed_identity_decoding_scales_to_many_distinct_types() {
+        let mut state=Collector::default();
+        // Emission order is preserved and all six identity sets grow only
+        // once per native record, instead of searching every prior Vec.
+        for id in 1..=8192_u64 {
+            send(&mut state,7,[id,1,0,0]);
+            send(&mut state,49,[id,8,8]);
+            send(&mut state,25,[id, id]);
+            send(&mut state,47,[id,3,0,0,0]);
+            send(&mut state,63,[id,1]);
+            send(&mut state,65,[id,1]);
+        }
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.types.len(),8192);
+        assert_eq!(state.il.type_object_sizes.len(),8192);
+        assert_eq!(state.il.symbol_types.len(),8192);
+        assert_eq!(state.il.global_variables.len(),8192);
+        assert_eq!(state.il.cxx_record_admissions.len(),8192);
+        assert_eq!(state.il.cxx_scalar_lifetime_admissions.len(),8192);
+        assert_eq!(state.seen.types.len(),8192);
+        assert_eq!(state.seen.layouts.len(),8192);
+        assert_eq!(state.seen.symbol_types.len(),8192);
+        assert_eq!(state.seen.globals.len(),8192);
+        assert_eq!(state.seen.cxx_records.len(),8192);
+        assert_eq!(state.seen.cxx_lifetimes.len(),8192);
+        assert_eq!(state.il.types[8191].id,TypeId(8192));
+        // A duplicate after a large valid stream must still fail closed.
+        send(&mut state,25,[8192,1]);
+        assert!(state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.symbol_types.len(),8192);
     }
 }
