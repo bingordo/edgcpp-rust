@@ -80,9 +80,9 @@ jobs:
             edgcpp-rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
+          key: rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/cpp/wire_schema_generated.inc', 'edgcpp-rust/tools/build_bridge.py') }}-${{ github.sha }}
           restore-keys: |
-            rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/tools/build_bridge.py') }}-
+            rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('edgcpp-rust/Cargo.toml', 'edgcpp-rust/Cargo.lock', 'edgcpp-rust/build.rs', 'edgcpp-rust/cpp/bridge.cpp', 'edgcpp-rust/cpp/wire_schema_generated.inc', 'edgcpp-rust/tools/build_bridge.py') }}-
             rust-edgcpp-cranelift-v1-${{ env.EDG_SOURCE_SHA }}-rust${{ env.RUST_TOOLCHAIN_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
 
       # EDG's IL layout depends on compile-time macros. CMake configure is
@@ -170,6 +170,7 @@ jobs:
           EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
+          python3 tools/gen_wire_schema.py --check
           python3 tools/check_wire_schema.py
           cargo test --lib --tests --features codegen
           cargo build --example parse
