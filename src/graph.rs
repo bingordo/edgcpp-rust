@@ -83,6 +83,8 @@ pub enum GraphError {
     DuplicateParameter { owner: TypeId, position: u32 },
     InvalidTypeParameterPosition(TypeId),
     DuplicateArrayBound(TypeId),
+    InvalidArrayBoundOwner(TypeId),
+    InvalidTypeDetailOwner(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
     InvalidRecordFieldBitOffset { owner: TypeId, position: u32 },
@@ -791,8 +793,12 @@ impl Graph {
         graph.type_parameters.sort_by_key(|p| (p.owner.0, p.position));
         let mut bounded = std::collections::HashSet::new();
         for bound in &il.array_bounds {
-            if !type_map.contains_key(&bound.array) {
+            let Some(&index)=type_map.get(&bound.array) else {
                 return Err(GraphError::MissingType(bound.array));
+            };
+            // Event 9 only describes a fixed, complete EDG array type.
+            if unsafe { edgcpp_codegen_kind(4, graph.types[index].kind) } != 6 {
+                return Err(GraphError::InvalidArrayBoundOwner(bound.array));
             }
             if !bounded.insert(bound.array) {
                 return Err(GraphError::DuplicateArrayBound(bound.array));
@@ -915,8 +921,13 @@ impl Graph {
 
         let mut detailed = std::collections::HashSet::new();
         for detail in &il.type_details {
-            if !type_map.contains_key(&detail.owner) {
+            let Some(&index)=type_map.get(&detail.owner) else {
                 return Err(GraphError::MissingType(detail.owner));
+            };
+            // The bridge emits event 11 only for pointer and typeref
+            // nodes; it cannot describe a record, array or integer.
+            if !matches!(unsafe { edgcpp_codegen_kind(4, graph.types[index].kind) }, 3|5) {
+                return Err(GraphError::InvalidTypeDetailOwner(detail.owner));
             }
             if !detailed.insert(detail.owner) {
                 return Err(GraphError::DuplicateTypeDetail(detail.owner));
@@ -3245,6 +3256,10 @@ fn graph_path_index(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn native_type_kind_for_semantic(semantic:u32) -> u32 {
+        (0..4096).find(|&kind| unsafe { edgcpp_codegen_kind(4,kind) } == semantic)
+            .expect("pinned native EDG type kind")
+    }
     fn native_call_kinds(member: bool) -> (u32, u32) {
         let native_kind=(0..4096).find(|&kind|
             unsafe { edgcpp_codegen_kind(2,kind) }==3
@@ -5674,7 +5689,10 @@ mod tests {
     #[test]
     fn resolves_reference_details() {
         let mut il = Il::default();
-        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: native_type_kind_for_semantic(5),
+            related_role: None, related: None,
+        });
         il.type_details.push(TypeDetail { owner: TypeId(1), is_reference: true,
             is_rvalue_reference: false, qualifiers: None });
         let graph = Graph::from_il(&il).unwrap();
@@ -5691,9 +5709,35 @@ mod tests {
     }
 
     #[test]
+    fn rejects_native_type_shape_metadata_on_wrong_kind() {
+        let mut il=Il::default();
+        il.types.push(TypeDef {
+            id:TypeId(1), kind:native_type_kind_for_semantic(1),
+            related_role:None, related:None,
+        });
+        il.array_bounds.push(ArrayBound {array:TypeId(1),elements:4});
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidArrayBoundOwner(TypeId(1)));
+        il.array_bounds.clear();
+        il.type_details.push(TypeDetail {
+            owner:TypeId(1), is_reference:false,
+            is_rvalue_reference:false, qualifiers:None,
+        });
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailOwner(TypeId(1)));
+        il.types[0].kind=native_type_kind_for_semantic(3);
+        Graph::from_il(&il).expect("typeref detail");
+        il.types[0].kind=native_type_kind_for_semantic(5);
+        Graph::from_il(&il).expect("pointer detail");
+    }
+
+    #[test]
     fn fixed_array_bound_is_owned() {
         let mut il = Il::default();
-        il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+        il.types.push(TypeDef {
+            id: TypeId(1), kind: native_type_kind_for_semantic(6),
+            related_role: None, related: None,
+        });
         il.array_bounds.push(ArrayBound { array: TypeId(1), elements: 12 });
         assert_eq!(Graph::from_il(&il).unwrap().array_bound(TypeId(1)), Some(12));
     }
