@@ -33,6 +33,25 @@ def render(schema):
         raise ValueError("invalid named record IDs")
     if named.get("RECORD_INCOMPLETE_SNAPSHOT") != 0:
         raise ValueError("malformed snapshot event must be reserved record zero")
+    # Only well-established wire records are field-typed in the first
+    # migration. Untyped records retain the existing decoder validation;
+    # each newly typed record must describe all of its fields.
+    fields = {}
+    for raw_kind, tag_names in schema.get("record_field_tags", {}).items():
+        kind = int(raw_kind)
+        if kind not in arities or len(tag_names) != arities[kind]:
+            raise ValueError(f"typed record {kind} has invalid field count")
+        masks = []
+        for accepted in tag_names:
+            if not isinstance(accepted, str):
+                raise ValueError(f"record {kind} has non-string tag descriptor")
+            options = accepted.split("|")
+            if len(set(options)) != len(options) or any(
+                name not in tags for name in options
+            ):
+                raise ValueError(f"record {kind} has invalid field tag: {accepted}")
+            masks.append(sum(1 << tags[name] for name in options))
+        fields[kind] = masks
 
     rust = (
         PREFIX
@@ -45,6 +64,13 @@ def render(schema):
         + "".join(f"        {k} => Some({arities[k]}),\n"
                   for k in sorted(arities))
         + "        _ => None,\n    }\n}\n"
+        + "\nfn expected_wire_field_tag_masks(kind: u32) -> Option<&'static [u8]> {\n"
+        + "    match kind {\n"
+        + "".join(
+            f"        {kind} => Some(&[{', '.join(str(v) for v in fields[kind])}]),\n"
+            for kind in sorted(fields)
+        )
+        + "        _ => None,\n    }\n}\n"
     )
     cpp = (
         PREFIX
@@ -54,6 +80,23 @@ def render(schema):
         + "".join(f"  {k} = {v},\n"
                   for k, v in named.items())
         + "};\n"
+        + "\n// Validate field tags before emitting typed native wire records.\n"
+        + "static bool wire_record_field_tags_valid(\n"
+        + "    uint32_t kind, std::initializer_list<edgcpp_field> fields)\n"
+        + "{\n  switch (kind) {\n"
+        + "".join(
+            f"  case {kind}: {{\n"
+            + f"    const uint8_t masks[] = {{{', '.join(str(v) for v in fields[kind])}}};\n"
+            + "    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;\n"
+            + "    size_t index = 0;\n"
+            + "    for (const auto &field : fields) {\n"
+            + "      if (field.tag > WIRE_SIGNED ||\n"
+            + "          (masks[index++] & (1u << field.tag)) == 0) return false;\n"
+            + "    }\n"
+            + "    return true;\n  }\n"
+            for kind in sorted(fields)
+        )
+        + "  default: return true;\n  }\n}\n"
     )
     return {
         ROOT / "src" / "wire_schema_generated.rs": rust,
