@@ -21,6 +21,12 @@ on:
       - docs/**
       - '**/*.md'
   workflow_dispatch:
+    inputs:
+      audit_type_index_benchmark:
+        description: "Run opt-in type-index batch microbenchmark"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded runs for the same PR/branch before they consume build CPU.
 concurrency:
@@ -300,11 +306,10 @@ jobs:
             }
           )
 
-      # One-time, same-runner comparison against the frozen pre-#174
-      # scan-based algorithm. The ignored test stays available for future
-      # manual measurements, but regular CI does not rerun slow benchmarks.
-      - name: "Audit #171 type-index batch scaling (one-time)"
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'audit/type-index-batch-benchmark-20261111' }}
+      # Reproducible opt-in benchmark; routine CI does not spend runner time
+      # on unoptimized worst-case performance measurements.
+      - name: "Audit type-index batch scaling (opt-in)"
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.audit_type_index_benchmark }}
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
