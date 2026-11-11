@@ -1737,10 +1737,7 @@ fn call_type_abi(il:&Il, ty:crate::TypeId) -> Result<CAbiInt,CodegenError> {
     }
     Ok(CAbiInt {bits:t.bits,signed:t.signed,is_bool:t.is_bool})
 }
-fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
-    let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
-        .ok_or_else(||invalid("call callee is not a direct named routine"))?;
-    let name=sym.name.clone();
+fn validate_direct_call_name(name: &str) -> Result<(), CodegenError> {
     // Pinned EDG recognizes GCC __atomic_* builtins, but currently exports
     // them as calls to libatomic-style symbols. Silently emitting undefined
     // externals loses our source memory-order validation and can make an ELF
@@ -1756,6 +1753,90 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
        !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
         return Err(invalid(format!("non-C/ambiguous direct-call symbol {name}")));
     }
+    Ok(())
+}
+
+/// Per-immutable-IL direct-call indexes. Unlike a persistent Graph cache,
+/// every entry is built and discarded with one native compilation snapshot.
+/// The existing ABI/type validator remains authoritative on first use.
+struct DirectCallIndex<'a> {
+    il: &'a Il,
+    symbols: HashMap<crate::SymbolId, &'a crate::Symbol>,
+    symbol_types: HashMap<crate::SymbolId, crate::TypeId>,
+    types: HashMap<crate::TypeId, &'a crate::TypeDef>,
+    canonical: HashMap<crate::TypeId, crate::TypeId>,
+    abis: HashMap<crate::TypeId, CAbi>,
+}
+
+impl<'a> DirectCallIndex<'a> {
+    fn new(il: &'a Il) -> Self {
+        let mut symbols=HashMap::with_capacity(il.symbols.len());
+        let mut symbol_types=HashMap::with_capacity(il.symbol_types.len());
+        let mut types=HashMap::with_capacity(il.types.len());
+        // Preserve first-entry lookup semantics of the original iter().find,
+        // including when graph validation later rejects duplicated IL IDs.
+        for sym in &il.symbols {symbols.entry(sym.id).or_insert(sym);}
+        for edge in &il.symbol_types {symbol_types.entry(edge.symbol).or_insert(edge.ty);}
+        for ty in &il.types {types.entry(ty.id).or_insert(ty);}
+        Self {il,symbols,symbol_types,types,canonical:HashMap::new(),abis:HashMap::new()}
+    }
+
+    fn is_native_atomic(&self, symbol: crate::SymbolId) -> bool {
+        self.symbols.get(&symbol).is_some_and(|sym|sym.name.starts_with("__atomic_"))
+    }
+
+    fn canonical_type(&mut self, source: crate::TypeId) -> Result<crate::TypeId,CodegenError> {
+        if let Some(&cached)=self.canonical.get(&source) {return Ok(cached);}
+        let mut ty=source;
+        let mut traversed=Vec::new();
+        for _ in 0..=self.il.types.len() {
+            let def=self.types.get(&ty).ok_or_else(||invalid(format!(
+                "missing EDG type {}",ty.0)))?;
+            if semantic(4,def.kind)!=3 {
+                for alias in traversed {self.canonical.insert(alias,ty);}
+                self.canonical.insert(source,ty);
+                return Ok(ty);
+            }
+            if def.related_role!=Some(4) {
+                return Err(invalid(format!("malformed EDG typeref {}",ty.0)));
+            }
+            traversed.push(ty);
+            ty=def.related.ok_or_else(||invalid(format!(
+                "unresolved EDG typeref {}",ty.0)))?;
+        }
+        Err(invalid("cyclic EDG typeref"))
+    }
+
+    fn declaration(&mut self, symbol: crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
+        let sym=self.symbols.get(&symbol).filter(|s|s.kind==1)
+            .ok_or_else(||invalid("call callee is not a direct named routine"))?;
+        let name=sym.name.clone();
+        validate_direct_call_name(&name)?;
+        let raw=*self.symbol_types.get(&symbol)
+            .ok_or_else(||invalid("call has no routine type"))?;
+        let ty=self.canonical_type(raw)?;
+        let def=self.types.get(&ty)
+            .ok_or_else(||invalid("missing called function type"))?;
+        if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
+            return Err(invalid("indirect/function-pointer calls not implemented"));
+        }
+        let abi=if let Some(cached)=self.abis.get(&ty) {
+            cached.clone()
+        } else {
+            // The full ABI/prototype/aggregate checks execute once per
+            // function TypeId, even for many distinct routine symbols.
+            let checked=function_type_abi(self.il,ty)?;
+            self.abis.insert(ty,checked.clone());
+            checked
+        };
+        Ok(CallDeclaration{symbol,name,abi})
+    }
+}
+fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
+    let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
+        .ok_or_else(||invalid("call callee is not a direct named routine"))?;
+    let name=sym.name.clone();
+    validate_direct_call_name(&name)?;
     let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("call has no routine type"))?.ty;
     let ty=canonical_abi_type(il,ty)?;
@@ -2015,16 +2096,15 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
-    // One native routine may appear in thousands of designator expressions.
-    // Validate and construct its declaration just once per immutable IL.
+    // Index native declarations once for this immutable IL. Distinct call
+    // targets no longer require linear symbol/type scans for each routine.
+    let mut lookup=DirectCallIndex::new(il);
     let mut seen_symbols=HashSet::new();
     for symbol in symbols {
         if !seen_symbols.insert(symbol) {continue;}
-        // The pinned EDG projection uses intrinsic-looking routine identities.
-        // These are handled in atomic_builtin, never ELF libatomic imports.
-        if il.symbols.iter().any(|s|s.id==symbol &&
-            s.name.starts_with("__atomic_")) {continue;}
-        let decl=direct_call_decl(il,symbol)?;
+        // Native atomic builtins remain owned by checked atomic lowering.
+        if lookup.is_native_atomic(symbol) {continue;}
+        let decl=lookup.declaration(symbol)?;
         found.insert(symbol,decl);
     }
     let mut result:Vec<CallDeclaration>=found.into_values().collect();
