@@ -1205,7 +1205,12 @@ fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,Codeg
             }
             Ok(u64::from(info.bits / 8))
         }
-        5 => Ok(8),
+        5 => {
+            // An invalid native pointer type cannot acquire a plausible
+            // eight-byte object layout merely from its semantic kind.
+            checked_pointer_element_type(il,ty)?;
+            Ok(8)
+        },
         6 => {
             let element=checked_native_pointer_element(il,ty)?;
             let count = il.array_bounds.iter().find(|b| b.array == ty)
@@ -1731,6 +1736,10 @@ fn cached_call_decl<'a>(
 fn call_type_abi(il:&Il, ty:crate::TypeId) -> Result<CAbiInt,CodegenError> {
     let ty=canonical_abi_type(il,ty)?;
     if il.types.iter().any(|t|t.id==ty && semantic(4,t.kind)==5) {
+        // A 64-bit machine representation does not establish a valid C
+        // pointer. Require the native pointee relationship even for a
+        // pointer return, which has no call-argument shape check.
+        checked_pointer_element_type(il,ty)?;
         // SysV LP64 data pointers (not aggregate/function-pointer ABI).
         return Ok(CAbiInt {bits:64,signed:false,is_bool:false});
     }
@@ -5022,11 +5031,17 @@ mod audit_pointer_difference_tests {
         for malformed in [20,21,22,23] {
             let ty=crate::TypeId(malformed);
             assert!(pointer_stride(&il,ty).is_err());
+            assert!(byte_size(&il,ty).is_err(),
+                "malformed native pointer/array cannot have an accepted layout");
+            assert!(call_type_abi(&il,ty).is_err(),
+                "malformed native pointer/array cannot become a scalar ABI slot");
             assert!(pointer_difference_stride(&il,ty,ty).is_err());
             for op in 5..=10 {
                 assert!(checked_pointer_comparison(&il,ty,ty,op).is_err());
             }
         }
+        assert_eq!(byte_size(&il,crate::TypeId(3)).unwrap(),8);
+        assert_eq!(call_type_abi(&il,crate::TypeId(3)).unwrap().bits,64);
         assert!(pointer_difference_stride(
             &il,crate::TypeId(3),crate::TypeId(6)).is_ok());
         assert!(checked_pointer_comparison(
