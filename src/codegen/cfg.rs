@@ -2024,6 +2024,25 @@ fn compatible_call_nested_types(
     }
 }
 
+/// Even a null-pointer constant needs a valid pointer *formal*. Without this
+/// check malformed native pointer metadata could be accepted by skipping the
+/// ordinary pointer-to-pointer compatibility path.
+fn checked_call_pointer_formal_target(
+    il:&Il,formal:crate::TypeId,
+) -> Result<crate::TypeId,CodegenError> {
+    let formal=canonical_abi_type(il,formal)?;
+    let expected=il.types.iter().find(|t|t.id==formal)
+        .ok_or_else(||invalid("missing call pointer formal type"))?;
+    if semantic(4,expected.kind)!=5 || expected.related_role!=Some(1) {
+        return Err(invalid("call pointer formal lacks pointer-to-type metadata"));
+    }
+    let target=canonical_abi_type(il,expected.related
+        .ok_or_else(||invalid("call pointer formal pointee missing"))?)?;
+    if !il.types.iter().any(|t|t.id==target) {
+        return Err(invalid("call pointer formal pointee type is unknown"));
+    }
+    Ok(target)
+}
 /// The explicit argument has been lowered by EDG, including any cast. For
 /// uncast pointer/array/function expressions validate pointee compatibility
 /// instead of treating all 64-bit pointers as interchangeable.
@@ -2036,12 +2055,7 @@ fn checked_call_pointer_argument(
         il.types.iter().find(|t|t.id==id)
             .ok_or_else(||invalid("call pointer argument references unknown type"))
     };
-    let expected=lookup(formal)?;
-    if semantic(4,expected.kind)!=5 || expected.related_role!=Some(1) {
-        return Err(invalid("call pointer formal lacks pointer-to-type metadata"));
-    }
-    let expected_target=canonical_abi_type(il,expected.related
-        .ok_or_else(||invalid("call pointer formal pointee missing"))?)?;
+    let expected_target=checked_call_pointer_formal_target(il,formal)?;
     let provided=lookup(actual)?;
     let actual_target=match semantic(4,provided.kind) {
         5|6 if provided.related_role==Some(1) =>
@@ -2095,8 +2109,9 @@ fn checked_call_argument_shape(
     } else if expected==5 && matches!(provided,5|6|2) {
         checked_call_pointer_argument(il,formal,actual)?;
     } else if expected==5 && provided==1 && literal_null_pointer {
-        // An EDG literal integer zero is a C null-pointer constant. The
-        // caller must verify the actual expression, not merely its type.
+        // An EDG literal integer zero is a C null-pointer constant, but a
+        // malformed pointer declaration still cannot pass through this path.
+        checked_call_pointer_formal_target(il,formal)?;
     } else if expected==5 {
         return Err(invalid("nonpointer/non-null argument passed to C pointer parameter"));
     } else if matches!(provided,5|6|2) && !bool_formal {
@@ -5830,6 +5845,20 @@ mod audit_call_argument_shape_tests {
             &il,crate::TypeId(11),crate::TypeId(1),true).is_ok(),
             "literal zero converts to void*");
         assert!(checked(&il,9,1),"integer-to-bool conversion remains supported");
+        let malformed=pointer_signature_types();
+        for bad_formal in [26,27] {
+            assert!(checked_call_argument_shape(&malformed,crate::TypeId(bad_formal),
+                crate::TypeId(1),true).is_err(),
+                "literal zero cannot bypass malformed pointer-formal metadata");
+        }
+        let mut missing=malformed;
+        missing.types.push(crate::TypeDef{
+            id:crate::TypeId(28),kind:native_type_kind(5),
+            related_role:Some(1),related:Some(crate::TypeId(777)),
+        });
+        assert!(checked_call_argument_shape(&missing,crate::TypeId(28),
+            crate::TypeId(1),true).is_err(),
+            "literal zero cannot bypass a missing pointee type");
     }
 
     #[test]
