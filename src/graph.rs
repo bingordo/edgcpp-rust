@@ -1572,16 +1572,23 @@ impl Graph {
                 });
             }
         }
-        for positions in root_positions.values_mut()
-            .chain(child_positions.values_mut())
-        {
+        let dense = |positions: &mut Vec<usize>| {
             positions.sort_unstable();
-            if positions.iter().enumerate().any(|(expected, actual)|
-                expected != *actual)
-            {
+            positions.iter().enumerate().all(|(expected, actual)|
+                expected == *actual)
+        };
+        for (function, positions) in &mut root_positions {
+            if !dense(positions) {
                 return Err(GraphError::InvalidStatementParent {
-                    function: "non-dense statement sequence".into(),
-                    path: format!("{positions:?}"),
+                    function: function.clone(), path: format!("roots {positions:?}"),
+                });
+            }
+        }
+        for ((function, parent, edge), positions) in &mut child_positions {
+            if !dense(positions) {
+                return Err(GraphError::InvalidStatementParent {
+                    function: function.clone(),
+                    path: format!("{parent}.{edge} {positions:?}"),
                 });
             }
         }
