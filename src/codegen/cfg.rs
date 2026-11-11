@@ -2923,6 +2923,13 @@ fn emit_expr(
                     _ => {
                         let ty=entry.pieces.first().ok_or_else(||
                             invalid("missing scalar ABI piece"))?.ty;
+                        // C _Bool converts every nonzero source integer or
+                        // pointer to 1 *before* ABI narrowing to i8. Merely
+                        // reducing the low byte turns values like 256 and
+                        // -256 into false, unlike the C implicit conversion.
+                        let value=if ty.is_bool {
+                            normalize_c_value(fb,value,ty)
+                        } else {value};
                         values.push(if ty.bits==64 {value}
                             else {fb.ins().ireduce(ty.cranelift(),value)});
                     }
