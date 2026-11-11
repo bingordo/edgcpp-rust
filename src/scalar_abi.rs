@@ -80,7 +80,7 @@ impl ScalarKind {
 const SYSV_INTEGER_ARGUMENT_REGISTERS:u8=6;
 const SYSV_SSE_ARGUMENT_REGISTERS:u8=8;
 // Defensive implementation cap, not a SysV ABI limit.
-const MAX_SUPPORTED_PARAMETERS:usize=256;
+pub(crate) const MAX_SUPPORTED_PARAMETERS:usize=256;
 
 impl Signature {
     pub fn plan_sysv_x86_64(&self)->Result<PassingPlan,PlanError> {
@@ -223,8 +223,19 @@ mod tests {
             assert_eq!(sig.plan_sysv_x86_64(),
                 Err(PlanError::UnprototypedOrVariadic));
         }
+        // The implementation cap is inclusive; a maximum-length signature
+        // must still get a deterministic and ordered stack argument plan.
+        let boundary=Signature{
+            parameters:vec![ScalarKind::Float64;MAX_SUPPORTED_PARAMETERS],
+            result:ScalarKind::Float64,prototyped:true,variadic:false,
+        }.plan_sysv_x86_64().unwrap();
+        assert_eq!(boundary.parameters.len(),MAX_SUPPORTED_PARAMETERS);
+        assert_eq!(boundary.outgoing_stack_slots,
+            (MAX_SUPPORTED_PARAMETERS-8) as u32);
+        assert_eq!(boundary.parameters[MAX_SUPPORTED_PARAMETERS-1].location,
+            Location::Stack{slot:(MAX_SUPPORTED_PARAMETERS-9) as u32});
         assert_eq!(Signature{
-            parameters:vec![ScalarKind::Float64;257],
+            parameters:vec![ScalarKind::Float64;MAX_SUPPORTED_PARAMETERS+1],
             result:ScalarKind::Float64,prototyped:true,variadic:false,
         }.plan_sysv_x86_64(),Err(PlanError::OversizedSignature));
         assert!(Signature{

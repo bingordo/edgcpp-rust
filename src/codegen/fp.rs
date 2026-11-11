@@ -6,7 +6,7 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 // Defensive implementation caps, not C language or target ABI limits.
-const MAX_FP_ARGUMENTS: usize = 256;
+const MAX_FP_ARGUMENTS: usize = crate::scalar_abi::MAX_SUPPORTED_PARAMETERS;
 const MAX_FP_LOCALS: usize = 4096;
 const MAX_FP_STATEMENTS: usize = 10000;
 
