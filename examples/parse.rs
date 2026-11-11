@@ -42,6 +42,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      attr.defined,attr.special_kind);
         }
     }
+    for base in &result.il.base_classes {
+        if let Some(offset)=result.il.base_subobject_offsets.iter().find(|o|
+            o.derived==base.derived && o.position==base.position) {
+            println!("EDG_BASE_OFFSET derived={} base={} position={} virtual={} offset={:?}",
+                     base.derived.0,base.base.0,base.position,base.is_virtual,
+                     offset.byte_offset);
+        }
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>

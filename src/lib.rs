@@ -161,6 +161,8 @@ pub struct Il {
     pub type_object_sizes: Vec<TypeObjectSize>,
     /// Direct class bases in declaration order.
     pub base_classes: Vec<BaseClass>,
+    /// EDG-authoritative verified direct base-subobject byte offsets.
+    pub base_subobject_offsets: Vec<BaseSubobjectOffset>,
     /// Direct-base access specifiers keyed by derived type and position.
     pub base_class_access: Vec<BaseClassAccess>,
     /// Constructor and destructor subobject initialization records.
@@ -450,6 +452,16 @@ pub struct BaseClass {
     pub position: u32,
     pub base: TypeId,
     pub is_virtual: bool,
+}
+
+/// Byte offset of a direct nonvirtual base within the derived object.
+/// None means EDG has NOT established a layout offset; zero is a real offset.
+/// Virtual bases are never admitted through this record.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct BaseSubobjectOffset {
+    pub derived: TypeId,
+    pub position: u32,
+    pub byte_offset: Option<u64>,
 }
 
 /// Native direct-base access from EDG's selected direct derivation path.
@@ -994,6 +1006,7 @@ struct WireSeen {
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     routine_link_names: HashSet<SymbolId>,
+    base_subobject_offsets: HashSet<(TypeId,u32)>,
 }
 #[derive(Default)]
 struct Collector {
@@ -1097,6 +1110,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         66 => Some(usize::from(il.file_scope_init_schedule.is_some())),
         67 => Some(il.file_scope_init_routines.len()),
         68 => Some(il.scope_dynamic_initializers.len()),
+        69 => Some(il.base_subobject_offsets.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -1155,6 +1169,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
+        69 => {
+            let (Some(derived),Some(position))=(n(0),n(1)) else {return;};
+            if derived==0 || !seen.base_subobject_offsets.insert((TypeId(derived),position)) {return;}
+            output.base_subobject_offsets.push(BaseSubobjectOffset {
+                derived:TypeId(derived), position,
+                byte_offset:fields[2].unsigned(),
+            });
+        }
         66 => {
             let (Some(available),Some(complete))=(n(0),n(1)) else {return;};
             if available>1 || complete>1 || (available==0 && complete!=0) ||
@@ -3072,7 +3094,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=68_u32 {
+        for kind in 1..=69_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3099,10 +3121,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,273);
+        assert_eq!(total,276);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(69).is_none());
+        assert!(expected_wire_field_tag_masks(70).is_none());
     }
 
     #[test]
@@ -3311,5 +3333,48 @@ mod file_scope_init_schedule_wire_tests {
         assert!(!state.malformed);
         send(&mut state,66,[1,1]); // exactly one availability record
         assert!(state.malformed);
+    }
+}
+
+
+#[cfg(test)]
+mod cxx5_base_subobject_offset_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,derived:u32,position:u32,offset:Option<u64>) {
+        let fields=[
+            WireField{data:std::ptr::null(),length:0,value:u64::from(derived),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(position),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:offset.unwrap_or_default(),
+                      tag:if offset.is_some() {wire_tags::UNSIGNED} else {wire_tags::ABSENT}},
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),69,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+    #[test]
+    fn distinguishes_known_zero_and_unknown_offset() {
+        let mut state=Collector::default();
+        send(&mut state,118,0,Some(0));
+        send(&mut state,118,1,Some(64));
+        send(&mut state,119,0,None);
+        assert!(!state.malformed);
+        assert_eq!(state.il.base_subobject_offsets,vec![
+            BaseSubobjectOffset{derived:TypeId(118),position:0,byte_offset:Some(0)},
+            BaseSubobjectOffset{derived:TypeId(118),position:1,byte_offset:Some(64)},
+            BaseSubobjectOffset{derived:TypeId(119),position:0,byte_offset:None},
+        ]);
+        send(&mut state,118,0,Some(8));
+        assert!(state.malformed,"duplicate base position must fail closed");
+    }
+    #[test]
+    fn reject_zero_owner() {
+        let mut state=Collector::default();
+        send(&mut state,0,0,Some(0));
+        assert!(state.malformed);
+        assert!(state.il.base_subobject_offsets.is_empty());
     }
 }
