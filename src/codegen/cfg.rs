@@ -1775,11 +1775,11 @@ impl<'a> DirectCallIndex<'a> {
         let mut symbol_types=HashMap::with_capacity(il.symbol_types.len());
         let mut types=HashMap::with_capacity(il.types.len());
         let mut native_atomic_symbols=HashSet::new();
-        // Preserve the first-entry lookup semantics of iter().find, but
-        // preserve the old any()-based builtin exclusion even for duplicate
-        // IDs (which Graph validation will separately reject).
+        // Match the first symbol with this ID AND routine kind, as the
+        // original direct_call_decl() scan did. Preserve its separate
+        // any()-based atomic exclusion even for duplicate malformed IDs.
         for sym in &il.symbols {
-            symbols.entry(sym.id).or_insert(sym);
+            if sym.kind==1 {symbols.entry(sym.id).or_insert(sym);}
             if sym.name.starts_with("__atomic_") {
                 native_atomic_symbols.insert(sym.id);
             }
@@ -1819,7 +1819,7 @@ impl<'a> DirectCallIndex<'a> {
     }
 
     fn declaration(&mut self, symbol: crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
-        let sym=self.symbols.get(&symbol).filter(|s|s.kind==1)
+        let sym=self.symbols.get(&symbol)
             .ok_or_else(||invalid("call callee is not a direct named routine"))?;
         let name=sym.name.clone();
         validate_direct_call_name(&name)?;
@@ -4440,6 +4440,17 @@ mod tests {
         });
         assert!(DirectCallIndex::new(&malformed)
             .is_native_atomic(crate::SymbolId(8)));
+        malformed.symbols.clear();
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(9),kind:2,name:"variable".into(),
+        });
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(9),kind:1,name:"later_routine".into(),
+        });
+        let mut indexed=DirectCallIndex::new(&malformed);
+        let old=format!("{:?}",direct_call_decl(&malformed,crate::SymbolId(9)).unwrap_err());
+        let new=format!("{:?}",indexed.declaration(crate::SymbolId(9)).unwrap_err());
+        assert_eq!(old,new,"select the first matching routine, not first ID of any kind");
     }
 
     #[test]
