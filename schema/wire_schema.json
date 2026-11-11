@@ -473,5 +473,39 @@
       "UNSIGNED",
       "UNSIGNED"
     ]
+  },
+  "record_field_relations": {
+    "6": [
+      {
+        "rule": "same_presence",
+        "fields": [
+          7,
+          8
+        ]
+      }
+    ],
+    "16": [
+      {
+        "rule": "implies_presence",
+        "when": 3,
+        "requires": 2
+      }
+    ],
+    "29": [
+      {
+        "rule": "presence_if_flag_clear",
+        "field": 1,
+        "flags_field": 4,
+        "mask": 1
+      }
+    ],
+    "53": [
+      {
+        "rule": "presence_if_eq",
+        "field": 3,
+        "value_field": 2,
+        "value": 1
+      }
+    ]
   }
 }
