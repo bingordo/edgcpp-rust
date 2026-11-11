@@ -1848,6 +1848,119 @@ fn checked_call_result_type(
     }
     Ok(())
 }
+/// Validate different native function TypeIds by their full prototypes.
+/// Distinct EDG function types may still be C-compatible; matching the
+/// 64-bit address representation alone is not sufficient.
+fn compatible_call_function_types(
+    il:&Il, lhs:crate::TypeId, rhs:crate::TypeId, depth:usize,
+) -> Result<bool,CodegenError> {
+    if depth>16 {return Err(invalid("nested function pointer signature exceeds audit limit"));}
+    let definition=|ty| -> Result<&crate::TypeDef,CodegenError> {
+        il.types.iter().find(|d|d.id==ty)
+            .ok_or_else(||invalid("missing function pointer prototype type"))
+    };
+    let lhs_def=definition(lhs)?;
+    let rhs_def=definition(rhs)?;
+    if semantic(4,lhs_def.kind)!=2 || semantic(4,rhs_def.kind)!=2 ||
+        lhs_def.related_role!=Some(3) || rhs_def.related_role!=Some(3) {
+        return Err(invalid("function pointer does not designate a function prototype"));
+    }
+    let lhs_ret=lhs_def.related.ok_or_else(||invalid("function pointer return type missing"))?;
+    let rhs_ret=rhs_def.related.ok_or_else(||invalid("function pointer return type missing"))?;
+    let lhs_sig=il.function_signatures.iter().find(|s|s.owner==lhs)
+        .ok_or_else(||invalid("function pointer signature metadata missing"))?;
+    let rhs_sig=il.function_signatures.iter().find(|s|s.owner==rhs)
+        .ok_or_else(||invalid("function pointer signature metadata missing"))?;
+    if lhs_sig.variadic!=rhs_sig.variadic ||
+        lhs_sig.prototyped!=rhs_sig.prototyped ||
+        !compatible_call_nested_types(il,lhs_ret,rhs_ret,depth+1)? {
+        return Ok(false);
+    }
+    let parameters=|owner| {
+        let mut entries:Vec<_>=il.type_parameters.iter()
+            .filter(|p|p.owner==owner).collect();
+        entries.sort_by_key(|p|p.position);
+        entries
+    };
+    let a=parameters(lhs);
+    let b=parameters(rhs);
+    if a.len()!=b.len() {return Ok(false);}
+    for (position,(a,b)) in a.iter().zip(&b).enumerate() {
+        if a.position!=position as u32 || b.position!=position as u32 {
+            return Err(invalid("noncontiguous function pointer parameters"));
+        }
+        if !compatible_call_nested_types(il,a.ty,b.ty,depth+1)? {return Ok(false);}
+    }
+    Ok(true)
+}
+
+/// Compare nested pointer and function types without applying top-level
+/// object-pointer/void* conversions recursively (void** != int**).
+fn compatible_call_nested_types(
+    il:&Il, lhs:crate::TypeId, rhs:crate::TypeId, depth:usize,
+) -> Result<bool,CodegenError> {
+    if depth>16 {return Err(invalid("nested call pointer type exceeds audit limit"));}
+    let lhs=canonical_abi_type(il,lhs)?;
+    let rhs=canonical_abi_type(il,rhs)?;
+    if lhs==rhs {return Ok(true);}
+    let definition=|ty|->Result<&crate::TypeDef,CodegenError> {
+        il.types.iter().find(|d|d.id==ty)
+            .ok_or_else(||invalid("missing nested call pointer type"))
+    };
+    let left=definition(lhs)?;
+    let right=definition(rhs)?;
+    match (semantic(4,left.kind),semantic(4,right.kind)) {
+        (2,2)=>compatible_call_function_types(il,lhs,rhs,depth+1),
+        (5,5) if left.related_role==Some(1) && right.related_role==Some(1) => {
+            let lhs=left.related.ok_or_else(||invalid("left pointer pointee missing"))?;
+            let rhs=right.related.ok_or_else(||invalid("right pointer pointee missing"))?;
+            compatible_call_nested_types(il,lhs,rhs,depth+1)
+        }
+        _=>Ok(false),
+    }
+}
+
+/// The explicit argument has been lowered by EDG, including any cast. For
+/// uncast pointer/array/function expressions validate pointee compatibility
+/// instead of treating all 64-bit pointers as interchangeable.
+fn checked_call_pointer_argument(
+    il:&Il, formal:crate::TypeId, actual:crate::TypeId,
+) -> Result<(),CodegenError> {
+    let formal=canonical_abi_type(il,formal)?;
+    let actual=canonical_abi_type(il,actual)?;
+    let lookup=|id| -> Result<&crate::TypeDef,CodegenError> {
+        il.types.iter().find(|t|t.id==id)
+            .ok_or_else(||invalid("call pointer argument references unknown type"))
+    };
+    let expected=lookup(formal)?;
+    if semantic(4,expected.kind)!=5 || expected.related_role!=Some(1) {
+        return Err(invalid("call pointer formal lacks pointer-to-type metadata"));
+    }
+    let expected_target=canonical_abi_type(il,expected.related
+        .ok_or_else(||invalid("call pointer formal pointee missing"))?)?;
+    let provided=lookup(actual)?;
+    let actual_target=match semantic(4,provided.kind) {
+        5|6 if provided.related_role==Some(1) =>
+            canonical_abi_type(il,provided.related
+                .ok_or_else(||invalid("call pointer actual pointee missing"))?)?,
+        2=>actual,  // function designator decays to function pointer
+        _=>return Err(invalid("call pointer actual is not a pointer/array/function")),
+    };
+    let expected_kind=semantic(4,lookup(expected_target)?.kind);
+    let actual_kind=semantic(4,lookup(actual_target)?.kind);
+    if expected_kind==4 || actual_kind==4 {
+        // ISO C permits void* conversions for object pointers, but never
+        // function pointers. Converting void** to T** is not permitted here.
+        if expected_kind!=2 && actual_kind!=2 {return Ok(());}
+        return Err(invalid("function pointer passed as void object pointer"));
+    }
+    if compatible_call_nested_types(il,expected_target,actual_target,0)? {
+        Ok(())
+    } else {
+        Err(invalid("call pointer argument pointee/signature mismatch"))
+    }
+}
+
 /// Check the *source* argument category independently of the machine ABI.
 ///
 /// An equal-size but unrelated C struct is not an interchangeable by-value
@@ -1866,20 +1979,18 @@ fn checked_call_argument_shape(
     };
     let expected=kind(formal)?;
     let provided=kind(actual)?;
+    let bool_formal=expected==1 && il.c_integer_types.iter()
+        .any(|info|info.id==formal && info.is_bool);
     if expected==7 {
         if actual!=formal || provided!=7 {
             return Err(invalid("call argument aggregate type differs from declared parameter"));
         }
     } else if matches!(provided,7|9) {
         return Err(invalid("aggregate argument passed to scalar/pointer parameter"));
-    } else if matches!(provided,6|2) && expected!=5 {
-        // An array or function designator may decay into a pointer,
-        // including when the pointer is then converted to _Bool.
-        let bool_formal=expected==1 && il.c_integer_types.iter()
-            .any(|info|info.id==formal && info.is_bool);
-        if !bool_formal {
-            return Err(invalid("array/function designator passed to nonpointer parameter"));
-        }
+    } else if expected==5 && matches!(provided,5|6|2) {
+        checked_call_pointer_argument(il,formal,actual)?;
+    } else if matches!(provided,5|6|2) && !bool_formal {
+        return Err(invalid("pointer/array/function passed to nonpointer C parameter"));
     }
     Ok(())
 }
@@ -5234,6 +5345,87 @@ mod audit_call_argument_shape_tests {
         assert!(!checked(&il,1,7),"a function designator does not convert to int");
         assert!(!checked(&il,1,99),"missing actual type is invalid");
         assert!(!checked(&il,99,1),"missing formal type is invalid");
+    }
+
+
+    fn pointer_signature_types() -> Il {
+        let mut il=types();
+        let kind=|semantic_id|native_type_kind(semantic_id);
+        let def=|id:u32,category,related:Option<u32>,role:Option<u32>| crate::TypeDef {
+            id:crate::TypeId(id),kind:kind(category),
+            related_role:role,related:related.map(crate::TypeId),
+        };
+        il.types.extend([
+            def(13,1,None,None),          // unsigned int (not int)
+            def(14,5,Some(13),Some(1)),  // unsigned int*
+            def(15,5,Some(2),Some(1)),   // struct A*
+            def(16,5,Some(3),Some(1)),   // struct B*
+            def(17,2,Some(1),Some(3)),   // int function(void), distinct TypeId
+            def(18,5,Some(17),Some(1)),  // int (*)(void), distinct TypeId
+            def(19,2,Some(13),Some(3)),  // unsigned int function(void)
+            def(20,5,Some(19),Some(1)),
+            def(21,2,Some(1),Some(3)),   // int function(int)
+            def(22,5,Some(21),Some(1)),
+            def(23,5,Some(5),Some(1)),   // int**
+            def(24,5,Some(11),Some(1)),  // void**
+            def(25,5,Some(4),Some(1)),   // struct A typedef alias*
+            def(26,5,Some(7),None),      // malformed function pointer
+            def(27,5,None,Some(1)),      // malformed no-pointee pointer
+        ]);
+        il.c_integer_types.push(crate::CIntegerType {
+            id:crate::TypeId(13),bits:32,signed:false,is_bool:false,
+        });
+        for owner in [7,17,19,21] {
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(owner),prototyped:true,variadic:false,
+            });
+        }
+        il.type_parameters.push(crate::TypeParameter {
+            owner:crate::TypeId(21),position:0,ty:crate::TypeId(1),
+        });
+        il
+    }
+
+    #[test]
+    fn audit_call_pointer_rejects_incompatible_object_pointees() {
+        let il=pointer_signature_types();
+        assert!(checked(&il,5,5));
+        assert!(checked(&il,5,6),"int[4] decays to int*");
+        assert!(checked(&il,11,5),"int* converts to void*");
+        assert!(checked(&il,5,11),"void* converts to int*");
+        assert!(checked(&il,11,6),"int[4] decays to void*");
+        assert!(checked(&il,15,25),"struct typedef alias pointer is compatible");
+        assert!(!checked(&il,5,14),"signed int* != unsigned int*");
+        assert!(!checked(&il,14,5),"unsigned int* != signed int*");
+        assert!(!checked(&il,15,16),"unrelated struct pointer types");
+        assert!(!checked(&il,23,24),"int** cannot be converted to void**");
+        assert!(!checked(&il,24,23),"void** cannot be converted to int**");
+        assert!(!checked(&il,11,8),"function pointer cannot convert to void*");
+        assert!(!checked(&il,8,11),"void* cannot convert to function pointer");
+        assert!(!checked(&il,1,5),"raw pointer cannot implicitly become int");
+        assert!(!checked(&il,5,26),"pointer actual with malformed related role");
+        assert!(!checked(&il,5,27),"pointer actual with missing pointee");
+    }
+
+    #[test]
+    fn audit_call_function_pointer_checks_complete_prototypes() {
+        let il=pointer_signature_types();
+        assert!(checked(&il,8,7),"native function designator decay");
+        assert!(checked(&il,8,8),"exact function pointer");
+        assert!(checked(&il,8,18),"distinct native TypeIds with identical prototype");
+        assert!(checked(&il,18,8),"compatible signatures are symmetric");
+        assert!(!checked(&il,8,20),"return type signedness differs");
+        assert!(!checked(&il,8,22),"parameter count differs");
+        assert!(!checked(&il,8,5),"data pointer cannot pass as function pointer");
+        assert!(!checked(&il,5,8),"function pointer cannot pass as object pointer");
+        let mut il=pointer_signature_types();
+        il.function_signatures.retain(|s|s.owner!=crate::TypeId(17));
+        assert!(!checked(&il,8,18),"missing second prototype must fail closed");
+        let mut il=pointer_signature_types();
+        il.type_parameters.push(crate::TypeParameter {
+            owner:crate::TypeId(17),position:2,ty:crate::TypeId(1),
+        });
+        assert!(!checked(&il,8,18),"malformed function pointer parameters");
     }
 
     #[test]
