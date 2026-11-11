@@ -135,7 +135,7 @@ def main():
         if descriptors is not None:
             for index, field in enumerate(fields):
                 emitted = {constructors[name] for name in re.findall(
-                    r"\\b(txt|num|signed_num|absent)\\s*\\(", field
+                    r"\b(txt|num|signed_num|absent)\s*\(", field
                 )}
                 if not emitted or not emitted <= descriptors[index]:
                     problems.append(
