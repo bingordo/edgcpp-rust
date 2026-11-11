@@ -320,6 +320,21 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --lib --features codegen audit_type_index_batch_scaling -- --ignored --nocapture
 
+      # Same-runner audit microbenchmark, only on this PR; regular CI has
+      # zero call-lookup benchmarking overhead. Keep all native tests enabled.
+      - name: "Audit call index and ABI cache scaling (one-time)"
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'audit/call-lookup-scalability-20261111' }}
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --lib --features codegen audit_call_lookup_scaling -- --ignored --nocapture
+          cargo test --lib --features codegen audit_direct_call_catalog_scaling -- --ignored --nocapture
+
       - name: M11 VLA dimension evaluation semantic snapshot (parse only)
         working-directory: edgcpp-rust
         env:
