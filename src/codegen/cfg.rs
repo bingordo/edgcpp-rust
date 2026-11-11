@@ -5347,6 +5347,87 @@ mod audit_call_argument_shape_tests {
         assert!(!checked(&il,99,1),"missing formal type is invalid");
     }
 
+
+    fn pointer_signature_types() -> Il {
+        let mut il=types();
+        let kind=|semantic_id|native_type_kind(semantic_id);
+        let def=|id:u32,category,related:Option<u32>,role:Option<u32>| crate::TypeDef {
+            id:crate::TypeId(id),kind:kind(category),
+            related_role:role,related:related.map(crate::TypeId),
+        };
+        il.types.extend([
+            def(13,1,None,None),          // unsigned int (not int)
+            def(14,5,Some(13),Some(1)),  // unsigned int*
+            def(15,5,Some(2),Some(1)),   // struct A*
+            def(16,5,Some(3),Some(1)),   // struct B*
+            def(17,2,Some(1),Some(3)),   // int function(void), distinct TypeId
+            def(18,5,Some(17),Some(1)),  // int (*)(void), distinct TypeId
+            def(19,2,Some(13),Some(3)),  // unsigned int function(void)
+            def(20,5,Some(19),Some(1)),
+            def(21,2,Some(1),Some(3)),   // int function(int)
+            def(22,5,Some(21),Some(1)),
+            def(23,5,Some(5),Some(1)),   // int**
+            def(24,5,Some(11),Some(1)),  // void**
+            def(25,5,Some(4),Some(1)),   // struct A typedef alias*
+            def(26,5,Some(7),None),      // malformed function pointer
+            def(27,5,None,Some(1)),      // malformed no-pointee pointer
+        ]);
+        il.c_integer_types.push(crate::CIntegerType {
+            id:crate::TypeId(13),bits:32,signed:false,is_bool:false,
+        });
+        for owner in [7,17,19,21] {
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(owner),prototyped:true,variadic:false,
+            });
+        }
+        il.type_parameters.push(crate::TypeParameter {
+            owner:crate::TypeId(21),position:0,ty:crate::TypeId(1),
+        });
+        il
+    }
+
+    #[test]
+    fn audit_call_pointer_rejects_incompatible_object_pointees() {
+        let il=pointer_signature_types();
+        assert!(checked(&il,5,5));
+        assert!(checked(&il,5,6),"int[4] decays to int*");
+        assert!(checked(&il,11,5),"int* converts to void*");
+        assert!(checked(&il,5,11),"void* converts to int*");
+        assert!(checked(&il,11,6),"int[4] decays to void*");
+        assert!(checked(&il,15,25),"struct typedef alias pointer is compatible");
+        assert!(!checked(&il,5,14),"signed int* != unsigned int*");
+        assert!(!checked(&il,14,5),"unsigned int* != signed int*");
+        assert!(!checked(&il,15,16),"unrelated struct pointer types");
+        assert!(!checked(&il,23,24),"int** cannot be converted to void**");
+        assert!(!checked(&il,24,23),"void** cannot be converted to int**");
+        assert!(!checked(&il,11,8),"function pointer cannot convert to void*");
+        assert!(!checked(&il,8,11),"void* cannot convert to function pointer");
+        assert!(!checked(&il,1,5),"raw pointer cannot implicitly become int");
+        assert!(!checked(&il,5,26),"pointer actual with malformed related role");
+        assert!(!checked(&il,5,27),"pointer actual with missing pointee");
+    }
+
+    #[test]
+    fn audit_call_function_pointer_checks_complete_prototypes() {
+        let il=pointer_signature_types();
+        assert!(checked(&il,8,7),"native function designator decay");
+        assert!(checked(&il,8,8),"exact function pointer");
+        assert!(checked(&il,8,18),"distinct native TypeIds with identical prototype");
+        assert!(checked(&il,18,8),"compatible signatures are symmetric");
+        assert!(!checked(&il,8,20),"return type signedness differs");
+        assert!(!checked(&il,8,22),"parameter count differs");
+        assert!(!checked(&il,8,5),"data pointer cannot pass as function pointer");
+        assert!(!checked(&il,5,8),"function pointer cannot pass as object pointer");
+        let mut il=pointer_signature_types();
+        il.function_signatures.retain(|s|s.owner!=crate::TypeId(17));
+        assert!(!checked(&il,8,18),"missing second prototype must fail closed");
+        let mut il=pointer_signature_types();
+        il.type_parameters.push(crate::TypeParameter {
+            owner:crate::TypeId(17),position:2,ty:crate::TypeId(1),
+        });
+        assert!(!checked(&il,8,18),"malformed function pointer parameters");
+    }
+
     #[test]
     fn audit_call_argument_shape_keeps_c_pointer_and_bool_decays() {
         let il=types();
