@@ -975,7 +975,11 @@ impl Graph {
         }
         let mut typed_symbols = std::collections::HashSet::new();
         for edge in &il.symbol_types {
-            if !symbol_index.contains_key(&edge.symbol) || !type_map.contains_key(&edge.ty) {
+            // The bridge exports these type edges only for routine and
+            // variable declarations. Record fields have explicit field-type
+            // metadata; labels are untyped control-flow identities.
+            if !(has_kind(edge.symbol, 1) || has_kind(edge.symbol, 2))
+                || !type_map.contains_key(&edge.ty) {
                 return Err(GraphError::InvalidSymbolType(edge.symbol));
             }
             if !typed_symbols.insert(edge.symbol) {
@@ -5111,6 +5115,28 @@ mod tests {
         il.symbol_types[0].ty = TypeId(100);
         assert_eq!(Graph::from_il(&il).unwrap_err(),
                    GraphError::InvalidSymbolType(SymbolId(1)));
+    }
+
+    #[test]
+    fn audit_symbol_type_edges_cannot_attach_to_fields_or_labels() {
+        let mut il=Il::default();
+        il.types.push(TypeDef {
+            id:TypeId(1),kind:2,related_role:None,related:None,
+        });
+        il.symbols.push(Symbol {
+            id:SymbolId(1),kind:2,name:"variable".into(),
+        });
+        il.symbol_types.push(SymbolType {
+            symbol:SymbolId(1),ty:TypeId(1),
+        });
+        Graph::from_il(&il).expect("native variable type edge");
+        for invalid_kind in [3,4] {
+            il.symbols[0].kind=invalid_kind;
+            assert_eq!(Graph::from_il(&il).unwrap_err(),
+                GraphError::InvalidSymbolType(SymbolId(1)));
+        }
+        il.symbols[0].kind=1;
+        Graph::from_il(&il).expect("native routine type edge");
     }
 
     #[test]
