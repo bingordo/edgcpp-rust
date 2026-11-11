@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      audit_call_lookup_benchmark:
+        description: "Run opt-in graph call lookup and ABI cache microbenchmarks"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded runs for the same PR/branch before they consume build CPU.
 concurrency:
@@ -320,10 +325,9 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo test --lib --features codegen audit_type_index_batch_scaling -- --ignored --nocapture
 
-      # Same-runner audit microbenchmark, only on this PR; regular CI has
-      # zero call-lookup benchmarking overhead. Keep all native tests enabled.
-      - name: "Audit call index and ABI cache scaling (one-time)"
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'audit/call-lookup-scalability-20261111' }}
+      # Reproducible measurement on demand; routine CI never runs this.
+      - name: "Audit call index and ABI cache scaling (opt-in)"
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.audit_call_lookup_benchmark }}
         working-directory: edgcpp-rust
         env:
           EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
