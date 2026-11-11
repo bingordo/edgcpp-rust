@@ -1882,7 +1882,7 @@ fn lower_c_expression(
             if let Some(name)=il.symbols.iter().find(|s|s.id==symbol)
                 .map(|s|s.name.as_str()) {
                 if name.starts_with("__atomic_") {
-                    return atomic_builtin::lower(graph,name,&node.operands[1..],params,locals,il);
+                    return atomic_builtin::lower(graph,name,&node.operands[1..],params,locals,il,catalog);
                 }
             }
         }
