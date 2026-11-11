@@ -1776,6 +1776,38 @@ jobs:
             fi
           )
 
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
       - name: M8 native C11 struct field differential
         working-directory: edgcpp-rust
         env:

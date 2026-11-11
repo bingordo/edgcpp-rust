@@ -3619,6 +3619,13 @@ fn valid_aggregate_relocation_range(
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
+    // A referenced FP object still needs typed FP expression lowering; do
+    // not accidentally expose its bytes through the integer CFG backend.
+    let source_references: HashSet<_> = il.expressions.iter()
+        .filter(|expr|semantic(2,expr.kind)==2).filter_map(|expr|expr.symbol_id)
+        .chain(il.constant_addresses.iter().map(|a|a.symbol))
+        .chain(il.global_aggregate_relocations.iter().flat_map(|r|[r.symbol,r.target]))
+        .collect();
     let references=il.expressions.iter()
         .filter(|expr|semantic(2,expr.kind)==2).filter_map(|expr|expr.symbol_id)
         .chain(il.constant_addresses.iter().map(|a|a.symbol))
@@ -3629,6 +3636,31 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     for id in references {
         if !il.global_variables.iter().any(|g|g.symbol==id) ||
            !seen.insert(id) {continue;}
+        // The FP-only routine backend and the integer CFG must agree on
+        // exact IEEE global data images. An unreferenced external C float
+        // definition is still required by independently linked objects,
+        // even if no FP routine selects the FP backend for this module.
+        if il.cpp_language==Some(false) &&
+            !source_references.contains(&id) &&
+            super::fp::is_standard_fp_global_type(il,id) {
+            let (name,fp_ty,linkage,initializer)=
+                super::fp::source_fp_global(il,id)?;
+            let storage_bytes=match fp_ty {
+                super::fp::FloatType::F32=>4usize,
+                super::fp::FloatType::F64=>8usize,
+            };
+            result.push(ScalarGlobal {
+                symbol:id,name,
+                // No CFG expression may reference this native FP object.
+                // Keep a correctly sized placeholder machine descriptor
+                // solely for the ELF symbol declaration bookkeeping.
+                ty:CAbiInt{bits:(storage_bytes*8) as u8,signed:false,is_bool:false},
+                access:MemoryAccess::Ordinary,linkage,initializer,
+                relocations:Vec::new(),storage_bytes,
+                alignment:storage_bytes as u64,
+            });
+            continue;
+        }
         let (name,scalar) = global_value_type(il,id)?;
         let declared=il.symbol_types.iter().find(|t|t.symbol==id)
             .ok_or_else(||invalid("global missing declared type"))?.ty;
