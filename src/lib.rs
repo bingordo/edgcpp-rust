@@ -2887,7 +2887,8 @@ mod audit_complete_wire_field_tags_tests {
     #[test]
     fn optional_field_accepts_absent_or_present_text() {
         let mut state=Collector::default();
-        let sample=b"f",path=b"0";
+        let sample=b"f";
+        let path=b"0";
         let text=|s:&'static [u8]|WireField{
             data:s.as_ptr(),length:s.len(),value:0,tag:wire_tags::TEXT
         };
