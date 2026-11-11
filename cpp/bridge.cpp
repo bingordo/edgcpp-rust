@@ -337,6 +337,51 @@ static bool plain_cpp_record(a_type_ptr type) {
   return true;
 }
 
+// C++2 P2.1a: separate *nontrivial* class-scope evidence. Do not
+// relabel a user-defined constructor/destructor as POD or share P1's
+// plain_cpp_record gate. This only certifies a narrow candidate for a
+// later path-sensitive native lifetime verifier, NOT executable admission.
+static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  if (type == nullptr ||
+      (type->kind != tk_class && type->kind != tk_struct) ||
+      type->incomplete || type->size != 4 || type->alignment != 4 ||
+      symbol_for(type) == nullptr) return false;
+  const auto *extra = type->variant.class_struct_union.extra_info;
+  if (extra == nullptr || extra->assoc_scope == nullptr ||
+      extra->direct_base_classes != nullptr ||
+      extra->has_field_initializer || extra->is_lambda_closure_class ||
+      type->variant.class_struct_union.any_virtual_functions ||
+      type->variant.class_struct_union.any_virtual_base_classes ||
+      extra->assoc_scope->variables != nullptr ||
+      !type_has_nontrivial_destructor(type)) return false;
+  // One ordinary 32-bit scalar, at byte offset zero; no bitfields,
+  // subobjects or hidden layout that our first native P2 caller could
+  // initialize or destroy accidentally.
+  a_field_ptr field = type->variant.class_struct_union.field_list;
+  if (field == nullptr || field->next != nullptr ||
+      field->type == nullptr || field->type->kind != tk_integer ||
+      field->type->size != 4 || field->type->alignment != 4 ||
+      field->offset != 0 || field->offset_bit_remainder != 0 ||
+      field->is_bit_field) return false;
+#if MAINTAIN_CLASS_MEMBER_LIST
+  unsigned declarations = 0;
+  for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
+       entry != nullptr; entry = entry->next) {
+    if (++declarations > 128 ||
+        (entry->entity.kind != iek_field &&
+         entry->entity.kind != iek_routine)) return false;
+  }
+#endif
+  // EDG may prune the class routine list before this type is serialized:
+  // an empty list is NOT evidence that the user constructor/destructor
+  // or any other special members are absent. The native TypeId caller
+  // must independently verify exact routine ownership, special_kind,
+  // ABI and executable call/cleanup paths from retained IL metadata.
+  // Thus this event is only a structural *candidate*, never authority
+  // to emit a nontrivial object by itself.
+  return true;
+}
+
 // Assign dense IDs during compilation; never export EDG type addresses.
 static uint32_t emit_type(a_type_ptr type, unsigned depth)
 {
@@ -372,6 +417,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   // constructor was optimized into ordinary scalar stores.
   if (type->kind == tk_class || type->kind == tk_struct) {
     emit_record(63, {num(id), num(plain_cpp_record(type) ? 1 : 0)});
+    emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
   // An alignment of zero is not a usable layout.

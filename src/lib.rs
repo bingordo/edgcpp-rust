@@ -75,6 +75,9 @@ pub struct Il {
     /// C++ local object admission after inspecting EDG's complete class
     /// member scope, including methods inlined away from routine bodies.
     pub cxx_record_admissions: Vec<CxxRecordAdmission>,
+    /// Distinct source-certified candidate for a bounded user ctor/dtor.
+    /// This never implies ordinary POD or proves path-sensitive cleanup.
+    pub cxx_scalar_lifetime_admissions: Vec<CxxScalarLifetimeAdmission>,
     /// Structural statement records captured while function IL is live.
     pub statements: Vec<Statement>,
     /// Native flags retained for each emitted statement.
@@ -392,6 +395,18 @@ pub struct TypeObjectSize {
 pub struct CxxRecordAdmission {
     pub owner: TypeId,
     pub plain_object: bool,
+}
+
+/// EDG source-layout proof for a nontrivial-dtor record containing
+/// exactly one 32-bit scalar field, no bases, virtual dispatch, static
+/// members or default field initializers. The class routine list may
+/// already be pruned: true does NOT prove the constructor/destructor
+/// count or semantics. A separate native TypeId verifier must check
+/// retained member identities, special-member ABI and every cleanup path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CxxScalarLifetimeAdmission {
+    pub owner: TypeId,
+    pub candidate: bool,
 }
 
 /// A direct C++ base class, in declaration order.
@@ -991,6 +1006,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         49 => Some(il.type_object_sizes.len()),
         63 => Some(il.cxx_record_admissions.len()),
         64 => Some(usize::from(il.cpp_language.is_some())),
+        65 => Some(il.cxx_scalar_lifetime_admissions.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
@@ -1029,7 +1045,7 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
 fn expected_wire_field_count(kind: u32) -> Option<usize> {
     Some(match kind {
         1..=4 => 1, 5 => 3, 6 => 15, 7 => 4, 8 => 3,
-        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, _ => return None,
+        9 => 2, 10 => 8, 11 => 3, 12 => 3, 13 => 3, 14 => 4, 15 => 2, 16 => 4, 17 => 7, 18 => 4, 19 => 4, 20 => 6, 21 => 2, 22 => 3, 23 => 8, 24 => 4, 25 => 2, 26 => 3, 27 => 9, 28 => 4, 29 => 5, 30 => 5, 31 => 6, 32 => 2, 33 => 6, 34 => 6, 35 => 6, 36 => 5, 37 => 8, 38 => 4, 39 => 3, 40 => 4, 41 => 5, 42 => 2, 43 => 1, 44 => 3, 45 => 3, 46 => 4, 47 => 5, 48 => 5, 49 => 3, 50 => 5, 51 => 3, 52 => 4, 53 => 4, 54 => 3, 55 => 4, 56 => 5, 57 => 2, 58 => 6, 59 => 6, 60 => 4, 61 => 3, 62 => 5, 63 => 2, 64 => 1, 65 => 2, _ => return None,
     })
 
 }
@@ -1122,6 +1138,15 @@ unsafe fn collect_event(output: &mut Il, kind: u32,
             }
             output.cxx_record_admissions.push(CxxRecordAdmission {
                 owner:TypeId(owner),plain_object:plain==1,
+            });
+        }
+        65 => {
+            let (Some(owner),Some(proven)) = (n(0),n(1)) else {return;};
+            if owner==0 || proven>1 ||
+                output.cxx_scalar_lifetime_admissions.iter()
+                    .any(|v|v.owner==TypeId(owner)) {return;}
+            output.cxx_scalar_lifetime_admissions.push(CxxScalarLifetimeAdmission {
+                owner:TypeId(owner),candidate:proven==1,
             });
         }
         64 => {
@@ -1845,17 +1870,25 @@ mod tests {
         let cpp=[number(1)];
         let triv=[number(42),number(1)];
         let ctor=[number(43),number(0)];
+        let lifetime_yes=[number(43),number(1)];
+        let lifetime_no=[number(42),number(0)];
         unsafe {
             let data=(&mut state as *mut Collector).cast();
             collect(data,64,cpp.as_ptr(),cpp.len(),0);
             collect(data,63,triv.as_ptr(),triv.len(),0);
             collect(data,63,ctor.as_ptr(),ctor.len(),0);
+            collect(data,65,lifetime_yes.as_ptr(),lifetime_yes.len(),0);
+            collect(data,65,lifetime_no.as_ptr(),lifetime_no.len(),0);
         }
         assert!(!state.malformed);
         assert_eq!(state.il.cpp_language,Some(true));
         assert_eq!(state.il.cxx_record_admissions,vec![
             CxxRecordAdmission {owner:TypeId(42),plain_object:true},
             CxxRecordAdmission {owner:TypeId(43),plain_object:false},
+        ]);
+        assert_eq!(state.il.cxx_scalar_lifetime_admissions,vec![
+            CxxScalarLifetimeAdmission{owner:TypeId(43),candidate:true},
+            CxxScalarLifetimeAdmission{owner:TypeId(42),candidate:false},
         ]);
         unsafe {
             let data=(&mut state as *mut Collector).cast();

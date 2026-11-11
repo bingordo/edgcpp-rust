@@ -22,6 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Entity::Namespace { name } => println!("namespace {name}"),
         }
     }
+    for class in &result.il.cxx_scalar_lifetime_admissions {
+        println!("cxx scalar lifetime owner={} candidate={}",
+                 class.owner.0,class.candidate);
+    }
     for statement in &result.il.statements {
         println!("statement {} path={} parent={:?} kind={}",
                  statement.function, statement.path, statement.parent, statement.kind);

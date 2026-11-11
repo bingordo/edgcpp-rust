@@ -135,6 +135,32 @@ jobs:
           rustup component add clippy --toolchain "$RUST_TOOLCHAIN_VERSION"
           rustup default "$RUST_TOOLCHAIN_VERSION"
 
+      - name: Verify real EDG bounded C++2 class lifetime proof before broad tests
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --lib decodes_cpp_dialect_and_immutable_record_triviality_proofs
+          cargo build --example parse
+          cp tests/fixtures/cxx2_scalar_lifetime_proof.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c++17 cxx2_scalar_lifetime_proof.cpp >cxx2-proof.log
+            grep -E '^(cxx scalar lifetime|routine Marker|type Marker)' cxx2-proof.log || true
+            grep -Fq 'routine Marker::Marker' cxx2-proof.log
+            grep -Fq 'routine Marker::~Marker' cxx2-proof.log
+            grep -Eq '^cxx scalar lifetime owner=[0-9]+ candidate=true$' cxx2-proof.log
+            grep -Eq '^cxx scalar lifetime owner=[0-9]+ candidate=false$' cxx2-proof.log
+            test "$(grep -Ec '^cxx scalar lifetime owner=[0-9]+ candidate=true$' cxx2-proof.log)" = 1
+            echo "EDG_CXX2 gate=bounded_scalar_nontrivial_proof source=Marker result=pass"
+          )
+
       - name: Build bindings and tests
         working-directory: edgcpp-rust
         env:
