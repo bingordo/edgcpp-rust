@@ -851,7 +851,7 @@ pub struct StaticLocalOwner {
 
 /// An EDG operation call. Operand zero is the callee; member calls use
 /// operand one for the object, so explicit arguments start at index two.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallSite {
     pub function: String,
     pub statement_path: String,
