@@ -5760,8 +5760,10 @@ mod tests {
     #[ignore = "opt-in call lookup scaling measurement"]
     fn audit_call_lookup_scaling() {
         for count in [512_usize, 2048, 4096] {
-            let mut graph=Graph::default();
-            graph.call_index_by_expression=vec![None;count*2];
+            let mut graph=Graph {
+                call_index_by_expression:vec![None;count*2],
+                ..Default::default()
+            };
             let mut keys=Vec::with_capacity(count*2);
             for i in 0..count {
                 let statement=i.to_string();
