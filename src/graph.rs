@@ -4026,7 +4026,7 @@ mod tests {
                     .position(|(id,_)|id==symbol)
                 {
                     if let Some(new_ty)=ty {
-                        index.symbol_order[position].1=*new_ty;
+                        index.symbol_order[position].1 = *new_ty;
                     } else {
                         index.symbol_order.remove(position);
                     }
@@ -4043,9 +4043,11 @@ mod tests {
         }
 
         for count in [1024_u32,4096,16384] {
-            let mut initial=TypeDependencyIndex::default();
-            initial.symbol_order=(1..=count)
-                .map(|id|(SymbolId(id),TypeId(id%32+1))).collect();
+            let mut initial=TypeDependencyIndex {
+                symbol_order:(1..=count)
+                    .map(|id|(SymbolId(id),TypeId(id%32+1))).collect(),
+                ..Default::default()
+            };
             for &(symbol,ty) in &initial.symbol_order {
                 initial.symbols_by_type.entry(ty).or_default().push(symbol);
             }
