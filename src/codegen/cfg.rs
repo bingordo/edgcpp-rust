@@ -3593,6 +3593,27 @@ fn requires_c_global_definition(meta: &crate::GlobalVariable, cpp: Option<bool>)
         (meta.linkage == 3 || (meta.linkage == 1 && meta.explicit_initializer))
 }
 
+/// An x86-64 data relocation occupies eight bytes, not just its first
+/// byte. Reject any intersection with a previously accepted relocation:
+/// packed or malformed native layouts must not create overlapping writes.
+/// All operations are checked before passing offsets to the ELF backend.
+fn valid_aggregate_relocation_range(
+    prior: &[(usize,crate::SymbolId,i64)],
+    start: usize,
+    storage_bytes: usize,
+) -> bool {
+    const POINTER_BYTES: usize = 8;
+    let Some(end) = start.checked_add(POINTER_BYTES) else {return false;};
+    if end > storage_bytes {return false;}
+    prior.iter().all(|(earlier,_,_)| {
+        // Earlier entries were accepted only after the same bounds check.
+        let Some(earlier_end)=earlier.checked_add(POINTER_BYTES) else {
+            return false;
+        };
+        end<=*earlier || earlier_end<=start
+    })
+}
+
 /// Resolve referenced globals, plus externally visible C definitions.
 /// Omit unsupported unrelated C++ types until full C++ global lowering exists.
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
@@ -3658,8 +3679,7 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             let start=usize::try_from(reloc.offset)
                 .map_err(|_|invalid("aggregate relocation offset out of range"))?;
             if scalar.is_some() || !meta.explicit_initializer ||
-                start.checked_add(8).is_none_or(|end|end>storage_bytes) ||
-                relocations.iter().any(|(offset,_,_)|*offset==start) {
+                !valid_aggregate_relocation_range(&relocations,start,storage_bytes) {
                 return Err(invalid("unsupported/overlapping aggregate pointer relocation"));
             }
             relocations.push((start,reloc.target,reloc.addend));
@@ -4379,5 +4399,28 @@ mod audit_c_external_global_definition_tests {
         let mut local=meta(3,true);
         local.local_to_function=true;
         assert!(!requires_c_global_definition(&local,Some(false)));
+    }
+}
+
+#[cfg(test)]
+mod audit_aggregate_relocation_range_tests {
+    use super::*;
+
+    #[test]
+    fn data_relocations_reject_all_overlaps_not_only_duplicate_starts() {
+        let id=crate::SymbolId(1);
+        let prior=vec![(8usize,id,0i64)];
+        // Exactly adjacent eight-byte relocation slots are valid.
+        assert!(valid_aggregate_relocation_range(&prior,0,24));
+        assert!(valid_aggregate_relocation_range(&prior,16,24));
+        // Either direction of overlap is invalid, even if starts differ.
+        for start in [1,7,8,9,15] {
+            assert!(!valid_aggregate_relocation_range(&prior,start,24),
+                "overlapping relocation accepted at offset {start}");
+        }
+        assert!(!valid_aggregate_relocation_range(&prior,17,24));
+        assert!(!valid_aggregate_relocation_range(&prior,usize::MAX,usize::MAX));
+        assert!(!valid_aggregate_relocation_range(&[],0,7));
+        assert!(valid_aggregate_relocation_range(&[],0,8));
     }
 }
