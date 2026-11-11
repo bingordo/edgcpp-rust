@@ -1969,6 +1969,7 @@ fn checked_call_pointer_argument(
 /// Keep those implicit conversions legal rather than comparing scalar TypeIds.
 fn checked_call_argument_shape(
     il:&Il, formal_ty:crate::TypeId, actual_ty:crate::TypeId,
+    literal_null_pointer:bool,
 ) -> Result<(),CodegenError> {
     let formal=canonical_abi_type(il,formal_ty)?;
     let actual=canonical_abi_type(il,actual_ty)?;
@@ -1989,6 +1990,11 @@ fn checked_call_argument_shape(
         return Err(invalid("aggregate argument passed to scalar/pointer parameter"));
     } else if expected==5 && matches!(provided,5|6|2) {
         checked_call_pointer_argument(il,formal,actual)?;
+    } else if expected==5 && provided==1 && literal_null_pointer {
+        // An EDG literal integer zero is a C null-pointer constant. The
+        // caller must verify the actual expression, not merely its type.
+    } else if expected==5 {
+        return Err(invalid("nonpointer/non-null argument passed to C pointer parameter"));
     } else if matches!(provided,5|6|2) && !bool_formal {
         return Err(invalid("pointer/array/function passed to nonpointer C parameter"));
     }
@@ -2089,7 +2095,13 @@ fn lower_c_expression(
         for ((&operand,aggregate),formal) in node.operands[1..].iter()
             .zip(&abi.aggregate_parameters).zip(&formal_types) {
             let actual_ty=expression_type_id(graph,operand)?;
-            checked_call_argument_shape(il,formal.ty,actual_ty)?;
+            // A type-only check cannot distinguish a C null-pointer constant
+            // from an arbitrary integer. Accept only a literal zero, never a
+            // nonzero integer or a runtime integer-valued expression.
+            let literal_null_pointer=graph.expression(operand).is_some_and(|n|
+                semantic(2,n.data.kind)==1 && n.data.constant_integer==Some(0)
+                && n.operands.is_empty());
+            checked_call_argument_shape(il,formal.ty,actual_ty,literal_null_pointer)?;
             if let Some(size)=aggregate {
                 let actual=target::ABI.classify_aggregate(il,actual_ty)?;
                 if actual!=Some(*size) {
@@ -5310,7 +5322,7 @@ mod audit_call_argument_shape_tests {
         il
     }
     fn checked(il:&Il,expected:u32,actual:u32)->bool {
-        checked_call_argument_shape(il,crate::TypeId(expected),crate::TypeId(actual)).is_ok()
+        checked_call_argument_shape(il,crate::TypeId(expected),crate::TypeId(actual),false).is_ok()
     }
 
     #[test]
@@ -5426,6 +5438,22 @@ mod audit_call_argument_shape_tests {
             owner:crate::TypeId(17),position:2,ty:crate::TypeId(1),
         });
         assert!(!checked(&il,8,18),"malformed function pointer parameters");
+    }
+
+    #[test]
+    fn audit_call_integer_to_pointer_requires_literal_zero() {
+        let il=types();
+        assert!(!checked(&il,5,1),"integer argument must not silently pass as int*");
+        assert!(!checked(&il,11,1),"integer argument must not silently pass as void*");
+        assert!(!checked(&il,5,9),"runtime _Bool is not a null pointer constant");
+        assert!(!checked(&il,5,10),"void argument is not a pointer");
+        assert!(checked_call_argument_shape(
+            &il,crate::TypeId(5),crate::TypeId(1),true).is_ok(),
+            "literal zero remains a C null-pointer constant");
+        assert!(checked_call_argument_shape(
+            &il,crate::TypeId(11),crate::TypeId(1),true).is_ok(),
+            "literal zero converts to void*");
+        assert!(checked(&il,9,1),"integer-to-bool conversion remains supported");
     }
 
     #[test]
