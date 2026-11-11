@@ -5409,7 +5409,9 @@ mod audit_statement_source_order_tests {
     #[test]
     fn numeric_source_order_handles_double_digit_siblings() {
         let mut il=Il::default();
-        for path in ["10","2","0","1"] {
+        // Include every native sibling. This tests double-digit numeric
+        // ordering without supplying a truncated/sparse statement sequence.
+        for path in ["10","2","0","1","9","6","3","8","7","4","5"] {
             il.statements.push(Statement {
                 function:"f".into(),path:path.into(),parent:None,kind:1,
             });
@@ -5417,7 +5419,7 @@ mod audit_statement_source_order_tests {
         let graph=Graph::from_il(&il).unwrap();
         let paths:Vec<_>=graph.roots("f")
             .map(|(_,s)|s.data.path.as_str()).collect();
-        assert_eq!(paths,["0","1","2","10"]);
+        assert_eq!(paths,["0","1","2","3","4","5","6","7","8","9","10"]);
     }
 }
 
