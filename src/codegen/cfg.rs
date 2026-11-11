@@ -1737,10 +1737,7 @@ fn call_type_abi(il:&Il, ty:crate::TypeId) -> Result<CAbiInt,CodegenError> {
     }
     Ok(CAbiInt {bits:t.bits,signed:t.signed,is_bool:t.is_bool})
 }
-fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
-    let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
-        .ok_or_else(||invalid("call callee is not a direct named routine"))?;
-    let name=sym.name.clone();
+fn validate_direct_call_name(name: &str) -> Result<(), CodegenError> {
     // Pinned EDG recognizes GCC __atomic_* builtins, but currently exports
     // them as calls to libatomic-style symbols. Silently emitting undefined
     // externals loses our source memory-order validation and can make an ELF
@@ -1756,6 +1753,101 @@ fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,Cod
        !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
         return Err(invalid(format!("non-C/ambiguous direct-call symbol {name}")));
     }
+    Ok(())
+}
+
+/// Per-immutable-IL direct-call indexes. Unlike a persistent Graph cache,
+/// every entry is built and discarded with one native compilation snapshot.
+/// The existing ABI/type validator remains authoritative on first use.
+struct DirectCallIndex<'a> {
+    il: &'a Il,
+    symbols: HashMap<crate::SymbolId, &'a crate::Symbol>,
+    symbol_types: HashMap<crate::SymbolId, crate::TypeId>,
+    types: HashMap<crate::TypeId, &'a crate::TypeDef>,
+    canonical: HashMap<crate::TypeId, crate::TypeId>,
+    abis: HashMap<crate::TypeId, CAbi>,
+    native_atomic_symbols: HashSet<crate::SymbolId>,
+}
+
+impl<'a> DirectCallIndex<'a> {
+    fn new(il: &'a Il) -> Self {
+        let mut symbols=HashMap::with_capacity(il.symbols.len());
+        let mut symbol_types=HashMap::with_capacity(il.symbol_types.len());
+        let mut types=HashMap::with_capacity(il.types.len());
+        let mut native_atomic_symbols=HashSet::new();
+        // Match the first symbol with this ID AND routine kind, as the
+        // original direct_call_decl() scan did. Preserve its separate
+        // any()-based atomic exclusion even for duplicate malformed IDs.
+        for sym in &il.symbols {
+            if sym.kind==1 {symbols.entry(sym.id).or_insert(sym);}
+            if sym.name.starts_with("__atomic_") {
+                native_atomic_symbols.insert(sym.id);
+            }
+        }
+        for edge in &il.symbol_types {symbol_types.entry(edge.symbol).or_insert(edge.ty);}
+        for ty in &il.types {types.entry(ty.id).or_insert(ty);}
+        Self {
+            il,symbols,symbol_types,types,canonical:HashMap::new(),
+            abis:HashMap::new(),native_atomic_symbols,
+        }
+    }
+
+    fn is_native_atomic(&self, symbol: crate::SymbolId) -> bool {
+        self.native_atomic_symbols.contains(&symbol)
+    }
+
+    fn canonical_type(&mut self, source: crate::TypeId) -> Result<crate::TypeId,CodegenError> {
+        if let Some(&cached)=self.canonical.get(&source) {return Ok(cached);}
+        let mut ty=source;
+        let mut traversed=Vec::new();
+        for _ in 0..=self.il.types.len() {
+            let def=self.types.get(&ty).ok_or_else(||invalid(format!(
+                "missing EDG type {}",ty.0)))?;
+            if semantic(4,def.kind)!=3 {
+                for alias in traversed {self.canonical.insert(alias,ty);}
+                self.canonical.insert(source,ty);
+                return Ok(ty);
+            }
+            if def.related_role!=Some(4) {
+                return Err(invalid(format!("malformed EDG typeref {}",ty.0)));
+            }
+            traversed.push(ty);
+            ty=def.related.ok_or_else(||invalid(format!(
+                "unresolved EDG typeref {}",ty.0)))?;
+        }
+        Err(invalid("cyclic EDG typeref"))
+    }
+
+    fn declaration(&mut self, symbol: crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
+        let sym=self.symbols.get(&symbol)
+            .ok_or_else(||invalid("call callee is not a direct named routine"))?;
+        let name=sym.name.clone();
+        validate_direct_call_name(&name)?;
+        let raw=*self.symbol_types.get(&symbol)
+            .ok_or_else(||invalid("call has no routine type"))?;
+        let ty=self.canonical_type(raw)?;
+        let def=self.types.get(&ty)
+            .ok_or_else(||invalid("missing called function type"))?;
+        if semantic(4,def.kind)!=2 || def.related_role!=Some(3) {
+            return Err(invalid("indirect/function-pointer calls not implemented"));
+        }
+        let abi=if let Some(cached)=self.abis.get(&ty) {
+            cached.clone()
+        } else {
+            // The full ABI/prototype/aggregate checks execute once per
+            // function TypeId, even for many distinct routine symbols.
+            let checked=function_type_abi(self.il,ty)?;
+            self.abis.insert(ty,checked.clone());
+            checked
+        };
+        Ok(CallDeclaration{symbol,name,abi})
+    }
+}
+fn direct_call_decl(il:&Il,symbol:crate::SymbolId) -> Result<CallDeclaration,CodegenError> {
+    let sym=il.symbols.iter().find(|s|s.id==symbol && s.kind==1)
+        .ok_or_else(||invalid("call callee is not a direct named routine"))?;
+    let name=sym.name.clone();
+    validate_direct_call_name(&name)?;
     let ty=il.symbol_types.iter().find(|t|t.symbol==symbol)
         .ok_or_else(||invalid("call has no routine type"))?.ty;
     let ty=canonical_abi_type(il,ty)?;
@@ -2000,6 +2092,33 @@ fn checked_call_argument_shape(
     }
     Ok(())
 }
+/// Build one compilation-local call catalog with the cheapest lookup path
+/// for this immutable IL. Repeated/small target sets do not pay for indexing
+/// the entire source symbol/type tables; large distinct sets do.
+fn direct_call_catalog(
+    il:&Il, symbols:&[crate::SymbolId],
+) -> Result<HashMap<crate::SymbolId,CallDeclaration>,CodegenError> {
+    let mut seen=HashSet::new();
+    let unique:Vec<_>=symbols.iter().copied()
+        .filter(|sym|seen.insert(*sym)).collect();
+    const INDEX_MIN_DISTINCT_ROUTINES:usize=64;
+    let mut index=(unique.len()>=INDEX_MIN_DISTINCT_ROUTINES)
+        .then(||DirectCallIndex::new(il));
+    let mut found=HashMap::with_capacity(unique.len());
+    for symbol in unique {
+        if let Some(lookup)=index.as_mut() {
+            if lookup.is_native_atomic(symbol) {continue;}
+            found.insert(symbol,lookup.declaration(symbol)?);
+        } else {
+            // Preserve the old low-overhead path for one or a few call
+            // targets, including the original any()-based atomic exclusion.
+            if il.symbols.iter().any(|s|s.id==symbol &&
+                s.name.starts_with("__atomic_")) {continue;}
+            found.insert(symbol,direct_call_decl(il,symbol)?);
+        }
+    }
+    Ok(found)
+}
 fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     // Member calls remain a separate C++ ABI/lifetime feature.
     for site in &il.calls {
@@ -2007,7 +2126,6 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
     }
     // Include ordinary calls AND function designators whose addresses are
     // taken but never directly called. Both need FuncRefs and ELF relocations.
-    let mut found:HashMap<crate::SymbolId,CallDeclaration>=HashMap::new();
     let mut symbols:Vec<_>=il.expressions.iter()
         .filter(|expr|semantic(2,expr.kind)==6)
         .map(|expr|expr.symbol_id.ok_or_else(||
@@ -2015,18 +2133,7 @@ fn compile_calls(il:&Il) -> Result<Vec<CallDeclaration>,CodegenError> {
         .collect::<Result<Vec<_>,_>>()?;
     symbols.extend(il.statement_routine_initializers.iter().map(|r|r.symbol));
     symbols.extend(il.constant_routine_addresses.iter().map(|r|r.symbol));
-    // One native routine may appear in thousands of designator expressions.
-    // Validate and construct its declaration just once per immutable IL.
-    let mut seen_symbols=HashSet::new();
-    for symbol in symbols {
-        if !seen_symbols.insert(symbol) {continue;}
-        // The pinned EDG projection uses intrinsic-looking routine identities.
-        // These are handled in atomic_builtin, never ELF libatomic imports.
-        if il.symbols.iter().any(|s|s.id==symbol &&
-            s.name.starts_with("__atomic_")) {continue;}
-        let decl=direct_call_decl(il,symbol)?;
-        found.insert(symbol,decl);
-    }
+    let found=direct_call_catalog(il,&symbols)?;
     let mut result:Vec<CallDeclaration>=found.into_values().collect();
     result.sort_by(|a,b|a.name.cmp(&b.name));
     Ok(result)
@@ -4230,6 +4337,7 @@ mod tests {
             for (label, targets) in [("repeated", &repeated),("distinct", &distinct)] {
                 let mut old_times=Vec::new();
                 let mut indexed_times=Vec::new();
+                let mut distinct_index_times=Vec::new();
                 for _ in 0..3 {
                     let started=std::time::Instant::now();
                     let old:Vec<_>=targets.iter()
@@ -4247,7 +4355,17 @@ mod tests {
                         .map(|&symbol|cached_call_decl(&catalog,symbol).unwrap())
                         .collect();
                     indexed_times.push(started.elapsed());
+                    let started=std::time::Instant::now();
+                    let optimized=direct_call_catalog(&il,targets).unwrap();
+                    let optimized_calls:Vec<_>=targets.iter()
+                        .map(|&symbol|cached_call_decl(&optimized,symbol).unwrap()).collect();
+                    distinct_index_times.push(started.elapsed());
                     assert_eq!(old.len(),indexed.len());
+                    for (a,b) in old.iter().zip(optimized_calls) {
+                        assert_eq!(a.symbol,b.symbol);
+                        assert_eq!(a.name,b.name);
+                        assert_eq!(a.abi,b.abi);
+                    }
                     for (a,b) in old.iter().zip(indexed) {
                         assert_eq!(a.symbol,b.symbol);
                         assert_eq!(a.name,b.name);
@@ -4255,14 +4373,135 @@ mod tests {
                     }
                     std::hint::black_box(&old);
                     std::hint::black_box(&catalog);
+                    std::hint::black_box(&optimized);
                 }
                 old_times.sort_unstable();
                 indexed_times.sort_unstable();
+                distinct_index_times.sort_unstable();
                 let before=old_times[1].as_secs_f64()*1000.0;
                 let after=indexed_times[1].as_secs_f64()*1000.0;
+                let fast=distinct_index_times[1].as_secs_f64()*1000.0;
                 println!("call-abi kind={label} symbols={count} old_ms={before:.3} indexed_ms={after:.3} speedup={:.2}x",before/after);
+                println!("call-abi-new kind={label} symbols={count} old_ms={before:.3} prior_cached_ms={after:.3} new_index_ms={fast:.3} speedup_vs_old={:.2}x speedup_vs_prior={:.2}x",before/fast,after/fast);
             }
         }
+    }
+
+    #[test]
+    fn audit_adaptive_call_catalog_preserves_few_and_many_target_semantics() {
+        let kind=|semantic_kind| (0..4096).find(|&value|
+            semantic(4,value)==semantic_kind).expect("native EDG type kind");
+        for count in [1_u32, 63, 64, 128] {
+            let mut il=Il::default();
+            il.types.extend([
+                crate::TypeDef {id:crate::TypeId(1),kind:kind(4),
+                    related_role:None,related:None},
+                crate::TypeDef {id:crate::TypeId(2),kind:kind(2),
+                    related_role:Some(3),related:Some(crate::TypeId(1))},
+            ]);
+            il.function_signatures.push(crate::FunctionSignature {
+                owner:crate::TypeId(2),prototyped:true,variadic:false,
+            });
+            let mut symbols=Vec::new();
+            for id in 1..=count {
+                let sym=crate::SymbolId(id);
+                il.symbols.push(crate::Symbol {
+                    id:sym,kind:1,name:format!("callee_{id}"),
+                });
+                il.symbol_types.push(crate::SymbolType {
+                    symbol:sym,ty:crate::TypeId(2),
+                });
+                symbols.extend([sym,sym]);
+            }
+            let catalog=direct_call_catalog(&il,&symbols).unwrap();
+            assert_eq!(catalog.len(),count as usize);
+            for id in 1..=count {
+                let sym=crate::SymbolId(id);
+                let legacy=direct_call_decl(&il,sym).unwrap();
+                let indexed=catalog.get(&sym).unwrap();
+                assert_eq!(legacy.symbol,indexed.symbol);
+                assert_eq!(legacy.name,indexed.name);
+                assert_eq!(legacy.abi,indexed.abi);
+            }
+            let nothing=direct_call_catalog(&il,&[]).unwrap();
+            assert!(nothing.is_empty());
+        }
+        assert!(compile_calls(&Il::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn audit_indexed_direct_call_preserves_legacy_validation_and_typerefs() {
+        let kind=|semantic_kind| (0..4096).find(|&value|
+            semantic(4,value)==semantic_kind).expect("pinned native EDG kind");
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef {id:crate::TypeId(1),kind:kind(4),
+                related_role:None,related:None},
+            crate::TypeDef {id:crate::TypeId(2),kind:kind(2),
+                related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef {id:crate::TypeId(3),kind:kind(2),
+                related_role:Some(3),related:Some(crate::TypeId(1))},
+            crate::TypeDef {id:crate::TypeId(4),kind:kind(3),
+                related_role:Some(4),related:Some(crate::TypeId(2))},
+        ]);
+        il.function_signatures.push(crate::FunctionSignature {
+            owner:crate::TypeId(2),prototyped:true,variadic:false,
+        });
+        for (id,sym_kind,name,ty) in [
+            (1,1,"ordinary",2),(2,1,"aliased",4),
+            (3,1,"not.valid",2),(4,2,"local_not_routine",2),
+            (5,1,"no_prototype",3),(6,1,"__sync_probe",2),
+            (7,1,"__atomic_probe",2),
+        ] {
+            il.symbols.push(crate::Symbol {
+                id:crate::SymbolId(id),kind:sym_kind,name:name.into(),
+            });
+            il.symbol_types.push(crate::SymbolType {
+                symbol:crate::SymbolId(id),ty:crate::TypeId(ty),
+            });
+        }
+        let mut index=DirectCallIndex::new(&il);
+        for id in [1,2] {
+            let symbol=crate::SymbolId(id);
+            let before=direct_call_decl(&il,symbol).unwrap();
+            let after=index.declaration(symbol).unwrap();
+            assert_eq!(before.name,after.name);
+            assert_eq!(before.symbol,after.symbol);
+            assert_eq!(before.abi,after.abi);
+        }
+        assert_eq!(index.abis.len(),1,"typedef-equivalent routines reuse one checked ABI");
+        for id in [3,4,5,6,7,999] {
+            let symbol=crate::SymbolId(id);
+            let old=format!("{:?}",direct_call_decl(&il,symbol).unwrap_err());
+            let new=format!("{:?}",index.declaration(symbol).unwrap_err());
+            assert_eq!(old,new,"different validation error for symbol {id}");
+        }
+        assert!(index.is_native_atomic(crate::SymbolId(7)));
+        assert!(!index.is_native_atomic(crate::SymbolId(6)));
+
+        // Old compile_calls() used any() over all duplicate symbol records
+        // for the native atomic exclusion; index construction must preserve
+        // that behavior until the Graph rejects malformed duplicate IDs.
+        let mut malformed=Il::default();
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(8),kind:1,name:"ordinary".into(),
+        });
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(8),kind:1,name:"__atomic_add".into(),
+        });
+        assert!(DirectCallIndex::new(&malformed)
+            .is_native_atomic(crate::SymbolId(8)));
+        malformed.symbols.clear();
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(9),kind:2,name:"variable".into(),
+        });
+        malformed.symbols.push(crate::Symbol {
+            id:crate::SymbolId(9),kind:1,name:"later_routine".into(),
+        });
+        let mut indexed=DirectCallIndex::new(&malformed);
+        let old=format!("{:?}",direct_call_decl(&malformed,crate::SymbolId(9)).unwrap_err());
+        let new=format!("{:?}",indexed.declaration(crate::SymbolId(9)).unwrap_err());
+        assert_eq!(old,new,"select the first matching routine, not first ID of any kind");
     }
 
     #[test]
