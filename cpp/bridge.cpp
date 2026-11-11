@@ -735,16 +735,24 @@ static bool constant_initializer_image(
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
         address.kind != abk_variable || address.variant.variable == nullptr ||
-        address.is_object_reflection || relocations->size() >= 256)
+        address.is_object_reflection)
       return false;
+    // The 4 KiB image bound and disjoint eight-byte slots already limit
+    // relocations to 512; an independent 256-entry cap rejected valid data.
+    static_assert(MAX_NATIVE_AGGREGATE_IMAGE_BYTES / 8 == 512);
     const auto delta = address.offset;
     if (delta < static_cast<decltype(delta)>(
                     std::numeric_limits<int64_t>::min()) ||
         delta > static_cast<decltype(delta)>(
                     std::numeric_limits<int64_t>::max()))
       return false;
+    // Check entire relocation ranges rather than only equal start offsets.
+    // Both start positions are inside the already validated 4 KiB image.
     for (const auto &prior : *relocations) {
-      if (prior.byte_offset == offset) return false;
+      if (!aggregate_subobject_fits(bytes.size(), prior.byte_offset, 8))
+        return false;
+      if (offset < prior.byte_offset + 8 && prior.byte_offset < offset + 8)
+        return false;
     }
     relocations->push_back({offset, address.variant.variable,
                             static_cast<int64_t>(delta)});

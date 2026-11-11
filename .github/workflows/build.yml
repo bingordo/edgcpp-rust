@@ -1888,6 +1888,44 @@ jobs:
             echo "Aggregate native object-image 4096/4097 boundary validation passed"
           )
 
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
       - name: Reject unsupported EDG constructs
         working-directory: edgcpp-rust
         env:
