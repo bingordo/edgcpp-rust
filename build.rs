@@ -2,6 +2,7 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=cpp/bridge.cpp");
+    println!("cargo:rerun-if-changed=cpp/wire_schema_generated.inc");
     println!("cargo:rerun-if-changed=tools/build_bridge.py");
     for key in ["EDGCPP_COMPILE_COMMANDS", "EDGCPP_LIB_DIR", "EDGCPP_SOURCE_DIR"] {
         println!("cargo:rerun-if-env-changed={key}");
