@@ -923,6 +923,8 @@ struct WireSeen {
     globals: HashSet<SymbolId>,
     cxx_records: HashSet<TypeId>,
     cxx_lifetimes: HashSet<TypeId>,
+    routine_symbols: HashSet<SymbolId>,
+    routine_link_names: HashSet<SymbolId>,
 }
 #[derive(Default)]
 struct Collector {
@@ -1657,6 +1659,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         13 => {
             let (Some(id), Some(kind), Some(name)) = (n(0), n(1), t(2)) else { return; };
+            if kind==1 {seen.routine_symbols.insert(SymbolId(id));}
             output.symbols.push(Symbol { id: SymbolId(id), kind, name });
         }
         61 => {
@@ -1664,8 +1667,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 (n(0),t(1),n(2)) else {return;};
             if symbol==0 || link_name.is_empty() || link_name.len()>4096 ||
                 link_name.contains('\0') || mangled>1 ||
-                !output.symbols.iter().any(|s|s.id==SymbolId(symbol) && s.kind==1) ||
-                output.symbol_link_names.iter().any(|s|s.symbol==SymbolId(symbol)) {
+                !seen.routine_symbols.contains(&SymbolId(symbol)) ||
+                !seen.routine_link_names.insert(SymbolId(symbol)) {
                 return;
             }
             output.symbol_link_names.push(SymbolLinkName {
@@ -2651,6 +2654,33 @@ mod audit_wire_identity_index_tests {
         }
     }
 
+    fn text(value:&'static [u8])->WireField {
+        WireField {data:value.as_ptr(),length:value.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send_routine(state:&mut Collector,id:u64) {
+        let fields=[number(id),number(1),text(b"f")];
+        unsafe {collect((state as *mut Collector).cast(),13,fields.as_ptr(),3,0);}
+    }
+    fn send_link_name(state:&mut Collector,id:u64) {
+        let fields=[number(id),text(b"_Z1fv"),number(1)];
+        unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
+    }
+    #[test]
+    fn unknown_or_duplicate_routine_link_names_fail_closed() {
+        let mut state=Collector::default();
+        send_link_name(&mut state,1);
+        assert!(state.malformed);
+        assert!(state.il.symbol_link_names.is_empty());
+
+        let mut state=Collector::default();
+        send_routine(&mut state,1);
+        send_link_name(&mut state,1);
+        assert!(!state.malformed);
+        send_link_name(&mut state,1);
+        assert!(state.malformed);
+        assert_eq!(state.il.symbol_link_names.len(),1);
+    }
+
     #[test]
     fn indexed_identity_decoding_scales_to_many_distinct_types() {
         let mut state=Collector::default();
@@ -2663,6 +2693,8 @@ mod audit_wire_identity_index_tests {
             send(&mut state,47,[id,3,0,0,0]);
             send(&mut state,63,[id,1]);
             send(&mut state,65,[id,1]);
+            send_routine(&mut state,id+8192);
+            send_link_name(&mut state,id+8192);
         }
         assert!(!state.malformed);
         assert!(!state.panicked);
@@ -2672,12 +2704,15 @@ mod audit_wire_identity_index_tests {
         assert_eq!(state.il.global_variables.len(),8192);
         assert_eq!(state.il.cxx_record_admissions.len(),8192);
         assert_eq!(state.il.cxx_scalar_lifetime_admissions.len(),8192);
+        assert_eq!(state.il.symbol_link_names.len(),8192);
         assert_eq!(state.seen.types.len(),8192);
         assert_eq!(state.seen.layouts.len(),8192);
         assert_eq!(state.seen.symbol_types.len(),8192);
         assert_eq!(state.seen.globals.len(),8192);
         assert_eq!(state.seen.cxx_records.len(),8192);
         assert_eq!(state.seen.cxx_lifetimes.len(),8192);
+        assert_eq!(state.seen.routine_symbols.len(),8192);
+        assert_eq!(state.seen.routine_link_names.len(),8192);
         assert_eq!(state.il.types[8191].id,TypeId(8192));
         // A duplicate after a large valid stream must still fail closed.
         send(&mut state,25,[8192,1]);
