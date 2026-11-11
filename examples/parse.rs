@@ -33,6 +33,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  init.scope,init.position,variable.map(|s|s.name.as_str()),
                  destructor.map(|s|s.name.as_str()),init.kind);
     }
+    for attr in &result.il.routine_attributes {
+        if attr.compiler_generated {
+            let routine = result.il.routine_identities.iter()
+                .find(|r|r.routine==attr.routine);
+            println!("EDG_GENERATED_ROUTINE symbol={} name={:?} defined={} special={}",
+                     attr.routine.0,routine.map(|r|r.function.as_str()),
+                     attr.defined,attr.special_kind);
+        }
+    }
     for entity in &result.il.entities {
         match entity {
             Entity::Routine { name, has_definition } =>

@@ -1985,7 +1985,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           (r->is_constexpr ? 64u : 0u) |
           (r->defined ? 128u : 0u) |
           (r->is_explicit_constructor ? 256u : 0u) |
-          (has_this ? 512u : 0u);
+          (has_this ? 512u : 0u) |
+          (r->compiler_generated ? 1024u : 0u);
       emit_record(22, {num(routine_symbol),
                        num(static_cast<unsigned>(r->special_kind)),
                        num(attributes)});

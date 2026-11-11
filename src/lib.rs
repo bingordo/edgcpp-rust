@@ -515,6 +515,8 @@ pub struct RoutineAttributes {
     pub defined: bool,
     pub explicit_constructor: bool,
     pub has_this_parameter: bool,
+    /// EDG-native compiler-generated function classification; never infer from spelling.
+    pub compiler_generated: bool,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -1682,7 +1684,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         22 => {
             let (Some(routine), Some(special_kind), Some(flags)) =
                 (n(0), n(1), n(2)) else { return; };
-            if flags & !1023 != 0 { return; }
+            if flags & !2047 != 0 { return; }
             output.routine_attributes.push(RoutineAttributes {
                 routine: SymbolId(routine), special_kind,
                 is_virtual: flags & 1 != 0, pure_virtual: flags & 2 != 0,
@@ -1692,6 +1694,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 defined: flags & 128 != 0,
                 explicit_constructor: flags & 256 != 0,
                 has_this_parameter: flags & 512 != 0,
+                compiler_generated: flags & 1024 != 0,
             });
         }
         21 => {
@@ -2014,7 +2017,7 @@ mod tests {
             data: std::ptr::null(), length: 0, value: 0, tag: 0,
         };
         let mut state = Collector::default();
-        let attributes = [number(3), number(1), number(1 | 4 | 8 | 512)];
+        let attributes = [number(3), number(1), number(1 | 4 | 8 | 512 | 1024)];
         unsafe {
             collect((&mut state as *mut Collector).cast(), 22,
                     attributes.as_ptr(), attributes.len(), 0);
@@ -2034,12 +2037,13 @@ mod tests {
         assert_eq!(attributes.special_kind, 1);
         assert!(attributes.is_virtual && attributes.is_override && attributes.is_final);
         assert!(attributes.has_this_parameter);
+        assert!(attributes.compiler_generated);
         assert!(!attributes.is_constexpr);
         let expr = &state.il.constructor_initializer_expressions[0];
         assert_eq!((expr.routine, expr.position), (SymbolId(3), 2));
         assert_eq!(expr.path, "0");
         assert_eq!(expr.type_id, Some(TypeId(9)));
-        let invalid_attributes = [number(3), number(1), number(1024)];
+        let invalid_attributes = [number(3), number(1), number(2048)];
         unsafe {
             collect((&mut state as *mut Collector).cast(), 22,
                     invalid_attributes.as_ptr(), invalid_attributes.len(), 0);

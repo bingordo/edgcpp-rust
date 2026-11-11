@@ -5022,7 +5022,7 @@ mod tests {
             overrides_base_member: true,
             is_inline: false, is_constexpr: false,
             defined: true, explicit_constructor: false,
-            has_this_parameter: true,
+            has_this_parameter: true, compiler_generated: false,
         };
         il.routine_attributes.push(attributes.clone());
         let graph = Graph::from_il(&il).unwrap();
