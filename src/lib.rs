@@ -1883,7 +1883,8 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     // not proof of an unqualified C type. Failed compilations can contain
     // partial diagnostic snapshots; preserve their original EDG status.
     if code == 0 &&
-        graph::Graph::validate_native_type_detail_coverage(&collector.il).is_err() {
+        (graph::Graph::validate_native_type_detail_coverage(&collector.il).is_err() ||
+         graph::Graph::validate_native_type_edge_coverage(&collector.il).is_err()) {
         return Err(Error::MalformedCallback);
     }
     Ok(Compilation { status: code, il: collector.il })
