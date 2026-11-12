@@ -266,6 +266,10 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
       if (variable->storage_class == sc_extern &&
           !variable->has_explicit_initializer &&
           !variable->is_thread_local &&
+          !variable->source_corresp.is_class_member &&
+          !variable->is_template_variable &&
+          !variable->is_prototype_instantiation &&
+          variable->source_corresp.name != nullptr &&
           variable_name_mangling_needed(const_cast<a_variable_ptr>(variable))) {
         const char *native = get_mangled_variable_name(
             const_cast<a_variable_ptr>(variable));
