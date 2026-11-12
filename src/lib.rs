@@ -146,6 +146,12 @@ pub struct Il {
     pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
     /// EDG's explicit file-scope init routine list in native order (if configured).
     pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
+    /// Exact routine-address link from EDG's lowering-generated __link object.
+    /// A startup root alone does not prove cleanup order or an ELF init plan.
+    pub file_scope_runtime_links: Vec<FileScopeRuntimeLink>,
+    /// Native generated __sti__ routine candidates in the non-patch mode.
+    /// EDG's own raw C backend classifier is used, not user source names.
+    pub file_scope_lowered_startup_routines: Vec<FileScopeLoweredStartupRoutine>,
     /// Native per-scope dynamic initializers in EDG's own list order.
     pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
@@ -361,6 +367,24 @@ pub struct FileScopeInitSchedule {
 pub struct FileScopeInitRoutine {
     pub position: u32,
     pub routine: SymbolId,
+}
+
+/// Lowered EDG compiler-created static __link object containing a native
+/// ck_address/abk_routine initializer. Neither object spellings nor mangled
+/// routine names are used to determine the routine identity.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeRuntimeLink {
+    pub link_variable: SymbolId,
+    pub startup_routine: SymbolId,
+}
+
+/// EDG lowered startup routine defined in the file scope. Priority zero
+/// means no explicit GNU init_priority; it does not imply ELF section order.
+/// Runtime destructor registration and cross-TU order remain unproven.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeLoweredStartupRoutine {
+    pub routine: SymbolId,
+    pub priority: u32,
 }
 
 /// Source-level initialization entries in an EDG file/namespace scope.
@@ -1086,6 +1110,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         11 => Some(il.type_details.len()),
         12 => Some(il.function_signatures.len()),
         71 => Some(il.routine_supplements.len()),
+        72 => Some(il.file_scope_runtime_links.len()),
+        73 => Some(il.file_scope_lowered_startup_routines.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1233,6 +1259,24 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if routine==0 || position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
+            });
+        }
+        72 => {
+            let (Some(link_variable),Some(startup_routine))=(n(0),n(1)) else {return;};
+            if link_variable==0 || startup_routine==0 ||
+               output.file_scope_runtime_links.iter().any(|r|
+                   r.link_variable==SymbolId(link_variable)) {return;}
+            output.file_scope_runtime_links.push(FileScopeRuntimeLink {
+                link_variable:SymbolId(link_variable),
+                startup_routine:SymbolId(startup_routine),
+            });
+        }
+        73 => {
+            let (Some(routine),Some(priority))=(n(0),n(1)) else {return;};
+            if routine==0 || output.file_scope_lowered_startup_routines.iter().any(|r|
+                r.routine==SymbolId(routine)) {return;}
+            output.file_scope_lowered_startup_routines.push(FileScopeLoweredStartupRoutine {
+                routine:SymbolId(routine),priority,
             });
         }
         1..=4 => {
@@ -3255,7 +3299,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=71_u32 {
+        for kind in 1..=73_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3282,10 +3326,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,283);
+        assert_eq!(total,287);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(72).is_none());
+        assert!(expected_wire_field_tag_masks(74).is_none());
     }
 
     #[test]
@@ -3428,6 +3472,75 @@ mod audit_scalar_type_identity_tests {
     }
 }
 
+
+#[cfg(test)]
+mod file_scope_lowered_startup_wire_tests {
+    use super::*;
+    fn send(state: &mut Collector, routine: u32, priority: u32) {
+        let fields=[routine,priority].map(|value| WireField {
+            data: std::ptr::null(), length: 0, value:u64::from(value),
+            tag:wire_tags::UNSIGNED,
+        });
+        unsafe { collect((state as *mut Collector).cast(),73,
+                         fields.as_ptr(),fields.len(),0); }
+    }
+    #[test]
+    fn native_startup_routines_retain_priorities_without_inventing_elf_order() {
+        let mut state=Collector::default();
+        send(&mut state,42,0);
+        send(&mut state,43,200);
+        assert!(!state.malformed);
+        assert_eq!(state.il.file_scope_lowered_startup_routines,
+            vec![FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0},
+                 FileScopeLoweredStartupRoutine{routine:SymbolId(43),priority:200}]);
+        assert!(state.il.file_scope_runtime_links.is_empty());
+        send(&mut state,43,201);
+        assert!(state.malformed,"duplicate startup definition accepted");
+    }
+    #[test]
+    fn rejects_missing_startup_routine_identity() {
+        let mut state=Collector::default();
+        send(&mut state,0,0);
+        assert!(state.malformed);
+    }
+}
+
+#[cfg(test)]
+mod file_scope_runtime_link_wire_tests {
+    use super::*;
+    fn send(state: &mut Collector, variable: u32, routine: u32) {
+        let fields = [variable, routine].map(|value| WireField {
+            data: std::ptr::null(), length: 0, value: u64::from(value),
+            tag: wire_tags::UNSIGNED,
+        });
+        unsafe { collect((state as *mut Collector).cast(), 72,
+                         fields.as_ptr(), fields.len(), 0); }
+    }
+    #[test]
+    fn retains_source_owned_startup_pointer_but_not_a_shutdown_certificate() {
+        let mut state = Collector::default();
+        send(&mut state, 25, 42);
+        assert!(!state.malformed);
+        assert_eq!(state.il.file_scope_runtime_links,
+                   vec![FileScopeRuntimeLink {
+                       link_variable: SymbolId(25),
+                       startup_routine: SymbolId(42),
+                   }]);
+        assert!(state.il.file_scope_init_routines.is_empty());
+        assert!(state.il.scope_dynamic_initializers.is_empty());
+        send(&mut state, 25, 43);
+        assert!(state.malformed, "duplicate link object was silently accepted");
+    }
+    #[test]
+    fn missing_native_identity_is_rejected() {
+        for (variable, routine) in [(0, 42), (25, 0)] {
+            let mut state = Collector::default();
+            send(&mut state, variable, routine);
+            assert!(state.malformed);
+            assert!(state.il.file_scope_runtime_links.is_empty());
+        }
+    }
+}
 
 #[cfg(test)]
 mod file_scope_init_schedule_wire_tests {

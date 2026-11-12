@@ -202,6 +202,13 @@ jobs:
             grep -q '^EDG status: 0$' cxx5-global-init-edg.out
             grep -q '^file scope init scheduler available=' cxx5-global-init-edg.out
             grep -q '^scope dynamic init entries=' cxx5-global-init-edg.out
+            # In the pinned non-patch configuration, EDG generates a
+            # compiler-created __sti__ routine, not a legacy __link object.
+            if ! grep -q '^file scope lowered startup routine=' cxx5-global-init-edg.out; then
+              cat cxx5-global-init-edg.out
+              echo 'C++5 missing EDG-generated startup routine evidence' >&2
+              exit 1
+            fi
             grep -q 'global_init_probe' cxx5-global-init-edg.out
             # Diagnostic output is not evidence of an executable init plan.
             grep -E '^(file scope init|scope dynamic init|EDG_GENERATED_ROUTINE)' \

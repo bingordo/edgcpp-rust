@@ -2066,6 +2066,24 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(22, {num(routine_symbol),
                        num(static_cast<unsigned>(r->special_kind)),
                        num(attributes)});
+      // EDG's active (non-patch) mode exposes the generated startup body
+      // as a compiler-created routine, not as an __link data object. EDG's
+      // C-generating backend identifies these functions through the raw
+      // IL_LOWERING_INIT_ROUTINE_PREFIX ("__sti__") name convention. Require
+      // the *native compiler-generated flag* and a definition; never use
+      // demangled user names or treat this as a complete .init_array plan.
+#if DO_IL_LOWERING && !SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
+      if (!C_mode() && r->compiler_generated &&
+          r->function_def_number != NULL_function_def_number &&
+          r->source_corresp.name != nullptr &&
+          std::string(r->source_corresp.name).rfind("__sti__", 0) == 0) {
+        uint32_t priority = 0;
+#if GNU_INIT_PRIORITY_ATTRIBUTE_ALLOWED
+        priority = static_cast<uint32_t>(r->init_priority);
+#endif
+        emit_record(73, {num(routine_symbol), num(priority)});
+      }
+#endif
       emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
@@ -2161,6 +2179,47 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
+      // In the optional legacy patch-startup mode EDG records its root
+      // as a *routine address* in its compiler-generated "__link" static
+      // aggregate. Preserve the exact native function pointer, rather than
+      // inferring __sti__ spellings. This records a startup root only; the
+      // runtime destruction-registration path is still unproven.
+#if DO_IL_LOWERING && USE_PATCH_INIT_STARTUP
+      if (!C_mode() && v->lowering_generated &&
+          v->storage_class == sc_static &&
+          std::string(source_name(v->source_corresp)) == "__link") {
+        a_constant_ptr aggregate = v->init_kind == initk_static ?
+                                   v->initializer.constant : nullptr;
+        if (aggregate == nullptr || aggregate->kind != ck_aggregate ||
+            aggregate->variant.aggregate.has_dynamic_init_component) {
+          report_incomplete_snapshot();
+        } else {
+          a_constant_ptr first = aggregate->variant.aggregate.first_constant;
+          a_constant_ptr middle = first != nullptr ? first->next : nullptr;
+          a_constant_ptr last = middle != nullptr ? middle->next : nullptr;
+          if (first == nullptr || middle == nullptr || last == nullptr ||
+              last->next != nullptr || middle->kind != ck_address ||
+              middle->variant.address.kind != abk_routine ||
+              middle->variant.address.variant.routine == nullptr ||
+              middle->variant.address.offset != 0 ||
+              middle->variant.address.one_past_the_end ||
+              middle->variant.address.is_object_reflection) {
+            report_incomplete_snapshot();
+          } else {
+            a_routine_ptr root = middle->variant.address.variant.routine;
+            const char *raw = source_name(root->source_corresp);
+            const uint32_t startup = emit_symbol(root, 1, raw != nullptr ?
+                declaration_name(root->source_corresp, true, true) :
+                "<EDG-lowered-startup-routine>");
+            if (startup != 0) {
+              emit_record(72, {num(symbol_id), num(startup)});
+            } else {
+              report_incomplete_snapshot();
+            }
+          }
+        }
+      }
+#endif
       // Only scalar static integer constants representable in i64 are
       // exported as values. Aggregate and dynamic initializers stay opaque.
       if (v->init_kind == initk_static && v->initializer.constant != nullptr &&
