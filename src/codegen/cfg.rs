@@ -2144,6 +2144,55 @@ fn checked_call_pointer_argument(
     }
 }
 
+/// Atomic pointee qualification is handled by the existing atomic
+/// lowering path, not by ordinary implicit C object-pointer conversions.
+/// Detect it before calling the CV-only compatibility checker. Do not treat
+/// missing/malformed type edges or a cyclic native type graph as permission
+/// to skip validation.
+fn pointer_type_contains_atomic_qualification(
+    il:&Il,ty:crate::TypeId,
+) -> Result<bool,CodegenError> {
+    let mut seen=HashSet::new();
+    let mut pending=vec![ty];
+    while let Some(id)=pending.pop() {
+        if !seen.insert(id) {
+            return Err(invalid("cyclic native pointer qualification relation"));
+        }
+        let def=il.types.iter().find(|t|t.id==id)
+            .ok_or_else(||invalid("missing native pointer qualification type"))?;
+        match semantic(4,def.kind) {
+            3 => {
+                if def.related_role!=Some(4) {
+                    return Err(invalid("invalid native qualified typeref role"));
+                }
+                let detail=il.type_details.iter().find(|d|d.owner==id)
+                    .ok_or_else(||invalid("missing native qualified type detail"))?;
+                let flags=detail.qualifiers
+                    .ok_or_else(||invalid("missing native qualifier flags"))?;
+                if flags & 8 != 0 {return Ok(true);}
+                pending.push(def.related.ok_or_else(||
+                    invalid("qualified native type is missing underlying type"))?);
+            }
+            5 => {
+                if def.related_role!=Some(1) {
+                    return Err(invalid("invalid native pointer pointee role"));
+                }
+                pending.push(def.related.ok_or_else(||
+                    invalid("native pointer missing pointee type"))?);
+            }
+            6 => {
+                if def.related_role!=Some(2) {
+                    return Err(invalid("invalid native array element role"));
+                }
+                pending.push(def.related.ok_or_else(||
+                    invalid("native array missing element type"))?);
+            }
+            _ => {},
+        }
+    }
+    Ok(false)
+}
+
 /// Check the *source* argument category independently of the machine ABI.
 ///
 /// An equal-size but unrelated C struct is not an interchangeable by-value
@@ -2260,7 +2309,15 @@ fn lower_c_expression(
     // the original C conversion for *every* such expression, while leaving
     // explicit source casts to their intentionally different C rules.
     if let Some(source)=graph.implicit_pointer_cast_source(id) {
-        checked_call_pointer_argument(il,expression_type_id(graph,id)?,source)?;
+        let target=expression_type_id(graph,id)?;
+        // C11 _Atomic pointer types use a separate checked lowering path.
+        // Preserve it rather than incorrectly interpreting atomic qualifiers
+        // as CV-only call compatibility. All ordinary C pointer casts still
+        // receive the original source-type validation here.
+        if !pointer_type_contains_atomic_qualification(il,source)?
+            && !pointer_type_contains_atomic_qualification(il,target)? {
+            checked_call_pointer_argument(il,target,source)?;
+        }
     }
     if let Some(site)=graph.call_at(id) {
         if site.first_argument!=1 || node.operands.is_empty() {
