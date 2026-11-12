@@ -11,7 +11,8 @@
     "RECORD_STATEMENT_SOURCE": 35,
     "RECORD_EXPRESSION_SOURCE": 37,
     "RECORD_IMPLICIT_POINTER_CAST": 70,
-    "RECORD_ROUTINE_SUPPLEMENT": 71
+    "RECORD_ROUTINE_SUPPLEMENT": 71,
+    "RECORD_FILE_SCOPE_RUNTIME_LINK": 72
   },
   "record_arities": {
     "1": 1,
@@ -84,7 +85,8 @@
     "68": 5,
     "69": 3,
     "70": 4,
-    "71": 3
+    "71": 3,
+    "72": 2
   },
   "record_field_tags": {
     "1": [
@@ -509,6 +511,10 @@
     ],
     "71": [
       "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "72": [
       "UNSIGNED",
       "UNSIGNED"
     ]
