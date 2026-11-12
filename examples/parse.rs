@@ -105,9 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  statement.function, statement.path, statement.parent, statement.kind);
     }
     for expression in &result.il.expressions {
-        println!("expression {} statement={} path={} parent={:?} kind={} op={:?} type={:?}",
+        println!("expression {} statement={} path={} parent={:?} kind={} op={:?} type={:?} type_id={:?}",
             expression.function, expression.statement_path, expression.path,
-            expression.parent, expression.kind, expression.operator, expression.type_kind);
+            expression.parent, expression.kind, expression.operator, expression.type_kind,
+            expression.type_id.map(|id|id.0));
         if let Some(value) = expression.constant_integer {
             println!("integer constant {} = {}", expression.function, value);
         }
@@ -190,7 +191,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  expr.parent, expr.kind, expr.operator);
     }
     for ty in &result.il.types {
-        println!("type id={} kind={} related={:?}", ty.id.0, ty.kind, ty.related);
+        println!("type id={} kind={} related={:?} role={:?}",
+            ty.id.0, ty.kind, ty.related, ty.related_role);
     }
     for field in &result.il.record_fields {
         println!("record field {} offset={} bit={} width={}",
