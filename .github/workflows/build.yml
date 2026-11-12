@@ -192,7 +192,7 @@ jobs:
             -o /tmp/cxx5-global-init-oracle
           /tmp/cxx5-global-init-oracle > /tmp/cxx5-global-init-oracle.out
           printf 'ctor\nmain\ndtor\n' > /tmp/cxx5-global-init-expected.out
-          test "$(cat /tmp/cxx5-global-init-oracle.out)" = "$(printf 'ctor\\nmain\\ndtor')"
+          test "$(cat /tmp/cxx5-global-init-oracle.out)" = "$(cat /tmp/cxx5-global-init-expected.out)"
           cp tests/fixtures/cxx5_global_init_owner.cpp ../edgcpp/build/gcc-release/
           (
             cd ../edgcpp/build/gcc-release
