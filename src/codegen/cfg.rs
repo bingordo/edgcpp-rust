@@ -2255,6 +2255,13 @@ fn lower_c_expression(
     locals: &[&crate::LocalVariable], il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
+    // An EDG-generated pointer cast may already have erased the source type
+    // before it reaches an assignment or return (not just a call). Validate
+    // the original C conversion for *every* such expression, while leaving
+    // explicit source casts to their intentionally different C rules.
+    if let Some(source)=graph.implicit_pointer_cast_source(id) {
+        checked_call_pointer_argument(il,expression_type_id(graph,id)?,source)?;
+    }
     if let Some(site)=graph.call_at(id) {
         if site.first_argument!=1 || node.operands.is_empty() {
             return Err(invalid("member call unsupported or missing callee"));
