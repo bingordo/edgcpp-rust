@@ -166,6 +166,9 @@ pub struct Il {
     /// EDG-authored counts of nonstatic record fields and direct bases.
     /// Mandatory for every native struct, class, or union on success.
     pub native_record_shapes: Vec<NativeRecordShape>,
+    /// Independent EDG-native event 75 proofs that events 49 (layout) and
+    /// 9 (fixed array bound) must be present or absent for each emitted type.
+    pub native_type_layout_proofs: Vec<NativeTypeLayoutProof>,
     /// Native EDG object sizes for complete types; not inferred from fields.
     pub type_object_sizes: Vec<TypeObjectSize>,
     /// Direct class bases in declaration order.
@@ -455,6 +458,15 @@ pub struct NativeRecordShape {
     pub owner: TypeId,
     pub field_count: u32,
     pub direct_base_count: u32,
+}
+
+/// Independent native EDG completeness proof for object layout and array bound.
+/// Neither presence flag is inferred from emitted wire records 49 or 9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeTypeLayoutProof {
+    pub owner: TypeId,
+    pub has_layout: bool,
+    pub has_fixed_array_bound: bool,
 }
 
 /// Native byte size of a complete EDG type. Alignment is not included.
@@ -1067,6 +1079,7 @@ struct WireSeen {
     cxx_lifetimes: HashSet<TypeId>,
     routine_supplements: HashSet<TypeId>,
     native_record_shapes: HashSet<TypeId>,
+    native_type_layout_proofs: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     /// Only source-correspondence routines and variables can carry raw linker names.
@@ -1126,6 +1139,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         72 => Some(il.file_scope_runtime_links.len()),
         73 => Some(il.file_scope_lowered_startup_routines.len()),
         74 => Some(il.native_record_shapes.len()),
+        75 => Some(il.native_type_layout_proofs.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1547,6 +1561,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(id), Some(elements)) = (n(0), fields[1].unsigned()) else { return; };
             output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
         }
+        75 => {
+            let (Some(owner),Some(has_layout),Some(has_fixed_array_bound)) =
+                (n(0),n(1),n(2)) else {return;};
+            if owner==0 || has_layout>1 || has_fixed_array_bound>1 ||
+               !seen.native_type_layout_proofs.insert(TypeId(owner)) {return;}
+            output.native_type_layout_proofs.push(NativeTypeLayoutProof {
+                owner:TypeId(owner), has_layout:has_layout==1,
+                has_fixed_array_bound:has_fixed_array_bound==1,
+            });
+        }
         74 => {
             let (Some(owner), Some(field_count), Some(direct_base_count)) =
                 (n(0),n(1),n(2)) else { return; };
@@ -1948,7 +1972,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
        graph::Graph::validate_native_routine_signature_coverage(il).is_err() ||
        graph::Graph::validate_native_class_admission_coverage(il).is_err() ||
-       graph::Graph::validate_native_record_shape_coverage(il).is_err() {
+       graph::Graph::validate_native_record_shape_coverage(il).is_err() ||
+       graph::Graph::validate_native_type_layout_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -2303,6 +2328,38 @@ mod tests {
             SymbolLinkName {symbol:SymbolId(12),link_name:"extern_c".into(),
                 edg_mangled:false},
         ]);
+    }
+
+    #[test]
+    fn decodes_unique_native_type_layout_proofs_and_boolean_flags() {
+        let number=|v|WireField {
+            data:std::ptr::null(),length:0,value:v,tag:wire_tags::UNSIGNED,
+        };
+        let fields=[number(11),number(1),number(0)];
+        let mut state=Collector::default();
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),75,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_type_layout_proofs,vec![
+            NativeTypeLayoutProof{owner:TypeId(11),has_layout:true,
+                has_fixed_array_bound:false},
+        ]);
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),75,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(state.malformed,"duplicate native type layout proof");
+        for values in [[0,0,0],[8,2,0],[8,0,2]] {
+            let mut bad=Collector::default();
+            let fields=values.map(number);
+            unsafe {
+                collect((&mut bad as *mut Collector).cast(),75,
+                        fields.as_ptr(),fields.len(),0);
+            }
+            assert!(bad.malformed,"invalid native type layout proof {values:?}");
+        }
     }
 
     #[test]
@@ -3354,7 +3411,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=74_u32 {
+        for kind in 1..=75_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3381,10 +3438,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,290);
+        assert_eq!(total,293);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(75).is_none());
+        assert!(expected_wire_field_tag_masks(76).is_none());
     }
 
     #[test]

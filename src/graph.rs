@@ -89,6 +89,9 @@ pub enum GraphError {
     InvalidRoutineParameterCount(TypeId),
     MissingNativeRecordAdmission(TypeId),
     MissingNativeRecordShape(TypeId),
+    MissingNativeTypeLayoutProof(TypeId),
+    InvalidNativeTypeLayoutProof(TypeId),
+    DuplicateNativeTypeLayoutProof(TypeId),
     InvalidNativeRecordShape(TypeId),
     DuplicateNativeRecordShape(TypeId),
     MissingNativeLifetimeAdmission(TypeId),
@@ -981,6 +984,61 @@ impl Graph {
             observed.sort_unstable();
             if observed.iter().enumerate().any(|(i,&position)| position!=i as u32) {
                 return Err(GraphError::InvalidTypeParameterPosition(owner));
+            }
+        }
+        Ok(())
+    }
+
+    /// A successful native EDG type emits exactly one event 75 describing
+    /// whether EDG promises event 49 (complete object size/alignment) and
+    /// event 9 (complete fixed array bound). An absent required layout/bound
+    /// is truncated metadata, not proof that a complete object is incomplete
+    /// or that a fixed array has no bound. Synthetic partial Il fixtures
+    /// remain supported by Graph::from_il.
+    pub fn validate_native_type_layout_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut kinds=HashMap::with_capacity(il.types.len());
+        for ty in &il.types {
+            if ty.id.0==0 {
+                return Err(GraphError::InvalidTypeId(ty.id));
+            }
+            if kinds.insert(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)}).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+        }
+        let mut proofs=HashMap::with_capacity(il.native_type_layout_proofs.len());
+        for proof in &il.native_type_layout_proofs {
+            let Some(&kind)=kinds.get(&proof.owner) else {
+                return Err(GraphError::MissingType(proof.owner));
+            };
+            if proof.has_fixed_array_bound && kind!=6 {
+                return Err(GraphError::InvalidNativeTypeLayoutProof(proof.owner));
+            }
+            if proofs.insert(proof.owner,
+                (proof.has_layout,proof.has_fixed_array_bound)).is_some() {
+                return Err(GraphError::DuplicateNativeTypeLayoutProof(proof.owner));
+            }
+        }
+        let mut layouts=std::collections::HashSet::new();
+        for layout in &il.type_object_sizes {
+            if !kinds.contains_key(&layout.owner) ||
+               layout.bytes==0 || layout.alignment==0 ||
+               !layouts.insert(layout.owner) {
+                return Err(GraphError::InvalidNativeTypeLayoutProof(layout.owner));
+            }
+        }
+        let mut bounds=std::collections::HashSet::new();
+        for bound in &il.array_bounds {
+            if kinds.get(&bound.array)!=Some(&6) ||
+               !bounds.insert(bound.array) {
+                return Err(GraphError::InvalidNativeTypeLayoutProof(bound.array));
+            }
+        }
+        for ty in &il.types {
+            let (expected_layout,expected_bound)=proofs.get(&ty.id).copied()
+                .ok_or(GraphError::MissingNativeTypeLayoutProof(ty.id))?;
+            if layouts.contains(&ty.id)!=expected_layout ||
+               bounds.contains(&ty.id)!=expected_bound {
+                return Err(GraphError::InvalidNativeTypeLayoutProof(ty.id));
             }
         }
         Ok(())
@@ -6766,6 +6824,72 @@ mod tests {
         il.function_signatures.clear();
         assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
             Err(GraphError::MissingFunctionSignature(TypeId(1))));
+    }
+
+    #[test]
+    fn audit_native_layout_proof_rejects_missing_bounds_and_object_layouts() {
+        let mut il=Il::default();
+        for (id,kind) in [(1,6),(2,7),(3,5)] {
+            il.types.push(TypeDef{id:TypeId(id),
+                kind:native_type_kind_for_semantic(kind),
+                related_role:None,related:None});
+        }
+        il.native_type_layout_proofs.extend([
+            crate::NativeTypeLayoutProof{owner:TypeId(1),
+                has_layout:true,has_fixed_array_bound:true},
+            crate::NativeTypeLayoutProof{owner:TypeId(2),
+                has_layout:true,has_fixed_array_bound:false},
+            crate::NativeTypeLayoutProof{owner:TypeId(3),
+                has_layout:false,has_fixed_array_bound:false},
+        ]);
+        il.type_object_sizes.extend([
+            crate::TypeObjectSize{owner:TypeId(1),bytes:16,alignment:4},
+            crate::TypeObjectSize{owner:TypeId(2),bytes:8,alignment:4},
+        ]);
+        il.array_bounds.push(crate::ArrayBound{array:TypeId(1),elements:4});
+        Graph::validate_native_type_layout_coverage(&il)
+            .expect("complete type, fixed array, incomplete type");
+        let mut lost_fixed_bound=il.clone();
+        lost_fixed_bound.array_bounds.clear();
+        assert_eq!(Graph::validate_native_type_layout_coverage(&lost_fixed_bound),
+            Err(GraphError::InvalidNativeTypeLayoutProof(TypeId(1))));
+        for lost_index in 0..2 {
+            let mut truncated=il.clone();
+            truncated.type_object_sizes.remove(lost_index);
+            assert_eq!(Graph::validate_native_type_layout_coverage(&truncated),
+                Err(GraphError::InvalidNativeTypeLayoutProof(TypeId(lost_index as u32+1))));
+        }
+        let mut missing_proof=il.clone();
+        missing_proof.native_type_layout_proofs.remove(2);
+        assert_eq!(Graph::validate_native_type_layout_coverage(&missing_proof),
+            Err(GraphError::MissingNativeTypeLayoutProof(TypeId(3))));
+        let mut duplicate=il.clone();
+        duplicate.native_type_layout_proofs.push(duplicate.native_type_layout_proofs[0]);
+        assert_eq!(Graph::validate_native_type_layout_coverage(&duplicate),
+            Err(GraphError::DuplicateNativeTypeLayoutProof(TypeId(1))));
+        let mut wrong_kind=il.clone();
+        wrong_kind.native_type_layout_proofs[1].has_fixed_array_bound=true;
+        assert_eq!(Graph::validate_native_type_layout_coverage(&wrong_kind),
+            Err(GraphError::InvalidNativeTypeLayoutProof(TypeId(2))));
+        let mut unexpected_bound=il.clone();
+        unexpected_bound.array_bounds.push(crate::ArrayBound{
+            array:TypeId(2),elements:9});
+        assert_eq!(Graph::validate_native_type_layout_coverage(&unexpected_bound),
+            Err(GraphError::InvalidNativeTypeLayoutProof(TypeId(2))));
+        let mut unexpected_layout=il.clone();
+        unexpected_layout.type_object_sizes.push(crate::TypeObjectSize{
+            owner:TypeId(3),bytes:8,alignment:8});
+        assert_eq!(Graph::validate_native_type_layout_coverage(&unexpected_layout),
+            Err(GraphError::InvalidNativeTypeLayoutProof(TypeId(3))));
+        let mut incomplete=Il::default();
+        incomplete.types.push(TypeDef{id:TypeId(3),
+            kind:native_type_kind_for_semantic(5),
+            related_role:None,related:None});
+        Graph::from_il(&incomplete).expect("partial synthetic IL remains supported");
+        incomplete.native_type_layout_proofs.push(crate::NativeTypeLayoutProof{
+            owner:TypeId(3),has_layout:false,has_fixed_array_bound:false});
+        Graph::validate_native_type_layout_coverage(&incomplete)
+            .expect("incomplete native type may lack object layout");
     }
 
     #[test]

@@ -627,6 +627,18 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       !type->incomplete) {
     emit_record(9, {num(id), num(type->variant.array.variant.number_of_elements)});
   }
+  // Independently certify whether event 49 and event 9 MUST be present.
+  // Absence otherwise looks like an incomplete type or variable array.
+  // Use the EDG source state, never the number of wire records emitted.
+  const bool native_has_layout =
+      !type->incomplete && type->size > 0 && type->alignment > 0;
+  const bool native_has_fixed_array_bound =
+      type->kind == tk_array && !type->incomplete &&
+      !type->variant.array.is_variable_size_array &&
+      !type->variant.array.is_template_dependent_size_array;
+  emit_record(RECORD_NATIVE_TYPE_LAYOUT_PROOF,
+              {num(id), num(native_has_layout ? 1 : 0),
+               num(native_has_fixed_array_bound ? 1 : 0)});
   return id;
 }
 
