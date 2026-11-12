@@ -1171,6 +1171,27 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
+  // EDG may wrap an illegal implicit C pointer conversion in eok_cast,
+  // leaving only the converted result type visible to the call operand
+  // validator (e.g. int** -> const int**). Preserve the original C pointer
+  // TypeId, but ONLY for genuinely compiler-generated casts. User-written
+  // explicit casts must retain their separate C semantics.
+  if (node->kind == enk_operation &&
+      node->variant.operation.kind == eok_cast &&
+      node->compiler_generated && node->type != nullptr) {
+    an_expr_node_ptr source = node->variant.operation.operands;
+    if (source != nullptr && source->type != nullptr &&
+        object_initializer_type(node->type) != nullptr &&
+        object_initializer_type(source->type) != nullptr &&
+        object_initializer_type(node->type)->kind == tk_pointer &&
+        object_initializer_type(source->type)->kind == tk_pointer) {
+      const uint32_t original = emit_type(source->type, depth + 1);
+      if (original != 0) {
+        emit_record(RECORD_IMPLICIT_POINTER_CAST,
+                    {txt(function), txt(stmt_path), txt(path), num(original)});
+      }
+    }
+  }
   const unsigned call_offset = call_argument_offset(node);
   if (call_offset != 0) {
     // Event 18: call site (function, statement, expression path,
