@@ -89,6 +89,7 @@ pub enum GraphError {
     InvalidArrayBoundOwner(TypeId),
     InvalidTypeDetailOwner(TypeId),
     InvalidTypeDetailFlags(TypeId),
+    MissingTypeDetail(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     InvalidRecordFieldOwner(TypeId),
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
@@ -786,6 +787,26 @@ impl TypeDependencyIndex {
 }
 
 impl Graph {
+    /// A successful *native EDG* snapshot contains one event 11 for every
+    /// emitted tk_pointer or tk_typeref, including aliases with qualifiers=0.
+    /// The general from_il constructor intentionally accepts partial hand-
+    /// built fixtures, so enforce completeness at the native compile boundary.
+    pub fn validate_native_type_detail_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut detailed=std::collections::HashSet::with_capacity(il.type_details.len());
+        for detail in &il.type_details {
+            if !detailed.insert(detail.owner) {
+                return Err(GraphError::DuplicateTypeDetail(detail.owner));
+            }
+        }
+        for ty in &il.types {
+            if matches!(unsafe {edgcpp_codegen_kind(4,ty.kind)},3|5)
+                && !detailed.contains(&ty.id) {
+                return Err(GraphError::MissingTypeDetail(ty.id));
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_il(il: &Il) -> Result<Self, GraphError> {
         let mut graph = Self::default();
         for (index, expr) in il.control_expressions.iter().enumerate() {
@@ -6151,6 +6172,43 @@ mod tests {
         il.record_fields.remove(1); // missing position zero
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldPosition(TypeId(1)));
+    }
+
+    #[test]
+    fn native_detail_coverage_rejects_missing_pointer_or_typeref_event() {
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef{id:TypeId(1),kind:native_type_kind_for_semantic(1),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(2),kind:native_type_kind_for_semantic(5),
+                related_role:Some(1),related:Some(TypeId(1))},
+            TypeDef{id:TypeId(3),kind:native_type_kind_for_semantic(3),
+                related_role:Some(4),related:Some(TypeId(1))},
+        ]);
+        // Incomplete synthetic test graphs may still be constructed. A real
+        // successful native callback must not drop either required event 11.
+        Graph::from_il(&il).expect("partial hand-built graph fixture");
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::MissingTypeDetail(TypeId(2))));
+        il.type_details.push(TypeDetail {
+            owner:TypeId(2),is_reference:false,
+            is_rvalue_reference:false,qualifiers:None,
+        });
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::MissingTypeDetail(TypeId(3))));
+        il.type_details.push(TypeDetail {
+            owner:TypeId(3),is_reference:false,
+            is_rvalue_reference:false,qualifiers:Some(0),
+        });
+        Graph::validate_native_type_detail_coverage(&il)
+            .expect("native pointer and plain typedef details are complete");
+        Graph::from_il(&il).expect("complete graph type details");
+        il.type_details[1].qualifiers=Some(1);
+        Graph::validate_native_type_detail_coverage(&il)
+            .expect("qualified typedef also supplies event 11");
+        il.type_details.push(il.type_details[1].clone());
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::DuplicateTypeDetail(TypeId(3))));
     }
 
     #[test]
