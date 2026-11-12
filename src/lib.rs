@@ -2084,6 +2084,18 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     if il.call_targets.len()!=il.calls.len() {
         return Err("native calls lack complete callee provenance");
     }
+    // Event 55 is emitted independently from the original ck_address /
+    // abk_routine callee expression, not inferred from call event 77.
+    // A purported constant routine target must agree with that source proof.
+    let mut addresses=std::collections::HashMap::with_capacity(
+        il.constant_routine_addresses.len());
+    for address in &il.constant_routine_addresses {
+        let key=(address.function.as_str(),address.statement_path.as_str(),
+                 address.path.as_str());
+        if addresses.insert(key,address.symbol).is_some() {
+            return Err("duplicate native constant routine address");
+        }
+    }
     let mut unique=HashSet::new();
     for proof in &il.call_targets {
         let key=(proof.function.as_str(),proof.statement_path.as_str(),
@@ -2113,9 +2125,26 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
         if expression.type_id!=proof.callee_type {
             return Err("native callee type disagrees with its EDG expression");
         }
-        if matches!(proof.form,CallTargetForm::DirectRoutine) &&
-            expression.symbol_id!=proof.callee_symbol {
-            return Err("native direct callee symbol disagrees with EDG expression");
+        let source_address=addresses.get(&(
+            proof.function.as_str(),proof.statement_path.as_str(),
+            callee_path.as_str())).copied();
+        match proof.form {
+            CallTargetForm::DirectRoutine => {
+                if expression.symbol_id!=proof.callee_symbol ||
+                   source_address.is_some() {
+                    return Err("native direct callee disagrees with EDG expression");
+                }
+            }
+            CallTargetForm::ConstantRoutineAddress => {
+                if source_address!=proof.callee_symbol {
+                    return Err("native constant callee lacks matching EDG address proof");
+                }
+            }
+            CallTargetForm::IndirectUnresolved => {
+                if proof.callee_symbol.is_some() || source_address.is_some() {
+                    return Err("native indirect callee contradicts EDG address proof");
+                }
+            }
         }
     }
     Ok(())
@@ -4063,6 +4092,48 @@ mod cxx5_call_target_wire_tests {
         let mut invalid=Collector::default();
         wire(&mut invalid,4,Some(70),None);
         assert!(invalid.malformed,"unrecognized callee form cannot be silently direct");
+    }
+    #[test]
+    fn constant_address_callee_requires_independent_matching_source_proof() {
+        let mut il=source();
+        il.expressions[0].symbol_id=None;
+        il.call_targets[0].form=CallTargetForm::ConstantRoutineAddress;
+        assert!(validate_native_call_target_coverage(&il).is_err(),
+            "event 77 alone cannot invent a source constant routine target");
+
+        il.constant_routine_addresses.push(ConstantRoutineAddress {
+            function:"main".into(),statement_path:"0.block.0".into(),
+            path:"0.0".into(),symbol:SymbolId(9),
+        });
+        assert!(validate_native_call_target_coverage(&il).is_ok());
+
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses[0].symbol=SymbolId(8);
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "source target must match the claimed callee routine");
+
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses[0].path="0.1".into();
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "unrelated constant addresses do not certify a call");
+
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses.push(
+            wrong.constant_routine_addresses[0].clone());
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "duplicate source address proof is ambiguous");
+
+        let mut wrong=il.clone();
+        wrong.call_targets[0].form=CallTargetForm::IndirectUnresolved;
+        wrong.call_targets[0].callee_symbol=None;
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "verified constant target cannot silently become unresolved");
+
+        let mut wrong=il;
+        wrong.call_targets[0].form=CallTargetForm::DirectRoutine;
+        wrong.expressions[0].symbol_id=Some(SymbolId(9));
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "the native direct-routine form cannot claim a constant address");
     }
     #[test]
     fn successful_snapshot_needs_exact_one_to_one_call_callee_identity() {
