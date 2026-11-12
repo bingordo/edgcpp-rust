@@ -218,6 +218,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("routine supplement id={} extra_info={} parameter_count={}",
             proof.owner.0,proof.has_extra_info,proof.parameter_count);
     }
+    for shape in &result.il.native_record_shapes {
+        println!("native record shape owner={} fields={} direct_bases={}",
+                 shape.owner.0,shape.field_count,shape.direct_base_count);
+    }
     for implicit in &result.il.implicit_pointer_casts {
         println!("implicit pointer cast {} statement={} path={} source_type={}",
             implicit.function,implicit.statement_path,

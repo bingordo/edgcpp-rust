@@ -163,6 +163,9 @@ pub struct Il {
     /// Known fixed array bounds (in elements).
     pub array_bounds: Vec<ArrayBound>,
     pub record_fields: Vec<RecordField>,
+    /// EDG-authored counts of nonstatic record fields and direct bases.
+    /// Mandatory for every native struct, class, or union on success.
+    pub native_record_shapes: Vec<NativeRecordShape>,
     /// Native EDG object sizes for complete types; not inferred from fields.
     pub type_object_sizes: Vec<TypeObjectSize>,
     /// Direct class bases in declaration order.
@@ -443,6 +446,15 @@ pub struct RecordField {
     pub bit_offset: u32,
     /// Zero for ordinary fields; nonzero for bit-fields.
     pub bit_width: u32,
+}
+
+/// Independent count proof for a native struct/class/union field list and
+/// direct C++ bases; counts are not reconstructed from wire edge records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeRecordShape {
+    pub owner: TypeId,
+    pub field_count: u32,
+    pub direct_base_count: u32,
 }
 
 /// Native byte size of a complete EDG type. Alignment is not included.
@@ -1054,6 +1066,7 @@ struct WireSeen {
     cxx_records: HashSet<TypeId>,
     cxx_lifetimes: HashSet<TypeId>,
     routine_supplements: HashSet<TypeId>,
+    native_record_shapes: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     /// Only source-correspondence routines and variables can carry raw linker names.
@@ -1112,6 +1125,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         71 => Some(il.routine_supplements.len()),
         72 => Some(il.file_scope_runtime_links.len()),
         73 => Some(il.file_scope_lowered_startup_routines.len()),
+        74 => Some(il.native_record_shapes.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1533,6 +1547,15 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(id), Some(elements)) = (n(0), fields[1].unsigned()) else { return; };
             output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
         }
+        74 => {
+            let (Some(owner), Some(field_count), Some(direct_base_count)) =
+                (n(0),n(1),n(2)) else { return; };
+            if owner==0 || field_count>10000 || direct_base_count>10000 ||
+                !seen.native_record_shapes.insert(TypeId(owner)) {return;}
+            output.native_record_shapes.push(NativeRecordShape {
+                owner:TypeId(owner),field_count,direct_base_count,
+            });
+        }
         10 => {
             let (Some(owner), Some(position), Some(ty), Some(name),
                  Some(byte_offset), Some(bit_offset), Some(bit_width), Some(symbol)) =
@@ -1924,7 +1947,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
        graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
        graph::Graph::validate_native_routine_signature_coverage(il).is_err() ||
-       graph::Graph::validate_native_class_admission_coverage(il).is_err() {
+       graph::Graph::validate_native_class_admission_coverage(il).is_err() ||
+       graph::Graph::validate_native_record_shape_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -2279,6 +2303,37 @@ mod tests {
             SymbolLinkName {symbol:SymbolId(12),link_name:"extern_c".into(),
                 edg_mangled:false},
         ]);
+    }
+
+    #[test]
+    fn decodes_native_record_shape_proof_with_unique_bounded_counts() {
+        let number=|value|WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let mut state=Collector::default();
+        let fields=[number(11),number(3),number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),74,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_record_shapes,vec![
+            NativeRecordShape{owner:TypeId(11),field_count:3,direct_base_count:1},
+        ]);
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),74,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(state.malformed,"duplicate record shape proof must fail closed");
+        for values in [[0,0,0],[7,10001,0],[7,0,10001]] {
+            let mut bad=Collector::default();
+            let fields=values.map(number);
+            unsafe {
+                collect((&mut bad as *mut Collector).cast(),74,
+                        fields.as_ptr(),fields.len(),0);
+            }
+            assert!(bad.malformed,"invalid native record shape {values:?}");
+        }
     }
 
     #[test]
@@ -3299,7 +3354,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=73_u32 {
+        for kind in 1..=74_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3326,10 +3381,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,287);
+        assert_eq!(total,290);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(74).is_none());
+        assert!(expected_wire_field_tag_masks(75).is_none());
     }
 
     #[test]

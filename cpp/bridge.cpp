@@ -467,6 +467,22 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     emit_record(49, {num(id), num(type->size), num(type->alignment)});
   }
   if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
+    // Native count proof is independent of event 10 and events 19/24/69.
+    // A lost last field or base must not appear as a shorter valid layout.
+    uint32_t field_count = 0;
+    for (a_field_ptr field = type->variant.class_struct_union.field_list;
+         field != nullptr && within_native_list_limit(field_count);
+         field = field->next, ++field_count) {}
+    uint32_t direct_base_count = 0;
+    if ((type->kind == tk_class || type->kind == tk_struct) &&
+        type->variant.class_struct_union.extra_info != nullptr) {
+      for (a_base_class_ptr base =
+               type->variant.class_struct_union.extra_info->direct_base_classes;
+           base != nullptr && within_native_list_limit(direct_base_count);
+           base = base->next_direct, ++direct_base_count) {}
+    }
+    emit_record(RECORD_NATIVE_RECORD_SHAPE,
+                {num(id), num(field_count), num(direct_base_count)});
     unsigned index = 0;
     for (a_field_ptr field = type->variant.class_struct_union.field_list;
          field != nullptr && within_native_list_limit(index); field = field->next, ++index) {
