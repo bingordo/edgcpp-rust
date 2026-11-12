@@ -8,6 +8,7 @@ enum : uint32_t {
   RECORD_SYMBOL = 13,
   RECORD_STATEMENT_SOURCE = 35,
   RECORD_EXPRESSION_SOURCE = 37,
+  RECORD_IMPLICIT_POINTER_CAST = 70,
 };
 
 // Validate field tags before emitting typed native wire records.
@@ -697,6 +698,16 @@ static bool wire_record_field_tags_valid(
   }
   case 69: {
     const uint8_t masks[] = {4, 4, 5};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 70: {
+    const uint8_t masks[] = {2, 2, 2, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {

@@ -189,6 +189,9 @@ pub struct Il {
     pub initializer_expressions: Vec<InitializerExpression>,
     /// Call sites with the operand index of the first explicit argument.
     pub calls: Vec<CallSite>,
+    /// Native compiler-generated pointer conversion wrappers, retaining the
+    /// operand source C type before EDG inserts an implicit cast.
+    pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
 }
 
 /// Per-compilation identity for a declaration or referenced symbol.
@@ -873,6 +876,17 @@ pub struct CallSite {
     pub first_argument: u32,
 }
 
+/// Original source-operand C type for a native compiler-generated pointer
+/// cast. Explicit source casts never emit this event. The expression path
+/// identifies the cast wrapper, not its child or surrounding call.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImplicitPointerCast {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub source_type: TypeId,
+}
+
 /// Owned namespace tree. Declarations are grouped by the namespace in
 /// which they occur; all strings and nodes are independent of EDG memory.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1118,6 +1132,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         52 => Some(il.global_aggregate_relocations.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
+        70 => Some(il.implicit_pointer_casts.len()),
         _ => None,
     }
 }
@@ -1753,6 +1768,15 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.base_classes.push(BaseClass {
                 derived: TypeId(derived), position, base: TypeId(base),
                 is_virtual: virtual_flag == 1,
+            });
+        }
+        70 => {
+            let (Some(function),Some(statement_path),Some(path),Some(source)) =
+                (t(0),t(1),t(2),n(3)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() || source==0 {return;}
+            output.implicit_pointer_casts.push(ImplicitPointerCast {
+                function,statement_path,path,source_type:TypeId(source),
             });
         }
         18 => {
@@ -3128,7 +3152,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=69_u32 {
+        for kind in 1..=70_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3155,10 +3179,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,276);
+        assert_eq!(total,280);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(70).is_none());
+        assert!(expected_wire_field_tag_masks(71).is_none());
     }
 
     #[test]

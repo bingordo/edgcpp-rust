@@ -144,6 +144,7 @@ pub enum GraphError {
     InvalidCallOperands { function: String, statement: String, path: String },
     InvalidCallOperandPath { function: String, statement: String, path: String },
     InvalidExpressionOperandPath { function: String, statement: String, path: String },
+    InvalidImplicitPointerCast { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -189,6 +190,7 @@ pub struct Graph {
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    implicit_pointer_cast_source_by_expression: HashMap<ExpressionId, TypeId>,
     routine_by_function: HashMap<String, SymbolId>,
     routine_function_by_id: HashMap<SymbolId, String>,
     label_definitions: HashMap<SymbolId, StatementId>,
@@ -1904,6 +1906,30 @@ impl Graph {
             node.children.sort_by(|a,b|
                 compare_tree_paths(&stmt_paths[a.0],&stmt_paths[b.0]));
         }
+        // Native event 70 names a compiler-generated eok_cast wrapper and
+        // its *pre-conversion* pointer source type. Do not infer this from a
+        // syntactically similar user-written cast: explicit C casts permit
+        // conversions that are forbidden as implicit call arguments.
+        for implicit in &il.implicit_pointer_casts {
+            let bad=||GraphError::InvalidImplicitPointerCast {
+                function:implicit.function.clone(),
+                statement:implicit.statement_path.clone(),path:implicit.path.clone(),
+            };
+            let key=(implicit.function.clone(),implicit.statement_path.clone(),
+                implicit.path.clone());
+            let id=*emap.get(&key).ok_or_else(bad)?;
+            let expr=&graph.expressions[id.0];
+            if unsafe {edgcpp_codegen_kind(2,expr.data.kind)}!=3 ||
+                expr.data.operator.map(|op|unsafe {edgcpp_codegen_kind(3,op)})!=Some(16) ||
+                expr.operands.len()!=1 ||
+                expr.data.type_id.is_none() ||
+                expr.operands.first().and_then(|child|
+                    graph.expressions[child.0].data.type_id)!=Some(implicit.source_type) ||
+                !type_map.contains_key(&implicit.source_type) ||
+                graph.implicit_pointer_cast_source_by_expression
+                    .insert(id,implicit.source_type).is_some()
+            {return Err(bad());}
+        }
         // Every call expression must carry its semantic operand offset.
         // A lost call-site event must not silently turn an ordinary function
         // call into an unrelated expression tree.
@@ -2868,6 +2894,9 @@ impl Graph {
     }
     pub fn signature(&self, id: TypeId) -> Option<&FunctionSignature> {
         self.function_signatures.iter().find(|s| s.owner == id)
+    }
+    pub fn implicit_pointer_cast_source(&self,id:ExpressionId) -> Option<TypeId> {
+        self.implicit_pointer_cast_source_by_expression.get(&id).copied()
     }
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
@@ -5676,6 +5705,57 @@ mod tests {
         assert_eq!(graph.call_callee(call), Some(ExpressionId(3)));
         assert_eq!(graph.call_object(call), Some(ExpressionId(2)));
         assert_eq!(graph.call_arguments(call), Some(&[ExpressionId(4), ExpressionId(1)][..]));
+    }
+
+    #[test]
+    fn validated_implicit_pointer_casts_retain_source_type_by_expression_id() {
+        let op=(0..4096).find(|&v|unsafe {edgcpp_codegen_kind(3,v)}==16)
+            .expect("native EDG eok_cast");
+        let expr_kind=(0..4096).find(|&v|unsafe {edgcpp_codegen_kind(2,v)}==3)
+            .expect("native EDG expression operation");
+        let mut il=Il::default();
+        let integer=native_type_kind_for_semantic(1);
+        let pointer=native_type_kind_for_semantic(5);
+        il.types.extend([
+            TypeDef{id:TypeId(1),kind:integer,related_role:None,related:None},
+            TypeDef{id:TypeId(2),kind:pointer,related_role:Some(1),related:Some(TypeId(1))},
+            TypeDef{id:TypeId(3),kind:pointer,related_role:Some(1),related:Some(TypeId(1))},
+        ]);
+        il.statements.push(Statement{
+            function:"f".into(),path:"0".into(),parent:None,kind:1,
+        });
+        for (path,parent,kind,operator,ty) in [
+            ("0",None,expr_kind,Some(op),TypeId(3)),
+            ("0.0",Some("0"),1,None,TypeId(2)),
+        ] {
+            il.expressions.push(Expression {
+                function:"f".into(),statement_path:"0".into(),
+                path:path.into(),parent:parent.map(str::to_owned),
+                kind,operator,type_id:Some(ty),
+                type_kind:None,reference:None,type_size:None,
+                type_alignment:None,constant_kind:None,constant_integer:None,
+                related_type_role:None,related_type_kind:None,symbol_id:None,
+            });
+        }
+        let record=crate::ImplicitPointerCast {
+            function:"f".into(),statement_path:"0".into(),
+            path:"0".into(),source_type:TypeId(2),
+        };
+        il.implicit_pointer_casts.push(record.clone());
+        let graph=Graph::from_il(&il).expect("native cast source provenance");
+        assert_eq!(graph.implicit_pointer_cast_source(ExpressionId(0)),Some(TypeId(2)));
+        assert_eq!(graph.implicit_pointer_cast_source(ExpressionId(1)),None);
+        il.implicit_pointer_casts[0].source_type=TypeId(3);
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidImplicitPointerCast{..})));
+        il.implicit_pointer_casts[0]=record.clone();
+        il.implicit_pointer_casts.push(record.clone());
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidImplicitPointerCast{..})));
+        il.implicit_pointer_casts.pop();
+        il.implicit_pointer_casts[0].path="0.99".into();
+        assert!(matches!(Graph::from_il(&il),
+            Err(GraphError::InvalidImplicitPointerCast{..})));
     }
 
     #[test]

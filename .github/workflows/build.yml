@@ -1679,6 +1679,47 @@ jobs:
             fi
           )
 
+      - name: Audit C11 source const/volatile call GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_cv_call_*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_cv_call.o --c11 audit_cv_call_legal.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_cv_call_legal.c audit_cv_call_driver.c -o gcc_audit_cv_call
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_cv_call.o audit_cv_call_driver.c -o edg_audit_cv_call
+            reference=$(./gcc_audit_cv_call)
+            actual=$(./edg_audit_cv_call)
+            test "$reference" = "audit C11 CV pointer calls pass"
+            if [ "$reference" != "$actual" ]; then
+              printf 'C11 CV call mismatch: GCC=%s EDG=%s\n' "$reference" "$actual" >&2
+              exit 1
+            fi
+            for source in audit_cv_call_bad_const.c audit_cv_call_bad_volatile.c audit_cv_call_bad_nested.c audit_cv_call_bad_void.c; do
+              if gcc -std=c11 -Wall -Wextra -pedantic-errors -fsyntax-only "$source" >audit_cv_gcc_bad.log 2>&1; then
+                echo "GCC unexpectedly accepts invalid C11 qualifier conversion: $source" >&2
+                exit 1
+              fi
+              rm -f audit_cv_bad.o audit_cv_bad.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen audit_cv_bad.o --c11 "$source" >audit_cv_bad.log 2>&1; then
+                if [ "$source" = audit_cv_call_bad_nested.c ]; then
+                  ../../../edgcpp-rust/target/debug/examples/parse --c11 "$source" >audit_cv_nested_il.log 2>&1 || true
+                  grep -E '^(expression audit_cv_bad_nested|implicit pointer cast audit_cv_bad_nested|type id=|type detail id=|symbol type name=|function signature)' audit_cv_nested_il.log | tail -n 160 || true
+                fi
+                echo "Native EDG lowering accepts invalid C11 qualifier conversion: $source" >&2
+                exit 1
+              fi
+              test ! -e audit_cv_bad.o
+            done
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:
