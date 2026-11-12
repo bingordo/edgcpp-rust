@@ -218,6 +218,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("routine supplement id={} extra_info={} parameter_count={}",
             proof.owner.0,proof.has_extra_info,proof.parameter_count);
     }
+    for proof in &result.il.native_scalar_proofs {
+        println!("native scalar proof owner={} integer={} float={} signed_i64={}",
+                 proof.owner.0,proof.integer_abi,proof.standard_float_abi,
+                 proof.signed_i64);
+    }
     for proof in &result.il.native_type_layout_proofs {
         println!("native type layout owner={} layout={} fixed_bound={}",
                  proof.owner.0,proof.has_layout,proof.has_fixed_array_bound);

@@ -608,6 +608,35 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
        (type->variant.float_kind == fk_double && type->size == 8))) {
     emit_record(57, {num(id), num(type->size * 8)});
   }
+  // Certify whether native records 43/46/57 must be present. These EDG
+  // predicates are independently evaluated from source type properties;
+  // never infer presence from the records that reached the Rust callback.
+  bool native_signed_i64 = false;
+  if (type->kind == tk_integer && !type->incomplete && type->size == 8 &&
+      !type->variant.integer.enum_type) {
+    const auto kind = type->variant.integer.int_kind;
+    native_signed_i64 = kind == ik_long;
+#if LONG_LONG_ALLOWED
+    native_signed_i64 = native_signed_i64 || kind == ik_long_long;
+#endif
+  }
+  bool native_integer_abi = false;
+  if (type->kind == tk_integer && !type->incomplete &&
+      !type->variant.integer.enum_type &&
+      (type->size == 1 || type->size == 2 ||
+       type->size == 4 || type->size == 8) &&
+      type->variant.integer.int_kind != ik_bit_precise &&
+      type->variant.integer.int_kind != ik_unsigned_bit_precise) {
+    native_integer_abi = type->variant.integer.int_kind < ik_last;
+  }
+  const bool native_float_abi =
+      type->kind == tk_float && !type->incomplete &&
+      ((type->variant.float_kind == fk_float && type->size == 4) ||
+       (type->variant.float_kind == fk_double && type->size == 8));
+  emit_record(RECORD_NATIVE_SCALAR_METADATA_PROOF,
+              {num(id), num((native_integer_abi ? 1 : 0) |
+                            (native_float_abi ? 2 : 0) |
+                            (native_signed_i64 ? 4 : 0))});
   // Type qualifiers and reference distinctions are native EDG properties,
   // rather than inferred from the printed type name.
   if (type->kind == tk_pointer || type->kind == tk_typeref) {

@@ -135,6 +135,9 @@ pub struct Il {
     pub c_integer_types: Vec<CIntegerType>,
     /// Source-verified standard C binary FP metadata (native wire event 57).
     pub c_float_types: Vec<CFloatType>,
+    /// One EDG-native event 76 per type certifies whether integer ABI,
+    /// standard float ABI and signed-i64 provenance records must exist.
+    pub native_scalar_proofs: Vec<NativeScalarMetadataProof>,
     /// Native IEEE standard floating-point literal images, event 58.
     pub float_constants: Vec<FloatConstant>,
     /// EDG dik_constant scalar FP initializer images, wire event 59.
@@ -308,6 +311,16 @@ pub struct CIntegerType {
     pub signed: bool,
     /// EDG's native bool_type bit, distinct from an unsigned byte.
     pub is_bool: bool,
+}
+/// Independent EDG-authoritative presence proof for scalar ABI records
+/// 46 (integer), 57 (standard FP) and 43 (signed i64). All three can be
+/// legitimately absent for unsupported/incomplete scalar type categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeScalarMetadataProof {
+    pub owner: TypeId,
+    pub integer_abi: bool,
+    pub standard_float_abi: bool,
+    pub signed_i64: bool,
 }
 /// Exact standard float/double source category, excluding long double, half,
 /// extended, imaginary and complex types even if their sizes coincide.
@@ -1080,6 +1093,7 @@ struct WireSeen {
     routine_supplements: HashSet<TypeId>,
     native_record_shapes: HashSet<TypeId>,
     native_type_layout_proofs: HashSet<TypeId>,
+    native_scalar_proofs: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     /// Only source-correspondence routines and variables can carry raw linker names.
@@ -1140,6 +1154,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         73 => Some(il.file_scope_lowered_startup_routines.len()),
         74 => Some(il.native_record_shapes.len()),
         75 => Some(il.native_type_layout_proofs.len()),
+        76 => Some(il.native_scalar_proofs.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1561,6 +1576,17 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(id), Some(elements)) = (n(0), fields[1].unsigned()) else { return; };
             output.array_bounds.push(ArrayBound { array: TypeId(id), elements });
         }
+        76 => {
+            let (Some(owner),Some(flags))=(n(0),n(1)) else {return;};
+            if owner==0 || flags & !7 != 0 ||
+               (flags & 4 != 0 && flags & 1 == 0) ||
+               (flags & 3 == 3) ||
+               !seen.native_scalar_proofs.insert(TypeId(owner)) {return;}
+            output.native_scalar_proofs.push(NativeScalarMetadataProof {
+                owner:TypeId(owner),integer_abi:flags&1!=0,
+                standard_float_abi:flags&2!=0,signed_i64:flags&4!=0,
+            });
+        }
         75 => {
             let (Some(owner),Some(has_layout),Some(has_fixed_array_bound)) =
                 (n(0),n(1),n(2)) else {return;};
@@ -1973,7 +1999,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_routine_signature_coverage(il).is_err() ||
        graph::Graph::validate_native_class_admission_coverage(il).is_err() ||
        graph::Graph::validate_native_record_shape_coverage(il).is_err() ||
-       graph::Graph::validate_native_type_layout_coverage(il).is_err() {
+       graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
+       graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -2328,6 +2355,38 @@ mod tests {
             SymbolLinkName {symbol:SymbolId(12),link_name:"extern_c".into(),
                 edg_mangled:false},
         ]);
+    }
+
+    #[test]
+    fn decodes_unique_native_scalar_abi_presence_proof() {
+        let number=|v|WireField {
+            data:std::ptr::null(),length:0,value:v,tag:wire_tags::UNSIGNED,
+        };
+        let mut state=Collector::default();
+        let fields=[number(11),number(5)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),76,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_scalar_proofs,vec![
+            NativeScalarMetadataProof{owner:TypeId(11),integer_abi:true,
+                standard_float_abi:false,signed_i64:true},
+        ]);
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),76,
+                    fields.as_ptr(),fields.len(),0);
+        }
+        assert!(state.malformed,"duplicate scalar presence proof must fail");
+        for values in [[0,0],[8,8],[8,3],[8,4],[8,7]] {
+            let mut bad=Collector::default();
+            let fields=values.map(number);
+            unsafe {
+                collect((&mut bad as *mut Collector).cast(),76,
+                        fields.as_ptr(),fields.len(),0);
+            }
+            assert!(bad.malformed,"invalid scalar proof {values:?}");
+        }
     }
 
     #[test]
@@ -3411,7 +3470,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=75_u32 {
+        for kind in 1..=76_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3438,10 +3497,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,293);
+        assert_eq!(total,295);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(76).is_none());
+        assert!(expected_wire_field_tag_masks(77).is_none());
     }
 
     #[test]

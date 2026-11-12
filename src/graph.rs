@@ -90,6 +90,9 @@ pub enum GraphError {
     MissingNativeRecordAdmission(TypeId),
     MissingNativeRecordShape(TypeId),
     MissingNativeTypeLayoutProof(TypeId),
+    MissingNativeScalarMetadataProof(TypeId),
+    InvalidNativeScalarMetadataProof(TypeId),
+    DuplicateNativeScalarMetadataProof(TypeId),
     InvalidNativeTypeLayoutProof(TypeId),
     DuplicateNativeTypeLayoutProof(TypeId),
     InvalidNativeRecordShape(TypeId),
@@ -1039,6 +1042,91 @@ impl Graph {
             if layouts.contains(&ty.id)!=expected_layout ||
                bounds.contains(&ty.id)!=expected_bound {
                 return Err(GraphError::InvalidNativeTypeLayoutProof(ty.id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Native event 76 certifies each EDG type's supported scalar ABI
+    /// records independently from the emitted records 43/46/57. A lost
+    /// scalar width/sign classification must invalidate the compilation
+    /// snapshot rather than appear as a legitimate unsupported type.
+    /// Keep hand-built partial Graph::from_il fixtures independent.
+    pub fn validate_native_scalar_metadata_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut kinds=HashMap::with_capacity(il.types.len());
+        for ty in &il.types {
+            if ty.id.0==0 {return Err(GraphError::InvalidTypeId(ty.id));}
+            if kinds.insert(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)}).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+        }
+        let mut proofs=HashMap::with_capacity(il.native_scalar_proofs.len());
+        for proof in &il.native_scalar_proofs {
+            let Some(&kind)=kinds.get(&proof.owner) else {
+                return Err(GraphError::MissingType(proof.owner));
+            };
+            if (proof.integer_abi && proof.standard_float_abi) ||
+               (proof.signed_i64 && !proof.integer_abi) ||
+               ((proof.integer_abi || proof.signed_i64) && kind!=1) ||
+               (proof.standard_float_abi && kind!=0) {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(proof.owner));
+            }
+            if proofs.insert(proof.owner,
+                (proof.integer_abi,proof.standard_float_abi,proof.signed_i64)).is_some() {
+                return Err(GraphError::DuplicateNativeScalarMetadataProof(proof.owner));
+            }
+        }
+        let mut integers=HashMap::with_capacity(il.c_integer_types.len());
+        for info in &il.c_integer_types {
+            if kinds.get(&info.id)!=Some(&1) ||
+               !matches!(info.bits,8|16|32|64) ||
+               (info.is_bool && (info.bits!=8 || info.signed)) ||
+               integers.insert(info.id,info).is_some() {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(info.id));
+            }
+        }
+        let mut floats=HashMap::with_capacity(il.c_float_types.len());
+        for info in &il.c_float_types {
+            // The current EDG semantic-kind mapper leaves tk_float as 0.
+            if kinds.get(&info.id)!=Some(&0) ||
+               !matches!(info.bits,32|64) ||
+               floats.insert(info.id,info).is_some() {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(info.id));
+            }
+        }
+        let mut signed=std::collections::HashSet::new();
+        for &id in &il.signed_i64_types {
+            if kinds.get(&id)!=Some(&1) || !signed.insert(id) {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(id));
+            }
+        }
+        let mut layouts=HashMap::with_capacity(il.type_object_sizes.len());
+        for layout in &il.type_object_sizes {
+            if layouts.insert(layout.owner,layout.bytes).is_some() {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(layout.owner));
+            }
+        }
+        for ty in &il.types {
+            let (want_integer,want_float,want_i64)=proofs.get(&ty.id).copied()
+                .ok_or(GraphError::MissingNativeScalarMetadataProof(ty.id))?;
+            if integers.contains_key(&ty.id)!=want_integer ||
+               floats.contains_key(&ty.id)!=want_float ||
+               signed.contains(&ty.id)!=want_i64 {
+                return Err(GraphError::InvalidNativeScalarMetadataProof(ty.id));
+            }
+            if let Some(integer)=integers.get(&ty.id) {
+                if layouts.get(&ty.id).is_some_and(|&bytes|
+                    bytes != u64::from(integer.bits)/8) ||
+                   (want_i64 && (!integer.signed || integer.bits!=64 ||
+                                  integer.is_bool)) {
+                    return Err(GraphError::InvalidNativeScalarMetadataProof(ty.id));
+                }
+            }
+            if let Some(float)=floats.get(&ty.id) {
+                if layouts.get(&ty.id).is_some_and(|&bytes|
+                    bytes != u64::from(float.bits)/8) {
+                    return Err(GraphError::InvalidNativeScalarMetadataProof(ty.id));
+                }
             }
         }
         Ok(())
@@ -6824,6 +6912,81 @@ mod tests {
         il.function_signatures.clear();
         assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
             Err(GraphError::MissingFunctionSignature(TypeId(1))));
+    }
+
+    #[test]
+    fn audit_native_scalar_metadata_proves_width_sign_and_standard_fp_presence() {
+        let mut il=Il::default();
+        for (id,semantic) in [(1,1),(2,1),(3,0),(4,5)] {
+            il.types.push(TypeDef {
+                id:TypeId(id),kind:if semantic==0 {u32::MAX} else {
+                    native_type_kind_for_semantic(semantic)
+                },related_role:None,related:None,
+            });
+        }
+        il.native_scalar_proofs.extend([
+            crate::NativeScalarMetadataProof{owner:TypeId(1),integer_abi:true,
+                standard_float_abi:false,signed_i64:true},
+            crate::NativeScalarMetadataProof{owner:TypeId(2),integer_abi:true,
+                standard_float_abi:false,signed_i64:false},
+            crate::NativeScalarMetadataProof{owner:TypeId(3),integer_abi:false,
+                standard_float_abi:true,signed_i64:false},
+            crate::NativeScalarMetadataProof{owner:TypeId(4),integer_abi:false,
+                standard_float_abi:false,signed_i64:false},
+        ]);
+        il.c_integer_types.extend([
+            crate::CIntegerType{id:TypeId(1),bits:64,signed:true,is_bool:false},
+            crate::CIntegerType{id:TypeId(2),bits:32,signed:false,is_bool:false},
+        ]);
+        il.c_float_types.push(crate::CFloatType{id:TypeId(3),bits:32});
+        il.signed_i64_types.push(TypeId(1));
+        il.type_object_sizes.extend([
+            crate::TypeObjectSize{owner:TypeId(1),bytes:8,alignment:8},
+            crate::TypeObjectSize{owner:TypeId(2),bytes:4,alignment:4},
+            crate::TypeObjectSize{owner:TypeId(3),bytes:4,alignment:4},
+        ]);
+        Graph::validate_native_scalar_metadata_coverage(&il)
+            .expect("native signed 64, unsigned 32 and standard float metadata");
+        let mut lost_signed=il.clone();
+        lost_signed.signed_i64_types.clear();
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&lost_signed),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(1))));
+        for index in 0..2 {
+            let mut lost=il.clone();
+            let id=lost.c_integer_types.remove(index).id;
+            assert_eq!(Graph::validate_native_scalar_metadata_coverage(&lost),
+                Err(GraphError::InvalidNativeScalarMetadataProof(id)));
+        }
+        let mut lost_float=il.clone();
+        lost_float.c_float_types.clear();
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&lost_float),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(3))));
+        let mut invalid_width=il.clone();
+        invalid_width.c_integer_types[0].bits=32;
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&invalid_width),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(1))));
+        let mut invalid_fp_width=il.clone();
+        invalid_fp_width.c_float_types[0].bits=64;
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&invalid_fp_width),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(3))));
+        let mut duplicate=il.clone();
+        duplicate.native_scalar_proofs.push(duplicate.native_scalar_proofs[0]);
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&duplicate),
+            Err(GraphError::DuplicateNativeScalarMetadataProof(TypeId(1))));
+        let mut missing_proof=il.clone();
+        missing_proof.native_scalar_proofs.pop();
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&missing_proof),
+            Err(GraphError::MissingNativeScalarMetadataProof(TypeId(4))));
+        let mut invalid_category=il.clone();
+        invalid_category.native_scalar_proofs[3].integer_abi=true;
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&invalid_category),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(4))));
+        let mut invalid_ambiguous=il.clone();
+        invalid_ambiguous.native_scalar_proofs[0].standard_float_abi=true;
+        assert_eq!(Graph::validate_native_scalar_metadata_coverage(&invalid_ambiguous),
+            Err(GraphError::InvalidNativeScalarMetadataProof(TypeId(1))));
+        let partial=Il { types:il.types, ..Il::default() };
+        Graph::from_il(&partial).expect("partial synthetic graphs need no native proof");
     }
 
     #[test]

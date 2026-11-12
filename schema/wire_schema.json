@@ -15,7 +15,8 @@
     "RECORD_FILE_SCOPE_RUNTIME_LINK": 72,
     "RECORD_FILE_SCOPE_LOWERED_STARTUP": 73,
     "RECORD_NATIVE_RECORD_SHAPE": 74,
-    "RECORD_NATIVE_TYPE_LAYOUT_PROOF": 75
+    "RECORD_NATIVE_TYPE_LAYOUT_PROOF": 75,
+    "RECORD_NATIVE_SCALAR_METADATA_PROOF": 76
   },
   "record_arities": {
     "1": 1,
@@ -92,7 +93,8 @@
     "72": 2,
     "73": 2,
     "74": 3,
-    "75": 3
+    "75": 3,
+    "76": 2
   },
   "record_field_tags": {
     "1": [
@@ -535,6 +537,10 @@
     ],
     "75": [
       "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "76": [
       "UNSIGNED",
       "UNSIGNED"
     ]

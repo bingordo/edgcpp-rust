@@ -2001,6 +2001,36 @@ jobs:
             ./gcc_type_layout_cpp
           )
 
+      - name: Audit C11 and C++20 native scalar ABI metadata completeness
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_scalar_proof_* ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_scalar_proof_c.c >audit_scalar_proof_c.il
+            echo 'Native C scalar proofs:'
+            grep '^native scalar proof ' audit_scalar_proof_c.il | head -n 35
+            grep -Eq '^native scalar proof owner=[0-9]+ integer=true float=false signed_i64=true$' audit_scalar_proof_c.il
+            grep -Eq '^native scalar proof owner=[0-9]+ integer=true float=false signed_i64=false$' audit_scalar_proof_c.il
+            grep -Eq '^native scalar proof owner=[0-9]+ integer=false float=true signed_i64=false$' audit_scalar_proof_c.il
+            gcc -std=c11 -O0 -Wall -Wextra -Werror audit_scalar_proof_c.c -o gcc_scalar_proof_c
+            ./gcc_scalar_proof_c
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_scalar_proof_cpp.cpp >audit_scalar_proof_cpp.il
+            echo 'Native C++ scalar proofs:'
+            grep '^native scalar proof ' audit_scalar_proof_cpp.il | head -n 35
+            grep -Eq '^native scalar proof owner=[0-9]+ integer=true float=false signed_i64=true$' audit_scalar_proof_cpp.il
+            grep -Eq '^native scalar proof owner=[0-9]+ integer=false float=true signed_i64=false$' audit_scalar_proof_cpp.il
+            g++ -std=c++20 -O0 -Wall -Wextra -Werror audit_scalar_proof_cpp.cpp -o gcc_scalar_proof_cpp
+            ./gcc_scalar_proof_cpp
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:
