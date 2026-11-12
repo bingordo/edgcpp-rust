@@ -3282,7 +3282,7 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,282);
+        assert_eq!(total,283);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
         assert!(expected_wire_field_tag_masks(72).is_none());
