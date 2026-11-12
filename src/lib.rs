@@ -146,6 +146,9 @@ pub struct Il {
     pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
     /// EDG's explicit file-scope init routine list in native order (if configured).
     pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
+    /// Exact routine-address link from EDG's lowering-generated __link object.
+    /// A startup root alone does not prove cleanup order or an ELF init plan.
+    pub file_scope_runtime_links: Vec<FileScopeRuntimeLink>,
     /// Native per-scope dynamic initializers in EDG's own list order.
     pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
@@ -361,6 +364,15 @@ pub struct FileScopeInitSchedule {
 pub struct FileScopeInitRoutine {
     pub position: u32,
     pub routine: SymbolId,
+}
+
+/// Lowered EDG compiler-created static __link object containing a native
+/// ck_address/abk_routine initializer. Neither object spellings nor mangled
+/// routine names are used to determine the routine identity.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeRuntimeLink {
+    pub link_variable: SymbolId,
+    pub startup_routine: SymbolId,
 }
 
 /// Source-level initialization entries in an EDG file/namespace scope.
@@ -1086,6 +1098,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         11 => Some(il.type_details.len()),
         12 => Some(il.function_signatures.len()),
         71 => Some(il.routine_supplements.len()),
+        72 => Some(il.file_scope_runtime_links.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1233,6 +1246,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if routine==0 || position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
+            });
+        }
+        72 => {
+            let (Some(link_variable),Some(startup_routine))=(n(0),n(1)) else {return;};
+            if link_variable==0 || startup_routine==0 ||
+               output.file_scope_runtime_links.iter().any(|r|
+                   r.link_variable==SymbolId(link_variable)) {return;}
+            output.file_scope_runtime_links.push(FileScopeRuntimeLink {
+                link_variable:SymbolId(link_variable),
+                startup_routine:SymbolId(startup_routine),
             });
         }
         1..=4 => {
@@ -3428,6 +3451,43 @@ mod audit_scalar_type_identity_tests {
     }
 }
 
+
+#[cfg(test)]
+mod file_scope_runtime_link_wire_tests {
+    use super::*;
+    fn send(state: &mut Collector, variable: u32, routine: u32) {
+        let fields = [variable, routine].map(|value| WireField {
+            data: std::ptr::null(), length: 0, value: u64::from(value),
+            tag: wire_tags::UNSIGNED,
+        });
+        unsafe { collect((state as *mut Collector).cast(), 72,
+                         fields.as_ptr(), fields.len(), 0); }
+    }
+    #[test]
+    fn retains_source_owned_startup_pointer_but_not_a_shutdown_certificate() {
+        let mut state = Collector::default();
+        send(&mut state, 25, 42);
+        assert!(!state.malformed);
+        assert_eq!(state.il.file_scope_runtime_links,
+                   vec![FileScopeRuntimeLink {
+                       link_variable: SymbolId(25),
+                       startup_routine: SymbolId(42),
+                   }]);
+        assert!(state.il.file_scope_init_routines.is_empty());
+        assert!(state.il.scope_dynamic_initializers.is_empty());
+        send(&mut state, 25, 43);
+        assert!(state.malformed, "duplicate link object was silently accepted");
+    }
+    #[test]
+    fn missing_native_identity_is_rejected() {
+        for (variable, routine) in [(0, 42), (25, 0)] {
+            let mut state = Collector::default();
+            send(&mut state, variable, routine);
+            assert!(state.malformed);
+            assert!(state.il.file_scope_runtime_links.is_empty());
+        }
+    }
+}
 
 #[cfg(test)]
 mod file_scope_init_schedule_wire_tests {
