@@ -1297,6 +1297,31 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     // Event 18: call site (function, statement, expression path,
     // first argument operand index). The callee is always operand zero.
     emit_record(18, {txt(function), txt(stmt_path), txt(path), num(call_offset)});
+    // Record 78 exports EDG's *original* member-call dispatch bit,
+    // not a reconstructed Itanium virtual slot. After lowering, eok_call
+    // may itself be the output of virtual dispatch, so kind=0 is
+    // "ordinary or already lowered" rather than proof of nonvirtual.
+    // 0=ordinary or lowered eok_call; 1=direct member-call node;
+    // 2=pointer-to-member call (its runtime target may be virtual).
+    uint32_t dispatch_kind = 0;
+    uint32_t virtual_dispatch = 0;
+    const an_expr_operator_kind original_op=node->variant.operation.kind;
+    switch (original_op) {
+      case eok_dot_member_call:
+      case eok_points_to_member_call:
+        dispatch_kind = 1;
+        virtual_dispatch = node->variant.operation.is_virtual_call ? 1 : 0;
+        break;
+      case eok_dot_pm_call:
+      case eok_points_to_pm_call:
+        dispatch_kind = 2;
+        break;
+      default: break;
+    }
+    emit_record(RECORD_NATIVE_CALL_DISPATCH, {
+        txt(function),txt(stmt_path),txt(path),
+        num(static_cast<unsigned>(original_op)),
+        num(dispatch_kind),num(virtual_dispatch)});
     // Event 77 is an *additional native-IL source ownership witness* for
     // the callee expression at this exact callsite. Classification:
     // 1 = direct EDG routine, 2 = exact ck_address/abk_routine constant,

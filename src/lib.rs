@@ -210,6 +210,9 @@ pub struct Il {
     /// Source-owned direct/indirect callee provenance, one native event 77
     /// per call. Indirect is intentionally *not* a virtual-call ABI proof.
     pub call_targets: Vec<CallTargetProvenance>,
+    /// EDG's source-owned member-call dispatch bit. Plain calls may be
+    /// lowered from virtual calls; their zero bit is not a nonvirtual proof.
+    pub call_dispatches: Vec<CallDispatchProvenance>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
     pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
@@ -971,6 +974,26 @@ pub struct CallTargetProvenance {
     pub callee_symbol:Option<SymbolId>,
 }
 
+/// Original native EDG call opcode classification, before bridge inference.
+/// OrdinaryOrLowered is deliberately *not* a nonvirtual certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallDispatchClass {
+    OrdinaryOrLowered,
+    Member,
+    PointerToMember,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallDispatchProvenance {
+    pub function:String,
+    pub statement_path:String,
+    pub path:String,
+    pub native_operator:u32,
+    pub class:CallDispatchClass,
+    /// Exact EDG operation.is_virtual_call flag, meaningful only for Member.
+    /// This is NOT a vtable slot, receiver adjustment, or live-object proof.
+    pub explicitly_virtual:bool,
+}
+
 /// Original source-operand C type for a native compiler-generated pointer
 /// cast. Explicit source casts never emit this event. The expression path
 /// identifies the cast wrapper, not its child or surrounding call.
@@ -1178,6 +1201,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         75 => Some(il.native_type_layout_proofs.len()),
         76 => Some(il.native_scalar_proofs.len()),
         77 => Some(il.call_targets.len()),
+        78 => Some(il.call_dispatches.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1949,6 +1973,27 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if first_argument != 1 && first_argument != 2 { return; }
             output.calls.push(CallSite { function, statement_path, path, first_argument });
         }
+        78 => {
+            let (Some(function),Some(statement_path),Some(path),
+                 Some(native_operator),Some(class),Some(virtual_flag)) =
+                (t(0),t(1),t(2),n(3),n(4),n(5)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() || virtual_flag>1 {return;}
+            let class=match class {
+                0=>CallDispatchClass::OrdinaryOrLowered,
+                1=>CallDispatchClass::Member,
+                2=>CallDispatchClass::PointerToMember,
+                _=>return,
+            };
+            // The native EDG virtual-call bit is defined ONLY on direct
+            // member-call operators; never infer it for an arbitrary
+            // lowered or pointer-to-member call.
+            if virtual_flag==1 && class!=CallDispatchClass::Member {return;}
+            output.call_dispatches.push(CallDispatchProvenance {
+                function,statement_path,path,native_operator,class,
+                explicitly_virtual:virtual_flag==1,
+            });
+        }
         77 => {
             let (Some(function),Some(statement_path),Some(path),Some(form)) =
                 (t(0),t(1),t(2),n(3)) else {return;};
@@ -2076,6 +2121,40 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// A mandatory second witness for every EDG call. Match the exact source
+/// call expression's opcode, not a textual routine name or guessed C++ ABI.
+fn validate_native_call_dispatch_coverage(il:&Il)->Result<(),&'static str> {
+    if il.call_dispatches.len()!=il.calls.len() {
+        return Err("native calls lack complete source dispatch provenance");
+    }
+    let mut unique=HashSet::new();
+    for proof in &il.call_dispatches {
+        let key=(proof.function.as_str(),proof.statement_path.as_str(),
+                 proof.path.as_str());
+        if !unique.insert(key) {return Err("duplicate native call dispatch");}
+        let site=il.calls.iter().find(|c|
+            c.function==proof.function &&
+            c.statement_path==proof.statement_path && c.path==proof.path)
+            .ok_or("orphaned native call dispatch")?;
+        let call=il.expressions.iter().find(|e|
+            e.function==proof.function &&
+            e.statement_path==proof.statement_path && e.path==proof.path)
+            .ok_or("native dispatch lacks exact call expression")?;
+        if call.operator!=Some(proof.native_operator) {
+            return Err("EDG call dispatch opcode disagrees with expression");
+        }
+        let expected=match proof.class {
+            CallDispatchClass::OrdinaryOrLowered=>1,
+            CallDispatchClass::Member|CallDispatchClass::PointerToMember=>2,
+        };
+        if site.first_argument!=expected ||
+            (proof.explicitly_virtual && proof.class!=CallDispatchClass::Member) {
+            return Err("native dispatch disagrees with operand/virtual semantics");
+        }
+    }
+    Ok(())
+}
+
 /// A successful native back_end() unconditionally exports event 64 with
 /// EDG's actual C/C++ mode. A lost event is a truncated snapshot, not a
 /// license to guess language semantics from source names or flags. This
@@ -2089,7 +2168,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_record_shape_coverage(il).is_err() ||
        graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
-       validate_native_call_target_coverage(il).is_err() {
+       validate_native_call_target_coverage(il).is_err() ||
+       validate_native_call_dispatch_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -4007,5 +4087,103 @@ mod cxx5_call_target_wire_tests {
         il.call_targets[0].callee_symbol=None;
         assert!(validate_native_call_target_coverage(&il).is_ok(),
             "unresolved source calls remain a distinct safe, non-authorized class");
+    }
+}
+
+#[cfg(test)]
+mod cxx5_native_call_dispatch_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,kind:u64,virtual_flag:u64) {
+        let function=b"std::locale::facet";
+        let statement=b"0.block.2";
+        let path=b"0";
+        let txt_field=|bytes:&[u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let unsigned=|value| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let fields=[
+            txt_field(function),txt_field(statement),txt_field(path),
+            unsigned(144),unsigned(kind),unsigned(virtual_flag),
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),78,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    fn source()->Il {
+        let mut il=Il::default();
+        il.calls.push(CallSite {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            first_argument:2,
+        });
+        il.expressions.push(Expression {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            parent:None,kind:3,operator:Some(144),
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,constant_integer:None,
+            related_type_role:None,related_type_kind:None,
+            type_id:None,symbol_id:None,
+        });
+        il.call_dispatches.push(CallDispatchProvenance {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            native_operator:144,class:CallDispatchClass::Member,
+            explicitly_virtual:true,
+        });
+        il
+    }
+
+    #[test]
+    fn native_virtual_bit_is_only_meaningful_for_explicit_member_calls() {
+        let mut v=Collector::default();
+        send(&mut v,1,1);
+        assert!(!v.malformed);
+        assert_eq!(v.il.call_dispatches.len(),1);
+        assert_eq!(v.il.call_dispatches[0].class,CallDispatchClass::Member);
+        assert!(v.il.call_dispatches[0].explicitly_virtual);
+        let mut ordinary=Collector::default();
+        send(&mut ordinary,0,0);
+        assert!(!ordinary.malformed);
+        assert_eq!(ordinary.il.call_dispatches[0].class,
+                   CallDispatchClass::OrdinaryOrLowered);
+        assert!(!ordinary.il.call_dispatches[0].explicitly_virtual);
+        for (kind,flag) in [(0,1),(2,1),(3,0),(1,2)] {
+            let mut bad=Collector::default();
+            send(&mut bad,kind,flag);
+            assert!(bad.malformed,"unsafe call dispatch ({kind},{flag}) admitted");
+        }
+    }
+
+    #[test]
+    fn duplicate_or_mismatched_call_opcodes_are_rejected_at_success_boundary() {
+        let il=source();
+        validate_native_call_dispatch_coverage(&il).unwrap();
+        let mut missing=il.clone();
+        missing.call_dispatches.clear();
+        assert!(validate_native_call_dispatch_coverage(&missing).is_err());
+        let mut duplicate=il.clone();
+        duplicate.call_dispatches.push(duplicate.call_dispatches[0].clone());
+        assert!(validate_native_call_dispatch_coverage(&duplicate).is_err());
+        let mut wrong_op=il.clone();
+        wrong_op.call_dispatches[0].native_operator=133;
+        assert!(validate_native_call_dispatch_coverage(&wrong_op).is_err());
+        let mut wrong_shape=il.clone();
+        wrong_shape.call_dispatches[0].class=CallDispatchClass::OrdinaryOrLowered;
+        wrong_shape.call_dispatches[0].explicitly_virtual=false;
+        assert!(validate_native_call_dispatch_coverage(&wrong_shape).is_err());
+        let mut incomplete=il.clone();
+        incomplete.expressions.clear();
+        assert!(validate_native_call_dispatch_coverage(&incomplete).is_err());
+        let mut not_proven=il.clone();
+        not_proven.call_dispatches[0].class=CallDispatchClass::Member;
+        not_proven.call_dispatches[0].explicitly_virtual=false;
+        assert!(validate_native_call_dispatch_coverage(&not_proven).is_ok(),
+            "false source virtual bit cannot authorize or forbid lowered dispatch");
     }
 }
