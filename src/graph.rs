@@ -796,14 +796,17 @@ impl Graph {
     /// even if its TypeDef record itself is otherwise well-formed.
     ///
     /// Do not enforce this in from_il, which also accepts deliberately
-    /// partial synthetic fixtures. Routine return edges are deliberately not
-    /// asserted here: C++ special functions may lack a normal return type.
+    /// partial synthetic fixtures. In proven native C mode, every routine
+    /// also has a return type (including void). C++ special member functions
+    /// may lack a normal return type, so retain their existing exception.
     pub fn validate_native_type_edge_coverage(il:&Il) -> Result<(),GraphError> {
         let ids: std::collections::HashSet<TypeId> =
             il.types.iter().map(|ty|ty.id).collect();
         for ty in &il.types {
             let expected=match unsafe {edgcpp_codegen_kind(4,ty.kind)} {
-                5=>1, 6=>2, 3=>4, _=>continue,
+                5=>1, 6=>2, 3=>4,
+                2 if il.cpp_language==Some(false)=>3,
+                _=>continue,
             };
             if ty.related_role!=Some(expected) ||
                !ty.related.is_some_and(|id| id.0!=0 && ids.contains(&id)) {
@@ -6341,7 +6344,20 @@ mod tests {
         il.types.push(TypeDef{id:TypeId(5),kind:native_routine_type_kind(),
             related_role:None,related:None});
         Graph::validate_native_type_edge_coverage(&il)
-            .expect("routine return relationship is not assumed mandatory");
+            .expect("routine return relationship is not assumed mandatory without mode proof");
+        il.cpp_language=Some(true);
+        Graph::validate_native_type_edge_coverage(&il)
+            .expect("C++ special member may lack normal return relation");
+        il.cpp_language=Some(false);
+        assert_eq!(Graph::validate_native_type_edge_coverage(&il),
+            Err(GraphError::MissingNativeTypeRelation(TypeId(5))));
+        il.types[4].related_role=Some(3);
+        il.types[4].related=Some(TypeId(1));
+        Graph::validate_native_type_edge_coverage(&il)
+            .expect("C function return type relation is complete");
+        il.types[4].related=Some(TypeId(999));
+        assert_eq!(Graph::validate_native_type_edge_coverage(&il),
+            Err(GraphError::MissingNativeTypeRelation(TypeId(5))));
     }
 
     #[test]
