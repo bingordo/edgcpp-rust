@@ -2161,6 +2161,47 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
+      // EDG's standard C++ lowering records the executable startup root
+      // as a *routine address* in its compiler-generated "__link" static
+      // aggregate. Preserve the exact native function pointer, rather than
+      // inferring __sti__ spellings. This records a startup root only; the
+      // runtime destruction-registration path is still unproven.
+#if DO_IL_LOWERING
+      if (!C_mode() && v->lowering_generated &&
+          v->storage_class == sc_static &&
+          std::string(source_name(v->source_corresp)) == "__link") {
+        a_constant_ptr aggregate = v->init_kind == initk_static ?
+                                   v->initializer.constant : nullptr;
+        if (aggregate == nullptr || aggregate->kind != ck_aggregate ||
+            aggregate->variant.aggregate.has_dynamic_init_component) {
+          report_incomplete_snapshot();
+        } else {
+          a_constant_ptr first = aggregate->variant.aggregate.first_constant;
+          a_constant_ptr middle = first != nullptr ? first->next : nullptr;
+          a_constant_ptr last = middle != nullptr ? middle->next : nullptr;
+          if (first == nullptr || middle == nullptr || last == nullptr ||
+              last->next != nullptr || middle->kind != ck_address ||
+              middle->variant.address.kind != abk_routine ||
+              middle->variant.address.variant.routine == nullptr ||
+              middle->variant.address.offset != 0 ||
+              middle->variant.address.one_past_the_end ||
+              middle->variant.address.is_object_reflection) {
+            report_incomplete_snapshot();
+          } else {
+            a_routine_ptr root = middle->variant.address.variant.routine;
+            const char *raw = source_name(root->source_corresp);
+            const uint32_t startup = emit_symbol(root, 1, raw != nullptr ?
+                declaration_name(root->source_corresp, true, true) :
+                "<EDG-lowered-startup-routine>");
+            if (startup != 0) {
+              emit_record(72, {num(symbol_id), num(startup)});
+            } else {
+              report_incomplete_snapshot();
+            }
+          }
+        }
+      }
+#endif
       // Only scalar static integer constants representable in i64 are
       // exported as values. Aggregate and dynamic initializers stay opaque.
       if (v->init_kind == initk_static && v->initializer.constant != nullptr &&
