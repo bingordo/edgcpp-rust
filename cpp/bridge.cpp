@@ -6,6 +6,7 @@
  */
 #include "fe_common.h"
 #include "const_ints.h"
+#include "lower_name.h"
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -253,7 +254,30 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
     // any demangled display/source key. A C++ overload or global data may have the same
     // display base as other routines; only the source correspondence
     // carries the name EDG has already mangled. Do not re-mangle it here.
-    if ((kind == 1 || kind == 2) && correspondence->name != nullptr &&
+    // For a C++ external data declaration (e.g. std::cout), EDG may
+    // retain only its unmangled source spelling until name lowering.
+    // Ask EDG's own target name mangler for the exact linker spelling;
+    // never invent an Itanium encoding in our bridge or Rust frontend.
+    // This API is read-only and does not change source_corresp.name.
+    bool emitted_native_link = false;
+#if TEMPLATE_LOOKUP_NEEDED || MODULE_ID_NEEDED
+    if (kind == 2) {
+      const auto *variable = reinterpret_cast<const a_variable *>(ptr);
+      if (variable->storage_class == sc_extern &&
+          !variable->has_explicit_initializer &&
+          !variable->is_thread_local &&
+          variable_name_mangling_needed(const_cast<a_variable_ptr>(variable))) {
+        const char *native = get_mangled_variable_name(
+            const_cast<a_variable_ptr>(variable));
+        if (native != nullptr && native[0] == '_' && native[1] == 'Z') {
+          emit_record(61, {num(id), txt(std::string(native)), num(1)});
+          emitted_native_link = true;
+        }
+      }
+    }
+#endif
+    if (!emitted_native_link &&
+        (kind == 1 || kind == 2) && correspondence->name != nullptr &&
         correspondence->name[0] != '\0') {
       unsigned already_mangled = 0;
 #if NEED_NAME_MANGLING
