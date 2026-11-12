@@ -201,6 +201,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for sig in &result.il.function_signatures {
         println!("function signature id={} prototyped={} variadic={}", sig.owner.0, sig.prototyped, sig.variadic);
     }
+    for implicit in &result.il.implicit_pointer_casts {
+        println!("implicit pointer cast {} statement={} path={} source_type={}",
+            implicit.function,implicit.statement_path,
+            implicit.path,implicit.source_type.0);
+    }
     for detail in &result.il.type_details {
         println!("type detail id={} reference={} rvalue={} qualifiers={:?}",
             detail.owner.0, detail.is_reference, detail.is_rvalue_reference, detail.qualifiers);
