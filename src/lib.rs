@@ -4089,3 +4089,101 @@ mod cxx5_call_target_wire_tests {
             "unresolved source calls remain a distinct safe, non-authorized class");
     }
 }
+
+#[cfg(test)]
+mod cxx5_native_call_dispatch_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,kind:u64,virtual_flag:u64) {
+        let function=b"std::locale::facet";
+        let statement=b"0.block.2";
+        let path=b"0";
+        let txt_field=|bytes:&[u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let unsigned=|value| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let fields=[
+            txt_field(function),txt_field(statement),txt_field(path),
+            unsigned(144),unsigned(kind),unsigned(virtual_flag),
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),78,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    fn source()->Il {
+        let mut il=Il::default();
+        il.calls.push(CallSite {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            first_argument:2,
+        });
+        il.expressions.push(Expression {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            parent:None,kind:3,operator:Some(144),
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,constant_integer:None,
+            related_type_role:None,related_type_kind:None,
+            type_id:None,symbol_id:None,
+        });
+        il.call_dispatches.push(CallDispatchProvenance {
+            function:"std::locale::facet".into(),
+            statement_path:"0.block.2".into(),path:"0".into(),
+            native_operator:144,class:CallDispatchClass::Member,
+            explicitly_virtual:true,
+        });
+        il
+    }
+
+    #[test]
+    fn native_virtual_bit_is_only_meaningful_for_explicit_member_calls() {
+        let mut v=Collector::default();
+        send(&mut v,1,1);
+        assert!(!v.malformed);
+        assert_eq!(v.il.call_dispatches.len(),1);
+        assert_eq!(v.il.call_dispatches[0].class,CallDispatchClass::Member);
+        assert!(v.il.call_dispatches[0].explicitly_virtual);
+        let mut ordinary=Collector::default();
+        send(&mut ordinary,0,0);
+        assert!(!ordinary.malformed);
+        assert_eq!(ordinary.il.call_dispatches[0].class,
+                   CallDispatchClass::OrdinaryOrLowered);
+        assert!(!ordinary.il.call_dispatches[0].explicitly_virtual);
+        for (kind,flag) in [(0,1),(2,1),(3,0),(1,2)] {
+            let mut bad=Collector::default();
+            send(&mut bad,kind,flag);
+            assert!(bad.malformed,"unsafe call dispatch ({kind},{flag}) admitted");
+        }
+    }
+
+    #[test]
+    fn duplicate_or_mismatched_call_opcodes_are_rejected_at_success_boundary() {
+        let il=source();
+        validate_native_call_dispatch_coverage(&il).unwrap();
+        let mut missing=il.clone();
+        missing.call_dispatches.clear();
+        assert!(validate_native_call_dispatch_coverage(&missing).is_err());
+        let mut duplicate=il.clone();
+        duplicate.call_dispatches.push(duplicate.call_dispatches[0].clone());
+        assert!(validate_native_call_dispatch_coverage(&duplicate).is_err());
+        let mut wrong_op=il.clone();
+        wrong_op.call_dispatches[0].native_operator=133;
+        assert!(validate_native_call_dispatch_coverage(&wrong_op).is_err());
+        let mut wrong_shape=il.clone();
+        wrong_shape.call_dispatches[0].class=CallDispatchClass::OrdinaryOrLowered;
+        wrong_shape.call_dispatches[0].explicitly_virtual=false;
+        assert!(validate_native_call_dispatch_coverage(&wrong_shape).is_err());
+        let mut incomplete=il.clone();
+        incomplete.expressions.clear();
+        assert!(validate_native_call_dispatch_coverage(&incomplete).is_err());
+        let mut not_proven=il.clone();
+        not_proven.call_dispatches[0].class=CallDispatchClass::Member;
+        not_proven.call_dispatches[0].explicitly_virtual=false;
+        assert!(validate_native_call_dispatch_coverage(&not_proven).is_ok(),
+            "false source virtual bit cannot authorize or forbid lowered dispatch");
+    }
+}
