@@ -172,6 +172,42 @@ jobs:
             echo "EDG_CXX2 gate=bounded_scalar_nontrivial_proof source=Marker result=pass"
           )
 
+      # Global C++ startup/shutdown is not yet an ELF admission certificate.
+      # Pin a real, two-TU behavioral oracle and exercise the EDG provenance
+      # snapshot. Do not infer constructor scheduling from global names.
+      - name: C++5 native global initialization provenance regression
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --example parse
+          g++ -std=c++17 -Wall -Wextra -pedantic -O0 \
+            tests/fixtures/cxx5_global_init_owner.cpp \
+            tests/fixtures/cxx5_global_init_driver.cpp \
+            -o /tmp/cxx5-global-init-oracle
+          /tmp/cxx5-global-init-oracle > /tmp/cxx5-global-init-oracle.out
+          printf 'ctor\nmain\ndtor\n' > /tmp/cxx5-global-init-expected.out
+          test "$(cat /tmp/cxx5-global-init-oracle.out)" = "$(cat /tmp/cxx5-global-init-expected.out)"
+          cp tests/fixtures/cxx5_global_init_owner.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c++17 \
+              cxx5_global_init_owner.cpp > cxx5-global-init-edg.out
+            grep -q '^EDG status: 0$' cxx5-global-init-edg.out
+            grep -q '^file scope init scheduler available=' cxx5-global-init-edg.out
+            grep -q '^scope dynamic init entries=' cxx5-global-init-edg.out
+            grep -q 'global_init_probe' cxx5-global-init-edg.out
+            # Diagnostic output is not evidence of an executable init plan.
+            grep -E '^(file scope init|scope dynamic init|EDG_GENERATED_ROUTINE)' \
+              cxx5-global-init-edg.out || true
+          )
+
       - name: Build bindings and tests
         working-directory: edgcpp-rust
         env:
