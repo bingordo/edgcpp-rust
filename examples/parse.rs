@@ -24,6 +24,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      symbol.map(|s|s.name.as_str()));
         }
     }
+    for startup in &result.il.file_scope_lowered_startup_routines {
+        let routine=result.il.symbols.iter().find(|s|s.id==startup.routine);
+        println!("file scope lowered startup routine={} priority={} name={:?}",
+                 startup.routine.0,startup.priority,
+                 routine.map(|s|s.name.as_str()));
+    }
     for link in &result.il.file_scope_runtime_links {
         let variable = result.il.symbols.iter().find(|s|s.id==link.link_variable);
         let routine = result.il.symbols.iter().find(|s|s.id==link.startup_routine);
