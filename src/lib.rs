@@ -554,12 +554,13 @@ pub struct FunctionSignature {
     pub variadic: bool,
 }
 
-/// Native tk_routine supplement presence, independent of event 12 and of
-/// whether the routine actually has any parameter type records (event 8).
+/// Independent native EDG proof of routine supplement presence and the
+/// source parameter-list length, not reconstructed from event 8 edges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRoutineSupplement {
     pub owner: TypeId,
     pub has_extra_info: bool,
+    pub parameter_count: u32,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -1507,11 +1508,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 is_rvalue_reference: flags & 2 != 0, qualifiers: n(2) });
         }
         71 => {
-            let (Some(owner), Some(present))=(n(0),n(1)) else {return;};
-            if owner==0 || present>1 ||
+            let (Some(owner), Some(present), Some(parameter_count)) =
+                (n(0),n(1),n(2)) else {return;};
+            if owner==0 || present>1 || parameter_count>10000 ||
+                (present==0 && parameter_count!=0) ||
                 !seen.routine_supplements.insert(TypeId(owner)) {return;}
             output.routine_supplements.push(NativeRoutineSupplement {
-                owner:TypeId(owner),has_extra_info:present==1,
+                owner:TypeId(owner),has_extra_info:present==1,parameter_count,
             });
         }
         12 => {
@@ -2240,14 +2243,14 @@ mod tests {
             data:std::ptr::null(),length:0,value,tag:2,
         };
         let mut state=Collector::default();
-        let proof=[number(7),number(1)];
+        let proof=[number(7),number(1),number(3)];
         unsafe {
             collect((&mut state as *mut Collector).cast(),71,
                     proof.as_ptr(),proof.len(),0);
         }
         assert!(!state.malformed);
         assert_eq!(state.il.routine_supplements,vec![
-            NativeRoutineSupplement {owner:TypeId(7),has_extra_info:true},
+            NativeRoutineSupplement {owner:TypeId(7),has_extra_info:true,parameter_count:3},
         ]);
         // Event 71 is unique per native TypeId; duplicate events cannot
         // silently override the first proof.
@@ -2257,16 +2260,21 @@ mod tests {
         }
         assert!(state.malformed);
         let mut state=Collector::default();
-        let proof=[number(8),number(0)];
+        let proof=[number(8),number(0),number(0)];
         unsafe {
             collect((&mut state as *mut Collector).cast(),71,
                     proof.as_ptr(),proof.len(),0);
         }
         assert_eq!(state.il.routine_supplements,vec![
-            NativeRoutineSupplement {owner:TypeId(8),has_extra_info:false},
+            NativeRoutineSupplement {owner:TypeId(8),has_extra_info:false,parameter_count:0},
         ]);
         assert!(!state.malformed);
-        for fields in [[number(9),number(2)],[number(0),number(1)]] {
+        for fields in [
+            [number(9),number(2),number(0)],
+            [number(0),number(1),number(0)],
+            [number(9),number(0),number(1)],
+            [number(9),number(1),number(10001)],
+        ] {
             let mut bad=Collector::default();
             unsafe {
                 collect((&mut bad as *mut Collector).cast(),71,
