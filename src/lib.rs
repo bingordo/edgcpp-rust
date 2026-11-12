@@ -3912,3 +3912,100 @@ mod cxx5_base_subobject_offset_wire_tests {
         assert!(state.il.base_subobject_offsets.is_empty());
     }
 }
+
+#[cfg(test)]
+mod cxx5_call_target_wire_tests {
+    use super::*;
+    fn wire(state:&mut Collector, form:u64, callee_type:Option<u64>,
+            callee_symbol:Option<u64>) {
+        let function=b"main";
+        let statement=b"0.block.0";
+        let path=b"0";
+        let mk_text=|bytes:&[u8]|WireField {
+            data:bytes.as_ptr(), length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let mk_num=|value:Option<u64>|WireField {
+            data:std::ptr::null(),length:0,value:value.unwrap_or_default(),
+            tag:if value.is_some() {wire_tags::UNSIGNED} else {wire_tags::ABSENT},
+        };
+        let fields=[
+            mk_text(function),mk_text(statement),mk_text(path),
+            mk_num(Some(form)),mk_num(callee_type),mk_num(callee_symbol),
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),77,
+                fields.as_ptr(),fields.len(),0);
+        }
+    }
+    fn source() -> Il {
+        let mut il=Il::default();
+        il.calls.push(CallSite {
+            function:"main".into(), statement_path:"0.block.0".into(),
+            path:"0".into(), first_argument:1,
+        });
+        il.expressions.push(Expression {
+            function:"main".into(),statement_path:"0.block.0".into(),
+            path:"0.0".into(),parent:Some("0".into()),kind:3,
+            operator:None,type_kind:None,reference:Some("f".into()),
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:None,related_type_role:None,
+            related_type_kind:None,type_id:Some(TypeId(70)),
+            symbol_id:Some(SymbolId(9)),
+        });
+        il.types.push(TypeDef {id:TypeId(70),kind:2,
+            related_role:None,related:None});
+        il.symbols.push(Symbol{id:SymbolId(9),kind:1,name:"f".into()});
+        il.call_targets.push(CallTargetProvenance {
+            function:"main".into(),statement_path:"0.block.0".into(),
+            path:"0".into(),form:CallTargetForm::DirectRoutine,
+            callee_type:Some(TypeId(70)),callee_symbol:Some(SymbolId(9)),
+        });
+        il
+    }
+    #[test]
+    fn direct_indirect_and_missing_symbol_are_distinct_on_wire() {
+        let mut direct=Collector::default();
+        wire(&mut direct,1,Some(70),Some(9));
+        assert!(!direct.malformed);
+        assert_eq!(direct.il.call_targets[0].form,CallTargetForm::DirectRoutine);
+        assert_eq!(direct.il.call_targets[0].callee_symbol,Some(SymbolId(9)));
+        let mut indirect=Collector::default();
+        wire(&mut indirect,3,Some(70),None);
+        assert!(!indirect.malformed);
+        assert_eq!(indirect.il.call_targets[0].form,CallTargetForm::IndirectUnresolved);
+        assert_eq!(indirect.il.call_targets[0].callee_symbol,None);
+        let mut invalid=Collector::default();
+        wire(&mut invalid,3,Some(70),Some(9));
+        assert!(invalid.malformed,"indirect callee must never invent routine identity");
+        let mut invalid=Collector::default();
+        wire(&mut invalid,1,Some(70),None);
+        assert!(invalid.malformed,"direct callee must own a routine source symbol");
+        let mut invalid=Collector::default();
+        wire(&mut invalid,4,Some(70),None);
+        assert!(invalid.malformed,"unrecognized callee form cannot be silently direct");
+    }
+    #[test]
+    fn successful_snapshot_needs_exact_one_to_one_call_callee_identity() {
+        let mut il=source();
+        assert!(validate_native_call_target_coverage(&il).is_ok());
+        il.call_targets.clear();
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets.push(il.call_targets[0].clone());
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].callee_type=Some(TypeId(99));
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].callee_symbol=Some(SymbolId(8));
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].path="0.1".into();
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].form=CallTargetForm::IndirectUnresolved;
+        il.call_targets[0].callee_symbol=None;
+        assert!(validate_native_call_target_coverage(&il).is_ok(),
+            "unresolved source calls remain a distinct safe, non-authorized class");
+    }
+}
