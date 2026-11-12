@@ -207,6 +207,9 @@ pub struct Il {
     pub initializer_expressions: Vec<InitializerExpression>,
     /// Call sites with the operand index of the first explicit argument.
     pub calls: Vec<CallSite>,
+    /// Source-owned direct/indirect callee provenance, one native event 77
+    /// per call. Indirect is intentionally *not* a virtual-call ABI proof.
+    pub call_targets: Vec<CallTargetProvenance>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
     pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
@@ -949,6 +952,25 @@ pub struct CallSite {
     pub first_argument: u32,
 }
 
+/// Callee classification from EDG's original operand-zero IL node.
+/// This does not include a vtable ABI, virtual slot, receiver adjustment or
+/// permission to execute an indirect call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallTargetForm {
+    DirectRoutine,
+    ConstantRoutineAddress,
+    IndirectUnresolved,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallTargetProvenance {
+    pub function:String,
+    pub statement_path:String,
+    pub path:String,
+    pub form:CallTargetForm,
+    pub callee_type:Option<TypeId>,
+    pub callee_symbol:Option<SymbolId>,
+}
+
 /// Original source-operand C type for a native compiler-generated pointer
 /// cast. Explicit source casts never emit this event. The expression path
 /// identifies the cast wrapper, not its child or surrounding call.
@@ -1155,6 +1177,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         74 => Some(il.native_record_shapes.len()),
         75 => Some(il.native_type_layout_proofs.len()),
         76 => Some(il.native_scalar_proofs.len()),
+        77 => Some(il.call_targets.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1926,6 +1949,27 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if first_argument != 1 && first_argument != 2 { return; }
             output.calls.push(CallSite { function, statement_path, path, first_argument });
         }
+        77 => {
+            let (Some(function),Some(statement_path),Some(path),Some(form)) =
+                (t(0),t(1),t(2),n(3)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() {return;}
+            let form=match form {
+                1=>CallTargetForm::DirectRoutine,
+                2=>CallTargetForm::ConstantRoutineAddress,
+                3=>CallTargetForm::IndirectUnresolved,
+                _=>return,
+            };
+            let callee_symbol=n(5).map(SymbolId);
+            if matches!(form,CallTargetForm::IndirectUnresolved) {
+                if callee_symbol.is_some() {return;}
+            } else if callee_symbol.is_none_or(|s|s.0==0) {return;}
+            let callee_type=n(4).map(TypeId);
+            if callee_type.is_some_and(|ty|ty.0==0) {return;}
+            output.call_targets.push(CallTargetProvenance {
+                function,statement_path,path,form,callee_type,callee_symbol,
+            });
+        }
         17 => {
             let (Some(owner), Some(path), Some(kind)) = (n(0), t(1), n(3)) else { return; };
             let parent = if fields[2].present() {
@@ -1988,6 +2032,50 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     }
 }
 
+/// The native bridge exports a separate callee classification for every
+/// source-owned call. A dropped, duplicated or cross-site record must not
+/// silently convert an unresolved pointer/vtable call into a direct call.
+fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
+    if il.call_targets.len()!=il.calls.len() {
+        return Err("native calls lack complete callee provenance");
+    }
+    let mut unique=HashSet::new();
+    for proof in &il.call_targets {
+        let key=(proof.function.as_str(),proof.statement_path.as_str(),
+                 proof.path.as_str());
+        if !unique.insert(key) ||
+            !il.calls.iter().any(|site|
+                site.function==proof.function &&
+                site.statement_path==proof.statement_path &&
+                site.path==proof.path) {
+            return Err("native callee provenance is ambiguous or orphaned");
+        }
+        if let Some(symbol)=proof.callee_symbol {
+            if !il.symbols.iter().any(|s|s.id==symbol && s.kind==1) {
+                return Err("native callee's direct routine identity is missing");
+            }
+        }
+        if let Some(ty)=proof.callee_type {
+            if !il.types.iter().any(|t|t.id==ty) {
+                return Err("native callee's source type is missing");
+            }
+        }
+        let callee_path=format!("{}.0",proof.path);
+        let expression=il.expressions.iter().find(|e|
+            e.function==proof.function &&
+            e.statement_path==proof.statement_path && e.path==callee_path)
+            .ok_or("native callee lacks original expression node")?;
+        if expression.type_id!=proof.callee_type {
+            return Err("native callee type disagrees with its EDG expression");
+        }
+        if matches!(proof.form,CallTargetForm::DirectRoutine) &&
+            expression.symbol_id!=proof.callee_symbol {
+            return Err("native direct callee symbol disagrees with EDG expression");
+        }
+    }
+    Ok(())
+}
+
 /// A successful native back_end() unconditionally exports event 64 with
 /// EDG's actual C/C++ mode. A lost event is a truncated snapshot, not a
 /// license to guess language semantics from source names or flags. This
@@ -2000,7 +2088,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_class_admission_coverage(il).is_err() ||
        graph::Graph::validate_native_record_shape_coverage(il).is_err() ||
        graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
-       graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() {
+       graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
+       validate_native_call_target_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -3821,5 +3910,102 @@ mod cxx5_base_subobject_offset_wire_tests {
         send(&mut state,0,0,Some(0));
         assert!(state.malformed);
         assert!(state.il.base_subobject_offsets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cxx5_call_target_wire_tests {
+    use super::*;
+    fn wire(state:&mut Collector, form:u64, callee_type:Option<u64>,
+            callee_symbol:Option<u64>) {
+        let function=b"main";
+        let statement=b"0.block.0";
+        let path=b"0";
+        let mk_text=|bytes:&[u8]|WireField {
+            data:bytes.as_ptr(), length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let mk_num=|value:Option<u64>|WireField {
+            data:std::ptr::null(),length:0,value:value.unwrap_or_default(),
+            tag:if value.is_some() {wire_tags::UNSIGNED} else {wire_tags::ABSENT},
+        };
+        let fields=[
+            mk_text(function),mk_text(statement),mk_text(path),
+            mk_num(Some(form)),mk_num(callee_type),mk_num(callee_symbol),
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),77,
+                fields.as_ptr(),fields.len(),0);
+        }
+    }
+    fn source() -> Il {
+        let mut il=Il::default();
+        il.calls.push(CallSite {
+            function:"main".into(), statement_path:"0.block.0".into(),
+            path:"0".into(), first_argument:1,
+        });
+        il.expressions.push(Expression {
+            function:"main".into(),statement_path:"0.block.0".into(),
+            path:"0.0".into(),parent:Some("0".into()),kind:3,
+            operator:None,type_kind:None,reference:Some("f".into()),
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:None,related_type_role:None,
+            related_type_kind:None,type_id:Some(TypeId(70)),
+            symbol_id:Some(SymbolId(9)),
+        });
+        il.types.push(TypeDef {id:TypeId(70),kind:2,
+            related_role:None,related:None});
+        il.symbols.push(Symbol{id:SymbolId(9),kind:1,name:"f".into()});
+        il.call_targets.push(CallTargetProvenance {
+            function:"main".into(),statement_path:"0.block.0".into(),
+            path:"0".into(),form:CallTargetForm::DirectRoutine,
+            callee_type:Some(TypeId(70)),callee_symbol:Some(SymbolId(9)),
+        });
+        il
+    }
+    #[test]
+    fn direct_indirect_and_missing_symbol_are_distinct_on_wire() {
+        let mut direct=Collector::default();
+        wire(&mut direct,1,Some(70),Some(9));
+        assert!(!direct.malformed);
+        assert_eq!(direct.il.call_targets[0].form,CallTargetForm::DirectRoutine);
+        assert_eq!(direct.il.call_targets[0].callee_symbol,Some(SymbolId(9)));
+        let mut indirect=Collector::default();
+        wire(&mut indirect,3,Some(70),None);
+        assert!(!indirect.malformed);
+        assert_eq!(indirect.il.call_targets[0].form,CallTargetForm::IndirectUnresolved);
+        assert_eq!(indirect.il.call_targets[0].callee_symbol,None);
+        let mut invalid=Collector::default();
+        wire(&mut invalid,3,Some(70),Some(9));
+        assert!(invalid.malformed,"indirect callee must never invent routine identity");
+        let mut invalid=Collector::default();
+        wire(&mut invalid,1,Some(70),None);
+        assert!(invalid.malformed,"direct callee must own a routine source symbol");
+        let mut invalid=Collector::default();
+        wire(&mut invalid,4,Some(70),None);
+        assert!(invalid.malformed,"unrecognized callee form cannot be silently direct");
+    }
+    #[test]
+    fn successful_snapshot_needs_exact_one_to_one_call_callee_identity() {
+        let mut il=source();
+        assert!(validate_native_call_target_coverage(&il).is_ok());
+        il.call_targets.clear();
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets.push(il.call_targets[0].clone());
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].callee_type=Some(TypeId(99));
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].callee_symbol=Some(SymbolId(8));
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].path="0.1".into();
+        assert!(validate_native_call_target_coverage(&il).is_err());
+        let mut il=source();
+        il.call_targets[0].form=CallTargetForm::IndirectUnresolved;
+        il.call_targets[0].callee_symbol=None;
+        assert!(validate_native_call_target_coverage(&il).is_ok(),
+            "unresolved source calls remain a distinct safe, non-authorized class");
     }
 }
