@@ -818,8 +818,23 @@ impl Graph {
     /// The general from_il constructor intentionally accepts partial hand-
     /// built fixtures, so enforce completeness at the native compile boundary.
     pub fn validate_native_type_detail_coverage(il:&Il) -> Result<(),GraphError> {
+        let kinds: HashMap<TypeId,u32> = il.types.iter()
+            .map(|ty|(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)})).collect();
         let mut detailed=std::collections::HashSet::with_capacity(il.type_details.len());
         for detail in &il.type_details {
+            let owner=*kinds.get(&detail.owner)
+                .ok_or(GraphError::MissingType(detail.owner))?;
+            if !matches!(owner,3|5) {
+                return Err(GraphError::InvalidTypeDetailOwner(detail.owner));
+            }
+            // Check native shape as well as completeness at the callback
+            // boundary, before a consumer decides whether to build a Graph.
+            if (owner==5 && (detail.qualifiers.is_some() ||
+                  (detail.is_rvalue_reference && !detail.is_reference))) ||
+               (owner==3 && (detail.qualifiers.is_none() ||
+                  detail.is_reference || detail.is_rvalue_reference)) {
+                return Err(GraphError::InvalidTypeDetailFlags(detail.owner));
+            }
             if !detailed.insert(detail.owner) {
                 return Err(GraphError::DuplicateTypeDetail(detail.owner));
             }
@@ -6364,6 +6379,26 @@ mod tests {
         il.type_details.push(il.type_details[1].clone());
         assert_eq!(Graph::validate_native_type_detail_coverage(&il),
             Err(GraphError::DuplicateTypeDetail(TypeId(3))));
+        il.type_details.pop();
+        il.type_details[0].is_rvalue_reference=true;
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::InvalidTypeDetailFlags(TypeId(2))));
+        il.type_details[0].is_reference=true;
+        Graph::validate_native_type_detail_coverage(&il)
+            .expect("well-formed native rvalue reference includes reference bit");
+        il.type_details[0].qualifiers=Some(0);
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::InvalidTypeDetailFlags(TypeId(2))));
+        il.type_details[0].qualifiers=None;
+        il.type_details[1].is_reference=true;
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::InvalidTypeDetailFlags(TypeId(3))));
+        il.type_details[1].is_reference=false;
+        il.type_details[0].is_reference=false;
+        il.type_details[0].is_rvalue_reference=false;
+        il.type_details[0].owner=TypeId(1);
+        assert_eq!(Graph::validate_native_type_detail_coverage(&il),
+            Err(GraphError::InvalidTypeDetailOwner(TypeId(1))));
     }
 
     #[test]
