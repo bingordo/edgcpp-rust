@@ -2066,6 +2066,24 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(22, {num(routine_symbol),
                        num(static_cast<unsigned>(r->special_kind)),
                        num(attributes)});
+      // EDG's active (non-patch) mode exposes the generated startup body
+      // as a compiler-created routine, not as an __link data object. EDG's
+      // C-generating backend identifies these functions through the raw
+      // IL_LOWERING_INIT_ROUTINE_PREFIX ("__sti__") name convention. Require
+      // the *native compiler-generated flag* and a definition; never use
+      // demangled user names or treat this as a complete .init_array plan.
+#if DO_IL_LOWERING && !SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
+      if (!C_mode() && r->compiler_generated &&
+          r->function_def_number != NULL_function_def_number &&
+          r->source_corresp.name != nullptr &&
+          std::string(r->source_corresp.name).rfind("__sti__", 0) == 0) {
+        uint32_t priority = 0;
+#if GNU_INIT_PRIORITY_ATTRIBUTE_ALLOWED
+        priority = static_cast<uint32_t>(r->init_priority);
+#endif
+        emit_record(73, {num(routine_symbol), num(priority)});
+      }
+#endif
       emit_record(1, {txt(name)}, r->function_def_number != NULL_function_def_number);
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
@@ -2161,12 +2179,12 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(14, {num(symbol_id), num(v->init_kind),
                        num(v->has_explicit_initializer ? 1 : 0),
                        num(v->uninitialized ? 1 : 0)});
-      // EDG's standard C++ lowering records the executable startup root
+      // In the optional legacy patch-startup mode EDG records its root
       // as a *routine address* in its compiler-generated "__link" static
       // aggregate. Preserve the exact native function pointer, rather than
       // inferring __sti__ spellings. This records a startup root only; the
       // runtime destruction-registration path is still unproven.
-#if DO_IL_LOWERING
+#if DO_IL_LOWERING && USE_PATCH_INIT_STARTUP
       if (!C_mode() && v->lowering_generated &&
           v->storage_class == sc_static &&
           std::string(source_name(v->source_corresp)) == "__link") {
