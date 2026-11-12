@@ -522,12 +522,20 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       }
     }
   }
-  // Event 71 is independent proof that EDG provided a routine supplement.
-  // Even for zero parameter types, the Rust side can now detect a missing
-  // event 12 instead of assuming an old-style non-prototype.
+  // Event 71 independently certifies the actual EDG parameter-list length.
+  // Do not derive this from the event 8 records: a missing final event 8
+  // would otherwise silently shorten a routine's native call signature.
   if (type->kind == tk_routine) {
+    const auto *info = type->variant.routine.extra_info;
+    uint32_t native_parameter_count = 0;
+    if (info != nullptr) {
+      for (a_param_type_ptr p = info->param_type_list;
+           p != nullptr && within_native_list_limit(native_parameter_count);
+           p = p->next, ++native_parameter_count) {}
+    }
     emit_record(RECORD_ROUTINE_SUPPLEMENT,
-                {num(id), num(type->variant.routine.extra_info != nullptr ? 1 : 0)});
+                {num(id), num(info != nullptr ? 1 : 0),
+                 num(native_parameter_count)});
   }
   // Preserve the calling interface shape, including variadic functions.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {

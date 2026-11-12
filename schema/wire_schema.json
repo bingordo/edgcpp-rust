@@ -84,7 +84,7 @@
     "68": 5,
     "69": 3,
     "70": 4,
-    "71": 2
+    "71": 3
   },
   "record_field_tags": {
     "1": [
@@ -508,6 +508,7 @@
       "UNSIGNED"
     ],
     "71": [
+      "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
     ]

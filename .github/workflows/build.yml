@@ -1887,7 +1887,7 @@ jobs:
             cd ../edgcpp/build/gcc-release
             source environment.sh
             ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_routine_signature_c.c >audit_routine_signature_c.il
-            grep -Eq '^routine supplement id=[0-9]+ extra_info=true$' audit_routine_signature_c.il
+            grep -Eq '^routine supplement id=[0-9]+ extra_info=true parameter_count=0$' audit_routine_signature_c.il
             grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_c.il
             ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_c.o --c11 audit_routine_signature_c.c
             gcc -std=c11 -O2 -Wall -Wextra -Werror audit_routine_signature_c.c audit_routine_signature_c_driver.c -o gcc_routine_signature_c
@@ -1898,7 +1898,7 @@ jobs:
             test "$expected" = "$observed"
 
             ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_routine_signature_cpp.cpp >audit_routine_signature_cpp.il
-            grep -Eq '^routine supplement id=[0-9]+ extra_info=true$' audit_routine_signature_cpp.il
+            grep -Eq '^routine supplement id=[0-9]+ extra_info=true parameter_count=0$' audit_routine_signature_cpp.il
             grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_cpp.il
             ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_cpp.o --c++20 audit_routine_signature_cpp.cpp
             g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_signature_cpp.cpp audit_routine_signature_cpp_driver.cpp -o gcc_routine_signature_cpp
@@ -1907,6 +1907,35 @@ jobs:
             observed=$(./edg_routine_signature_cpp)
             test "$expected" = "native C++ zero-parameter signature pass"
             test "$expected" = "$observed"
+          )
+
+      - name: Audit C11 and C++20 native routine parameter-list counts
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_routine_count_* ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_routine_count_c.c >audit_routine_count_c.il
+            for count in 1 2 3; do
+              grep -Eq "^routine supplement id=[0-9]+ extra_info=true parameter_count=${count}$" audit_routine_count_c.il
+            done
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=true$' audit_routine_count_c.il
+            gcc -std=c11 -O0 -Wall -Wextra -Werror audit_routine_count_c.c -o gcc_routine_count_c
+            ./gcc_routine_count_c
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_routine_count_cpp.cpp >audit_routine_count_cpp.il
+            for count in 1 2 3; do
+              grep -Eq "^routine supplement id=[0-9]+ extra_info=true parameter_count=${count}$" audit_routine_count_cpp.il
+            done
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=true$' audit_routine_count_cpp.il
+            g++ -std=c++20 -O0 -Wall -Wextra -Werror audit_routine_count_cpp.cpp -o gcc_routine_count_cpp
+            ./gcc_routine_count_cpp
           )
 
       - name: M6 typed direct-call ELF and GCC interoperability

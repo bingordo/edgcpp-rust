@@ -86,6 +86,7 @@ pub enum GraphError {
     InvalidFunctionSignatureOwner(TypeId),
     MissingFunctionSignature(TypeId),
     MissingRoutineSupplement(TypeId),
+    InvalidRoutineParameterCount(TypeId),
     MissingNativeRecordAdmission(TypeId),
     MissingNativeLifetimeAdmission(TypeId),
     InvalidNativeRecordAdmission(TypeId),
@@ -841,10 +842,9 @@ impl Graph {
         Ok(())
     }
 
-    /// Native event 71 is independent of event 12: every emitted tk_routine
-    /// has a proof recording whether EDG allocated its extra_info block.
-    /// In particular this catches a lost signature for f(void) with zero
-    /// parameter edges, which type-parameter validation cannot detect.
+    /// Event 71 independently certifies both extra_info presence and the
+    /// native EDG parameter-list length. A lost final event 8 must never
+    /// change the inferred signature of a successful compilation.
     pub fn validate_native_routine_signature_coverage(il:&Il) -> Result<(),GraphError> {
         let mut kinds=HashMap::with_capacity(il.types.len());
         for ty in &il.types {
@@ -859,7 +859,11 @@ impl Graph {
                 Some(&2)=>{},
                 _=>return Err(GraphError::InvalidRoutineSupplement(proof.owner)),
             }
-            if proofs.insert(proof.owner,proof.has_extra_info).is_some() {
+            if proof.parameter_count>10000 ||
+               (!proof.has_extra_info && proof.parameter_count!=0) {
+                return Err(GraphError::InvalidRoutineParameterCount(proof.owner));
+            }
+            if proofs.insert(proof.owner,(proof.has_extra_info,proof.parameter_count)).is_some() {
                 return Err(GraphError::DuplicateRoutineSupplement(proof.owner));
             }
         }
@@ -874,7 +878,7 @@ impl Graph {
         }
         for (&owner,&kind) in &kinds {
             if kind!=2 {continue;}
-            let present=*proofs.get(&owner)
+            let (present,_) = *proofs.get(&owner)
                 .ok_or(GraphError::MissingRoutineSupplement(owner))?;
             if present && !signatures.contains(&owner) {
                 return Err(GraphError::MissingFunctionSignature(owner));
@@ -883,12 +887,24 @@ impl Graph {
                 return Err(GraphError::InvalidRoutineSupplement(owner));
             }
         }
+        let mut positions: HashMap<TypeId,Vec<u32>>=HashMap::new();
         for param in &il.type_parameters {
             if !signatures.contains(&param.owner) {
                 return Err(GraphError::MissingFunctionSignature(param.owner));
             }
             if !kinds.contains_key(&param.ty) {
                 return Err(GraphError::MissingType(param.ty));
+            }
+            positions.entry(param.owner).or_default().push(param.position);
+        }
+        for (&owner, &(_,expected_count)) in &proofs {
+            let observed=positions.entry(owner).or_default();
+            if observed.len()!=expected_count as usize {
+                return Err(GraphError::InvalidRoutineParameterCount(owner));
+            }
+            observed.sort_unstable();
+            if observed.iter().enumerate().any(|(i,&position)| position!=i as u32) {
+                return Err(GraphError::InvalidTypeParameterPosition(owner));
             }
         }
         Ok(())
@@ -1235,6 +1251,12 @@ impl Graph {
             }
             if !proof.has_extra_info && signatures.contains(&proof.owner) {
                 return Err(GraphError::InvalidRoutineSupplement(proof.owner));
+            }
+            if (!proof.has_extra_info && proof.parameter_count!=0) ||
+               proof.parameter_count>10000 ||
+               parameter_positions.get(&proof.owner).map_or(0,Vec::len)
+                    != proof.parameter_count as usize {
+                return Err(GraphError::InvalidRoutineParameterCount(proof.owner));
             }
         }
         // Native parameter edges require event 12, even in a partial
@@ -6615,7 +6637,7 @@ mod tests {
         assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
             Err(GraphError::MissingRoutineSupplement(TypeId(1))));
         il.routine_supplements.push(crate::NativeRoutineSupplement {
-            owner:TypeId(1),has_extra_info:true,
+            owner:TypeId(1),has_extra_info:true,parameter_count:0,
         });
         Graph::validate_native_routine_signature_coverage(&il)
             .expect("zero-parameter prototype with EDG extra_info proof");
@@ -6662,11 +6684,71 @@ mod tests {
         il.type_parameters.push(TypeParameter {
             owner:TypeId(1),position:0,ty:TypeId(2),
         });
+        il.routine_supplements[0].parameter_count=1;
         Graph::validate_native_routine_signature_coverage(&il)
             .expect("parameter edges plus signature and proof");
         il.function_signatures.clear();
         assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
             Err(GraphError::MissingFunctionSignature(TypeId(1))));
+    }
+
+    #[test]
+    fn audit_native_parameter_count_rejects_dropped_tail_and_other_edges() {
+        let mut il=Il::default();
+        il.types.push(TypeDef {id:TypeId(1),kind:native_routine_type_kind(),
+            related_role:None,related:None});
+        il.types.push(TypeDef {id:TypeId(2),kind:native_type_kind_for_semantic(1),
+            related_role:None,related:None});
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
+        il.routine_supplements.push(crate::NativeRoutineSupplement {
+            owner:TypeId(1),has_extra_info:true,parameter_count:3,
+        });
+        for position in 0..3 {
+            il.type_parameters.push(TypeParameter {
+                owner:TypeId(1),position,ty:TypeId(2),
+            });
+        }
+        Graph::validate_native_routine_signature_coverage(&il)
+            .expect("complete three-parameter proof");
+        Graph::from_il(&il).expect("complete three-parameter graph");
+        for missing in 0..3 {
+            let mut truncated=il.clone();
+            truncated.type_parameters.remove(missing);
+            assert_eq!(Graph::validate_native_routine_signature_coverage(&truncated),
+                Err(GraphError::InvalidRoutineParameterCount(TypeId(1))));
+            assert!(Graph::from_il(&truncated).is_err(),
+                "dropped parameter position {missing} must fail closed");
+        }
+        let mut repeated=il.clone();
+        repeated.type_parameters[2].position=1;
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&repeated),
+            Err(GraphError::InvalidTypeParameterPosition(TypeId(1))));
+
+        let mut old_style=il.clone();
+        old_style.function_signatures[0].prototyped=false;
+        old_style.function_signatures[0].variadic=false;
+        Graph::validate_native_routine_signature_coverage(&old_style)
+            .expect("old-style supplement with preserved parameter list");
+
+        let mut variadic=il.clone();
+        variadic.function_signatures[0].variadic=true;
+        Graph::validate_native_routine_signature_coverage(&variadic)
+            .expect("variadic parameter list includes only declared fixed parameters");
+
+        let mut empty=il.clone();
+        empty.type_parameters.clear();
+        empty.routine_supplements[0].parameter_count=0;
+        Graph::validate_native_routine_signature_coverage(&empty)
+            .expect("zero-parameter prototype");
+        empty.routine_supplements[0].has_extra_info=false;
+        empty.function_signatures.clear();
+        Graph::validate_native_routine_signature_coverage(&empty)
+            .expect("native null supplement");
+        empty.routine_supplements[0].parameter_count=1;
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&empty),
+            Err(GraphError::InvalidRoutineParameterCount(TypeId(1))));
     }
 
     #[test]
