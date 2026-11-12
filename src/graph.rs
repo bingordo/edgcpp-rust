@@ -143,6 +143,7 @@ pub enum GraphError {
     InvalidCallOperands { function: String, statement: String, path: String },
     InvalidCallOperandPath { function: String, statement: String, path: String },
     InvalidExpressionOperandPath { function: String, statement: String, path: String },
+    InvalidImplicitPointerCast { function: String, statement: String, path: String },
 }
 
 /// A dense-ID graph retaining EDG's native kinds and the original paths.
@@ -188,6 +189,7 @@ pub struct Graph {
     pub dynamic_initializers: Vec<DynamicInitializer>,
     pub initializer_expressions: Vec<InitializerExpression>,
     pub calls: Vec<CallSite>,
+    implicit_pointer_cast_source_by_expression: HashMap<ExpressionId, TypeId>,
     routine_by_function: HashMap<String, SymbolId>,
     routine_function_by_id: HashMap<SymbolId, String>,
     label_definitions: HashMap<SymbolId, StatementId>,
@@ -1883,6 +1885,30 @@ impl Graph {
             node.children.sort_by(|a,b|
                 compare_tree_paths(&stmt_paths[a.0],&stmt_paths[b.0]));
         }
+        // Native event 70 names a compiler-generated eok_cast wrapper and
+        // its *pre-conversion* pointer source type. Do not infer this from a
+        // syntactically similar user-written cast: explicit C casts permit
+        // conversions that are forbidden as implicit call arguments.
+        for implicit in &il.implicit_pointer_casts {
+            let bad=||GraphError::InvalidImplicitPointerCast {
+                function:implicit.function.clone(),
+                statement:implicit.statement_path.clone(),path:implicit.path.clone(),
+            };
+            let key=(implicit.function.clone(),implicit.statement_path.clone(),
+                implicit.path.clone());
+            let id=*emap.get(&key).ok_or_else(bad)?;
+            let expr=&graph.expressions[id.0];
+            if unsafe {edgcpp_codegen_kind(2,expr.data.kind)}!=3 ||
+                expr.data.operator.map(|op|unsafe {edgcpp_codegen_kind(3,op)})!=Some(16) ||
+                expr.operands.len()!=1 ||
+                expr.data.type_id.is_none() ||
+                expr.operands.first().and_then(|child|
+                    graph.expressions[child.0].data.type_id)!=Some(implicit.source_type) ||
+                !type_map.contains_key(&implicit.source_type) ||
+                graph.implicit_pointer_cast_source_by_expression
+                    .insert(id,implicit.source_type).is_some()
+            {return Err(bad());}
+        }
         // Every call expression must carry its semantic operand offset.
         // A lost call-site event must not silently turn an ordinary function
         // call into an unrelated expression tree.
@@ -2847,6 +2873,9 @@ impl Graph {
     }
     pub fn signature(&self, id: TypeId) -> Option<&FunctionSignature> {
         self.function_signatures.iter().find(|s| s.owner == id)
+    }
+    pub fn implicit_pointer_cast_source(&self,id:ExpressionId) -> Option<TypeId> {
+        self.implicit_pointer_cast_source_by_expression.get(&id).copied()
     }
     pub fn type_detail(&self, id: TypeId) -> Option<&TypeDetail> {
         self.type_details.iter().find(|d| d.owner == id)
