@@ -6218,3 +6218,46 @@ mod audit_call_argument_shape_tests {
         assert!(!checked(&il,9,28),"dangling pointer pointee must fail closed");
     }
 }
+
+#[cfg(test)]
+mod audit_implicit_pointer_cast_qualification_tests {
+    use super::*;
+
+    fn kind(semantic_kind:u32)->u32 {
+        (0..128).find(|&candidate|semantic(4,candidate)==semantic_kind)
+            .expect("native EDG C type kind")
+    }
+
+    #[test]
+    fn differentiates_native_atomic_and_cv_pointer_cast_types() {
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(1),kind:kind(1),
+                related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(2),kind:kind(3),
+                related_role:Some(4),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(3),kind:kind(5),
+                related_role:Some(1),related:Some(crate::TypeId(2))},
+        ]);
+        il.type_details.push(crate::TypeDetail {
+            owner:crate::TypeId(2),is_reference:false,
+            is_rvalue_reference:false,qualifiers:Some(8),
+        });
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap());
+        il.type_details[0].qualifiers=Some(1 | 2);
+        assert!(!pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap(),
+            "ordinary const+volatile must not bypass C pointer checking");
+        il.type_details[0].qualifiers=Some(0);
+        assert!(!pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap());
+        il.type_details.clear();
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).is_err(),
+            "missing typeref qualifier records cannot bypass validation");
+        il.type_details.push(crate::TypeDetail{
+            owner:crate::TypeId(2),is_reference:false,
+            is_rvalue_reference:false,qualifiers:Some(0),
+        });
+        il.types[1].related=Some(crate::TypeId(2));
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).is_err(),
+            "cyclic typeref chain cannot bypass validation");
+    }
+}
