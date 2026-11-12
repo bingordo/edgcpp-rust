@@ -2144,6 +2144,55 @@ fn checked_call_pointer_argument(
     }
 }
 
+/// Atomic pointee qualification is handled by the existing atomic
+/// lowering path, not by ordinary implicit C object-pointer conversions.
+/// Detect it before calling the CV-only compatibility checker. Do not treat
+/// missing/malformed type edges or a cyclic native type graph as permission
+/// to skip validation.
+fn pointer_type_contains_atomic_qualification(
+    il:&Il,ty:crate::TypeId,
+) -> Result<bool,CodegenError> {
+    let mut seen=HashSet::new();
+    let mut pending=vec![ty];
+    while let Some(id)=pending.pop() {
+        if !seen.insert(id) {
+            return Err(invalid("cyclic native pointer qualification relation"));
+        }
+        let def=il.types.iter().find(|t|t.id==id)
+            .ok_or_else(||invalid("missing native pointer qualification type"))?;
+        match semantic(4,def.kind) {
+            3 => {
+                if def.related_role!=Some(4) {
+                    return Err(invalid("invalid native qualified typeref role"));
+                }
+                let detail=il.type_details.iter().find(|d|d.owner==id)
+                    .ok_or_else(||invalid("missing native qualified type detail"))?;
+                let flags=detail.qualifiers
+                    .ok_or_else(||invalid("missing native qualifier flags"))?;
+                if flags & 8 != 0 {return Ok(true);}
+                pending.push(def.related.ok_or_else(||
+                    invalid("qualified native type is missing underlying type"))?);
+            }
+            5 => {
+                if def.related_role!=Some(1) {
+                    return Err(invalid("invalid native pointer pointee role"));
+                }
+                pending.push(def.related.ok_or_else(||
+                    invalid("native pointer missing pointee type"))?);
+            }
+            6 => {
+                if def.related_role!=Some(2) {
+                    return Err(invalid("invalid native array element role"));
+                }
+                pending.push(def.related.ok_or_else(||
+                    invalid("native array missing element type"))?);
+            }
+            _ => {},
+        }
+    }
+    Ok(false)
+}
+
 /// Check the *source* argument category independently of the machine ABI.
 ///
 /// An equal-size but unrelated C struct is not an interchangeable by-value
@@ -2255,6 +2304,21 @@ fn lower_c_expression(
     locals: &[&crate::LocalVariable], il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>
 ) -> Result<Expr, CodegenError> {
     let node = graph.expression(id).ok_or_else(|| invalid("missing expression"))?;
+    // An EDG-generated pointer cast may already have erased the source type
+    // before it reaches an assignment or return (not just a call). Validate
+    // the original C conversion for *every* such expression, while leaving
+    // explicit source casts to their intentionally different C rules.
+    if let Some(source)=graph.implicit_pointer_cast_source(id) {
+        let target=expression_type_id(graph,id)?;
+        // C11 _Atomic pointer types use a separate checked lowering path.
+        // Preserve it rather than incorrectly interpreting atomic qualifiers
+        // as CV-only call compatibility. All ordinary C pointer casts still
+        // receive the original source-type validation here.
+        if !pointer_type_contains_atomic_qualification(il,source)?
+            && !pointer_type_contains_atomic_qualification(il,target)? {
+            checked_call_pointer_argument(il,target,source)?;
+        }
+    }
     if let Some(site)=graph.call_at(id) {
         if site.first_argument!=1 || node.operands.is_empty() {
             return Err(invalid("member call unsupported or missing callee"));
@@ -6152,5 +6216,48 @@ mod audit_call_argument_shape_tests {
             related_role:Some(1),related:Some(crate::TypeId(777)),
         });
         assert!(!checked(&il,9,28),"dangling pointer pointee must fail closed");
+    }
+}
+
+#[cfg(test)]
+mod audit_implicit_pointer_cast_qualification_tests {
+    use super::*;
+
+    fn kind(semantic_kind:u32)->u32 {
+        (0..128).find(|&candidate|semantic(4,candidate)==semantic_kind)
+            .expect("native EDG C type kind")
+    }
+
+    #[test]
+    fn differentiates_native_atomic_and_cv_pointer_cast_types() {
+        let mut il=Il::default();
+        il.types.extend([
+            crate::TypeDef{id:crate::TypeId(1),kind:kind(1),
+                related_role:None,related:None},
+            crate::TypeDef{id:crate::TypeId(2),kind:kind(3),
+                related_role:Some(4),related:Some(crate::TypeId(1))},
+            crate::TypeDef{id:crate::TypeId(3),kind:kind(5),
+                related_role:Some(1),related:Some(crate::TypeId(2))},
+        ]);
+        il.type_details.push(crate::TypeDetail {
+            owner:crate::TypeId(2),is_reference:false,
+            is_rvalue_reference:false,qualifiers:Some(8),
+        });
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap());
+        il.type_details[0].qualifiers=Some(1 | 2);
+        assert!(!pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap(),
+            "ordinary const+volatile must not bypass C pointer checking");
+        il.type_details[0].qualifiers=Some(0);
+        assert!(!pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).unwrap());
+        il.type_details.clear();
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).is_err(),
+            "missing typeref qualifier records cannot bypass validation");
+        il.type_details.push(crate::TypeDetail{
+            owner:crate::TypeId(2),is_reference:false,
+            is_rvalue_reference:false,qualifiers:Some(0),
+        });
+        il.types[1].related=Some(crate::TypeId(2));
+        assert!(pointer_type_contains_atomic_qualification(&il,crate::TypeId(3)).is_err(),
+            "cyclic typeref chain cannot bypass validation");
     }
 }
