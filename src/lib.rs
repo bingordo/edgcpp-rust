@@ -1876,7 +1876,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
        graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
-       graph::Graph::validate_native_routine_signature_coverage(il).is_err() {
+       graph::Graph::validate_native_routine_signature_coverage(il).is_err() ||
+       graph::Graph::validate_native_class_admission_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
