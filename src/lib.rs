@@ -2234,6 +2234,48 @@ mod tests {
     }
 
     #[test]
+    fn decodes_routine_supplement_proof_with_bounded_native_flags() {
+        let number=|value|WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector::default();
+        let proof=[number(7),number(1)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),71,
+                    proof.as_ptr(),proof.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.routine_supplements,vec![
+            NativeRoutineSupplement {owner:TypeId(7),has_extra_info:true},
+        ]);
+        // Event 71 is unique per native TypeId; duplicate events cannot
+        // silently override the first proof.
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),71,
+                    proof.as_ptr(),proof.len(),0);
+        }
+        assert!(state.malformed);
+        let mut state=Collector::default();
+        let proof=[number(8),number(0)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),71,
+                    proof.as_ptr(),proof.len(),0);
+        }
+        assert_eq!(state.il.routine_supplements,vec![
+            NativeRoutineSupplement {owner:TypeId(8),has_extra_info:false},
+        ]);
+        assert!(!state.malformed);
+        for fields in [[number(9),number(2)],[number(0),number(1)]] {
+            let mut bad=Collector::default();
+            unsafe {
+                collect((&mut bad as *mut Collector).cast(),71,
+                        fields.as_ptr(),fields.len(),0);
+            }
+            assert!(bad.malformed,"native proof needs nonzero owner and boolean flag");
+        }
+    }
+
+    #[test]
     fn decodes_authoritative_routine_identity_records() {
         let string = |bytes: &[u8]| WireField {
             data: bytes.as_ptr(), length: bytes.len(), value: 0, tag: 1,
