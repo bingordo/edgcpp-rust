@@ -2315,13 +2315,20 @@ fn lower_c_expression(
         for ((&operand,aggregate),&formal_ty) in node.operands[1..].iter()
             .zip(&abi.aggregate_parameters).zip(formal_types.iter()) {
             let actual_ty=expression_type_id(graph,operand)?;
+            // EDG inserts compiler-generated eok_cast nodes for some implicit
+            // pointer conversions. Validate the original operand C type,
+            // never the already-converted wrapper type; preserve the wrapper
+            // itself when lowering the machine argument. Explicit source C
+            // casts do not carry this native provenance and remain legal.
+            let source_ty=graph.implicit_pointer_cast_source(operand)
+                .unwrap_or(actual_ty);
             // A type-only check cannot distinguish a C null-pointer constant
             // from an arbitrary integer. Accept only a literal zero, never a
             // nonzero integer or a runtime integer-valued expression.
             let literal_null_pointer=graph.expression(operand).is_some_and(|n|
                 semantic(2,n.data.kind)==1 && n.data.constant_integer==Some(0)
                 && n.operands.is_empty());
-            checked_call_argument_shape(il,formal_ty,actual_ty,literal_null_pointer)?;
+            checked_call_argument_shape(il,formal_ty,source_ty,literal_null_pointer)?;
             if let Some(size)=aggregate {
                 let actual=target::ABI.classify_aggregate(il,actual_ty)?;
                 if actual!=Some(*size) {
