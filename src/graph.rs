@@ -86,6 +86,10 @@ pub enum GraphError {
     InvalidFunctionSignatureOwner(TypeId),
     MissingFunctionSignature(TypeId),
     MissingRoutineSupplement(TypeId),
+    MissingNativeRecordAdmission(TypeId),
+    MissingNativeLifetimeAdmission(TypeId),
+    InvalidNativeRecordAdmission(TypeId),
+    InvalidNativeLifetimeAdmission(TypeId),
     InvalidRoutineSupplement(TypeId),
     DuplicateRoutineSupplement(TypeId),
     DuplicateArrayBound(TypeId),
@@ -793,6 +797,47 @@ impl TypeDependencyIndex {
 }
 
 impl Graph {
+    /// cpp/bridge.cpp::emit_type unconditionally emits BOTH event 63
+    /// (plain-struct/C++ class admission) and event 65 (bounded scalar
+    /// lifetime candidate) for every tk_struct or tk_class. Their absence
+    /// on a successful compilation means a truncated snapshot; a missing
+    /// positive admission must never look like a valid negative proof.
+    /// Keep partial hand-built Graph fixtures independently supported.
+    pub fn validate_native_class_admission_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut kinds=HashMap::with_capacity(il.types.len());
+        for ty in &il.types {
+            if kinds.insert(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)}).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+        }
+        let mut admitted=std::collections::HashSet::new();
+        for record in &il.cxx_record_admissions {
+            let kind=kinds.get(&record.owner)
+                .ok_or(GraphError::MissingType(record.owner))?;
+            if !matches!(kind,7|8) || !admitted.insert(record.owner) {
+                return Err(GraphError::InvalidNativeRecordAdmission(record.owner));
+            }
+        }
+        let mut lifetime=std::collections::HashSet::new();
+        for record in &il.cxx_scalar_lifetime_admissions {
+            let kind=kinds.get(&record.owner)
+                .ok_or(GraphError::MissingType(record.owner))?;
+            if !matches!(kind,7|8) || !lifetime.insert(record.owner) {
+                return Err(GraphError::InvalidNativeLifetimeAdmission(record.owner));
+            }
+        }
+        for (&id,&kind) in &kinds {
+            if !matches!(kind,7|8) {continue;}
+            if !admitted.contains(&id) {
+                return Err(GraphError::MissingNativeRecordAdmission(id));
+            }
+            if !lifetime.contains(&id) {
+                return Err(GraphError::MissingNativeLifetimeAdmission(id));
+            }
+        }
+        Ok(())
+    }
+
     /// Native event 71 is independent of event 12: every emitted tk_routine
     /// has a proof recording whether EDG allocated its extra_info block.
     /// In particular this catches a lost signature for f(void) with zero
@@ -6375,6 +6420,53 @@ mod tests {
         il.record_fields.remove(1); // missing position zero
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldPosition(TypeId(1)));
+    }
+
+    #[test]
+    fn native_class_admission_coverage_rejects_missing_or_invalid_proofs() {
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef{id:TypeId(1),kind:native_type_kind_for_semantic(7),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(2),kind:native_type_kind_for_semantic(8),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(3),kind:native_type_kind_for_semantic(9),
+                related_role:None,related:None},
+        ]);
+        // Graph's ordinary constructor is intentionally permissive: the
+        // completeness guarantee belongs to successful native callbacks.
+        Graph::from_il(&il).expect("partial hand-built graph fixture");
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::MissingNativeRecordAdmission(TypeId(1))));
+        for id in [1,2] {
+            il.cxx_record_admissions.push(crate::CxxRecordAdmission{
+                owner:TypeId(id),plain_object:id==1,
+            });
+        }
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::MissingNativeLifetimeAdmission(TypeId(1))));
+        for id in [1,2] {
+            il.cxx_scalar_lifetime_admissions.push(crate::CxxScalarLifetimeAdmission{
+                owner:TypeId(id),candidate:id==2,
+            });
+        }
+        Graph::validate_native_class_admission_coverage(&il)
+            .expect("all struct and class records have both native proofs");
+        il.cxx_record_admissions.push(il.cxx_record_admissions[0]);
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::InvalidNativeRecordAdmission(TypeId(1))));
+        il.cxx_record_admissions.pop();
+        il.cxx_scalar_lifetime_admissions.push(il.cxx_scalar_lifetime_admissions[0]);
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::InvalidNativeLifetimeAdmission(TypeId(1))));
+        il.cxx_scalar_lifetime_admissions.pop();
+        il.cxx_record_admissions[0].owner=TypeId(3);
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::InvalidNativeRecordAdmission(TypeId(3))),
+            "unions do not receive native class admission events");
+        il.cxx_record_admissions[0].owner=TypeId(999);
+        assert_eq!(Graph::validate_native_class_admission_coverage(&il),
+            Err(GraphError::MissingType(TypeId(999))));
     }
 
     #[test]
