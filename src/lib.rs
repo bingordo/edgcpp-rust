@@ -175,8 +175,8 @@ pub struct Il {
     pub routine_attributes: Vec<RoutineAttributes>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
-    /// Independent native event 71: whether tk_routine.extra_info exists.
-    /// In a complete EDG snapshot, every routine TypeId has exactly one.
+    /// Independent native event 71: whether tk_routine.extra_info exists
+    /// and the authoritative EDG parameter count. Every routine has one.
     pub routine_supplements: Vec<NativeRoutineSupplement>,
     pub symbols: Vec<Symbol>,
     /// EDG's untouched routine linker spellings, distinct from display names.
