@@ -1720,6 +1720,45 @@ jobs:
             done
           )
 
+      - name: Audit C11 implicit pointer casts in assignment and return
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_cv_context_*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_cv_context.o --c11 audit_cv_context_legal.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_cv_context_legal.c audit_cv_context_driver.c -o gcc_audit_cv_context
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_cv_context.o audit_cv_context_driver.c -o edg_audit_cv_context
+            reference=$(./gcc_audit_cv_context)
+            actual=$(./edg_audit_cv_context)
+            test "$reference" = "audit C11 CV assignment/return pass"
+            if [ "$reference" != "$actual" ]; then
+              printf 'C11 CV assignment/return mismatch: GCC=%s EDG=%s\n' "$reference" "$actual" >&2
+              exit 1
+            fi
+            for source in audit_cv_context_bad_nested_assign.c audit_cv_context_bad_nested_return.c audit_cv_context_bad_drop_return.c audit_cv_context_bad_drop_assign.c; do
+              if gcc -std=c11 -Wall -Wextra -pedantic-errors -fsyntax-only "$source" >audit_cv_context_gcc_bad.log 2>&1; then
+                echo "GCC unexpectedly accepts invalid C11 pointer conversion: $source" >&2
+                exit 1
+              fi
+              rm -f audit_cv_context_bad.o audit_cv_context_bad.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen audit_cv_context_bad.o --c11 "$source" >audit_cv_context_bad.log 2>&1; then
+                echo "Native EDG lowering accepts invalid C11 pointer conversion: $source" >&2
+                ../../../edgcpp-rust/target/debug/examples/parse --c11 "$source" >audit_cv_context_bad_il.log 2>&1 || true
+                grep -E '^(expression audit_cv_bad_|implicit pointer cast audit_cv_bad_|type id=|type detail id=)' audit_cv_context_bad_il.log | tail -n 100 || true
+                exit 1
+              fi
+              test ! -e audit_cv_context_bad.o
+            done
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:
