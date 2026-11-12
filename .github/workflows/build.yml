@@ -202,6 +202,9 @@ jobs:
             grep -q '^EDG status: 0$' cxx5-global-init-edg.out
             grep -q '^file scope init scheduler available=' cxx5-global-init-edg.out
             grep -q '^scope dynamic init entries=' cxx5-global-init-edg.out
+            # Exact EDG __link aggregate -> startup routine pointer (not a
+            # guessed __sti__ symbol or a destructor/ELF admission proof).
+            grep -q '^file scope runtime link variable=' cxx5-global-init-edg.out
             grep -q 'global_init_probe' cxx5-global-init-edg.out
             # Diagnostic output is not evidence of an executable init plan.
             grep -E '^(file scope init|scope dynamic init|EDG_GENERATED_ROUTINE)' \
