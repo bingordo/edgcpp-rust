@@ -1853,6 +1853,15 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     if code < 0 {
         return Err(Error::NativeFailure);
     }
+    // cpp/bridge.cpp::emit_type always emits event 11 for every native
+    // tk_pointer and tk_typeref (including zero-qualified aliases).
+    // On a successful EDG compilation, losing one is a truncated snapshot,
+    // not proof of an unqualified C type. Failed compilations can contain
+    // partial diagnostic snapshots; preserve their original EDG status.
+    if code == 0 &&
+        graph::Graph::validate_native_type_detail_coverage(&collector.il).is_err() {
+        return Err(Error::MalformedCallback);
+    }
     Ok(Compilation { status: code, il: collector.il })
 }
 
