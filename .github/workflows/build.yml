@@ -1798,6 +1798,45 @@ jobs:
             done
           )
 
+      - name: Audit C11 pointer comparisons and subtraction GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_pointer_cmp_*.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_ptrcmp.o --c11 audit_pointer_cmp_legal.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_pointer_cmp_legal.c audit_pointer_cmp_driver.c -o gcc_audit_ptrcmp
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_ptrcmp.o audit_pointer_cmp_driver.c -o edg_audit_ptrcmp
+            reference=$(./gcc_audit_ptrcmp)
+            actual=$(./edg_audit_ptrcmp)
+            test "$reference" = "C11 pointer comparison/difference pass"
+            if [ "$reference" != "$actual" ]; then
+              printf 'pointer comparison/difference mismatch GCC=%s EDG=%s\n' "$reference" "$actual" >&2
+              exit 1
+            fi
+            for source in audit_pointer_cmp_bad_incompatible_eq.c audit_pointer_cmp_bad_incompatible_order.c audit_pointer_cmp_bad_incompatible_diff.c audit_pointer_cmp_bad_void_order.c; do
+              if gcc -std=c11 -Wall -Wextra -pedantic-errors -fsyntax-only "$source" >audit_ptrcmp_gcc_bad.log 2>&1; then
+                echo "GCC unexpectedly accepts invalid C11 pointer operation: $source" >&2
+                exit 1
+              fi
+              rm -f audit_ptrcmp_bad.o audit_ptrcmp_bad.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen audit_ptrcmp_bad.o --c11 "$source" >audit_ptrcmp_bad.log 2>&1; then
+                echo "Native EDG lowering accepts invalid C11 pointer operation: $source" >&2
+                ../../../edgcpp-rust/target/debug/examples/parse --c11 "$source" >audit_ptrcmp_bad_il.log 2>&1 || true
+                grep -E '^(expression audit_pointer_cmp_bad_|implicit pointer cast audit_pointer_cmp_bad_|type id=|type detail id=)' audit_ptrcmp_bad_il.log | tail -n 100 || true
+                exit 1
+              fi
+              test ! -e audit_ptrcmp_bad.o
+            done
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:
