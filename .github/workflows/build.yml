@@ -1973,6 +1973,34 @@ jobs:
             ./gcc_record_shape_cpp
           )
 
+      - name: Audit native C11 and C++20 type layouts and array bounds
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_type_layout_* ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_type_layout_c.c >audit_type_layout_c.il
+            grep -E '^native (type layout|array bound) ' audit_type_layout_c.il | head -n 35
+            grep -Eq '^native type layout owner=[0-9]+ layout=true fixed_bound=true$' audit_type_layout_c.il
+            grep -Eq '^native type layout owner=[0-9]+ layout=true fixed_bound=false$' audit_type_layout_c.il
+            grep -Eq '^native array bound owner=[0-9]+ elements=4$' audit_type_layout_c.il
+            gcc -std=c11 -O0 -Wall -Wextra -Werror audit_type_layout_c.c -o gcc_type_layout_c
+            ./gcc_type_layout_c
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_type_layout_cpp.cpp >audit_type_layout_cpp.il
+            grep -E '^native (type layout|array bound) ' audit_type_layout_cpp.il | head -n 35
+            grep -Eq '^native type layout owner=[0-9]+ layout=true fixed_bound=true$' audit_type_layout_cpp.il
+            grep -Eq '^native array bound owner=[0-9]+ elements=5$' audit_type_layout_cpp.il
+            g++ -std=c++20 -O0 -Wall -Wextra -Werror audit_type_layout_cpp.cpp -o gcc_type_layout_cpp
+            ./gcc_type_layout_cpp
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:

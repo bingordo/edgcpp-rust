@@ -218,6 +218,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("routine supplement id={} extra_info={} parameter_count={}",
             proof.owner.0,proof.has_extra_info,proof.parameter_count);
     }
+    for proof in &result.il.native_type_layout_proofs {
+        println!("native type layout owner={} layout={} fixed_bound={}",
+                 proof.owner.0,proof.has_layout,proof.has_fixed_array_bound);
+    }
+    for bound in &result.il.array_bounds {
+        println!("native array bound owner={} elements={}",
+                 bound.array.0,bound.elements);
+    }
     for shape in &result.il.native_record_shapes {
         println!("native record shape owner={} fields={} direct_bases={}",
                  shape.owner.0,shape.field_count,shape.direct_base_count);
