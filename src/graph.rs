@@ -90,6 +90,7 @@ pub enum GraphError {
     InvalidTypeDetailOwner(TypeId),
     InvalidTypeDetailFlags(TypeId),
     MissingTypeDetail(TypeId),
+    MissingNativeTypeRelation(TypeId),
     DuplicateRecordField { owner: TypeId, position: u32 },
     InvalidRecordFieldOwner(TypeId),
     DuplicateRecordFieldSymbol { owner: TypeId, symbol: SymbolId },
@@ -789,6 +790,29 @@ impl TypeDependencyIndex {
 }
 
 impl Graph {
+    /// A successful native EDG snapshot must retain pointee/element/underlying
+    /// edges for pointer, array and typeref nodes. Those native owner types
+    /// always have a child type; a zero relationship is an incomplete export,
+    /// even if its TypeDef record itself is otherwise well-formed.
+    ///
+    /// Do not enforce this in from_il, which also accepts deliberately
+    /// partial synthetic fixtures. Routine return edges are deliberately not
+    /// asserted here: C++ special functions may lack a normal return type.
+    pub fn validate_native_type_edge_coverage(il:&Il) -> Result<(),GraphError> {
+        let ids: std::collections::HashSet<TypeId> =
+            il.types.iter().map(|ty|ty.id).collect();
+        for ty in &il.types {
+            let expected=match unsafe {edgcpp_codegen_kind(4,ty.kind)} {
+                5=>1, 6=>2, 3=>4, _=>continue,
+            };
+            if ty.related_role!=Some(expected) ||
+               !ty.related.is_some_and(|id| id.0!=0 && ids.contains(&id)) {
+                return Err(GraphError::MissingNativeTypeRelation(ty.id));
+            }
+        }
+        Ok(())
+    }
+
     /// A successful *native EDG* snapshot contains one event 11 for every
     /// emitted tk_pointer or tk_typeref, including aliases with qualifiers=0.
     /// The general from_il constructor intentionally accepts partial hand-
@@ -6252,6 +6276,52 @@ mod tests {
         il.record_fields.remove(1); // missing position zero
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidRecordFieldPosition(TypeId(1)));
+    }
+
+    #[test]
+    fn native_type_edge_coverage_rejects_truncated_pointer_array_typeref() {
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef{id:TypeId(1),kind:native_type_kind_for_semantic(1),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(2),kind:native_type_kind_for_semantic(5),
+                related_role:Some(1),related:Some(TypeId(1))},
+            TypeDef{id:TypeId(3),kind:native_type_kind_for_semantic(6),
+                related_role:Some(2),related:Some(TypeId(1))},
+            TypeDef{id:TypeId(4),kind:native_type_kind_for_semantic(3),
+                related_role:Some(4),related:Some(TypeId(1))},
+        ]);
+        Graph::validate_native_type_edge_coverage(&il)
+            .expect("all required native type edges exported");
+        for index in [1usize,2,3] {
+            let original=il.types[index].clone();
+            il.types[index].related=None;
+            il.types[index].related_role=None;
+            // Partial fixtures remain useful for Graph visitors; only the
+            // successful native callback is required to supply these edges.
+            Graph::from_il(&il).expect("partial graph fixture still accepted");
+            assert_eq!(Graph::validate_native_type_edge_coverage(&il),
+                Err(GraphError::MissingNativeTypeRelation(original.id)));
+            il.types[index]=original.clone();
+            il.types[index].related_role=Some(4);
+            if index!=3 {
+                assert_eq!(Graph::validate_native_type_edge_coverage(&il),
+                    Err(GraphError::MissingNativeTypeRelation(original.id)));
+            }
+            il.types[index]=original.clone();
+            il.types[index].related=Some(TypeId(999));
+            assert_eq!(Graph::validate_native_type_edge_coverage(&il),
+                Err(GraphError::MissingNativeTypeRelation(original.id)));
+            il.types[index]=original;
+        }
+        Graph::validate_native_type_edge_coverage(&il)
+            .expect("complete edges remain valid after each mutation");
+        // A routine without a return relation can represent a C++ special
+        // member and is not proof of truncation in this narrow check.
+        il.types.push(TypeDef{id:TypeId(5),kind:native_routine_type_kind(),
+            related_role:None,related:None});
+        Graph::validate_native_type_edge_coverage(&il)
+            .expect("routine return relationship is not assumed mandatory");
     }
 
     #[test]
