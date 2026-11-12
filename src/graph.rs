@@ -1064,7 +1064,12 @@ impl Graph {
             // The native pointer emits reference bits but no qualifiers.
             // The native typeref emits qualifiers (including zero) but never
             // reference bits. Lost/shifted field tags must fail closed.
-            if (owner_kind==5 && detail.qualifiers.is_some())
+            // EDG il_def.h defines is_reference as encompassing both
+            // lvalue *and* rvalue references. An rvalue-reference flag
+            // without the encompassing reference bit cannot be native IL.
+            if (owner_kind==5 &&
+                (detail.qualifiers.is_some() ||
+                 (detail.is_rvalue_reference && !detail.is_reference)))
                 || (owner_kind==3 &&
                     (detail.qualifiers.is_none() ||
                      detail.is_reference || detail.is_rvalue_reference))
@@ -6423,6 +6428,13 @@ mod tests {
             GraphError::InvalidTypeDetailFlags(TypeId(1)));
         il.type_details[0].qualifiers=None;
         Graph::from_il(&il).expect("native pointer reference detail");
+        il.type_details[0].is_reference=false;
+        il.type_details[0].is_rvalue_reference=true;
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidTypeDetailFlags(TypeId(1)));
+        il.type_details[0].is_reference=true;
+        Graph::from_il(&il).expect("rvalue reference retains its enclosing reference bit");
+        il.type_details[0].is_rvalue_reference=false;
         il.types[0].kind=native_type_kind_for_semantic(3);
         assert_eq!(Graph::from_il(&il).unwrap_err(),
             GraphError::InvalidTypeDetailFlags(TypeId(1)));
