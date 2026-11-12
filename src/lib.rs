@@ -1847,6 +1847,19 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     }
 }
 
+/// A successful native back_end() unconditionally exports event 64 with
+/// EDG's actual C/C++ mode. A lost event is a truncated snapshot, not a
+/// license to guess language semantics from source names or flags. This
+/// boundary also covers required type details and relationship edges.
+fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
+    if il.cpp_language.is_none() ||
+       graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
+       graph::Graph::validate_native_type_edge_coverage(il).is_err() {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(())
+}
+
 /// Execute the front end with the supplied command-line arguments.
 ///
 /// Include argv[0] (usually `"edgcpfe"`) as the first string, then EDG
@@ -1877,15 +1890,10 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     if code < 0 {
         return Err(Error::NativeFailure);
     }
-    // cpp/bridge.cpp::emit_type always emits event 11 for every native
-    // tk_pointer and tk_typeref (including zero-qualified aliases).
-    // On a successful EDG compilation, losing one is a truncated snapshot,
-    // not proof of an unqualified C type. Failed compilations can contain
-    // partial diagnostic snapshots; preserve their original EDG status.
-    if code == 0 &&
-        (graph::Graph::validate_native_type_detail_coverage(&collector.il).is_err() ||
-         graph::Graph::validate_native_type_edge_coverage(&collector.il).is_err()) {
-        return Err(Error::MalformedCallback);
+    // Failed compilations may provide partial diagnostic snapshots; on
+    // success, require every native-mandatory provenance record.
+    if code == 0 {
+        validate_complete_native_snapshot(&collector.il)?;
     }
     Ok(Compilation { status: code, il: collector.il })
 }
@@ -1893,6 +1901,27 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_success_requires_language_mode_provenance() {
+        let mut il=Il::default();
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)),
+            "missing native event 64 must fail even for empty translation units");
+        il.cpp_language=Some(false);
+        validate_complete_native_snapshot(&il)
+            .expect("complete empty C translation unit");
+        il.cpp_language=Some(true);
+        validate_complete_native_snapshot(&il)
+            .expect("complete empty C++ translation unit");
+        il.cpp_language=None;
+        il.types.push(TypeDef {
+            id:TypeId(1),kind:0,related_role:None,related:None,
+        });
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)),
+            "unrelated records do not replace a language mode event");
+    }
+
     #[test]
     fn builds_owned_namespace_tree() {
         let il = Il { entities: vec![
