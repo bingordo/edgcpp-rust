@@ -82,6 +82,7 @@ fn expected_wire_field_count(kind: u32) -> Option<usize> {
         71 => Some(3),
         72 => Some(2),
         73 => Some(2),
+        74 => Some(3),
         _ => None,
     }
 }
@@ -161,6 +162,7 @@ fn expected_wire_field_tag_masks(kind: u32) -> Option<&'static [u8]> {
         71 => Some(&[4, 4, 4]),
         72 => Some(&[4, 4]),
         73 => Some(&[4, 4]),
+        74 => Some(&[4, 4, 4]),
         _ => None,
     }
 }

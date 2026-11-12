@@ -1945,6 +1945,34 @@ jobs:
             ./gcc_routine_count_cpp
           )
 
+      - name: Audit native C11 and C++20 record shape completeness
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_record_shape_* ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_record_shape_c.c >audit_record_shape_c.il
+            echo 'Native C record shapes:'
+            grep '^native record shape ' audit_record_shape_c.il | tail -n 50
+            grep -Eq '^native record shape owner=[0-9]+ fields=3 direct_bases=0$' audit_record_shape_c.il
+            grep -Eq '^native record shape owner=[0-9]+ fields=2 direct_bases=0$' audit_record_shape_c.il
+            gcc -std=c11 -O0 -Wall -Wextra -Werror audit_record_shape_c.c -o gcc_record_shape_c
+            ./gcc_record_shape_c
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_record_shape_cpp.cpp >audit_record_shape_cpp.il
+            echo 'Native C++ record shapes:'
+            grep '^native record shape ' audit_record_shape_cpp.il | tail -n 50
+            grep -Eq '^native record shape owner=[0-9]+ fields=3 direct_bases=1$' audit_record_shape_cpp.il
+            g++ -std=c++20 -O0 -Wall -Wextra -Werror audit_record_shape_cpp.cpp -o gcc_record_shape_cpp
+            ./gcc_record_shape_cpp
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:

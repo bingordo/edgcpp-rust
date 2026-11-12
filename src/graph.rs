@@ -88,6 +88,9 @@ pub enum GraphError {
     MissingRoutineSupplement(TypeId),
     InvalidRoutineParameterCount(TypeId),
     MissingNativeRecordAdmission(TypeId),
+    MissingNativeRecordShape(TypeId),
+    InvalidNativeRecordShape(TypeId),
+    DuplicateNativeRecordShape(TypeId),
     MissingNativeLifetimeAdmission(TypeId),
     InvalidNativeRecordAdmission(TypeId),
     InvalidNativeLifetimeAdmission(TypeId),
@@ -838,6 +841,79 @@ impl Graph {
             if !lifetime.contains(&id) {
                 return Err(GraphError::MissingNativeLifetimeAdmission(id));
             }
+        }
+        Ok(())
+    }
+
+    /// The native bridge emits event 74 for every tk_struct/class/union,
+    /// independently counting its EDG field_list and direct_base_classes.
+    /// Without this a lost *final* field/base could silently shorten a
+    /// seemingly contiguous layout, changing source ABI and memory access.
+    /// Also require each base's event 24 access and event 69 offset proof
+    /// (the offset value may legitimately be absent).
+    pub fn validate_native_record_shape_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut kinds=HashMap::with_capacity(il.types.len());
+        for ty in &il.types {
+            if kinds.insert(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)}).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+        }
+        let mut proofs=HashMap::with_capacity(il.native_record_shapes.len());
+        for proof in &il.native_record_shapes {
+            let kind=kinds.get(&proof.owner).copied()
+                .ok_or(GraphError::MissingType(proof.owner))?;
+            if !matches!(kind,7..=9) || proof.field_count>10000 ||
+               proof.direct_base_count>10000 ||
+               (kind==9 && proof.direct_base_count!=0) {
+                return Err(GraphError::InvalidNativeRecordShape(proof.owner));
+            }
+            if proofs.insert(proof.owner,(proof.field_count,proof.direct_base_count)).is_some() {
+                return Err(GraphError::DuplicateNativeRecordShape(proof.owner));
+            }
+        }
+        let mut fields:HashMap<TypeId,Vec<u32>>=HashMap::new();
+        for field in &il.record_fields {
+            if !kinds.get(&field.owner).is_some_and(|kind| matches!(*kind,7..=9)) ||
+               !kinds.contains_key(&field.ty) || field.symbol.0==0 {
+                return Err(GraphError::InvalidNativeRecordShape(field.owner));
+            }
+            fields.entry(field.owner).or_default().push(field.position);
+        }
+        let mut bases:HashMap<TypeId,Vec<u32>>=HashMap::new();
+        for base in &il.base_classes {
+            if !kinds.get(&base.derived).is_some_and(|kind| matches!(*kind,7|8)) ||
+               !kinds.contains_key(&base.base) || base.derived==base.base {
+                return Err(GraphError::InvalidNativeRecordShape(base.derived));
+            }
+            bases.entry(base.derived).or_default().push(base.position);
+        }
+        let mut accesses:HashMap<TypeId,Vec<u32>>=HashMap::new();
+        for access in &il.base_class_access {
+            accesses.entry(access.derived).or_default().push(access.position);
+        }
+        let mut offsets:HashMap<TypeId,Vec<u32>>=HashMap::new();
+        for offset in &il.base_subobject_offsets {
+            offsets.entry(offset.derived).or_default().push(offset.position);
+        }
+        fn complete(mut positions:Vec<u32>,count:u32)->bool {
+            if positions.len()!=count as usize {return false;}
+            positions.sort_unstable();
+            positions.iter().enumerate().all(|(index,&position)|position==index as u32)
+        }
+        for ty in &il.types {
+            if !matches!(kinds[&ty.id],7..=9) {continue;}
+            let (field_count,base_count)=proofs.get(&ty.id).copied()
+                .ok_or(GraphError::MissingNativeRecordShape(ty.id))?;
+            if !complete(fields.remove(&ty.id).unwrap_or_default(),field_count) ||
+               !complete(bases.remove(&ty.id).unwrap_or_default(),base_count) ||
+               !complete(accesses.remove(&ty.id).unwrap_or_default(),base_count) ||
+               !complete(offsets.remove(&ty.id).unwrap_or_default(),base_count) {
+                return Err(GraphError::InvalidNativeRecordShape(ty.id));
+            }
+        }
+        // A stray access/offset proof cannot belong to any native record.
+        if let Some((&id,_))=accesses.iter().next().or_else(||offsets.iter().next()) {
+            return Err(GraphError::InvalidNativeRecordShape(id));
         }
         Ok(())
     }
@@ -6690,6 +6766,80 @@ mod tests {
         il.function_signatures.clear();
         assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
             Err(GraphError::MissingFunctionSignature(TypeId(1))));
+    }
+
+    #[test]
+    fn audit_native_record_shape_proves_all_fields_and_direct_base_metadata() {
+        let mut il=Il::default();
+        for (id,semantic) in [(1,7),(2,8),(3,9),(4,1)] {
+            il.types.push(TypeDef{id:TypeId(id),kind:native_type_kind_for_semantic(semantic),
+                related_role:None,related:None});
+        }
+        il.native_record_shapes.extend([
+            crate::NativeRecordShape{owner:TypeId(1),field_count:3,direct_base_count:0},
+            crate::NativeRecordShape{owner:TypeId(2),field_count:1,direct_base_count:1},
+            crate::NativeRecordShape{owner:TypeId(3),field_count:2,direct_base_count:0},
+        ]);
+        for (owner,count) in [(1,3),(2,1),(3,2)] {
+            for position in 0..count {
+                il.record_fields.push(RecordField {
+                    owner:TypeId(owner),position,ty:TypeId(4),
+                    symbol:SymbolId(100+owner*10+position),
+                    name:format!("field_{position}"),byte_offset:0,
+                    bit_offset:0,bit_width:0,
+                });
+            }
+        }
+        il.base_classes.push(BaseClass{derived:TypeId(2),position:0,
+            base:TypeId(1),is_virtual:false});
+        il.base_class_access.push(BaseClassAccess{derived:TypeId(2),
+            position:0,access:Some(0),pack_expansion:false});
+        il.base_subobject_offsets.push(crate::BaseSubobjectOffset{
+            derived:TypeId(2),position:0,byte_offset:None});
+        Graph::validate_native_record_shape_coverage(&il)
+            .expect("complete native struct/class/union shape metadata");
+        for index in 0..3 {
+            let mut truncated=il.clone();
+            truncated.record_fields.remove(index);
+            assert_eq!(Graph::validate_native_record_shape_coverage(&truncated),
+                Err(GraphError::InvalidNativeRecordShape(TypeId(1))));
+        }
+        let mut lost_union_tail=il.clone();
+        lost_union_tail.record_fields.pop();
+        assert_eq!(Graph::validate_native_record_shape_coverage(&lost_union_tail),
+            Err(GraphError::InvalidNativeRecordShape(TypeId(3))));
+        for omitted in 0..3 {
+            let mut truncated=il.clone();
+            match omitted {
+                0=>{truncated.base_classes.clear();},
+                1=>{truncated.base_class_access.clear();},
+                _=>{truncated.base_subobject_offsets.clear();},
+            }
+            assert_eq!(Graph::validate_native_record_shape_coverage(&truncated),
+                Err(GraphError::InvalidNativeRecordShape(TypeId(2))));
+        }
+        let mut missing=il.clone();
+        missing.native_record_shapes.remove(2);
+        assert_eq!(Graph::validate_native_record_shape_coverage(&missing),
+            Err(GraphError::MissingNativeRecordShape(TypeId(3))));
+        let mut duplicate=il.clone();
+        duplicate.native_record_shapes.push(duplicate.native_record_shapes[0]);
+        assert_eq!(Graph::validate_native_record_shape_coverage(&duplicate),
+            Err(GraphError::DuplicateNativeRecordShape(TypeId(1))));
+        let mut union_base=il.clone();
+        union_base.native_record_shapes[2].direct_base_count=1;
+        assert_eq!(Graph::validate_native_record_shape_coverage(&union_base),
+            Err(GraphError::InvalidNativeRecordShape(TypeId(3))));
+        let mut zero=Il::default();
+        zero.types.push(TypeDef{id:TypeId(1),
+            kind:native_type_kind_for_semantic(7),related_role:None,related:None});
+        assert_eq!(Graph::validate_native_record_shape_coverage(&zero),
+            Err(GraphError::MissingNativeRecordShape(TypeId(1))));
+        Graph::from_il(&zero).expect("partial synthetic graph remains supported");
+        zero.native_record_shapes.push(crate::NativeRecordShape{
+            owner:TypeId(1),field_count:0,direct_base_count:0});
+        Graph::validate_native_record_shape_coverage(&zero)
+            .expect("empty record with explicit native shape");
     }
 
     #[test]
