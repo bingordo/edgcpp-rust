@@ -24,6 +24,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      symbol.map(|s|s.name.as_str()));
         }
     }
+    for link in &result.il.file_scope_runtime_links {
+        let variable = result.il.symbols.iter().find(|s|s.id==link.link_variable);
+        let routine = result.il.symbols.iter().find(|s|s.id==link.startup_routine);
+        println!("file scope runtime link variable={} name={:?} startup={} name={:?}",
+                 link.link_variable.0, variable.map(|s|s.name.as_str()),
+                 link.startup_routine.0, routine.map(|s|s.name.as_str()));
+    }
     println!("scope dynamic init entries={}",
              result.il.scope_dynamic_initializers.len());
     for init in &result.il.scope_dynamic_initializers {
