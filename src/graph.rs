@@ -814,7 +814,7 @@ impl Graph {
         for record in &il.cxx_record_admissions {
             let kind=kinds.get(&record.owner)
                 .ok_or(GraphError::MissingType(record.owner))?;
-            if !matches!(kind,7|8) || !admitted.insert(record.owner) {
+            if !matches!(*kind,7|8) || !admitted.insert(record.owner) {
                 return Err(GraphError::InvalidNativeRecordAdmission(record.owner));
             }
         }
@@ -822,11 +822,14 @@ impl Graph {
         for record in &il.cxx_scalar_lifetime_admissions {
             let kind=kinds.get(&record.owner)
                 .ok_or(GraphError::MissingType(record.owner))?;
-            if !matches!(kind,7|8) || !lifetime.insert(record.owner) {
+            if !matches!(*kind,7|8) || !lifetime.insert(record.owner) {
                 return Err(GraphError::InvalidNativeLifetimeAdmission(record.owner));
             }
         }
-        for (&id,&kind) in &kinds {
+        // Iterate source type order for deterministic first-error identity.
+        for ty in &il.types {
+            let id=ty.id;
+            let kind=kinds[&id];
             if !matches!(kind,7|8) {continue;}
             if !admitted.contains(&id) {
                 return Err(GraphError::MissingNativeRecordAdmission(id));
