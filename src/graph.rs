@@ -85,6 +85,9 @@ pub enum GraphError {
     InvalidTypeParameterOwner(TypeId),
     InvalidFunctionSignatureOwner(TypeId),
     MissingFunctionSignature(TypeId),
+    MissingRoutineSupplement(TypeId),
+    InvalidRoutineSupplement(TypeId),
+    DuplicateRoutineSupplement(TypeId),
     DuplicateArrayBound(TypeId),
     InvalidArrayBoundOwner(TypeId),
     InvalidTypeDetailOwner(TypeId),
@@ -790,6 +793,59 @@ impl TypeDependencyIndex {
 }
 
 impl Graph {
+    /// Native event 71 is independent of event 12: every emitted tk_routine
+    /// has a proof recording whether EDG allocated its extra_info block.
+    /// In particular this catches a lost signature for f(void) with zero
+    /// parameter edges, which type-parameter validation cannot detect.
+    pub fn validate_native_routine_signature_coverage(il:&Il) -> Result<(),GraphError> {
+        let mut kinds=HashMap::with_capacity(il.types.len());
+        for ty in &il.types {
+            if kinds.insert(ty.id,unsafe {edgcpp_codegen_kind(4,ty.kind)}).is_some() {
+                return Err(GraphError::DuplicateType(ty.id));
+            }
+        }
+        let mut proofs=HashMap::with_capacity(il.routine_supplements.len());
+        for proof in &il.routine_supplements {
+            match kinds.get(&proof.owner) {
+                None=>return Err(GraphError::MissingType(proof.owner)),
+                Some(&2)=>{},
+                _=>return Err(GraphError::InvalidRoutineSupplement(proof.owner)),
+            }
+            if proofs.insert(proof.owner,proof.has_extra_info).is_some() {
+                return Err(GraphError::DuplicateRoutineSupplement(proof.owner));
+            }
+        }
+        let mut signatures=std::collections::HashSet::new();
+        for sig in &il.function_signatures {
+            if kinds.get(&sig.owner)!=Some(&2) {
+                return Err(GraphError::InvalidFunctionSignatureOwner(sig.owner));
+            }
+            if !signatures.insert(sig.owner) {
+                return Err(GraphError::DuplicateFunctionSignature(sig.owner));
+            }
+        }
+        for (&owner,&kind) in &kinds {
+            if kind!=2 {continue;}
+            let present=*proofs.get(&owner)
+                .ok_or(GraphError::MissingRoutineSupplement(owner))?;
+            if present && !signatures.contains(&owner) {
+                return Err(GraphError::MissingFunctionSignature(owner));
+            }
+            if !present && signatures.contains(&owner) {
+                return Err(GraphError::InvalidRoutineSupplement(owner));
+            }
+        }
+        for param in &il.type_parameters {
+            if !signatures.contains(&param.owner) {
+                return Err(GraphError::MissingFunctionSignature(param.owner));
+            }
+            if !kinds.contains_key(&param.ty) {
+                return Err(GraphError::MissingType(param.ty));
+            }
+        }
+        Ok(())
+    }
+
     /// A successful native EDG snapshot must retain pointee/element/underlying
     /// edges for pointer, array and typeref nodes. Those native owner types
     /// always have a child type; a zero relationship is an incomplete export,
@@ -1112,9 +1168,29 @@ impl Graph {
             }
             graph.function_signatures.push(sig.clone());
         }
-        // The native emitter only writes parameter edges inside the same
-        // tk_routine.extra_info block that always emits event 12. A type
-        // with parameter events but no signature is a truncated snapshot.
+        // Explicit native proof records are optional for hand-built graph
+        // fixtures, but when present they must agree with event 12 even if
+        // there are no parameter records to cross-check.
+        let mut proven=std::collections::HashSet::new();
+        for proof in &il.routine_supplements {
+            if !type_map.contains_key(&proof.owner) {
+                return Err(GraphError::MissingType(proof.owner));
+            }
+            if !routine_types.contains(&proof.owner) {
+                return Err(GraphError::InvalidRoutineSupplement(proof.owner));
+            }
+            if !proven.insert(proof.owner) {
+                return Err(GraphError::DuplicateRoutineSupplement(proof.owner));
+            }
+            if proof.has_extra_info && !signatures.contains(&proof.owner) {
+                return Err(GraphError::MissingFunctionSignature(proof.owner));
+            }
+            if !proof.has_extra_info && signatures.contains(&proof.owner) {
+                return Err(GraphError::InvalidRoutineSupplement(proof.owner));
+            }
+        }
+        // Native parameter edges require event 12, even in a partial
+        // synthetic graph without supplement-presence proof.
         for owner in parameter_positions.keys() {
             if !signatures.contains(owner) {
                 return Err(GraphError::MissingFunctionSignature(*owner));
@@ -6428,6 +6504,74 @@ mod tests {
             is_rvalue_reference: false, qualifiers: None });
         let graph = Graph::from_il(&il).unwrap();
         assert!(graph.type_detail(TypeId(1)).unwrap().is_reference);
+    }
+
+    #[test]
+    fn audit_native_zero_parameter_routine_supplement_proof() {
+        let mut il=Il::default();
+        il.types.push(TypeDef {id:TypeId(1),kind:native_routine_type_kind(),
+            related_role:None,related:None});
+        // A no-parameter function has no event 8 edges; this was the
+        // ambiguous case before the independent native event 71.
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
+        Graph::from_il(&il).expect("partial synthetic graph without event 71");
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::MissingRoutineSupplement(TypeId(1))));
+        il.routine_supplements.push(crate::NativeRoutineSupplement {
+            owner:TypeId(1),has_extra_info:true,
+        });
+        Graph::validate_native_routine_signature_coverage(&il)
+            .expect("zero-parameter prototype with EDG extra_info proof");
+        Graph::from_il(&il).expect("native provenance agrees with signature");
+        il.function_signatures.clear();
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::MissingFunctionSignature(TypeId(1))));
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::MissingFunctionSignature(TypeId(1)));
+        il.routine_supplements[0].has_extra_info=false;
+        Graph::validate_native_routine_signature_coverage(&il)
+            .expect("a genuinely null extra_info need not have event 12");
+        Graph::from_il(&il).expect("matching no-supplement proof");
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::InvalidRoutineSupplement(TypeId(1))));
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRoutineSupplement(TypeId(1)));
+        il.function_signatures.clear();
+        il.routine_supplements[0].has_extra_info=true;
+        il.function_signatures.push(FunctionSignature {
+            owner:TypeId(1),prototyped:true,variadic:false,
+        });
+        il.routine_supplements.push(il.routine_supplements[0].clone());
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::DuplicateRoutineSupplement(TypeId(1))));
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::DuplicateRoutineSupplement(TypeId(1)));
+        il.routine_supplements.pop();
+        il.types.push(TypeDef {id:TypeId(2),
+            kind:native_type_kind_for_semantic(1),
+            related_role:None,related:None});
+        il.routine_supplements[0].owner=TypeId(2);
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::InvalidRoutineSupplement(TypeId(2))));
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::InvalidRoutineSupplement(TypeId(2)));
+        il.routine_supplements[0].owner=TypeId(999);
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::MissingType(TypeId(999))));
+        il.routine_supplements[0].owner=TypeId(1);
+        il.type_parameters.push(TypeParameter {
+            owner:TypeId(1),position:0,ty:TypeId(2),
+        });
+        Graph::validate_native_routine_signature_coverage(&il)
+            .expect("parameter edges plus signature and proof");
+        il.function_signatures.clear();
+        assert_eq!(Graph::validate_native_routine_signature_coverage(&il),
+            Err(GraphError::MissingFunctionSignature(TypeId(1))));
     }
 
     #[test]

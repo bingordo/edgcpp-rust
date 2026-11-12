@@ -201,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for sig in &result.il.function_signatures {
         println!("function signature id={} prototyped={} variadic={}", sig.owner.0, sig.prototyped, sig.variadic);
     }
+    for proof in &result.il.routine_supplements {
+        println!("routine supplement id={} extra_info={}",proof.owner.0,proof.has_extra_info);
+    }
     for implicit in &result.il.implicit_pointer_casts {
         println!("implicit pointer cast {} statement={} path={} source_type={}",
             implicit.function,implicit.statement_path,

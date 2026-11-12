@@ -494,6 +494,13 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
       }
     }
   }
+  // Event 71 is independent proof that EDG provided a routine supplement.
+  // Even for zero parameter types, the Rust side can now detect a missing
+  // event 12 instead of assuming an old-style non-prototype.
+  if (type->kind == tk_routine) {
+    emit_record(RECORD_ROUTINE_SUPPLEMENT,
+                {num(id), num(type->variant.routine.extra_info != nullptr ? 1 : 0)});
+  }
   // Preserve the calling interface shape, including variadic functions.
   if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
     const auto *info = type->variant.routine.extra_info;
