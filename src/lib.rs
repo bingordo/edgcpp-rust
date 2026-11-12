@@ -175,6 +175,9 @@ pub struct Il {
     pub routine_attributes: Vec<RoutineAttributes>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
+    /// Independent native event 71: whether tk_routine.extra_info exists.
+    /// In a complete EDG snapshot, every routine TypeId has exactly one.
+    pub routine_supplements: Vec<NativeRoutineSupplement>,
     pub symbols: Vec<Symbol>,
     /// EDG's untouched routine linker spellings, distinct from display names.
     /// A false mangled flag does NOT authorize fabricating C++ ABI names.
@@ -549,6 +552,14 @@ pub struct FunctionSignature {
     pub owner: TypeId,
     pub prototyped: bool,
     pub variadic: bool,
+}
+
+/// Native tk_routine supplement presence, independent of event 12 and of
+/// whether the routine actually has any parameter type records (event 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRoutineSupplement {
+    pub owner: TypeId,
+    pub has_extra_info: bool,
 }
 
 /// A statement node, identified by a stable path within one function.
@@ -1017,6 +1028,7 @@ struct WireSeen {
     globals: HashSet<SymbolId>,
     cxx_records: HashSet<TypeId>,
     cxx_lifetimes: HashSet<TypeId>,
+    routine_supplements: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
     routine_symbols: HashSet<SymbolId>,
     /// Only source-correspondence routines and variables can carry raw linker names.
@@ -1072,6 +1084,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         10 => Some(il.record_fields.len()),
         11 => Some(il.type_details.len()),
         12 => Some(il.function_signatures.len()),
+        71 => Some(il.routine_supplements.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1493,6 +1506,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 owner: TypeId(owner), is_reference: flags & 1 != 0,
                 is_rvalue_reference: flags & 2 != 0, qualifiers: n(2) });
         }
+        71 => {
+            let (Some(owner), Some(present))=(n(0),n(1)) else {return;};
+            if owner==0 || present>1 ||
+                !seen.routine_supplements.insert(TypeId(owner)) {return;}
+            output.routine_supplements.push(NativeRoutineSupplement {
+                owner:TypeId(owner),has_extra_info:present==1,
+            });
+        }
         12 => {
             let (Some(owner), Some(prototyped), Some(variadic)) = (n(0), n(1), n(2)) else { return; };
             // Neither field is a truthy integer: the wire schema specifies
@@ -1854,7 +1875,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
-       graph::Graph::validate_native_type_edge_coverage(il).is_err() {
+       graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
+       graph::Graph::validate_native_routine_signature_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -3182,7 +3204,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=70_u32 {
+        for kind in 1..=71_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3209,10 +3231,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,280);
+        assert_eq!(total,282);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(71).is_none());
+        assert!(expected_wire_field_tag_masks(72).is_none());
     }
 
     #[test]
