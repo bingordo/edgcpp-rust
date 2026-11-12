@@ -1873,6 +1873,2321 @@ jobs:
             test "$expected" = "$observed"
           )
 
+      - name: Audit C11 and C++20 native routine parameter-list counts
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_routine_count_* ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/parse --c11 audit_routine_count_c.c >audit_routine_count_c.il
+            for count in 1 2 3; do
+              grep -Eq "^routine supplement id=[0-9]+ extra_info=true parameter_count=${count}$" audit_routine_count_c.il
+            done
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=true
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_signature_c.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_c.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_c.o --c11 audit_routine_signature_c.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_routine_signature_c.c audit_routine_signature_c_driver.c -o gcc_routine_signature_c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_routine_c.o audit_routine_signature_c_driver.c -o edg_routine_signature_c
+            expected=$(./gcc_routine_signature_c)
+            observed=$(./edg_routine_signature_c)
+            test "$expected" = "native C zero-parameter signature pass"
+            test "$expected" = "$observed"
+
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_routine_signature_cpp.cpp >audit_routine_signature_cpp.il
+            grep -Eq '^routine supplement id=[0-9]+ extra_info=true parameter_count=0 audit_routine_signature_cpp.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_cpp.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_cpp.o --c++20 audit_routine_signature_cpp.cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_signature_cpp.cpp audit_routine_signature_cpp_driver.cpp -o gcc_routine_signature_cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_cpp.o audit_routine_signature_cpp_driver.cpp -o edg_routine_signature_cpp
+            expected=$(./gcc_routine_signature_cpp)
+            observed=$(./edg_routine_signature_cpp)
+            test "$expected" = "native C++ zero-parameter signature pass"
+            test "$expected" = "$observed"
+          )
+
+      - name: M6 typed direct-call ELF and GCC interoperability
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_signature_cpp.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_cpp.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_cpp.o --c++20 audit_routine_signature_cpp.cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_signature_cpp.cpp audit_routine_signature_cpp_driver.cpp -o gcc_routine_signature_cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_cpp.o audit_routine_signature_cpp_driver.cpp -o edg_routine_signature_cpp
+            expected=$(./gcc_routine_signature_cpp)
+            observed=$(./edg_routine_signature_cpp)
+            test "$expected" = "native C++ zero-parameter signature pass"
+            test "$expected" = "$observed"
+          )
+
+      - name: M6 typed direct-call ELF and GCC interoperability
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_count_c.il
+            gcc -std=c11 -O0 -Wall -Wextra -Werror audit_routine_count_c.c -o gcc_routine_count_c
+            ./gcc_routine_count_c
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_routine_count_cpp.cpp >audit_routine_count_cpp.il
+            for count in 1 2 3; do
+              grep -Eq "^routine supplement id=[0-9]+ extra_info=true parameter_count=${count}$" audit_routine_count_cpp.il
+            done
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=true
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_signature_c.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_c.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_c.o --c11 audit_routine_signature_c.c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_routine_signature_c.c audit_routine_signature_c_driver.c -o gcc_routine_signature_c
+            gcc -std=c11 -O2 -Wall -Wextra -Werror audit_routine_c.o audit_routine_signature_c_driver.c -o edg_routine_signature_c
+            expected=$(./gcc_routine_signature_c)
+            observed=$(./edg_routine_signature_c)
+            test "$expected" = "native C zero-parameter signature pass"
+            test "$expected" = "$observed"
+
+            ../../../edgcpp-rust/target/debug/examples/parse --c++20 audit_routine_signature_cpp.cpp >audit_routine_signature_cpp.il
+            grep -Eq '^routine supplement id=[0-9]+ extra_info=true parameter_count=0 audit_routine_signature_cpp.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_cpp.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_cpp.o --c++20 audit_routine_signature_cpp.cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_signature_cpp.cpp audit_routine_signature_cpp_driver.cpp -o gcc_routine_signature_cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_cpp.o audit_routine_signature_cpp_driver.cpp -o edg_routine_signature_cpp
+            expected=$(./gcc_routine_signature_cpp)
+            observed=$(./edg_routine_signature_cpp)
+            test "$expected" = "native C++ zero-parameter signature pass"
+            test "$expected" = "$observed"
+          )
+
+      - name: M6 typed direct-call ELF and GCC interoperability
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_signature_cpp.il
+            grep -Eq '^function signature id=[0-9]+ prototyped=true variadic=false$' audit_routine_signature_cpp.il
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_routine_cpp.o --c++20 audit_routine_signature_cpp.cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_signature_cpp.cpp audit_routine_signature_cpp_driver.cpp -o gcc_routine_signature_cpp
+            g++ -std=c++20 -O2 -Wall -Wextra -Werror audit_routine_cpp.o audit_routine_signature_cpp_driver.cpp -o edg_routine_signature_cpp
+            expected=$(./gcc_routine_signature_cpp)
+            observed=$(./edg_routine_signature_cpp)
+            test "$expected" = "native C++ zero-parameter signature pass"
+            test "$expected" = "$observed"
+          )
+
+      - name: M6 typed direct-call ELF and GCC interoperability
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_calls_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6.o --c11 m6_calls.c
+            gcc -std=c11 -O2 m6_calls.c m6_calls_driver.c -o gcc_m6
+            gcc -std=c11 -O2 edg_m6.o m6_calls_driver.c -o cranelift_m6
+            reference=$(./gcc_m6)
+            actual=$(./cranelift_m6)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 direct-call GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M10 indirect-call and callback GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m10_indirect_calls.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m10_indirect_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m10.o --c11 m10_indirect_calls.c
+            gcc -std=c11 -O2 m10_indirect_calls.c m10_indirect_driver.c -o gcc_m10
+            gcc -std=c11 -O2 edg_m10.o m10_indirect_driver.c -o cranelift_m10
+            ./gcc_m10
+            ./cranelift_m10
+          )
+
+      - name: M6 GNU block-value expression GCC differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m6_gnu_blocks.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m6_gnu_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m6_gnu.o --c11 --gcc m6_gnu_blocks.c
+            gcc -std=gnu11 -O2 m6_gnu_blocks.c m6_gnu_driver.c -o gcc_m6_gnu
+            gcc -std=gnu11 -O2 edg_m6_gnu.o m6_gnu_driver.c -o cranelift_m6_gnu
+            reference=$(./gcc_m6_gnu)
+            actual=$(./cranelift_m6_gnu)
+            if [ "$reference" != "$actual" ]; then
+              echo "M6 GNU block-value GCC mismatch"
+              printf 'GCC: %s\nEDG: %s\n' "$reference" "$actual"
+              exit 1
+            fi
+          )
+
+      - name: M6 GNU statement-expression 35-case native differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          python3 tools/m6_gnu_differential.py --codegen "$PWD/target/debug/examples/codegen" --edg-environment "$PWD/../edgcpp/build/gcc-release/environment.sh" --codegen-cwd "$PWD/../edgcpp/build/gcc-release"
+
+      - name: EDG to Cranelift vs GCC native execution
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --features codegen --example codegen
+          cp tests/fixtures/codegen_simple.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_reference_main.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_reference.o --c++20 codegen_simple.cpp
+            g++ -std=c++20 -O2 codegen_simple.cpp codegen_reference_main.cpp -o gcc_reference
+            g++ -std=c++20 -O2 edg_reference.o codegen_reference_main.cpp -o cranelift_reference
+            baseline=$(./gcc_reference)
+            generated=$(./cranelift_reference)
+            test "$baseline" = "$generated"
+            printf 'EDG/Cranelift comparison passed: %s\\n' "$generated"
+          )
+
+      - name: EDG C11 scalar expressions vs GCC (targeted)
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/codegen_m3_c.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/codegen_m3_c_main.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m3_c.o --c11 codegen_m3_c.c
+            gcc -std=c11 -O2 codegen_m3_c.c codegen_m3_c_main.c -o gcc_m3_c
+            gcc -std=c11 -O2 edg_m3_c.o codegen_m3_c_main.c -o cranelift_m3_c
+            baseline=$(./gcc_m3_c)
+            generated=$(./cranelift_m3_c)
+            test "$baseline" = "$generated"
+            printf '%s\n' "$generated"
+          )
+
+      - name: C11 unreferenced external definitions link from a separate object
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_exported_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_exported_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_c_exported_data.o --c11 audit_c_exported_data.c
+            for symbol in audit_c_initialized_export audit_c_tentative_export audit_c_extern_initialized_export; do
+              nm -g --defined-only audit_c_exported_data.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing externally linkable C definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_exported_data.c audit_c_exported_data_driver.c -o gcc_c_exports
+            gcc -std=c11 -O2 audit_c_exported_data.o audit_c_exported_data_driver.c -o cranelift_c_exports
+            baseline=$(./gcc_c_exports)
+            generated=$(./cranelift_c_exports)
+            test "$baseline" = "37 0 73 5"
+            if test "$baseline" != "$generated"; then
+              printf 'C global export mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 unreferenced IEEE data globals with integer-only functions
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_c_unreferenced_fp_data.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_c_unreferenced_fp_data_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_unreferenced_fp.o --c11 audit_c_unreferenced_fp_data.c
+            for symbol in audit_c_fp_negative_zero audit_c_fp_two_point_five audit_c_fp_tentative audit_c_fp_extern_initialized; do
+              nm -g --defined-only audit_unreferenced_fp.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "Missing IEEE C global definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_c_unreferenced_fp_data.c audit_c_unreferenced_fp_data_driver.c -o gcc_unreferenced_fp
+            gcc -std=c11 -O2 audit_unreferenced_fp.o audit_c_unreferenced_fp_data_driver.c -o clif_unreferenced_fp
+            baseline=$(./gcc_unreferenced_fp)
+            generated=$(./clif_unreferenced_fp)
+            test "$baseline" = "80000000 4004000000000000 00000000 c00c000000000000 11"
+            if test "$baseline" != "$generated"; then
+              printf 'Unreferenced IEEE C globals mismatch: GCC=%s CLIF=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+          )
+
+      - name: C11 data-only translation unit GCC/Cranelift linkage
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_data_only.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_data_only_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_data_only.o --c11 audit_data_only.c
+            for symbol in audit_data_only_integer audit_data_only_negative_zero audit_data_only_tentative audit_data_only_pair; do
+              nm -g --defined-only audit_data_only.o | grep -Eq " [BD] ${symbol}$" || {
+                echo "C data-only object omitted externally visible definition: ${symbol}"
+                exit 1
+              }
+            done
+            gcc -std=c11 -O2 audit_data_only.c audit_data_only_driver.c -o gcc_data_only
+            gcc -std=c11 -O2 audit_data_only.o audit_data_only_driver.c -o clif_data_only
+            baseline=$(./gcc_data_only)
+            generated=$(./clif_data_only)
+            test "$baseline" = "23 7 0 80000000 1"
+            if test "$generated" != "$baseline"; then
+              printf 'Data-only object mismatch: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            echo "Data-only C object differential passed"
+          )
+
+      - name: M8 native C11 struct field differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/m8_struct_fields.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m8_struct_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4096_driver.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_image_4097.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen edg_m8_struct.o --c11 m8_struct_fields.c
+            gcc -std=c11 -O2 m8_struct_fields.c m8_struct_driver.c -o gcc_m8_struct
+            gcc -std=c11 -O2 edg_m8_struct.o m8_struct_driver.c -o cranelift_m8_struct
+            baseline=$(./gcc_m8_struct)
+            generated=$(./cranelift_m8_struct)
+            if [ "$baseline" != "$generated" ]; then
+              echo "M8 EDG/Cranelift struct field mismatch"
+              printf 'GCC: %s\n' "$baseline"
+              printf 'EDG: %s\n' "$generated"
+              exit 1
+            fi
+            echo "M8 native layout and field differential passed"
+            # Exact image limit must preserve the final designated byte and
+            # all implicit zero-filled elements, as independently built by GCC.
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4096.o --c11 audit_image_4096.c
+            gcc -std=c11 -O2 audit_image_4096.c audit_image_4096_driver.c -o gcc_image_4096
+            gcc -std=c11 -O2 audit_image_4096.o audit_image_4096_driver.c -o cranelift_image_4096
+            expected=$(./gcc_image_4096)
+            actual=$(./cranelift_image_4096)
+            test "$expected" = "102 13 0 89"
+            if test "$actual" != "$expected"; then
+              printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
+              exit 1
+            fi
+            rm -f audit_image_4097.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4097-byte initializer"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
+              cat audit_image_4097.log
+              exit 1
+            }
+            test ! -f audit_image_4097.o
+            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+          )
+
+      - name: C11 aggregate data relocation boundary differential
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          cp tests/fixtures/audit_reloc_512.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_513.c ../edgcpp/build/gcc-release/
+          cp tests/fixtures/audit_reloc_512_driver.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_512.o --c11 audit_reloc_512.c
+            gcc -std=c11 -O2 audit_reloc_512.c audit_reloc_512_driver.c -o gcc_reloc_512
+            gcc -std=c11 -O2 audit_reloc_512.o audit_reloc_512_driver.c -o clif_reloc_512
+            baseline=$(./gcc_reloc_512)
+            generated=$(./clif_reloc_512)
+            test "$baseline" = "18944 37 37"
+            if test "$baseline" != "$generated"; then
+              printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
+              exit 1
+            fi
+            rm -f audit_reloc_513.o
+            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
+              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
+              exit 1
+            fi
+            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
+              cat audit_reloc_513.log
+              exit 1
+            }
+            test ! -f audit_reloc_513.o
+            echo "Native aggregate 512/513 pointer relocation boundary passed"
+          )
+
+      - name: Reject unsupported EDG constructs
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cp tests/fixtures/codegen_rejected.cpp ../edgcpp/build/gcc-release/
+          cp tests/fixtures/m5_gnu_statement_expr.c ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            # The formerly rejected C++20 FP return is now supported.
+            ../../../edgcpp-rust/target/debug/examples/codegen accepted_fp.o --c++20 -DTEST_FLOAT_RETURN codegen_rejected.cpp
+            nm -g --defined-only accepted_fp.o | grep -Eq ' [Tt] rejected$'
+            rm -f accepted_fp.o
+            for variant in TEST_FLOAT_LOCAL; do
+              rm -f rejected.o rejected.log
+              if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c++20 -D"$variant" codegen_rejected.cpp > rejected.log 2>&1; then
+                echo "Unexpectedly accepted unsupported construct: $variant"
+                exit 1
+              fi
+              grep -Eq 'parameter/return ABI must be|call callee is not a direct named routine|function-pointer calls unsupported|unsupported EDG operation|unsupported typed EDG expression|unsupported C expression type|unsupported/nonlocal variable|unresolved scalar variable|qualified global|FP locals require typed scalar CFG integration|unsupported FP source expression form|FP source statement|unsupported FP control flow or statement form|qualified/reference FP local needs memory effects|FP if arms must both return or contain assignment-only control flow' rejected.log || {
+                echo "Wrong rejection reason for $variant"
+                cat rejected.log
+                exit 1
+              }
+              test ! -e rejected.o
+              echo "Rejected $variant"
+            done
+            rm -f rejected.o rejected.log
+            if ../../../edgcpp-rust/target/debug/examples/codegen rejected.o --c11 --gcc m5_gnu_statement_expr.c > rejected.log 2>&1; then
+              echo "Unexpectedly accepted GNU statement expression without block/value lowering"
+              exit 1
+            fi
+            grep -E 'GNU block has unsupported statement kind|GNU statement-expression missing|GNU block statements after result' rejected.log
+            test ! -e rejected.o
+          )
+
+      - name: Save incremental Rust cache (successful codegen-branch builds only)
+        if: ${{ success() && github.ref == 'refs/heads/cranelift-codegen' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            edgcpp-rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+ audit_routine_count_cpp.il
+            g++ -std=c++20 -O0 -Wall -Wextra -Werror audit_routine_count_cpp.cpp -o gcc_routine_count_cpp
+            ./gcc_routine_count_cpp
+          )
+
       - name: M6 typed direct-call ELF and GCC interoperability
         working-directory: edgcpp-rust
         env:
