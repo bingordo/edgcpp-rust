@@ -1711,7 +1711,7 @@ jobs:
               if ../../../edgcpp-rust/target/debug/examples/codegen audit_cv_bad.o --c11 "$source" >audit_cv_bad.log 2>&1; then
                 if [ "$source" = audit_cv_call_bad_nested.c ]; then
                   ../../../edgcpp-rust/target/debug/examples/parse --c11 "$source" >audit_cv_nested_il.log 2>&1 || true
-                  grep -E '^(expression audit_cv_bad_nested|type id=|type detail id=|symbol type name=|function signature)' audit_cv_nested_il.log | tail -n 160 || true
+                  grep -E '^(expression audit_cv_bad_nested|implicit pointer cast audit_cv_bad_nested|type id=|type detail id=|symbol type name=|function signature)' audit_cv_nested_il.log | tail -n 160 || true
                 fi
                 echo "Native EDG lowering accepts invalid C11 qualifier conversion: $source" >&2
                 exit 1
