@@ -1297,6 +1297,43 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     // Event 18: call site (function, statement, expression path,
     // first argument operand index). The callee is always operand zero.
     emit_record(18, {txt(function), txt(stmt_path), txt(path), num(call_offset)});
+    // Event 77 is an *additional native-IL source ownership witness* for
+    // the callee expression at this exact callsite. Classification:
+    // 1 = direct EDG routine, 2 = exact ck_address/abk_routine constant,
+    // 3 = otherwise indirect. Importantly 3 is NOT proof of virtual
+    // dispatch or any vtable slot; standard C function pointers also
+    // use this form. Keep exact type and source symbol where present.
+    // A missing operand is an incomplete native snapshot, not a call.
+    an_expr_node_ptr callee = node->variant.operation.operands;
+    if (callee == nullptr) {
+      report_incomplete_snapshot();
+    } else {
+      uint32_t form = 3, callee_symbol = 0;
+      if (callee->kind == enk_routine &&
+          callee->variant.routine.ptr != nullptr) {
+        a_routine_ptr routine = callee->variant.routine.ptr;
+        callee_symbol = emit_symbol(routine, 1,
+            declaration_name(routine->source_corresp, true, true));
+        form = 1;
+      } else if (callee->kind == enk_constant &&
+                 callee->variant.constant.ptr != nullptr &&
+                 callee->variant.constant.ptr->kind == ck_address) {
+        const auto &address = callee->variant.constant.ptr->variant.address;
+        if (address.kind == abk_routine &&
+            address.variant.routine != nullptr &&
+            address.offset == 0 && !address.is_object_reflection) {
+          a_routine_ptr routine = address.variant.routine;
+          callee_symbol = emit_symbol(routine, 1,
+              declaration_name(routine->source_corresp, true, true));
+          form = 2;
+        }
+      }
+      const uint32_t callee_type = emit_type(callee->type, depth + 1);
+      emit_record(RECORD_CALL_TARGET_PROVENANCE, {
+          txt(function), txt(stmt_path), txt(path), num(form),
+          callee_type ? num(callee_type) : absent(),
+          callee_symbol ? num(callee_symbol) : absent()});
+    }
   }
   // GNU ({...}) owns a real EDG statement subtree. Give each expression
   // occurrence a unique child edge under its enclosing statement so the
