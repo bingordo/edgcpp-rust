@@ -4685,6 +4685,117 @@ mod cxx5_virtual_receiver_reuse_tests {
 }
 
 #[cfg(test)]
+mod cxx5_virtual_entry_index_selection_tests {
+    use super::*;
+
+    fn source(index:u64) -> Il {
+        let mut il=Il {cpp_language:Some(true), ..Il::default()};
+        il.symbols.push(Symbol {
+            id:SymbolId(9),kind:1,name:"Base::f".into(),
+        });
+        il.routine_attributes.push(RoutineAttributes {
+            routine:SymbolId(9),special_kind:0,is_virtual:true,
+            pure_virtual:false,is_override:false,is_final:false,
+            overrides_base_member:false,is_inline:false,is_constexpr:false,
+            defined:true,explicit_constructor:false,has_this_parameter:true,
+            compiler_generated:false,
+        });
+        il.native_virtual_members.push(NativeVirtualMemberInfo {
+            routine:SymbolId(9),owner:TypeId(4),
+            virtual_number:Some(index),virtual_info_offset:Some(0),
+            sharing_base:None,
+        });
+        il.prelower_virtual_origins.push(PrelowerVirtualCallOrigin {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),original_routine:SymbolId(9),
+            original_receiver_type:Some(TypeId(4)),
+            original_operator:107,receiver_node_retained:false,
+        });
+        il.virtual_entry_indexes.push(VirtualEntryIndexSelection {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),source_index:index,entry_bytes:8,
+        });
+        il
+    }
+
+    #[test]
+    fn source_index_must_match_original_virtual_method_and_safe_width() {
+        let mut il=source(0);
+        assert!(validate_virtual_entry_index_selections(&il).is_ok(),
+            "zero-based Itanium native virtual index must be preserved");
+        il=source(6);
+        assert!(validate_virtual_entry_index_selections(&il).is_ok(),
+            "source index six is still not an independently proven machine slot");
+        il.virtual_entry_indexes.clear();
+        assert!(validate_virtual_entry_index_selections(&il).is_ok(),
+            "copied index nodes may lose pointer identity without guessed ABI");
+    }
+
+    #[test]
+    fn source_index_rejects_missing_ambiguous_or_wrong_method_evidence() {
+        let il=source(3);
+        let mut bad=il.clone();
+        bad.virtual_entry_indexes.push(bad.virtual_entry_indexes[0].clone());
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        let mut bad=il.clone();
+        bad.native_virtual_members[0].virtual_number=Some(4);
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        let mut bad=il.clone();
+        bad.routine_attributes[0].is_virtual=false;
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        let mut bad=il.clone();
+        bad.prelower_virtual_origins.clear();
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_entry_indexes[0].path="different".into();
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        let mut bad=il.clone();
+        bad.cpp_language=Some(false);
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+    }
+
+    #[test]
+    fn native_element_width_is_not_a_guessed_machine_slot() {
+        let il=source(3);
+        for invalid_width in [0,3,5,64] {
+            let mut bad=il.clone();
+            bad.virtual_entry_indexes[0].entry_bytes=invalid_width;
+            assert!(validate_virtual_entry_index_selections(&bad).is_err());
+        }
+        let mut bad=source(u64::MAX);
+        bad.virtual_entry_indexes[0].entry_bytes=8;
+        assert!(validate_virtual_entry_index_selections(&bad).is_err());
+    }
+
+    #[test]
+    fn wire_record_is_typed_and_overflow_is_rejected() {
+        let text=|value:&[u8]| WireField {
+            data:value.as_ptr(),length:value.len(),value:0,
+            tag:wire_tags::TEXT,
+        };
+        let number=|value:u64| WireField {
+            data:std::ptr::null(),length:0,value,
+            tag:wire_tags::UNSIGNED,
+        };
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                    number(0),number(8)];
+        let mut collector=Collector::default();
+        unsafe {collect((&mut collector as *mut Collector).cast(),82,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(!collector.malformed);
+        let got=&collector.il.virtual_entry_indexes[0];
+        assert_eq!(got.source_index,0);
+        assert_eq!(got.entry_bytes,8);
+        let overflow=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                      number(u64::MAX),number(8)];
+        let mut collector=Collector::default();
+        unsafe {collect((&mut collector as *mut Collector).cast(),82,
+                        overflow.as_ptr(),overflow.len(),0);}
+        assert!(collector.malformed);
+    }
+}
+
+#[cfg(test)]
 mod cxx5_prelower_virtual_call_origin_tests {
     use super::*;
 
