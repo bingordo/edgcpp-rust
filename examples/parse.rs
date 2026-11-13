@@ -321,6 +321,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  info.virtual_number,info.virtual_info_offset,
                  info.sharing_base.map(|id|id.0));
     }
+    // A lowered ordinary eok_call can contain an exact record-field
+    // reference to "__vptr" without retaining its pre-lowering virtual
+    // routine/receiver identity. Record this *observed tree* only for
+    // independently unresolved native call targets. These raw literals
+    // must never be used to infer Itanium slots or authorize execution.
+    let call_by_site:std::collections::HashMap<(&str,&str,&str),&edgcpp::CallSite>=
+        graph.calls.iter().map(|c| (
+            (c.function.as_str(),c.statement_path.as_str(),c.path.as_str()),c
+        )).collect();
+    for target in &result.il.call_targets {
+        if target.form!=edgcpp::CallTargetForm::IndirectUnresolved {continue;}
+        let key=(target.function.as_str(),target.statement_path.as_str(),
+                 target.path.as_str());
+        let Some(call)=call_by_site.get(&key) else {continue;};
+        let Some(evidence)=graph.callee_vptr_field_reference(call) else {continue;};
+        println!("EDG_INDIRECT_CALLEE_VPTR function={} statement={} path={} field={} field_name=__vptr owner={} field_path={} field_byte_offset={} raw_literals={:?} source_virtual_proven=false machine_slot_proven=false executable_abi_proven=false",
+                 call.function,call.statement_path,call.path,
+                 evidence.field.0,evidence.owner.0,evidence.field_path,
+                 evidence.field_byte_offset,evidence.raw_integer_literals);
+    }
     for attributes in &graph.routine_attributes {
         let routine = graph.symbol(attributes.routine).ok_or("missing routine attributes symbol")?;
         println!("routine attributes name={} special={} virtual={} override={} final={} this={} generated={} defined={}",
