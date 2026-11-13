@@ -20,7 +20,8 @@
     "RECORD_CALL_TARGET_PROVENANCE": 77,
     "RECORD_NATIVE_CALL_DISPATCH": 78,
     "RECORD_NATIVE_VIRTUAL_MEMBER_INFO": 79,
-    "RECORD_PRELOWER_VIRTUAL_CALL_ORIGIN": 80
+    "RECORD_PRELOWER_VIRTUAL_CALL_ORIGIN": 80,
+    "RECORD_VIRTUAL_RECEIVER_REUSE": 81
   },
   "record_arities": {
     "1": 1,
@@ -102,7 +103,8 @@
     "77": 6,
     "78": 6,
     "79": 5,
-    "80": 7
+    "80": 7,
+    "81": 6
   },
   "record_field_tags": {
     "1": [
@@ -581,6 +583,14 @@
       "TEXT",
       "UNSIGNED",
       "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "81": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
     ]

@@ -334,6 +334,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             origin.original_receiver_type.map(|id|id.0),
             origin.original_operator,origin.receiver_node_retained);
     }
+    // Event 81 is an independent source-backed reuse proof: EDG's
+    // get_virtual_function_address returned this exact receiver expression,
+    // which remained a unique direct argument of the paired lowered call.
+    // The copied expression need not share the original source-node address.
+    // It does not prove a complete object, vtable address, subobject
+    // offset, thunk, or runtime machine this-adjustment.
+    for reuse in &result.il.virtual_receiver_reuses {
+        println!("EDG_VIRTUAL_RECEIVER_REUSE function={} statement={} path={} receiver_type={} arg_index={} original_node_same={} edg_reuse_proven=true subobject_abi_proven=false executable_abi_proven=false",
+                 reuse.function,reuse.statement_path,reuse.path,
+                 reuse.receiver_type.0,reuse.argument_position,
+                 reuse.original_node_reused);
+    }
     // A lowered ordinary eok_call can contain an exact record-field
     // reference to "__vptr" without retaining its pre-lowering virtual
     // routine/receiver identity. Record this *observed tree* only for

@@ -79,6 +79,10 @@ thread_local std::unordered_map<const void *, PrelowerVirtualCall>
 struct PostlowerVirtualCall {
   PrelowerVirtualCall source;
   const void *rewritten_callee;
+  // EDG source get_virtual_function_address explicitly returned this
+  // make_reusable_copy receiver. This is only a node provenance witness,
+  // not a machine this-adjustment or proof of live object storage.
+  const void *receiver_reused_for_call;
   bool ambiguous;
 };
 thread_local std::unordered_map<const void *, PostlowerVirtualCall>
@@ -1416,6 +1420,39 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                 original_receiver_type ? num(original_receiver_type) : absent(),
                 num(origin.original_operator),
                 num(callee->next == origin.original_receiver ? 1 : 0)});
+
+            // EDG's get_virtual_function_address produced an exact reusable
+            // receiver expression for this virtual call. The new source hook
+            // supplies that node; export event 81 only when it is still a
+            // *unique direct call argument* of the already proven eok_call.
+            // This records expression reuse, not class subobject identity,
+            // ABI vtable slot, thunk or adjusted machine `this` value.
+            auto *reuse = static_cast<an_expr_node_ptr>(
+                const_cast<void *>(observed->second.receiver_reused_for_call));
+            if (reuse != nullptr) {
+              unsigned index = 0;
+              unsigned matches = 0;
+              unsigned matched_index = 0;
+              for (an_expr_node_ptr argument = callee->next;
+                   argument != nullptr && index < 16;
+                   argument = argument->next, ++index) {
+                if (argument == reuse) {
+                  ++matches;
+                  matched_index = index;
+                }
+              }
+              if (matches == 1 && index < 16) {
+                uint32_t receiver_type_id = emit_type(reuse->type, depth + 1);
+                if (receiver_type_id == 0) {
+                  report_incomplete_snapshot();
+                } else {
+                  emit_record(RECORD_VIRTUAL_RECEIVER_REUSE, {
+                      txt(function),txt(stmt_path),txt(path),
+                      num(receiver_type_id),num(matched_index),
+                      num(reuse == origin.original_receiver ? 1 : 0)});
+                }
+              }
+            }
           }
         }
       }
@@ -2692,11 +2729,13 @@ extern "C" void edgcpp_capture_pre_lower_virtual_call(
 // subsequent copies/replacements; it cannot establish complete provenance
 // across arbitrary EDG inlining or prove receiver adjustments.
 extern "C" void edgcpp_capture_post_lower_virtual_call(
-    void *original_call, void *rewritten_call)
+    void *original_call, void *rewritten_call,
+    void *receiver_reused_for_call)
 {
   using namespace edg;
   if (current_callback == nullptr || original_call == nullptr ||
-      rewritten_call == nullptr) return;
+      rewritten_call == nullptr ||
+      receiver_reused_for_call == nullptr) return;
   const auto original = prelower_virtual_calls.find(original_call);
   if (original == prelower_virtual_calls.end() ||
       original->second.ambiguous || original->second.routine == nullptr) return;
@@ -2727,7 +2766,8 @@ extern "C" void edgcpp_capture_post_lower_virtual_call(
   auto added = postlower_virtual_calls.emplace(
       rewritten_call,
       PostlowerVirtualCall {
-          original->second, lowered->variant.operation.operands, false});
+          original->second, lowered->variant.operation.operands,
+          receiver_reused_for_call, false});
   if (!added.second) {
     // Even two apparently equal entries are ambiguous across EDG
     // transformations. Never silently reuse a physical node address.
