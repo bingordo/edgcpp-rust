@@ -66,10 +66,24 @@ struct PrelowerVirtualCall {
   const void *original_receiver;
   const void *receiver_type;
   unsigned original_operator;
+  const void *original_routine_operand;
   bool ambiguous;
 };
 thread_local std::unordered_map<const void *, PrelowerVirtualCall>
     prelower_virtual_calls;
+
+// Source-owned native IA64_ABI virtual dispatch index: recorded only when
+// EDG has actually constructed the __vptr + integer index expression.
+// The exact index-node pointer must survive in the *callee subtree*.
+// Not a certificate for the target object's address point or machine ABI.
+struct NativeVirtualEntrySelection {
+  const void *index_expression;
+  uint64_t source_index;
+  uint64_t entry_bytes;
+  bool ambiguous;
+};
+thread_local std::unordered_map<const void *, NativeVirtualEntrySelection>
+    native_virtual_entry_selections;
 
 // Recorded ONLY by a second EDG source hook after the actual call rewrite.
 // This is stronger than old raw-pointer-only guesses: the original call and
@@ -83,6 +97,8 @@ struct PostlowerVirtualCall {
   // make_reusable_copy receiver. This is only a node provenance witness,
   // not a machine this-adjustment or proof of live object storage.
   const void *receiver_reused_for_call;
+  NativeVirtualEntrySelection native_entry;
+  bool native_entry_seen;
   bool ambiguous;
 };
 thread_local std::unordered_map<const void *, PostlowerVirtualCall>
@@ -2714,11 +2730,41 @@ extern "C" void edgcpp_capture_pre_lower_virtual_call(
       callee->variant.routine.ptr == nullptr) return;
   const PrelowerVirtualCall proof = {
       callee->variant.routine.ptr, receiver, receiver->type,
-      static_cast<unsigned>(expr->variant.operation.kind), false};
+      static_cast<unsigned>(expr->variant.operation.kind),
+      original_routine, false};
   for (const void *carrier : {call, original_routine}) {
     auto inserted = prelower_virtual_calls.emplace(carrier, proof);
     if (!inserted.second) inserted.first->second.ambiguous = true;
   }
+}
+
+// Observed inside EDG make_vtbl_entry_node at the instant an eok_padd
+// operand list is constructed from a native __vptr field access and a new
+// constant index expression. Keep only exact source-owned routine operands
+// already reported by the genuine pre-lowering virtual-call hook.
+extern "C" void edgcpp_capture_virtual_entry_index(
+    void *original_routine_operand, void *index_expression,
+    unsigned long long source_index, unsigned long long entry_bytes)
+{
+  using namespace edg;
+  if (current_callback == nullptr || original_routine_operand == nullptr ||
+      index_expression == nullptr || entry_bytes == 0 || entry_bytes > 32)
+    return;
+  auto origin = prelower_virtual_calls.find(original_routine_operand);
+  if (origin == prelower_virtual_calls.end() || origin->second.ambiguous ||
+      origin->second.original_routine_operand != original_routine_operand ||
+      origin->second.routine == nullptr) return;
+  auto *index_node = static_cast<an_expr_node_ptr>(index_expression);
+  auto *routine = static_cast<a_routine_ptr>(
+      const_cast<void *>(origin->second.routine));
+  if (index_node->kind != enk_constant ||
+      index_node->variant.constant.ptr == nullptr ||
+      routine->number.virtual_function != source_index) return;
+  auto added = native_virtual_entry_selections.emplace(
+      original_routine_operand, NativeVirtualEntrySelection {
+          index_expression, static_cast<uint64_t>(source_index),
+          static_cast<uint64_t>(entry_bytes), false});
+  if (!added.second) added.first->second.ambiguous = true;
 }
 
 // EDG invokes this only after converting the original member-call node
@@ -2763,11 +2809,20 @@ extern "C" void edgcpp_capture_post_lower_virtual_call(
     }
   }
   if (!source_rewrite_is_structurally_visible) return;
+  NativeVirtualEntrySelection native_entry = {nullptr, 0, 0, true};
+  bool entry_seen = false;
+  const auto native = native_virtual_entry_selections.find(
+      original->second.original_routine_operand);
+  if (native != native_virtual_entry_selections.end() &&
+      !native->second.ambiguous) {
+    native_entry = native->second;
+    entry_seen = true;
+  }
   auto added = postlower_virtual_calls.emplace(
       rewritten_call,
       PostlowerVirtualCall {
           original->second, lowered->variant.operation.operands,
-          receiver_reused_for_call, false});
+          receiver_reused_for_call, native_entry, entry_seen, false});
   if (!added.second) {
     // Even two apparently equal entries are ambiguous across EDG
     // transformations. Never silently reuse a physical node address.
@@ -2796,6 +2851,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_static_locals.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
+  native_virtual_entry_selections.clear();
   postlower_virtual_calls.clear();
   current_callback = callback;
   current_user_data = user_data;
@@ -2819,6 +2875,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_static_locals.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
+  native_virtual_entry_selections.clear();
   postlower_virtual_calls.clear();
   return status;
 }
