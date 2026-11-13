@@ -1385,11 +1385,12 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           txt(function), txt(stmt_path), txt(path), num(form),
           callee_type ? num(callee_type) : absent(),
           callee_symbol ? num(callee_symbol) : absent()});
-      // This optional source-owned witness was recorded *before*
-      // lower_virtual_function_call replaced the original enk_routine and
-      // receiver. Its carrier is only an observed surviving EDG node address;
-      // it does not establish slot encoding, thunks, object lifetime,
-      // receiver adjustment, or permission to call.
+      // This optional native witness pairs source hook callbacks *before*
+      // and *after* EDG's same lower_virtual_function_call rewrite. The
+      // post-hook names the exact rewritten eok_call and its callee node:
+      // any missing/ambiguous/mismatched post-rewrite pointer yields NO event.
+      // It still does not establish virtual slot encoding, thunks, receiver
+      // adjustment, object lifetime, or permission to call.
       if (form == 3 && original_op == eok_call) {
         auto observed = postlower_virtual_calls.find(node);
         if (observed != postlower_virtual_calls.end() &&
