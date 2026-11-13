@@ -321,14 +321,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  info.virtual_number,info.virtual_info_offset,
                  info.sharing_base.map(|id|id.0));
     }
-    // Event 80, when present, came from a pre-lowering EDG callback that
-    // observed the actual virtual routine and receiver *before* EDG rewrote
-    // the call. It records source identity only; the current mapping is
-    // optional and does not prove physical vtable slot, adjustment or ABI.
+    // Event 80 requires paired native EDG callbacks before and after the
+    // same virtual-call rewrite and an exact final callee-node match.
+    // The mapped identity is still optional after copying/inlining; no
+    // physical slot, receiver adjustment, or executable ABI is proven.
     for origin in &result.il.prelower_virtual_origins {
         let name=result.il.symbols.iter().find(|s|
             s.id==origin.original_routine).map(|s|s.name.as_str());
-        println!("EDG_PRELOWER_VIRTUAL_ORIGIN function={} statement={} path={} original_routine={} original_name={:?} receiver_type={:?} original_operator={} receiver_node_retained={} machine_slot_proven=false executable_abi_proven=false",
+        println!("EDG_PRELOWER_VIRTUAL_ORIGIN function={} statement={} path={} original_routine={} original_name={:?} receiver_type={:?} original_operator={} receiver_node_retained={} postlower_rewrite_proven=true callee_pointer_stable=true machine_slot_proven=false executable_abi_proven=false",
             origin.function,origin.statement_path,origin.path,
             origin.original_routine.0,name,
             origin.original_receiver_type.map(|id|id.0),
