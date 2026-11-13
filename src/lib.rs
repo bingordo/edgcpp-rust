@@ -2264,6 +2264,24 @@ fn validate_native_call_dispatch_coverage(il:&Il)->Result<(),&'static str> {
 /// EDG's actual C/C++ mode. A lost event is a truncated snapshot, not a
 /// license to guess language semantics from source names or flags. This
 /// boundary also covers required type details and relationship edges.
+// Successful native compilations must retain exactly one attributes event
+// for each statement, including compiler-synthesized for increments.
+fn validate_native_statement_attribute_coverage(il:&Il) -> Result<(),Error> {
+    let statements: HashSet<_> = il.statements.iter()
+        .map(|s| (s.function.as_str(), s.path.as_str())).collect();
+    let mut attributes = HashSet::with_capacity(il.statement_attributes.len());
+    for attr in &il.statement_attributes {
+        let key = (attr.function.as_str(), attr.statement_path.as_str());
+        if !statements.contains(&key) || !attributes.insert(key) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if attributes.len() != il.statements.len() {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -2276,6 +2294,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_call_target_coverage(il).is_err() ||
        validate_native_call_dispatch_coverage(il).is_err() ||
        validate_native_virtual_member_coverage(il).is_err() ||
+       validate_native_statement_attribute_coverage(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -2342,6 +2361,33 @@ mod tests {
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)),
             "unrelated records do not replace a language mode event");
+    }
+
+    #[test]
+    fn native_statement_attributes_prove_exact_statement_coverage() {
+        let mut il=Il { cpp_language:Some(false), ..Il::default() };
+        let statement=|path:&str| Statement {
+            function:"f".into(),path:path.into(),parent:None,kind:0,
+        };
+        let attributes=|path:&str| StatementAttributes {
+            function:"f".into(),statement_path:path.into(),
+            compiler_generated:false,initialization_guard:false,
+            fallthrough:false,likely:false,unlikely:false,
+            lowering_generated:false,lowering_boilerplate:false,
+        };
+        il.statements.extend([statement("0"),statement("1")]);
+        il.statement_attributes.push(attributes("0"));
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)), "missing tail metadata must fail");
+        il.statement_attributes.push(attributes("1"));
+        validate_complete_native_snapshot(&il).expect("complete metadata");
+        il.statement_attributes.push(attributes("1"));
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)), "duplicate metadata must fail");
+        il.statement_attributes.pop();
+        il.statement_attributes[1].statement_path="2".into();
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)), "orphan metadata must fail");
     }
 
     #[test]
