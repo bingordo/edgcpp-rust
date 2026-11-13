@@ -72,11 +72,13 @@ struct PrelowerVirtualCall {
 thread_local std::unordered_map<const void *, PrelowerVirtualCall>
     prelower_virtual_calls;
 
-// Source-owned native IA64_ABI virtual dispatch index: recorded only when
-// EDG has actually constructed the __vptr + integer index expression.
-// The exact index-node pointer must survive in the *callee subtree*.
-// Not a certificate for the target object's address point or machine ABI.
+// Source-owned native IA64_ABI vptr + index expression. All three exact
+// node identities and the parent->operand links must survive into the
+// final callee subtree; a detached index is insufficient evidence.
+// This still does not prove a live vtable address point or machine ABI.
 struct NativeVirtualEntrySelection {
+  const void *entry_expression;
+  const void *vptr_expression;
   const void *index_expression;
   uint64_t source_index;
   uint64_t entry_bytes;
@@ -748,25 +750,40 @@ static expression_children children_of(an_expr_node_ptr node)
   return {nullptr, false};
 }
 
-// Fail-closed bounded walk over only the final indirect callee subtree.
-// A physical pointer match to EDG's newly created virtual-table index
-// expression cannot be synthesized from a numeric literal in unrelated IL.
-// Never walk the eok_call's receiver/argument operands or assume that
-// a cloned graph preserves exact pointer identity.
-static bool callee_contains_unique_native_index(an_expr_node_ptr root,
-                                                const void *target)
+// Fail-closed bounded walk of the final indirect *callee only*: require
+// exact EDG source-built eok_padd, its vptr operand and its index operand.
+// Merely finding the numeric index node somewhere in the callee must not
+// certify that it remains part of the original vtable lookup. Pointer
+// copies, unexpected cycles, aliasing and alternate shapes suppress proof.
+static bool callee_contains_exact_native_padd(an_expr_node_ptr root,
+                                              const void *entry,
+                                              const void *vptr,
+                                              const void *index)
 {
-  if (root == nullptr || target == nullptr) return false;
+  if (root == nullptr || entry == nullptr || vptr == nullptr ||
+      index == nullptr || entry == vptr || entry == index || vptr == index)
+    return false;
   std::vector<an_expr_node_ptr> pending{root};
   std::unordered_set<const void *> visited;
-  unsigned matches = 0;
+  unsigned entry_matches = 0, vptr_matches = 0, index_matches = 0;
   while (!pending.empty()) {
     if (visited.size() >= 512 || pending.size() > 512) return false;
     an_expr_node_ptr candidate = pending.back();
     pending.pop_back();
     if (candidate == nullptr || !visited.insert(candidate).second)
       return false;
-    if (candidate == target) ++matches;
+    if (candidate == entry) {
+      ++entry_matches;
+      if (candidate->kind != enk_operation ||
+          candidate->variant.operation.kind != eok_padd)
+        return false;
+      an_expr_node_ptr first = candidate->variant.operation.operands;
+      if (first == nullptr || first != vptr ||
+          first->next != index || first->next->next != nullptr)
+        return false;
+    }
+    if (candidate == vptr) ++vptr_matches;
+    if (candidate == index) ++index_matches;
     const expression_children children = children_of(candidate);
     unsigned count = 0;
     an_expr_node_ptr child = children.first;
@@ -774,9 +791,10 @@ static bool callee_contains_unique_native_index(an_expr_node_ptr root,
          child = children.linked_list ? child->next : nullptr, ++count) {
       pending.push_back(child);
     }
-    if (child != nullptr || matches > 1) return false;
+    if (child != nullptr || entry_matches > 1 ||
+        vptr_matches > 1 || index_matches > 1) return false;
   }
-  return matches == 1;
+  return entry_matches == 1 && vptr_matches == 1 && index_matches == 1;
 }
 
 // EDG's call operators encode the callee as operand zero. Member calls
@@ -1501,18 +1519,20 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
               }
             }
 
-            // Event 82 is strictly the EDG-owned index constant that was
-            // inserted into an actual eok_padd(__vptr, index) expression
-            // by native Itanium ABI lowering. Require the exact index
-            // expression node to remain unique in *this callee subtree*,
-            // not in receiver or argument subtrees. Paired event 80 already
-            // established the original virtual routine/call identity.
-            // This does NOT prove the address point or physical machine
-            // vtable slot (notably secondary tables and thunks).
+            // Event 82 requires the exact EDG-generated eok_padd parent,
+            // original vptr operand and index operand to remain linked in
+            // this call's final *callee subtree*. A surviving detached
+            // index alone is not evidence of the lookup. Event 80 already
+            // binds the original virtual routine to the rewritten call.
+            // Still no physical machine slot, thunk, this adjustment or
+            // live object's address point is proven.
             if (observed->second.native_entry_seen &&
                 observed->second.native_entry.entry_bytes != 0 &&
-                callee_contains_unique_native_index(
-                    callee, observed->second.native_entry.index_expression)) {
+                callee_contains_exact_native_padd(
+                    callee,
+                    observed->second.native_entry.entry_expression,
+                    observed->second.native_entry.vptr_expression,
+                    observed->second.native_entry.index_expression)) {
               emit_record(RECORD_VIRTUAL_ENTRY_INDEX_SELECTION, {
                   txt(function),txt(stmt_path),txt(path),
                   num(observed->second.native_entry.source_index),
@@ -2787,31 +2807,40 @@ extern "C" void edgcpp_capture_pre_lower_virtual_call(
   }
 }
 
-// Observed inside EDG make_vtbl_entry_node at the instant an eok_padd
-// operand list is constructed from a native __vptr field access and a new
-// constant index expression. Keep only exact source-owned routine operands
-// already reported by the genuine pre-lowering virtual-call hook.
+// Observed inside EDG make_vtbl_entry_node when the native
+// eok_padd(__vptr, index) is built. Require exact parent and operand
+// identities up front; reconfirm their links in the *final* callee.
+// Only accept the genuine pre-lowering source virtual-call identity.
 extern "C" void edgcpp_capture_virtual_entry_index(
-    void *original_routine_operand, void *index_expression,
+    void *original_routine_operand, void *entry_expression,
+    void *vptr_expression, void *index_expression,
     unsigned long long source_index, unsigned long long entry_bytes)
 {
   using namespace edg;
   if (current_callback == nullptr || original_routine_operand == nullptr ||
+      entry_expression == nullptr || vptr_expression == nullptr ||
       index_expression == nullptr || entry_bytes == 0 || entry_bytes > 32)
     return;
   auto origin = prelower_virtual_calls.find(original_routine_operand);
   if (origin == prelower_virtual_calls.end() || origin->second.ambiguous ||
       origin->second.original_routine_operand != original_routine_operand ||
       origin->second.routine == nullptr) return;
+  auto *entry_node = static_cast<an_expr_node_ptr>(entry_expression);
+  auto *vptr_node = static_cast<an_expr_node_ptr>(vptr_expression);
   auto *index_node = static_cast<an_expr_node_ptr>(index_expression);
   auto *routine = static_cast<a_routine_ptr>(
       const_cast<void *>(origin->second.routine));
-  if (index_node->kind != enk_constant ||
+  if (entry_node->kind != enk_operation ||
+      entry_node->variant.operation.kind != eok_padd ||
+      entry_node->variant.operation.operands != vptr_node ||
+      vptr_node->next != index_node || index_node->next != nullptr ||
+      index_node->kind != enk_constant ||
       index_node->variant.constant.ptr == nullptr ||
       routine->number.virtual_function != source_index) return;
   auto added = native_virtual_entry_selections.emplace(
       original_routine_operand, NativeVirtualEntrySelection {
-          index_expression, static_cast<uint64_t>(source_index),
+          entry_expression, vptr_expression, index_expression,
+          static_cast<uint64_t>(source_index),
           static_cast<uint64_t>(entry_bytes), false});
   if (!added.second) added.first->second.ambiguous = true;
 }
@@ -2858,7 +2887,8 @@ extern "C" void edgcpp_capture_post_lower_virtual_call(
     }
   }
   if (!source_rewrite_is_structurally_visible) return;
-  NativeVirtualEntrySelection native_entry = {nullptr, 0, 0, true};
+  NativeVirtualEntrySelection native_entry = {nullptr, nullptr, nullptr,
+                                              0, 0, true};
   bool entry_seen = false;
   const auto native = native_virtual_entry_selections.find(
       original->second.original_routine_operand);
