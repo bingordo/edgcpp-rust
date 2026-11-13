@@ -361,6 +361,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 entry.source_index,entry.entry_bytes,source_byte_displacement);
         }
     }
+    // Source event 83 ties EDG's exact vptr-lookup object expression
+    // to its reusable virtual call receiver, only when both original
+    // nodes still appear in the same source-proven rewritten call.
+    // Not evidence of runtime subobject offsets or adjusted machine this.
+    for pair in &result.il.virtual_vptr_receiver_pairs {
+        println!("EDG_VIRTUAL_VPTR_RECEIVER function={} statement={} path={} lookup_object_type={} arg_index={} source_lookup_object_proven=true reused_call_argument_proven=true subobject_offset_proven=false machine_this_adjustment_proven=false executable_abi_proven=false",
+                 pair.function,pair.statement_path,pair.path,
+                 pair.lookup_object_type.0,pair.argument_position);
+    }
     // A lowered ordinary eok_call can contain an exact record-field
     // reference to "__vptr" without retaining its pre-lowering virtual
     // routine/receiver identity. Record this *observed tree* only for
