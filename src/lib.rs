@@ -188,6 +188,9 @@ pub struct Il {
     pub member_functions: Vec<MemberFunction>,
     /// Special-function and virtual dispatch attributes of routines.
     pub routine_attributes: Vec<RoutineAttributes>,
+    /// EDG logical virtual member number, class virtual-info byte offset,
+    /// and optional sharing base. Never a complete Itanium dispatch ABI proof.
+    pub native_virtual_members: Vec<NativeVirtualMemberInfo>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     /// Independent native event 71: whether tk_routine.extra_info exists
@@ -602,6 +605,18 @@ pub struct RoutineAttributes {
     pub has_this_parameter: bool,
     /// EDG-native compiler-generated function classification; never infer from spelling.
     pub compiler_generated: bool,
+}
+
+/// EDG source-owned *logical* virtual method metadata. The native number
+/// is not an Itanium table slot/address point, nor does the class offset
+/// prove live storage, adjusted receivers or exception-safe dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeVirtualMemberInfo {
+    pub routine: SymbolId,
+    pub owner: TypeId,
+    pub virtual_number: Option<u64>,
+    pub virtual_info_offset: Option<u64>,
+    pub sharing_base: Option<TypeId>,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -1202,6 +1217,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         76 => Some(il.native_scalar_proofs.len()),
         77 => Some(il.call_targets.len()),
         78 => Some(il.call_dispatches.len()),
+        79 => Some(il.native_virtual_members.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1908,6 +1924,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 symbol_id: n(7).map(SymbolId),
             });
         }
+        79 => {
+            let (Some(routine),Some(owner))=(n(0),n(1)) else {return;};
+            if routine==0 || owner==0 {return;}
+            if n(4).is_some_and(|base|base==0) {return;}
+            output.native_virtual_members.push(NativeVirtualMemberInfo {
+                routine: SymbolId(routine),owner:TypeId(owner),
+                virtual_number:n(2),virtual_info_offset:n(3),
+                sharing_base:n(4).map(TypeId),
+            });
+        }
         22 => {
             let (Some(routine), Some(special_kind), Some(flags)) =
                 (n(0), n(1), n(2)) else { return; };
@@ -2150,6 +2176,55 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// Native event 79 belongs to each exported virtual member. Validate
+/// original EDG routine/class identity, not a guessed ABI dispatch slot.
+/// This boundary does NOT grant codegen permission for indirect calls.
+fn validate_native_virtual_member_coverage(il:&Il)->Result<(),&'static str> {
+    let mut virtuals=HashSet::new();
+    for attr in &il.routine_attributes {
+        if attr.is_virtual {
+            if !attr.has_this_parameter || !virtuals.insert(attr.routine) {
+                return Err("native virtual method lacks unique this ABI metadata");
+            }
+        }
+    }
+    if il.cpp_language!=Some(true) && !il.native_virtual_members.is_empty() {
+        return Err("virtual member metadata in non-C++ native compilation");
+    }
+    if virtuals.len()!=il.native_virtual_members.len() {
+        return Err("native virtual members lack complete EDG metadata");
+    }
+    let mut seen=HashSet::new();
+    for proof in &il.native_virtual_members {
+        if !seen.insert(proof.routine) || !virtuals.contains(&proof.routine) {
+            return Err("duplicate or nonvirtual native method proof");
+        }
+        if !il.symbols.iter().any(|s|s.id==proof.routine && s.kind==1) ||
+           !il.types.iter().any(|t|t.id==proof.owner) {
+            return Err("virtual member proof has missing source identity");
+        }
+        if il.member_functions.iter().filter(|m|
+            m.routine==proof.routine && m.owner==proof.owner).count()!=1 {
+            return Err("virtual member proof disagrees with source class owner");
+        }
+        if let Some(base)=proof.sharing_base {
+            if !il.types.iter().any(|t|t.id==base) ||
+               proof.virtual_info_offset.is_none() {
+                return Err("invalid shared virtual-info base proof");
+            }
+        }
+        if let Some(offset)=proof.virtual_info_offset {
+            if let Some(layout)=il.type_object_sizes.iter().find(|v|
+                v.owner==proof.owner) {
+                if offset>=layout.bytes {
+                    return Err("virtual-info offset exceeds EDG class object layout");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A mandatory second witness for every EDG call. Match the exact source
 /// call expression's opcode, not a textual routine name or guessed C++ ABI.
 fn validate_native_call_dispatch_coverage(il:&Il)->Result<(),&'static str> {
@@ -2198,7 +2273,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
        validate_native_call_target_coverage(il).is_err() ||
-       validate_native_call_dispatch_coverage(il).is_err() {
+       validate_native_call_dispatch_coverage(il).is_err() ||
+       validate_native_virtual_member_coverage(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -3668,7 +3744,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=76_u32 {
+        for kind in 1..=79_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3695,10 +3771,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,295);
+        assert_eq!(total,312);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(77).is_none());
+        assert!(expected_wire_field_tag_masks(80).is_none());
     }
 
     #[test]
