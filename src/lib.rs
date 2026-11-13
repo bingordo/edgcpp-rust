@@ -2183,10 +2183,9 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
 fn validate_native_virtual_member_coverage(il:&Il)->Result<(),&'static str> {
     let mut virtuals=HashSet::new();
     for attr in &il.routine_attributes {
-        if attr.is_virtual {
-            if !attr.has_this_parameter || !virtuals.insert(attr.routine) {
-                return Err("native virtual method lacks unique this ABI metadata");
-            }
+        if attr.is_virtual
+            && (!attr.has_this_parameter || !virtuals.insert(attr.routine)) {
+            return Err("native virtual method lacks unique this ABI metadata");
         }
     }
     if il.cpp_language!=Some(true) && !il.native_virtual_members.is_empty() {
