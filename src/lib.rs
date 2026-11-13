@@ -4238,6 +4238,116 @@ mod cxx5_call_target_wire_tests {
 }
 
 #[cfg(test)]
+mod cxx5_virtual_member_info_wire_tests {
+    use super::*;
+
+    fn source() -> Il {
+        let mut il=Il { cpp_language:Some(true), ..Il::default() };
+        il.symbols.push(Symbol {id:SymbolId(4),kind:1,name:"Base::f".into()});
+        il.types.push(TypeDef {id:TypeId(20),kind:11,
+            related_role:None,related:None});
+        il.member_functions.push(MemberFunction {
+            owner:TypeId(20),routine:SymbolId(4),
+        });
+        il.routine_attributes.push(RoutineAttributes {
+            routine:SymbolId(4),special_kind:0,is_virtual:true,
+            pure_virtual:false,is_override:false,is_final:false,
+            overrides_base_member:false,is_inline:false,is_constexpr:false,
+            defined:true,explicit_constructor:false,has_this_parameter:true,
+            compiler_generated:false,
+        });
+        il.type_object_sizes.push(TypeObjectSize {
+            owner:TypeId(20),bytes:24,alignment:8,
+        });
+        il.native_virtual_members.push(NativeVirtualMemberInfo {
+            routine:SymbolId(4),owner:TypeId(20),virtual_number:Some(1),
+            virtual_info_offset:Some(0),sharing_base:None,
+        });
+        il
+    }
+
+    fn wire(state:&mut Collector,routine:u64,owner:u64,
+            virtual_number:Option<u64>,offset:Option<u64>,base:Option<u64>) {
+        let field=|value:Option<u64>| WireField {
+            data:std::ptr::null(),length:0,value:value.unwrap_or(0),
+            tag:if value.is_some() {wire_tags::UNSIGNED}
+                else {wire_tags::ABSENT},
+        };
+        let fields=[field(Some(routine)),field(Some(owner)),
+            field(virtual_number),field(offset),field(base)];
+        unsafe {
+            collect((state as *mut Collector).cast(),79,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn virtual_member_wire_is_typed_and_keeps_zero_byte_offsets() {
+        let mut collector=Collector::default();
+        wire(&mut collector,4,20,Some(0),Some(0),None);
+        assert!(!collector.malformed);
+        let info=collector.il.native_virtual_members[0];
+        assert_eq!(info.routine,SymbolId(4));
+        assert_eq!(info.owner,TypeId(20));
+        assert_eq!(info.virtual_number,Some(0),
+            "IA64_ABI virtual numbering may start at zero");
+        assert_eq!(info.virtual_info_offset,Some(0));
+        assert_eq!(info.sharing_base,None);
+        let mut broken=Collector::default();
+        wire(&mut broken,0,20,Some(1),Some(0),None);
+        assert!(broken.malformed,"virtual method symbol must be nonzero");
+        let mut broken=Collector::default();
+        wire(&mut broken,4,0,Some(1),Some(0),None);
+        assert!(broken.malformed,"virtual class TypeId must be nonzero");
+        let mut broken=Collector::default();
+        wire(&mut broken,4,20,None,None,Some(0));
+        assert!(broken.malformed,"sharing base TypeId must be nonzero");
+    }
+
+    #[test]
+    fn reject_missing_duplicate_wrong_class_and_nonvirtual_source_proofs() {
+        let il=source();
+        assert!(validate_native_virtual_member_coverage(&il).is_ok());
+        let mut missing=il.clone();
+        missing.native_virtual_members.clear();
+        assert!(validate_native_virtual_member_coverage(&missing).is_err());
+        let mut duplicate=il.clone();
+        duplicate.native_virtual_members.push(duplicate.native_virtual_members[0]);
+        assert!(validate_native_virtual_member_coverage(&duplicate).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].owner=TypeId(999);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.routine_attributes[0].is_virtual=false;
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.routine_attributes[0].has_this_parameter=false;
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].virtual_info_offset=Some(24);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].sharing_base=Some(TypeId(200));
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.cpp_language=Some(false);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+    }
+
+    #[test]
+    fn incomplete_virtual_number_is_not_a_slot_or_dispatch_certificate() {
+        let mut il=source();
+        il.native_virtual_members[0].virtual_number=None;
+        il.native_virtual_members[0].virtual_info_offset=None;
+        assert!(validate_native_virtual_member_coverage(&il).is_ok(),
+            "unknown EDG metadata must remain unknown and non-executable");
+        il.native_virtual_members[0].sharing_base=Some(TypeId(20));
+        assert!(validate_native_virtual_member_coverage(&il).is_err(),
+            "cannot claim shared vptr information without its byte location");
+    }
+}
+
+#[cfg(test)]
 mod cxx5_native_call_dispatch_wire_tests {
     use super::*;
 
