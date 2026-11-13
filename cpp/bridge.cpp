@@ -1554,6 +1554,14 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                     depth + 1, true);
   }
   const auto children = children_of(node);
+  // Count independently of emitted operands so a missing tail fails closed.
+  uint32_t native_child_count = 0;
+  for (an_expr_node_ptr operand = children.first;
+       operand != nullptr && within_native_list_limit(native_child_count);
+       operand = children.linked_list ? operand->next : nullptr,
+       ++native_child_count) {}
+  emit_record(RECORD_NATIVE_EXPRESSION_CHILD_COUNT,
+              {txt(function), txt(stmt_path), txt(path), num(native_child_count)});
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
        operand != nullptr && within_native_list_limit(index);
@@ -1834,8 +1842,15 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                             const std::string &parent, const std::string &edge,
                             unsigned depth, bool single)
 {
-  if (head == nullptr || current_callback == nullptr) return;
+  if (current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
+  uint32_t sibling_count = 0;
+  for (a_statement_ptr stmt = head;
+       stmt != nullptr && within_native_list_limit(sibling_count);
+       stmt = single ? nullptr : stmt->next, ++sibling_count) {}
+  emit_record(RECORD_NATIVE_STATEMENT_SIBLING_COUNT,
+              {txt(function), parent.empty() ? absent() : txt(parent),
+               txt(edge), num(sibling_count)});
   unsigned index = 0;
   for (a_statement_ptr stmt = head; stmt != nullptr && within_native_list_limit(index);
        stmt = single ? nullptr : stmt->next, ++index) {
