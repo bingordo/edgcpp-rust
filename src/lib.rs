@@ -1930,7 +1930,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if n(4).is_some_and(|base|base==0) {return;}
             output.native_virtual_members.push(NativeVirtualMemberInfo {
                 routine: SymbolId(routine),owner:TypeId(owner),
-                virtual_number:n(2),virtual_info_offset:n(3),
+                virtual_number:fields[2].unsigned(),
+                virtual_info_offset:fields[3].unsigned(),
                 sharing_base:n(4).map(TypeId),
             });
         }
