@@ -22,7 +22,9 @@
     "RECORD_NATIVE_VIRTUAL_MEMBER_INFO": 79,
     "RECORD_PRELOWER_VIRTUAL_CALL_ORIGIN": 80,
     "RECORD_VIRTUAL_RECEIVER_REUSE": 81,
-    "RECORD_VIRTUAL_ENTRY_INDEX_SELECTION": 82
+    "RECORD_VIRTUAL_ENTRY_INDEX_SELECTION": 82,
+    "RECORD_NATIVE_EXPRESSION_CHILD_COUNT": 83,
+    "RECORD_NATIVE_STATEMENT_SIBLING_COUNT": 84
   },
   "record_arities": {
     "1": 1,
@@ -106,7 +108,9 @@
     "79": 5,
     "80": 7,
     "81": 6,
-    "82": 5
+    "82": 5,
+    "83": 4,
+    "84": 4
   },
   "record_field_tags": {
     "1": [
@@ -601,6 +605,18 @@
       "TEXT",
       "TEXT",
       "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "83": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "84": [
+      "TEXT",
+      "ABSENT|TEXT",
+      "TEXT",
       "UNSIGNED"
     ]
   }
