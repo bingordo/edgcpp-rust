@@ -39,6 +39,20 @@ pub struct ExpressionNode {
     pub statement: StatementId,
 }
 
+/// A lowered indirect callee's *observed* expression-tree reference to a
+/// field named "__vptr", verified against its EDG record-field identity.
+/// Neither a class ABI certificate nor proof the source call was virtual.
+/// Literal values here are un-interpreted EDG expression constants, NOT
+/// virtual slots, byte displacements, vtable address points or this offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalleeVptrFieldReference {
+    pub field: SymbolId,
+    pub owner: TypeId,
+    pub field_path: String,
+    pub field_byte_offset: u64,
+    pub raw_integer_literals: Vec<(String, i64)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateStatement { function: String, path: String },
@@ -3271,6 +3285,59 @@ impl Graph {
         self.expressions[id.0].operands.first().copied()
     }
 
+    /// Inspect a *callee-only* tree for an exact EDG record-field reference
+    /// named "__vptr". No source member-call classification survives by
+    /// implication: the caller must independently require the event-77
+    /// IndirectUnresolved record, and this evidence never authorizes codegen.
+    ///
+    /// A fixed bound and rejection of multiple candidates avoid silently
+    /// choosing a vptr field in large/ambiguous lowered expressions. Raw
+    /// constants are reported with original expression paths, but never
+    /// interpreted as an Itanium slot or pointer arithmetic unit.
+    pub fn callee_vptr_field_reference(
+        &self, call: &CallSite
+    ) -> Option<CalleeVptrFieldReference> {
+        let callee=self.call_callee(call)?;
+        let mut stack=vec![callee];
+        let mut seen=std::collections::HashSet::new();
+        let mut field=None;
+        let mut integers=Vec::new();
+        while let Some(id)=stack.pop() {
+            if !seen.insert(id) || seen.len()>512 {return None;}
+            let node=self.expressions.get(id.0)?;
+            if node.data.function!=call.function ||
+               node.data.statement_path!=call.statement_path {
+                return None;
+            }
+            if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==5 {
+                if let Some(symbol)=node.data.symbol_id {
+                    if let Some(record)=self.record_fields.iter().find(|f|
+                        f.symbol==symbol && f.name=="__vptr") {
+                        if node.data.reference.as_deref()!=Some("__vptr") ||
+                           field.is_some() || record.bit_width!=0 {
+                            return None;
+                        }
+                        field=Some((symbol,record.owner,node.data.path.clone(),
+                                    record.byte_offset));
+                    }
+                }
+            }
+            if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==1 {
+                if let Some(value)=node.data.constant_integer {
+                    if integers.len()>=16 {return None;}
+                    integers.push((node.data.path.clone(),value));
+                }
+            }
+            stack.extend(node.operands.iter().copied());
+        }
+        let (field,owner,field_path,field_byte_offset)=field?;
+        integers.sort_by(|a,b|compare_tree_paths(&a.0,&b.0));
+        Some(CalleeVptrFieldReference {
+            field,owner,field_path,field_byte_offset,
+            raw_integer_literals:integers,
+        })
+    }
+
     /// Implicit object operand for member calls; absent for ordinary calls.
     pub fn call_object(&self, call: &CallSite) -> Option<ExpressionId> {
         if call.first_argument != 2 { return None; }
@@ -3822,6 +3889,122 @@ fn compare_tree_paths(a: &str, b: &str) -> std::cmp::Ordering {
 
 fn graph_path_index(path: &str) -> usize {
     path.rsplit('.').next().and_then(|n| n.parse().ok()).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod callee_vptr_field_tests {
+    use super::*;
+
+    fn kind(semantic:u32)->u32 {
+        (0..256).find(|&value|
+            unsafe {edgcpp_codegen_kind(2,value)}==semantic)
+            .expect("native EDG expression kind")
+    }
+    fn expr(path:&str,semantic:u32,symbol:Option<SymbolId>,
+            name:Option<&str>,integer:Option<i64>)->Expression {
+        Expression {
+            function:"target".into(),statement_path:"0.block.2".into(),
+            path:path.into(),
+            parent:if path=="0" {None}
+                   else {Some(path.rsplit_once('.').unwrap().0.into())},
+            kind:kind(semantic),operator:None,type_kind:None,
+            reference:name.map(str::to_owned),
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:integer,related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:symbol,
+        }
+    }
+    fn node(data:Expression,operands:Vec<usize>)->ExpressionNode {
+        ExpressionNode {
+            data,parent:None,
+            operands:operands.into_iter().map(ExpressionId).collect(),
+            statement:StatementId(0),
+        }
+    }
+    fn fixture()->(Graph,CallSite) {
+        let call=CallSite {
+            function:"target".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),first_argument:1,
+        };
+        let mut graph=Graph::default();
+        graph.expressions=vec![
+            node(expr("0",3,None,None,None),vec![1,4]),
+            node(expr("0.0",3,None,None,None),vec![2,3]),
+            node(expr("0.0.0",5,Some(SymbolId(106)),
+                      Some("__vptr"),None),vec![]),
+            node(expr("0.0.1",1,None,None,Some(6)),vec![]),
+            node(expr("0.1",2,None,Some("this"),None),vec![]),
+        ];
+        graph.record_fields.push(RecordField {
+            owner:TypeId(145),position:0,ty:TypeId(117),
+            symbol:SymbolId(106),name:"__vptr".into(),
+            byte_offset:0,bit_offset:0,bit_width:0,
+        });
+        graph.calls.push(call.clone());
+        graph.call_expression_by_site.insert(call.clone(),ExpressionId(0));
+        (graph,call)
+    }
+
+    #[test]
+    fn reports_exact_callee_field_identity_and_uninterpreted_literal() {
+        let (graph,call)=fixture();
+        let evidence=graph.callee_vptr_field_reference(&call).unwrap();
+        assert_eq!(evidence.field,SymbolId(106));
+        assert_eq!(evidence.owner,TypeId(145));
+        assert_eq!(evidence.field_path,"0.0.0");
+        assert_eq!(evidence.field_byte_offset,0);
+        assert_eq!(evidence.raw_integer_literals,
+                   vec![("0.0.1".into(),6)]);
+        // An ordinary pointer argument must not contribute evidence.
+        assert!(!evidence.raw_integer_literals.iter()
+                 .any(|(p,_)|p=="0.1"));
+    }
+
+    #[test]
+    fn fails_closed_for_forged_or_non_callee_field_references() {
+        let (mut graph,call)=fixture();
+        graph.record_fields[0].name="user_field".into();
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "source names alone are insufficient without an EDG field record");
+        let (mut graph,call)=fixture();
+        graph.expressions[2].data.symbol_id=Some(SymbolId(999));
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "field identity must match its independently exported record");
+        let (mut graph,call)=fixture();
+        graph.expressions[2].data.reference=Some("different".into());
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "field expression must carry the same native name");
+        let (mut graph,call)=fixture();
+        graph.expressions[1].operands=vec![ExpressionId(3)];
+        graph.expressions[0].operands.push(ExpressionId(2));
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "vptr mentioned only as an argument is not a callee-chain proof");
+        let (mut graph,call)=fixture();
+        graph.expressions[1].operands.push(ExpressionId(2));
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "ambiguous/repeated expression paths must not be guessed");
+        let (mut graph,call)=fixture();
+        graph.record_fields[0].bit_width=1;
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "a bit-field is not a vptr-sized source field");
+    }
+
+    #[test]
+    fn bounded_tree_cannot_recognize_unbounded_or_cyclic_input() {
+        let (mut graph,call)=fixture();
+        graph.expressions[1].operands.push(ExpressionId(1));
+        assert!(graph.callee_vptr_field_reference(&call).is_none());
+        let (mut graph,call)=fixture();
+        for id in 0..514 {
+            let path=format!("0.0.{}",id+2);
+            graph.expressions.push(node(expr(&path,1,None,None,Some(id)),
+                                        vec![]));
+            let last=ExpressionId(graph.expressions.len()-1);
+            graph.expressions[1].operands.push(last);
+        }
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "oversized callee trees must not produce misleading partial proof");
+    }
 }
 
 #[cfg(test)]
