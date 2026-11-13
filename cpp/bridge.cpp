@@ -87,6 +87,18 @@ struct NativeVirtualEntrySelection {
 thread_local std::unordered_map<const void *, NativeVirtualEntrySelection>
     native_virtual_entry_selections;
 
+// Source-observed object used in vptr lookup and the reusable receiver
+// which EDG will pass to the same rewritten indirect virtual call.
+// Pointer identity is diagnostic: this does not prove class subobject
+// location, object lifetime, ABI adjustments or execution safety.
+struct NativeVirtualReceiverPair {
+  const void *vptr_lookup_object;
+  const void *reusable_receiver;
+  bool ambiguous;
+};
+thread_local std::unordered_map<const void *, NativeVirtualReceiverPair>
+    native_virtual_receiver_pairs;
+
 // Recorded ONLY by a second EDG source hook after the actual call rewrite.
 // This is stronger than old raw-pointer-only guesses: the original call and
 // new eok_call must be associated by the single source transformation, and
@@ -101,6 +113,8 @@ struct PostlowerVirtualCall {
   const void *receiver_reused_for_call;
   NativeVirtualEntrySelection native_entry;
   bool native_entry_seen;
+  NativeVirtualReceiverPair receiver_pair;
+  bool receiver_pair_seen;
   bool ambiguous;
 };
 thread_local std::unordered_map<const void *, PostlowerVirtualCall>
@@ -795,6 +809,34 @@ static bool callee_contains_exact_native_padd(an_expr_node_ptr root,
         vptr_matches > 1 || index_matches > 1) return false;
   }
   return entry_matches == 1 && vptr_matches == 1 && index_matches == 1;
+}
+
+// A bounded, cycle-safe lookup of a single exact EDG source node in a
+// vptr operand subtree. It must not accidentally traverse a sibling
+// expression outside that subtree (notably the adjacent table index).
+static bool subtree_contains_unique_native_node(an_expr_node_ptr root,
+                                                 const void *target)
+{
+  if (root == nullptr || target == nullptr) return false;
+  std::vector<an_expr_node_ptr> pending{root};
+  std::unordered_set<const void *> visited;
+  unsigned matches = 0;
+  while (!pending.empty()) {
+    if (visited.size() >= 512 || pending.size() > 512) return false;
+    an_expr_node_ptr node = pending.back();
+    pending.pop_back();
+    if (node == nullptr || !visited.insert(node).second) return false;
+    if (node == target) ++matches;
+    const expression_children children = children_of(node);
+    unsigned count = 0;
+    an_expr_node_ptr child = children.first;
+    for (; child != nullptr && count < 64;
+         child = children.linked_list ? child->next : nullptr, ++count) {
+      pending.push_back(child);
+    }
+    if (child != nullptr || matches > 1) return false;
+  }
+  return matches == 1;
 }
 
 // EDG's call operators encode the callee as operand zero. Member calls
@@ -1537,6 +1579,46 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   txt(function),txt(stmt_path),txt(path),
                   num(observed->second.native_entry.source_index),
                   num(observed->second.native_entry.entry_bytes)});
+              // Event 85 is strictly optional source-evaluation linkage:
+              // the object passed by EDG into the vptr lookup is still
+              // uniquely reachable under that original vptr subtree,
+              // and its independently sourced reusable copy remains a
+              // unique *direct argument* of this exact lowered call.
+              // It does not establish machine subobject layout or thunks.
+              if (observed->second.receiver_pair_seen &&
+                  observed->second.receiver_pair.reusable_receiver ==
+                      observed->second.receiver_reused_for_call &&
+                  subtree_contains_unique_native_node(
+                      static_cast<an_expr_node_ptr>(const_cast<void *>(
+                          observed->second.native_entry.vptr_expression)),
+                      observed->second.receiver_pair.vptr_lookup_object)) {
+                auto *lookup = static_cast<an_expr_node_ptr>(
+                    const_cast<void *>(
+                        observed->second.receiver_pair.vptr_lookup_object));
+                auto *paired_receiver = static_cast<an_expr_node_ptr>(
+                    const_cast<void *>(
+                        observed->second.receiver_pair.reusable_receiver));
+                unsigned pos = 0, count = 0, matched_pos = 0;
+                for (an_expr_node_ptr argument = callee->next;
+                     argument != nullptr && pos < 16;
+                     argument = argument->next, ++pos) {
+                  if (argument == paired_receiver) {
+                    ++count;
+                    matched_pos = pos;
+                  }
+                }
+                if (count == 1 && pos < 16) {
+                  const uint32_t lookup_type =
+                      emit_type(lookup->type, depth + 1);
+                  if (lookup_type == 0) {
+                    report_incomplete_snapshot();
+                  } else {
+                    emit_record(RECORD_VIRTUAL_VPTR_RECEIVER_PAIR, {
+                        txt(function),txt(stmt_path),txt(path),
+                        num(lookup_type),num(matched_pos)});
+                  }
+                }
+              }
             }
           }
         }
@@ -2864,6 +2946,28 @@ extern "C" void edgcpp_capture_virtual_entry_shape(
   if (!added.second) added.first->second.ambiguous = true;
 }
 
+// This observer pairs the *same* source virtual routine with EDG's
+// lookup-object node and the reusable receiver which is later inserted
+// into the rewritten call. A copied expression has a different pointer;
+// the final vptr subtree and direct argument are checked again at emission.
+extern "C" void edgcpp_capture_virtual_receiver_pair(
+    void *original_routine_operand, void *vptr_lookup_object,
+    void *reusable_call_receiver)
+{
+  using namespace edg;
+  if (current_callback == nullptr || original_routine_operand == nullptr ||
+      vptr_lookup_object == nullptr || reusable_call_receiver == nullptr)
+    return;
+  const auto origin = prelower_virtual_calls.find(original_routine_operand);
+  if (origin == prelower_virtual_calls.end() || origin->second.ambiguous ||
+      origin->second.original_routine_operand != original_routine_operand ||
+      origin->second.routine == nullptr) return;
+  auto added = native_virtual_receiver_pairs.emplace(
+      original_routine_operand, NativeVirtualReceiverPair {
+          vptr_lookup_object, reusable_call_receiver, false});
+  if (!added.second) added.first->second.ambiguous = true;
+}
+
 // EDG invokes this only after converting the original member-call node
 // into an ordinary indirect eok_call. In the comma-operator case the call
 // is the old routine operand, *not* the original enclosing expression.
@@ -2916,11 +3020,21 @@ extern "C" void edgcpp_capture_post_lower_virtual_call(
     native_entry = native->second;
     entry_seen = true;
   }
+  NativeVirtualReceiverPair receiver_pair = {nullptr, nullptr, true};
+  bool receiver_pair_seen = false;
+  const auto pair = native_virtual_receiver_pairs.find(
+      original->second.original_routine_operand);
+  if (pair != native_virtual_receiver_pairs.end() &&
+      !pair->second.ambiguous) {
+    receiver_pair = pair->second;
+    receiver_pair_seen = true;
+  }
   auto added = postlower_virtual_calls.emplace(
       rewritten_call,
       PostlowerVirtualCall {
           original->second, lowered->variant.operation.operands,
-          receiver_reused_for_call, native_entry, entry_seen, false});
+          receiver_reused_for_call, native_entry, entry_seen,
+          receiver_pair, receiver_pair_seen, false});
   if (!added.second) {
     // Even two apparently equal entries are ambiguous across EDG
     // transformations. Never silently reuse a physical node address.
@@ -2950,6 +3064,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
   native_virtual_entry_selections.clear();
+  native_virtual_receiver_pairs.clear();
   postlower_virtual_calls.clear();
   current_callback = callback;
   current_user_data = user_data;
@@ -2974,6 +3089,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
   native_virtual_entry_selections.clear();
+  native_virtual_receiver_pairs.clear();
   postlower_virtual_calls.clear();
   return status;
 }
