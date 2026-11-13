@@ -2275,7 +2275,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
        validate_native_call_target_coverage(il).is_err() ||
        validate_native_call_dispatch_coverage(il).is_err() ||
-       validate_native_virtual_member_coverage(il).is_err() {
+       validate_native_virtual_member_coverage(il).is_err() ||
+       graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -2341,6 +2342,27 @@ mod tests {
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)),
             "unrelated records do not replace a language mode event");
+    }
+
+    #[test]
+    fn native_success_rejects_duplicate_symbol_identity() {
+        let mut il = Il { cpp_language: Some(false), ..Il::default() };
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "first".into() },
+            Symbol { id: SymbolId(1), kind: 2, name: "second".into() },
+        ]);
+        assert!(matches!(graph::Graph::from_il(&il),
+            Err(graph::GraphError::DuplicateSymbol(SymbolId(1)))));
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)));
+    }
+
+    #[test]
+    fn native_success_accepts_valid_symbol_identity() {
+        let mut il = Il { cpp_language: Some(true), ..Il::default() };
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "routine".into() });
+        validate_complete_native_snapshot(&il)
+            .expect("well-formed symbol must be accepted");
     }
 
     #[test]
