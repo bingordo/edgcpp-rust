@@ -2031,11 +2031,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if function.is_empty() || statement_path.is_empty() ||
                path.is_empty() || entry_bytes==0 || entry_bytes>32 ||
                !entry_bytes.is_power_of_two() ||
-               source_index.checked_mul(entry_bytes).is_none() {
+               u64::from(source_index)
+                   .checked_mul(u64::from(entry_bytes)).is_none() {
                 return;
             }
             output.virtual_entry_indexes.push(VirtualEntryIndexSelection {
-                function,statement_path,path,source_index,entry_bytes,
+                function,statement_path,path,
+                source_index:u64::from(source_index),
+                entry_bytes:u64::from(entry_bytes),
             });
         }
         79 => {
