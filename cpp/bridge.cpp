@@ -2185,6 +2185,52 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(22, {num(routine_symbol),
                        num(static_cast<unsigned>(r->special_kind)),
                        num(attributes)});
+      // Record 79: EDG-authored *logical* virtual member numbering and
+      // class virtual-info location. IA64_ABI in EDG means an Itanium-style
+      // class ABI, but an EDG virtual function number is NOT by itself a
+      // machine vtable slot, vtable address point or this-adjustment.
+      // This source witness remains diagnostic-only: never authorize an
+      // indirect call or a live class-object dereference from it.
+      if (!C_mode() && r->is_virtual) {
+        if (owning_class == nullptr ||
+            (owning_class->kind != tk_class &&
+             owning_class->kind != tk_struct)) {
+          report_incomplete_snapshot();
+        } else {
+          const uint32_t owner_id = emit_type(owning_class, 0);
+          const bool numbered = !r->is_consteval &&
+              !r->is_constexpr_intrinsic &&
+              r->number.virtual_function != VIRTUAL_FUNCTION_NUMBER_NONE;
+          const auto *class_info =
+              owning_class->variant.class_struct_union.extra_info;
+          const bool has_virtual_info =
+              !owning_class->incomplete &&
+              owning_class->variant.class_struct_union.any_virtual_functions &&
+              class_info != nullptr;
+          uint32_t shared_base = 0;
+          if (has_virtual_info &&
+              class_info->virtual_function_info_base_class != nullptr) {
+            a_type_ptr base =
+                class_info->virtual_function_info_base_class->type;
+            if (base == nullptr) {
+              report_incomplete_snapshot();
+            } else {
+              shared_base = emit_type(base, 0);
+            }
+          }
+          if (owner_id == 0) {
+            report_incomplete_snapshot();
+          } else {
+            emit_record(RECORD_NATIVE_VIRTUAL_MEMBER_INFO, {
+                num(routine_symbol), num(owner_id),
+                numbered ? num(static_cast<uint64_t>(
+                    r->number.virtual_function)) : absent(),
+                has_virtual_info ? num(static_cast<uint64_t>(
+                    class_info->virtual_function_info_offset)) : absent(),
+                shared_base ? num(shared_base) : absent()});
+          }
+        }
+      }
       // EDG's active (non-patch) mode exposes the generated startup body
       // as a compiler-created routine, not as an __link data object. EDG's
       // C-generating backend identifies these functions through the raw
