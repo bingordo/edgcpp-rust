@@ -321,6 +321,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  info.virtual_number,info.virtual_info_offset,
                  info.sharing_base.map(|id|id.0));
     }
+    // Event 80, when present, came from a pre-lowering EDG callback that
+    // observed the actual virtual routine and receiver *before* EDG rewrote
+    // the call. It records source identity only; the current mapping is
+    // optional and does not prove physical vtable slot, adjustment or ABI.
+    for origin in &result.il.prelower_virtual_origins {
+        let name=result.il.symbols.iter().find(|s|
+            s.id==origin.original_routine).map(|s|s.name.as_str());
+        println!("EDG_PRELOWER_VIRTUAL_ORIGIN function={} statement={} path={} original_routine={} original_name={:?} receiver_type={:?} original_operator={} receiver_node_retained={} machine_slot_proven=false executable_abi_proven=false",
+            origin.function,origin.statement_path,origin.path,
+            origin.original_routine.0,name,
+            origin.original_receiver_type.map(|id|id.0),
+            origin.original_operator,origin.receiver_node_retained);
+    }
     // A lowered ordinary eok_call can contain an exact record-field
     // reference to "__vptr" without retaining its pre-lowering virtual
     // routine/receiver identity. Record this *observed tree* only for
