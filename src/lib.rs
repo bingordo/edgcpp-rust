@@ -1013,11 +1013,13 @@ pub struct CallDispatchProvenance {
     pub explicitly_virtual:bool,
 }
 
-/// Optional source-owned callback from *before* EDG rewrites a virtual
-/// member call into an ordinary indirect eok_call. The pointer carrier
-/// survived into this post-lowering call, but the original receiver tree
-/// may have been duplicated/rewritten. This is never a virtual ABI slot,
-/// object-lifetime certificate, or permission to execute indirect calls.
+/// Source-owned callbacks from both *before* and *after* EDG rewrites a
+/// virtual member call into an ordinary indirect eok_call. The bridge
+/// requires a structurally valid rewrite of the exact call and an unchanged
+/// callee pointer in the final snapshot. Copying/inlining may still lose
+/// the witness, and the original receiver tree may be duplicated/rewritten.
+/// This is never a virtual ABI slot, live-object certificate, receiver
+/// adjustment, or permission to execute indirect calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrelowerVirtualCallOrigin {
     pub function:String,
