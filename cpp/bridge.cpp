@@ -1442,13 +1442,13 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                 }
               }
               if (matches == 1 && index < 16) {
-                uint32_t ty = emit_type(reuse->type, depth + 1);
-                if (ty == 0) {
+                uint32_t receiver_type_id = emit_type(reuse->type, depth + 1);
+                if (receiver_type_id == 0) {
                   report_incomplete_snapshot();
                 } else {
                   emit_record(RECORD_VIRTUAL_RECEIVER_REUSE, {
                       txt(function),txt(stmt_path),txt(path),
-                      num(ty),num(matched_index),
+                      num(receiver_type_id),num(matched_index),
                       num(reuse == origin.original_receiver ? 1 : 0)});
                 }
               }
