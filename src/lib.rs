@@ -188,6 +188,9 @@ pub struct Il {
     pub member_functions: Vec<MemberFunction>,
     /// Special-function and virtual dispatch attributes of routines.
     pub routine_attributes: Vec<RoutineAttributes>,
+    /// EDG logical virtual member number, class virtual-info byte offset,
+    /// and optional sharing base. Never a complete Itanium dispatch ABI proof.
+    pub native_virtual_members: Vec<NativeVirtualMemberInfo>,
     pub type_details: Vec<TypeDetail>,
     pub function_signatures: Vec<FunctionSignature>,
     /// Independent native event 71: whether tk_routine.extra_info exists
@@ -602,6 +605,18 @@ pub struct RoutineAttributes {
     pub has_this_parameter: bool,
     /// EDG-native compiler-generated function classification; never infer from spelling.
     pub compiler_generated: bool,
+}
+
+/// EDG source-owned *logical* virtual method metadata. The native number
+/// is not an Itanium table slot/address point, nor does the class offset
+/// prove live storage, adjusted receivers or exception-safe dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeVirtualMemberInfo {
+    pub routine: SymbolId,
+    pub owner: TypeId,
+    pub virtual_number: Option<u64>,
+    pub virtual_info_offset: Option<u64>,
+    pub sharing_base: Option<TypeId>,
 }
 
 /// Pointer reference flags and typeref qualifier bitmask.
@@ -1202,6 +1217,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         76 => Some(il.native_scalar_proofs.len()),
         77 => Some(il.call_targets.len()),
         78 => Some(il.call_dispatches.len()),
+        79 => Some(il.native_virtual_members.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1908,6 +1924,17 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 symbol_id: n(7).map(SymbolId),
             });
         }
+        79 => {
+            let (Some(routine),Some(owner))=(n(0),n(1)) else {return;};
+            if routine==0 || owner==0 {return;}
+            if n(4).is_some_and(|base|base==0) {return;}
+            output.native_virtual_members.push(NativeVirtualMemberInfo {
+                routine: SymbolId(routine),owner:TypeId(owner),
+                virtual_number:fields[2].unsigned(),
+                virtual_info_offset:fields[3].unsigned(),
+                sharing_base:n(4).map(TypeId),
+            });
+        }
         22 => {
             let (Some(routine), Some(special_kind), Some(flags)) =
                 (n(0), n(1), n(2)) else { return; };
@@ -2150,6 +2177,55 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// Native event 79 belongs to each exported virtual member. Validate
+/// original EDG routine/class identity, not a guessed ABI dispatch slot.
+/// This boundary does NOT grant codegen permission for indirect calls.
+fn validate_native_virtual_member_coverage(il:&Il)->Result<(),&'static str> {
+    let mut virtuals=HashSet::new();
+    for attr in &il.routine_attributes {
+        if attr.is_virtual {
+            if !attr.has_this_parameter || !virtuals.insert(attr.routine) {
+                return Err("native virtual method lacks unique this ABI metadata");
+            }
+        }
+    }
+    if il.cpp_language!=Some(true) && !il.native_virtual_members.is_empty() {
+        return Err("virtual member metadata in non-C++ native compilation");
+    }
+    if virtuals.len()!=il.native_virtual_members.len() {
+        return Err("native virtual members lack complete EDG metadata");
+    }
+    let mut seen=HashSet::new();
+    for proof in &il.native_virtual_members {
+        if !seen.insert(proof.routine) || !virtuals.contains(&proof.routine) {
+            return Err("duplicate or nonvirtual native method proof");
+        }
+        if !il.symbols.iter().any(|s|s.id==proof.routine && s.kind==1) ||
+           !il.types.iter().any(|t|t.id==proof.owner) {
+            return Err("virtual member proof has missing source identity");
+        }
+        if il.member_functions.iter().filter(|m|
+            m.routine==proof.routine && m.owner==proof.owner).count()!=1 {
+            return Err("virtual member proof disagrees with source class owner");
+        }
+        if let Some(base)=proof.sharing_base {
+            if !il.types.iter().any(|t|t.id==base) ||
+               proof.virtual_info_offset.is_none() {
+                return Err("invalid shared virtual-info base proof");
+            }
+        }
+        if let Some(offset)=proof.virtual_info_offset {
+            if let Some(layout)=il.type_object_sizes.iter().find(|v|
+                v.owner==proof.owner) {
+                if offset>=layout.bytes {
+                    return Err("virtual-info offset exceeds EDG class object layout");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A mandatory second witness for every EDG call. Match the exact source
 /// call expression's opcode, not a textual routine name or guessed C++ ABI.
 fn validate_native_call_dispatch_coverage(il:&Il)->Result<(),&'static str> {
@@ -2199,6 +2275,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
        validate_native_call_target_coverage(il).is_err() ||
        validate_native_call_dispatch_coverage(il).is_err() ||
+       validate_native_virtual_member_coverage(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3690,7 +3767,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=78_u32 {
+        for kind in 1..=79_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3717,10 +3794,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,307);
+        assert_eq!(total,312);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(79).is_none());
+        assert!(expected_wire_field_tag_masks(80).is_none());
     }
 
     #[test]
@@ -4180,6 +4257,116 @@ mod cxx5_call_target_wire_tests {
         il.call_targets[0].callee_symbol=None;
         assert!(validate_native_call_target_coverage(&il).is_ok(),
             "unresolved source calls remain a distinct safe, non-authorized class");
+    }
+}
+
+#[cfg(test)]
+mod cxx5_virtual_member_info_wire_tests {
+    use super::*;
+
+    fn source() -> Il {
+        let mut il=Il { cpp_language:Some(true), ..Il::default() };
+        il.symbols.push(Symbol {id:SymbolId(4),kind:1,name:"Base::f".into()});
+        il.types.push(TypeDef {id:TypeId(20),kind:11,
+            related_role:None,related:None});
+        il.member_functions.push(MemberFunction {
+            owner:TypeId(20),routine:SymbolId(4),
+        });
+        il.routine_attributes.push(RoutineAttributes {
+            routine:SymbolId(4),special_kind:0,is_virtual:true,
+            pure_virtual:false,is_override:false,is_final:false,
+            overrides_base_member:false,is_inline:false,is_constexpr:false,
+            defined:true,explicit_constructor:false,has_this_parameter:true,
+            compiler_generated:false,
+        });
+        il.type_object_sizes.push(TypeObjectSize {
+            owner:TypeId(20),bytes:24,alignment:8,
+        });
+        il.native_virtual_members.push(NativeVirtualMemberInfo {
+            routine:SymbolId(4),owner:TypeId(20),virtual_number:Some(1),
+            virtual_info_offset:Some(0),sharing_base:None,
+        });
+        il
+    }
+
+    fn wire(state:&mut Collector,routine:u64,owner:u64,
+            virtual_number:Option<u64>,offset:Option<u64>,base:Option<u64>) {
+        let field=|value:Option<u64>| WireField {
+            data:std::ptr::null(),length:0,value:value.unwrap_or(0),
+            tag:if value.is_some() {wire_tags::UNSIGNED}
+                else {wire_tags::ABSENT},
+        };
+        let fields=[field(Some(routine)),field(Some(owner)),
+            field(virtual_number),field(offset),field(base)];
+        unsafe {
+            collect((state as *mut Collector).cast(),79,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn virtual_member_wire_is_typed_and_keeps_zero_byte_offsets() {
+        let mut collector=Collector::default();
+        wire(&mut collector,4,20,Some(0),Some(0),None);
+        assert!(!collector.malformed);
+        let info=collector.il.native_virtual_members[0];
+        assert_eq!(info.routine,SymbolId(4));
+        assert_eq!(info.owner,TypeId(20));
+        assert_eq!(info.virtual_number,Some(0),
+            "IA64_ABI virtual numbering may start at zero");
+        assert_eq!(info.virtual_info_offset,Some(0));
+        assert_eq!(info.sharing_base,None);
+        let mut broken=Collector::default();
+        wire(&mut broken,0,20,Some(1),Some(0),None);
+        assert!(broken.malformed,"virtual method symbol must be nonzero");
+        let mut broken=Collector::default();
+        wire(&mut broken,4,0,Some(1),Some(0),None);
+        assert!(broken.malformed,"virtual class TypeId must be nonzero");
+        let mut broken=Collector::default();
+        wire(&mut broken,4,20,None,None,Some(0));
+        assert!(broken.malformed,"sharing base TypeId must be nonzero");
+    }
+
+    #[test]
+    fn reject_missing_duplicate_wrong_class_and_nonvirtual_source_proofs() {
+        let il=source();
+        assert!(validate_native_virtual_member_coverage(&il).is_ok());
+        let mut missing=il.clone();
+        missing.native_virtual_members.clear();
+        assert!(validate_native_virtual_member_coverage(&missing).is_err());
+        let mut duplicate=il.clone();
+        duplicate.native_virtual_members.push(duplicate.native_virtual_members[0]);
+        assert!(validate_native_virtual_member_coverage(&duplicate).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].owner=TypeId(999);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.routine_attributes[0].is_virtual=false;
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.routine_attributes[0].has_this_parameter=false;
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].virtual_info_offset=Some(24);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members[0].sharing_base=Some(TypeId(200));
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.cpp_language=Some(false);
+        assert!(validate_native_virtual_member_coverage(&wrong).is_err());
+    }
+
+    #[test]
+    fn incomplete_virtual_number_is_not_a_slot_or_dispatch_certificate() {
+        let mut il=source();
+        il.native_virtual_members[0].virtual_number=None;
+        il.native_virtual_members[0].virtual_info_offset=None;
+        assert!(validate_native_virtual_member_coverage(&il).is_ok(),
+            "unknown EDG metadata must remain unknown and non-executable");
+        il.native_virtual_members[0].sharing_base=Some(TypeId(20));
+        assert!(validate_native_virtual_member_coverage(&il).is_err(),
+            "cannot claim shared vptr information without its byte location");
     }
 }
 

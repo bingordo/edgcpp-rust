@@ -17,6 +17,7 @@ enum : uint32_t {
   RECORD_NATIVE_SCALAR_METADATA_PROOF = 76,
   RECORD_CALL_TARGET_PROVENANCE = 77,
   RECORD_NATIVE_CALL_DISPATCH = 78,
+  RECORD_NATIVE_VIRTUAL_MEMBER_INFO = 79,
 };
 
 // Validate field tags before emitting typed native wire records.
@@ -796,6 +797,16 @@ static bool wire_record_field_tags_valid(
   }
   case 78: {
     const uint8_t masks[] = {2, 2, 2, 4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 79: {
+    const uint8_t masks[] = {4, 4, 5, 5, 5};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {

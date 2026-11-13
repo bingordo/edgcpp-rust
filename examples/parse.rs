@@ -311,6 +311,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let symbol = graph.symbol(member.routine).ok_or("missing member symbol")?;
         println!("member function owner={} name={}", member.owner.0, symbol.name);
     }
+    // EDG logical virtual numbering and class virtual-info placement are
+    // source diagnostics, NOT Itanium ABI vtable slots or call permission.
+    for info in &result.il.native_virtual_members {
+        let routine=result.il.symbols.iter().find(|s|s.id==info.routine)
+            .ok_or("missing native virtual member symbol")?;
+        println!("EDG_VIRTUAL_MEMBER routine={} name={} owner={} number={:?} info_offset={:?} sharing_base={:?} executable_abi_proven=false",
+                 info.routine.0,routine.name,info.owner.0,
+                 info.virtual_number,info.virtual_info_offset,
+                 info.sharing_base.map(|id|id.0));
+    }
     for attributes in &graph.routine_attributes {
         let routine = graph.symbol(attributes.routine).ok_or("missing routine attributes symbol")?;
         println!("routine attributes name={} special={} virtual={} override={} final={} this={} generated={} defined={}",
