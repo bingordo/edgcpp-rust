@@ -21,7 +21,8 @@
     "RECORD_NATIVE_CALL_DISPATCH": 78,
     "RECORD_NATIVE_VIRTUAL_MEMBER_INFO": 79,
     "RECORD_PRELOWER_VIRTUAL_CALL_ORIGIN": 80,
-    "RECORD_VIRTUAL_RECEIVER_REUSE": 81
+    "RECORD_VIRTUAL_RECEIVER_REUSE": 81,
+    "RECORD_VIRTUAL_ENTRY_INDEX_SELECTION": 82
   },
   "record_arities": {
     "1": 1,
@@ -104,7 +105,8 @@
     "78": 6,
     "79": 5,
     "80": 7,
-    "81": 6
+    "81": 6,
+    "82": 5
   },
   "record_field_tags": {
     "1": [
@@ -591,6 +593,13 @@
       "TEXT",
       "TEXT",
       "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "82": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
       "UNSIGNED",
       "UNSIGNED"
     ]
