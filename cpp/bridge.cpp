@@ -56,6 +56,20 @@ struct PendingMember {
 };
 thread_local std::vector<PendingMember> unresolved_members;
 thread_local std::unordered_map<std::string, uint32_t> named_class_types;
+
+// A per-compilation, pre-lowering witness of EDG's original virtual call.
+// The two node-address carriers are observed only while EDG owns the IL.
+// Copying/inlining may lose them; a surviving carrier is diagnostic, never a
+// one-to-one completeness or executable Itanium vtable ABI certificate.
+struct PrelowerVirtualCall {
+  const void *routine;
+  const void *original_receiver;
+  const void *receiver_type;
+  unsigned original_operator;
+  bool ambiguous;
+};
+thread_local std::unordered_map<const void *, PrelowerVirtualCall>
+    prelower_virtual_calls;
 }
 
 namespace edg {
@@ -1358,6 +1372,35 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           txt(function), txt(stmt_path), txt(path), num(form),
           callee_type ? num(callee_type) : absent(),
           callee_symbol ? num(callee_symbol) : absent()});
+      // This optional source-owned witness was recorded *before*
+      // lower_virtual_function_call replaced the original enk_routine and
+      // receiver. Its carrier is only an observed surviving EDG node address;
+      // it does not establish slot encoding, thunks, object lifetime,
+      // receiver adjustment, or permission to call.
+      if (form == 3 && original_op == eok_call) {
+        auto origin = prelower_virtual_calls.find(node);
+        if (origin != prelower_virtual_calls.end() &&
+            !origin->second.ambiguous && origin->second.routine != nullptr) {
+          auto *routine = static_cast<a_routine_ptr>(
+              const_cast<void *>(origin->second.routine));
+          auto *receiver_type = static_cast<a_type_ptr>(
+              const_cast<void *>(origin->second.receiver_type));
+          const uint32_t original_symbol = emit_symbol(routine, 1,
+              declaration_name(routine->source_corresp, true, true));
+          const uint32_t original_receiver_type = receiver_type != nullptr ?
+              emit_type(receiver_type, depth + 1) : 0;
+          if (original_symbol == 0) {
+            report_incomplete_snapshot();
+          } else {
+            emit_record(RECORD_PRELOWER_VIRTUAL_CALL_ORIGIN, {
+                txt(function),txt(stmt_path),txt(path),
+                num(original_symbol),
+                original_receiver_type ? num(original_receiver_type) : absent(),
+                num(origin->second.original_operator),
+                num(callee->next == origin->second.original_receiver ? 1 : 0)});
+          }
+        }
+      }
     }
   }
   // GNU ({...}) owns a real EDG statement subtree. Give each expression
@@ -2591,6 +2634,34 @@ void back_end(void)
 }
 } // namespace edg
 
+// Optional weak hook defined by the source EDG fork at the precise entrance
+// to lower_virtual_function_call. When linked against an older uninstrumented
+// archive it is simply never called and no event 80 is invented. Capture only
+// the original routine and receiver type while those IL nodes are still live.
+extern "C" void edgcpp_capture_pre_lower_virtual_call(
+    void *call, void *original_routine, void *original_receiver)
+{
+  using namespace edg;
+  if (current_callback == nullptr || call == nullptr ||
+      original_routine == nullptr || original_receiver == nullptr) return;
+  auto *expr = static_cast<an_expr_node_ptr>(call);
+  auto *callee = static_cast<an_expr_node_ptr>(original_routine);
+  auto *receiver = static_cast<an_expr_node_ptr>(original_receiver);
+  if (expr->kind != enk_operation ||
+      !expr->variant.operation.is_virtual_call ||
+      expr->variant.operation.operands != callee ||
+      callee->next != receiver ||
+      callee->kind != enk_routine ||
+      callee->variant.routine.ptr == nullptr) return;
+  const PrelowerVirtualCall proof = {
+      callee->variant.routine.ptr, receiver, receiver->type,
+      static_cast<unsigned>(expr->variant.operation.kind), false};
+  for (const void *carrier : {call, original_routine}) {
+    auto inserted = prelower_virtual_calls.emplace(carrier, proof);
+    if (!inserted.second) inserted.first->second.ambiguous = true;
+  }
+}
+
 extern "C" int edgcpp_compile(int argc, char **argv,
                                edgcpp_il_callback callback, void *user_data)
 {
@@ -2611,6 +2682,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   named_class_types.clear();
   pending_static_locals.clear();
   pending_named_statics.clear();
+  prelower_virtual_calls.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -2632,6 +2704,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   named_class_types.clear();
   pending_static_locals.clear();
   pending_named_statics.clear();
+  prelower_virtual_calls.clear();
   return status;
 }
 
