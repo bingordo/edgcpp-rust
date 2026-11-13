@@ -4348,6 +4348,112 @@ mod cxx5_call_target_wire_tests {
 }
 
 #[cfg(test)]
+mod cxx5_prelower_virtual_call_origin_tests {
+    use super::*;
+
+    fn source() -> Il {
+        let mut il=Il {cpp_language:Some(true), ..Il::default()};
+        il.symbols.push(Symbol {
+            id:SymbolId(9),kind:1,name:"Base::f".into(),
+        });
+        il.types.push(TypeDef {id:TypeId(4),kind:11,
+            related_role:None,related:None});
+        il.calls.push(CallSite {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),first_argument:1,
+        });
+        il.call_targets.push(CallTargetProvenance {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),form:CallTargetForm::IndirectUnresolved,
+            callee_type:None,callee_symbol:None,
+        });
+        il.call_dispatches.push(CallDispatchProvenance {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),native_operator:106,
+            class:CallDispatchClass::OrdinaryOrLowered,
+            explicitly_virtual:false,
+        });
+        il.prelower_virtual_origins.push(PrelowerVirtualCallOrigin {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),original_routine:SymbolId(9),
+            original_receiver_type:Some(TypeId(4)),
+            original_operator:107,receiver_node_retained:false,
+        });
+        il
+    }
+
+    #[test]
+    fn source_proof_is_optional_and_distinct_from_indirect_call_permission() {
+        let mut il=source();
+        assert!(validate_prelower_virtual_call_origins(&il).is_ok());
+        il.prelower_virtual_origins.clear();
+        assert!(validate_prelower_virtual_call_origins(&il).is_ok(),
+            "lost EDG pointer-carrier must not invent a virtual ABI");
+    }
+
+    #[test]
+    fn duplicate_or_foreign_or_direct_source_proofs_are_rejected() {
+        let il=source();
+        let mut wrong=il.clone();
+        wrong.prelower_virtual_origins.push(il.prelower_virtual_origins[0].clone());
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.prelower_virtual_origins[0].original_routine=SymbolId(999);
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.prelower_virtual_origins[0].original_receiver_type=Some(TypeId(999));
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.call_targets[0].form=CallTargetForm::DirectRoutine;
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.call_dispatches[0].class=CallDispatchClass::Member;
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.cpp_language=Some(false);
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+    }
+
+    #[test]
+    fn wire_event_preserves_source_routine_and_receiver_without_slot_inference() {
+        let mut collector=Collector::default();
+        let text=|s:&[u8]| WireField {
+            data:s.as_ptr(),length:s.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let num=|n:u64| WireField {
+            data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED,
+        };
+        let absent=WireField {
+            data:std::ptr::null(),length:0,value:0,tag:wire_tags::ABSENT,
+        };
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+            num(9),num(4),num(107),num(1)];
+        unsafe {collect((&mut collector as *mut Collector).cast(),80,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(!collector.malformed);
+        assert_eq!(collector.il.prelower_virtual_origins.len(),1);
+        let got=&collector.il.prelower_virtual_origins[0];
+        assert_eq!(got.original_routine,SymbolId(9));
+        assert_eq!(got.original_receiver_type,Some(TypeId(4)));
+        assert_eq!(got.original_operator,107);
+        assert!(got.receiver_node_retained);
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+            num(9),absent,num(107),num(0)];
+        let mut absent_owner=Collector::default();
+        unsafe {collect((&mut absent_owner as *mut Collector).cast(),80,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(!absent_owner.malformed);
+        assert_eq!(absent_owner.il.prelower_virtual_origins[0].original_receiver_type,None);
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+            num(9),absent,num(107),num(2)];
+        let mut invalid=Collector::default();
+        unsafe {collect((&mut invalid as *mut Collector).cast(),80,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(invalid.malformed);
+    }
+}
+
+#[cfg(test)]
 mod cxx5_virtual_member_info_wire_tests {
     use super::*;
 
