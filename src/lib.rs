@@ -216,6 +216,10 @@ pub struct Il {
     /// EDG's source-owned member-call dispatch bit. Plain calls may be
     /// lowered from virtual calls; their zero bit is not a nonvirtual proof.
     pub call_dispatches: Vec<CallDispatchProvenance>,
+    /// Optional EDG hook before lower_virtual_function_call replaces its
+    /// routine and receiver operands. Node carriers may be lost to copying:
+    /// surviving records are diagnostic-only, not complete ABI admission.
+    pub prelower_virtual_origins: Vec<PrelowerVirtualCallOrigin>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
     pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
@@ -1009,6 +1013,24 @@ pub struct CallDispatchProvenance {
     pub explicitly_virtual:bool,
 }
 
+/// Optional source-owned callback from *before* EDG rewrites a virtual
+/// member call into an ordinary indirect eok_call. The pointer carrier
+/// survived into this post-lowering call, but the original receiver tree
+/// may have been duplicated/rewritten. This is never a virtual ABI slot,
+/// object-lifetime certificate, or permission to execute indirect calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrelowerVirtualCallOrigin {
+    pub function:String,
+    pub statement_path:String,
+    pub path:String,
+    pub original_routine:SymbolId,
+    pub original_receiver_type:Option<TypeId>,
+    pub original_operator:u32,
+    /// Whether the original receiver node address equals the post-lowered
+    /// call's first object argument node. Address identity only.
+    pub receiver_node_retained:bool,
+}
+
 /// Original source-operand C type for a native compiler-generated pointer
 /// cast. Explicit source casts never emit this event. The expression path
 /// identifies the cast wrapper, not its child or surrounding call.
@@ -1218,6 +1240,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         77 => Some(il.call_targets.len()),
         78 => Some(il.call_dispatches.len()),
         79 => Some(il.native_virtual_members.len()),
+        80 => Some(il.prelower_virtual_origins.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1924,6 +1947,23 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 symbol_id: n(7).map(SymbolId),
             });
         }
+        80 => {
+            let (Some(function),Some(statement_path),Some(path),
+                 Some(original_routine),Some(original_operator),
+                 Some(receiver_retained)) =
+                (t(0),t(1),t(2),n(3),n(5),n(6)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+               path.is_empty() || original_routine==0 ||
+               original_operator==0 || receiver_retained>1 ||
+               n(4)==Some(0) {return;}
+            output.prelower_virtual_origins.push(PrelowerVirtualCallOrigin {
+                function,statement_path,path,
+                original_routine:SymbolId(original_routine),
+                original_receiver_type:n(4).map(TypeId),
+                original_operator,
+                receiver_node_retained:receiver_retained==1,
+            });
+        }
         79 => {
             let (Some(routine),Some(owner))=(n(0),n(1)) else {return;};
             if routine==0 || owner==0 {return;}
@@ -2177,6 +2217,52 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// A source-identified virtual routine can survive EDG lowering only via the
+/// optional native pre-lowering observer. Require unique observed call sites
+/// and source-consistent, still-indirect eok_call operands; absent witnesses
+/// are deliberately accepted because EDG copying/inlining can destroy raw
+/// node-address carriers. No consumer may use this as complete vtable ABI.
+fn validate_prelower_virtual_call_origins(il:&Il)->Result<(),&'static str> {
+    if il.cpp_language!=Some(true) && !il.prelower_virtual_origins.is_empty() {
+        return Err("prelower virtual call source proof in non-C++ IL");
+    }
+    let mut unique=HashSet::new();
+    for proof in &il.prelower_virtual_origins {
+        let key=(proof.function.as_str(),proof.statement_path.as_str(),
+                 proof.path.as_str());
+        if !unique.insert(key) {
+            return Err("duplicate prelower virtual call origin");
+        }
+        let source=il.call_targets.iter().find(|v|
+            v.function==proof.function &&
+            v.statement_path==proof.statement_path && v.path==proof.path);
+        if !matches!(source,Some(CallTargetProvenance {
+                form:CallTargetForm::IndirectUnresolved,..})) {
+            return Err("prelower virtual origin not an unresolved indirect call");
+        }
+        if !il.calls.iter().any(|v|
+            v.function==proof.function &&
+            v.statement_path==proof.statement_path && v.path==proof.path) ||
+           !il.call_dispatches.iter().any(|v|
+            v.function==proof.function &&
+            v.statement_path==proof.statement_path && v.path==proof.path &&
+            v.class==CallDispatchClass::OrdinaryOrLowered &&
+            !v.explicitly_virtual) {
+            return Err("prelower virtual origin lacks matching lowered call");
+        }
+        if !il.symbols.iter().any(|s|
+            s.id==proof.original_routine && s.kind==1) {
+            return Err("prelower virtual routine identity missing");
+        }
+        if let Some(ty)=proof.original_receiver_type {
+            if !il.types.iter().any(|t|t.id==ty) {
+                return Err("prelower receiver native type missing");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Native event 79 belongs to each exported virtual member. Validate
 /// original EDG routine/class identity, not a guessed ABI dispatch slot.
 /// This boundary does NOT grant codegen permission for indirect calls.
@@ -2276,6 +2362,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_call_target_coverage(il).is_err() ||
        validate_native_call_dispatch_coverage(il).is_err() ||
        validate_native_virtual_member_coverage(il).is_err() ||
+       validate_prelower_virtual_call_origins(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3767,7 +3854,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=79_u32 {
+        for kind in 1..=80_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3794,10 +3881,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,312);
+        assert_eq!(total,319);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(80).is_none());
+        assert!(expected_wire_field_tag_masks(81).is_none());
     }
 
     #[test]
