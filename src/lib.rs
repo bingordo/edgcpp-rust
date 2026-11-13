@@ -224,6 +224,10 @@ pub struct Il {
     /// and still present as a unique direct ordinary-call argument. Optional
     /// independent wire event 81: this is NOT an ABI this-adjustment.
     pub virtual_receiver_reuses: Vec<VirtualReceiverReuse>,
+    /// EDG source-observed native Itanium vptr + exact constant index,
+    /// where the same index node survives in the final indirect callee.
+    /// Does NOT certify the physical vtable slot, thunk or address point.
+    pub virtual_entry_indexes: Vec<VirtualEntryIndexSelection>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
     pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
@@ -1055,6 +1059,21 @@ pub struct VirtualReceiverReuse {
     pub original_node_reused:bool,
 }
 
+/// Event 82: source-owned EDG Itanium-class-ABI vptr index expression.
+/// The exact native index constant must still appear in the same
+/// source-certified call's final callee subtree. The element width comes
+/// from EDG vtbl_entry_size, not a guessed pointer/slot width. These
+/// facts are not a proof of any live object's vtable address point or
+/// executable virtual dispatch ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualEntryIndexSelection {
+    pub function:String,
+    pub statement_path:String,
+    pub path:String,
+    pub source_index:u64,
+    pub entry_bytes:u64,
+}
+
 /// Original source-operand C type for a native compiler-generated pointer
 /// cast. Explicit source casts never emit this event. The expression path
 /// identifies the cast wrapper, not its child or surrounding call.
@@ -1266,6 +1285,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         79 => Some(il.native_virtual_members.len()),
         80 => Some(il.prelower_virtual_origins.len()),
         81 => Some(il.virtual_receiver_reuses.len()),
+        82 => Some(il.virtual_entry_indexes.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2004,6 +2024,20 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 original_node_reused:same_node==1,
             });
         }
+        82 => {
+            let (Some(function),Some(statement_path),Some(path),
+                 Some(source_index),Some(entry_bytes)) =
+                (t(0),t(1),t(2),n(3),n(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+               path.is_empty() || entry_bytes==0 || entry_bytes>32 ||
+               !entry_bytes.is_power_of_two() ||
+               source_index.checked_mul(entry_bytes).is_none() {
+                return;
+            }
+            output.virtual_entry_indexes.push(VirtualEntryIndexSelection {
+                function,statement_path,path,source_index,entry_bytes,
+            });
+        }
         79 => {
             let (Some(routine),Some(owner))=(n(0),n(1)) else {return;};
             if routine==0 || owner==0 {return;}
@@ -2365,6 +2399,46 @@ fn validate_virtual_receiver_reuses(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// Event 82 must identify the same original *virtual* source routine
+/// already established by paired EDG pre-/post-lowering observer event 80,
+/// and its exact EDG logical number from independent event 79. Its index
+/// expression pointer appeared uniquely in the final callee subtree.
+/// Byte displacement is only the EDG-native eok_padd scaling, not the
+/// physical machine slot or vtable address point.
+fn validate_virtual_entry_index_selections(il:&Il)->Result<(),&'static str> {
+    if il.cpp_language!=Some(true) && !il.virtual_entry_indexes.is_empty() {
+        return Err("virtual table index in non-C++ IL");
+    }
+    let mut seen=HashSet::new();
+    for entry in &il.virtual_entry_indexes {
+        let key=(entry.function.as_str(),entry.statement_path.as_str(),
+                 entry.path.as_str());
+        if !seen.insert(key) {
+            return Err("duplicate native virtual table entry witness");
+        }
+        if entry.entry_bytes==0 || entry.entry_bytes>32 ||
+           !entry.entry_bytes.is_power_of_two() ||
+           entry.source_index.checked_mul(entry.entry_bytes).is_none() {
+            return Err("invalid or overflowing EDG native table index");
+        }
+        let origin=il.prelower_virtual_origins.iter().find(|v|
+            v.function==entry.function &&
+            v.statement_path==entry.statement_path &&
+            v.path==entry.path)
+            .ok_or("virtual table index lacks paired source call proof")?;
+        let native=il.native_virtual_members.iter().find(|v|
+            v.routine==origin.original_routine)
+            .ok_or("virtual table index lacks original EDG member declaration")?;
+        if native.virtual_number!=Some(entry.source_index) ||
+           !il.routine_attributes.iter().any(|v|
+               v.routine==origin.original_routine &&
+               v.is_virtual && v.has_this_parameter) {
+            return Err("virtual table index contradicts EDG routine numbering");
+        }
+    }
+    Ok(())
+}
+
 /// Native event 79 belongs to each exported virtual member. Validate
 /// original EDG routine/class identity, not a guessed ABI dispatch slot.
 /// This boundary does NOT grant codegen permission for indirect calls.
@@ -2483,6 +2557,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_virtual_member_coverage(il).is_err() ||
        validate_prelower_virtual_call_origins(il).is_err() ||
        validate_virtual_receiver_reuses(il).is_err() ||
+       validate_virtual_entry_index_selections(il).is_err() ||
        validate_native_statement_attribute_coverage(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
@@ -4002,7 +4077,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=81_u32 {
+        for kind in 1..=82_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4029,10 +4104,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,325);
+        assert_eq!(total,330);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(82).is_none());
+        assert!(expected_wire_field_tag_masks(83).is_none());
     }
 
     #[test]
