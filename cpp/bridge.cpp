@@ -1963,6 +1963,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           const std::string increment_path = path + ".increment.0";
           emit_record(5, {txt(function), txt(increment_path), txt(path)},
                       static_cast<uint32_t>(stmk_expr));
+          // Synthetic increments have no source flags but still require
+          // the mandatory native statement-attributes witness.
+          emit_record(26, {txt(function), txt(increment_path), num(0)});
           emit_expr(info->increment, function, increment_path, "0", "", 0);
         }
       }
