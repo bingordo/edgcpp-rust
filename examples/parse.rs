@@ -346,6 +346,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  reuse.receiver_type.0,reuse.argument_position,
                  reuse.original_node_reused);
     }
+    // Native Itanium-class-ABI EDG eok_padd(vptr, index) was witnessed at
+    // its source construction point, and that *exact index expression
+    // node* remained in the final call's callee subtree. Scale using
+    // EDG's actual table-element width, not a hard-coded pointer width.
+    // This is source displacement, NOT a verified physical G++ ABI slot,
+    // address point, thunk adjustment, or executable indirect call.
+    for entry in &result.il.virtual_entry_indexes {
+        if let Some(source_byte_displacement)=
+            entry.source_index.checked_mul(entry.entry_bytes) {
+            println!("EDG_NATIVE_VIRTUAL_INDEX function={} statement={} path={} source_index={} native_entry_bytes={} source_byte_displacement={} exact_index_node_proven=true machine_address_point_proven=false machine_slot_proven=false executable_abi_proven=false",
+                entry.function,entry.statement_path,entry.path,
+                entry.source_index,entry.entry_bytes,source_byte_displacement);
+        }
+    }
     // A lowered ordinary eok_call can contain an exact record-field
     // reference to "__vptr" without retaining its pre-lowering virtual
     // routine/receiver identity. Record this *observed tree* only for
