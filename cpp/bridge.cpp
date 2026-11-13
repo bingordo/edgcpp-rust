@@ -2811,7 +2811,11 @@ extern "C" void edgcpp_capture_pre_lower_virtual_call(
 // eok_padd(__vptr, index) is built. Require exact parent and operand
 // identities up front; reconfirm their links in the *final* callee.
 // Only accept the genuine pre-lowering source virtual-call identity.
-extern "C" void edgcpp_capture_virtual_entry_index(
+// Distinct v2 C symbol: old EDG source archives may still reference
+// edgcpp_capture_virtual_entry_index with the original four-argument ABI.
+// Leave that old weak symbol undefined rather than calling an incompatible
+// function or claiming stronger provenance from an old producer.
+extern "C" void edgcpp_capture_virtual_entry_shape(
     void *original_routine_operand, void *entry_expression,
     void *vptr_expression, void *index_expression,
     unsigned long long source_index, unsigned long long entry_bytes)
