@@ -748,6 +748,37 @@ static expression_children children_of(an_expr_node_ptr node)
   return {nullptr, false};
 }
 
+// Fail-closed bounded walk over only the final indirect callee subtree.
+// A physical pointer match to EDG's newly created virtual-table index
+// expression cannot be synthesized from a numeric literal in unrelated IL.
+// Never walk the eok_call's receiver/argument operands or assume that
+// a cloned graph preserves exact pointer identity.
+static bool callee_contains_unique_native_index(an_expr_node_ptr root,
+                                                const void *target)
+{
+  if (root == nullptr || target == nullptr) return false;
+  std::vector<an_expr_node_ptr> pending{root};
+  std::unordered_set<const void *> visited;
+  unsigned matches = 0;
+  while (!pending.empty()) {
+    if (visited.size() >= 512 || pending.size() > 512) return false;
+    an_expr_node_ptr candidate = pending.back();
+    pending.pop_back();
+    if (candidate == nullptr || !visited.insert(candidate).second)
+      return false;
+    if (candidate == target) ++matches;
+    const expression_children children = children_of(candidate);
+    unsigned count = 0;
+    an_expr_node_ptr child = children.first;
+    for (; child != nullptr && count < 64;
+         child = children.linked_list ? child->next : nullptr, ++count) {
+      pending.push_back(child);
+    }
+    if (child != nullptr || matches > 1) return false;
+  }
+  return matches == 1;
+}
+
 // EDG's call operators encode the callee as operand zero. Member calls
 // additionally encode the object as operand one. Keep the classification
 // symbolic here: numeric enum values depend on EDG's build configuration.
@@ -1468,6 +1499,24 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       num(reuse == origin.original_receiver ? 1 : 0)});
                 }
               }
+            }
+
+            // Event 82 is strictly the EDG-owned index constant that was
+            // inserted into an actual eok_padd(__vptr, index) expression
+            // by native Itanium ABI lowering. Require the exact index
+            // expression node to remain unique in *this callee subtree*,
+            // not in receiver or argument subtrees. Paired event 80 already
+            // established the original virtual routine/call identity.
+            // This does NOT prove the address point or physical machine
+            // vtable slot (notably secondary tables and thunks).
+            if (observed->second.native_entry_seen &&
+                observed->second.native_entry.entry_bytes != 0 &&
+                callee_contains_unique_native_index(
+                    callee, observed->second.native_entry.index_expression)) {
+              emit_record(RECORD_VIRTUAL_ENTRY_INDEX_SELECTION, {
+                  txt(function),txt(stmt_path),txt(path),
+                  num(observed->second.native_entry.source_index),
+                  num(observed->second.native_entry.entry_bytes)});
             }
           }
         }
