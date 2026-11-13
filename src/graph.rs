@@ -3999,8 +3999,8 @@ mod callee_vptr_field_tests {
             let path=format!("0.0.{}",id+2);
             graph.expressions.push(node(expr(&path,1,None,None,Some(id)),
                                         vec![]));
-            graph.expressions[1].operands.push(
-                ExpressionId(graph.expressions.len()-1));
+            let last=ExpressionId(graph.expressions.len()-1);
+            graph.expressions[1].operands.push(last);
         }
         assert!(graph.callee_vptr_field_reference(&call).is_none(),
             "oversized callee trees must not produce misleading partial proof");
