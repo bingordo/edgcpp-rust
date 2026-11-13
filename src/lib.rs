@@ -4029,10 +4029,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,319);
+        assert_eq!(total,325);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(81).is_none());
+        assert!(expected_wire_field_tag_masks(82).is_none());
     }
 
     #[test]
@@ -4492,6 +4492,120 @@ mod cxx5_call_target_wire_tests {
         il.call_targets[0].callee_symbol=None;
         assert!(validate_native_call_target_coverage(&il).is_ok(),
             "unresolved source calls remain a distinct safe, non-authorized class");
+    }
+}
+
+#[cfg(test)]
+mod cxx5_virtual_receiver_reuse_tests {
+    use super::*;
+
+    fn fixture() -> Il {
+        let mut il=Il { cpp_language:Some(true), ..Il::default() };
+        il.types.push(TypeDef {
+            id:TypeId(4),kind:11,related_role:None,related:None,
+        });
+        il.calls.push(CallSite {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),first_argument:1,
+        });
+        il.prelower_virtual_origins.push(PrelowerVirtualCallOrigin {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),original_routine:SymbolId(9),
+            original_receiver_type:Some(TypeId(4)),
+            original_operator:107,receiver_node_retained:false,
+        });
+        // The lowered ordinary eok_call's callee is at 0.0, so the
+        // EDG-reused receiver is its first direct argument at 0.1.
+        il.expressions.push(Expression {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0.1".into(),parent:Some("0".into()),
+            kind:3,operator:None,type_kind:None,
+            reference:None,type_size:None,type_alignment:None,
+            constant_kind:None,constant_integer:None,
+            related_type_role:None,related_type_kind:None,
+            type_id:Some(TypeId(4)),symbol_id:None,
+        });
+        il.virtual_receiver_reuses.push(VirtualReceiverReuse {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),receiver_type:TypeId(4),
+            argument_position:0,original_node_reused:false,
+        });
+        il
+    }
+
+    #[test]
+    fn accept_exact_source_reused_receiver_copy_but_not_execution() {
+        let mut il=fixture();
+        assert!(validate_virtual_receiver_reuses(&il).is_ok());
+        assert!(!il.virtual_receiver_reuses[0].original_node_reused,
+            "EDG make_reusable_copy does not mean source pointer identity");
+        // The receiver witness is optional. A missing source pointer
+        // witness must not produce a substitute by pattern matching.
+        il.virtual_receiver_reuses.clear();
+        assert!(validate_virtual_receiver_reuses(&il).is_ok());
+    }
+
+    #[test]
+    fn receiver_witness_must_have_original_virtual_call_and_exact_arg() {
+        let il=fixture();
+        let mut bad=il.clone();
+        bad.prelower_virtual_origins.clear();
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_receiver_reuses.push(bad.virtual_receiver_reuses[0].clone());
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_receiver_reuses[0].receiver_type=TypeId(999);
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_receiver_reuses[0].argument_position=1;
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.expressions[0].type_id=None;
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.expressions[0].path="0.2".into();
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.calls[0].first_argument=2;
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+        let mut bad=il.clone();
+        bad.cpp_language=Some(false);
+        assert!(validate_virtual_receiver_reuses(&bad).is_err());
+    }
+
+    #[test]
+    fn receiver_record_81_has_typed_fields_and_bounded_position() {
+        let text=|value:&[u8]| WireField {
+            data:value.as_ptr(),length:value.len(),value:0,
+            tag:wire_tags::TEXT,
+        };
+        let number=|value:u64| WireField {
+            data:std::ptr::null(),length:0,value,
+            tag:wire_tags::UNSIGNED,
+        };
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                    number(4),number(0),number(0)];
+        let mut state=Collector::default();
+        unsafe {collect((&mut state as *mut Collector).cast(),81,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.virtual_receiver_reuses.len(),1);
+        assert_eq!(state.il.virtual_receiver_reuses[0].receiver_type,TypeId(4));
+        assert_eq!(state.il.virtual_receiver_reuses[0].argument_position,0);
+        assert!(!state.il.virtual_receiver_reuses[0].original_node_reused);
+        let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                 number(4),number(16),number(0)];
+        let mut invalid=Collector::default();
+        unsafe {collect((&mut invalid as *mut Collector).cast(),81,
+                        bad.as_ptr(),bad.len(),0);}
+        assert!(invalid.malformed);
+        let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                 number(4),number(0),number(2)];
+        let mut invalid=Collector::default();
+        unsafe {collect((&mut invalid as *mut Collector).cast(),81,
+                        bad.as_ptr(),bad.len(),0);}
+        assert!(invalid.malformed);
     }
 }
 
