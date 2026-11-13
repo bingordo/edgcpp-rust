@@ -3926,15 +3926,17 @@ mod callee_vptr_field_tests {
             function:"target".into(),statement_path:"0.block.2".into(),
             path:"0".into(),first_argument:1,
         };
-        let mut graph=Graph::default();
-        graph.expressions=vec![
+        let mut graph=Graph {
+            expressions:vec![
             node(expr("0",3,None,None,None),vec![1,4]),
             node(expr("0.0",3,None,None,None),vec![2,3]),
             node(expr("0.0.0",5,Some(SymbolId(106)),
                       Some("__vptr"),None),vec![]),
             node(expr("0.0.1",1,None,None,Some(6)),vec![]),
             node(expr("0.1",2,None,Some("this"),None),vec![]),
-        ];
+            ],
+            ..Default::default()
+        };
         graph.record_fields.push(RecordField {
             owner:TypeId(145),position:0,ty:TypeId(117),
             symbol:SymbolId(106),name:"__vptr".into(),
