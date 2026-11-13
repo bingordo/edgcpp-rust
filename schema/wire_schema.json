@@ -24,7 +24,8 @@
     "RECORD_VIRTUAL_RECEIVER_REUSE": 81,
     "RECORD_VIRTUAL_ENTRY_INDEX_SELECTION": 82,
     "RECORD_NATIVE_EXPRESSION_CHILD_COUNT": 83,
-    "RECORD_NATIVE_STATEMENT_SIBLING_COUNT": 84
+    "RECORD_NATIVE_STATEMENT_SIBLING_COUNT": 84,
+    "RECORD_VIRTUAL_VPTR_RECEIVER_PAIR": 85
   },
   "record_arities": {
     "1": 1,
@@ -110,7 +111,8 @@
     "81": 6,
     "82": 5,
     "83": 4,
-    "84": 4
+    "84": 4,
+    "85": 5
   },
   "record_field_tags": {
     "1": [
@@ -617,6 +619,13 @@
       "TEXT",
       "ABSENT|TEXT",
       "TEXT",
+      "UNSIGNED"
+    ],
+    "85": [
+      "TEXT",
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
       "UNSIGNED"
     ]
   }
