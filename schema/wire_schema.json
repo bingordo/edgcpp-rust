@@ -18,7 +18,8 @@
     "RECORD_NATIVE_TYPE_LAYOUT_PROOF": 75,
     "RECORD_NATIVE_SCALAR_METADATA_PROOF": 76,
     "RECORD_CALL_TARGET_PROVENANCE": 77,
-    "RECORD_NATIVE_CALL_DISPATCH": 78
+    "RECORD_NATIVE_CALL_DISPATCH": 78,
+    "RECORD_NATIVE_VIRTUAL_MEMBER_INFO": 79
   },
   "record_arities": {
     "1": 1,
@@ -98,7 +99,8 @@
     "75": 3,
     "76": 2,
     "77": 6,
-    "78": 6
+    "78": 6,
+    "79": 5
   },
   "record_field_tags": {
     "1": [
@@ -563,6 +565,13 @@
       "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
+    ],
+    "79": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
     ]
   }
 }
