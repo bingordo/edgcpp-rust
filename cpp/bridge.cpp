@@ -70,6 +70,19 @@ struct PrelowerVirtualCall {
 };
 thread_local std::unordered_map<const void *, PrelowerVirtualCall>
     prelower_virtual_calls;
+
+// Recorded ONLY by a second EDG source hook after the actual call rewrite.
+// This is stronger than old raw-pointer-only guesses: the original call and
+// new eok_call must be associated by the single source transformation, and
+// the final emitted call must still own exactly the same callee node.
+// No post-hook, ambiguous map, or copied/replaced callee -> no wire event.
+struct PostlowerVirtualCall {
+  PrelowerVirtualCall source;
+  const void *rewritten_callee;
+  bool ambiguous;
+};
+thread_local std::unordered_map<const void *, PostlowerVirtualCall>
+    postlower_virtual_calls;
 }
 
 namespace edg {
@@ -1372,19 +1385,24 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           txt(function), txt(stmt_path), txt(path), num(form),
           callee_type ? num(callee_type) : absent(),
           callee_symbol ? num(callee_symbol) : absent()});
-      // This optional source-owned witness was recorded *before*
-      // lower_virtual_function_call replaced the original enk_routine and
-      // receiver. Its carrier is only an observed surviving EDG node address;
-      // it does not establish slot encoding, thunks, object lifetime,
-      // receiver adjustment, or permission to call.
+      // This optional native witness pairs source hook callbacks *before*
+      // and *after* EDG's same lower_virtual_function_call rewrite. The
+      // post-hook names the exact rewritten eok_call and its callee node:
+      // any missing/ambiguous/mismatched post-rewrite pointer yields NO event.
+      // It still does not establish virtual slot encoding, thunks, receiver
+      // adjustment, object lifetime, or permission to call.
       if (form == 3 && original_op == eok_call) {
-        auto origin = prelower_virtual_calls.find(node);
-        if (origin != prelower_virtual_calls.end() &&
-            !origin->second.ambiguous && origin->second.routine != nullptr) {
+        auto observed = postlower_virtual_calls.find(node);
+        if (observed != postlower_virtual_calls.end() &&
+            !observed->second.ambiguous &&
+            observed->second.rewritten_callee == callee &&
+            !observed->second.source.ambiguous &&
+            observed->second.source.routine != nullptr) {
+          const PrelowerVirtualCall &origin = observed->second.source;
           auto *routine = static_cast<a_routine_ptr>(
-              const_cast<void *>(origin->second.routine));
+              const_cast<void *>(origin.routine));
           auto *receiver_type = static_cast<a_type_ptr>(
-              const_cast<void *>(origin->second.receiver_type));
+              const_cast<void *>(origin.receiver_type));
           const uint32_t original_symbol = emit_symbol(routine, 1,
               declaration_name(routine->source_corresp, true, true));
           const uint32_t original_receiver_type = receiver_type != nullptr ?
@@ -1396,8 +1414,8 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                 txt(function),txt(stmt_path),txt(path),
                 num(original_symbol),
                 original_receiver_type ? num(original_receiver_type) : absent(),
-                num(origin->second.original_operator),
-                num(callee->next == origin->second.original_receiver ? 1 : 0)});
+                num(origin.original_operator),
+                num(callee->next == origin.original_receiver ? 1 : 0)});
           }
         }
       }
@@ -2637,10 +2655,11 @@ void back_end(void)
 }
 } // namespace edg
 
-// Optional weak hook defined by the source EDG fork at the precise entrance
-// to lower_virtual_function_call. When linked against an older uninstrumented
-// archive it is simply never called and no event 80 is invented. Capture only
-// the original routine and receiver type while those IL nodes are still live.
+// Optional source hooks at the entrance and exit of EDG's *same*
+// lower_virtual_function_call invocation. The first observes the original
+// virtual routine/receiver; the second proves exactly which eok_call EDG
+// created. Older or partially instrumented archives cannot emit event 80.
+// Neither hook changes EDG's IL, proves an ABI slot, nor permits execution.
 extern "C" void edgcpp_capture_pre_lower_virtual_call(
     void *call, void *original_routine, void *original_receiver)
 {
@@ -2665,6 +2684,57 @@ extern "C" void edgcpp_capture_pre_lower_virtual_call(
   }
 }
 
+// EDG invokes this only after converting the original member-call node
+// into an ordinary indirect eok_call. In the comma-operator case the call
+// is the old routine operand, *not* the original enclosing expression.
+// Bind the exact rewritten node and its immediate callee pointer while
+// both are still live. Matching the pointer later guards against some
+// subsequent copies/replacements; it cannot establish complete provenance
+// across arbitrary EDG inlining or prove receiver adjustments.
+extern "C" void edgcpp_capture_post_lower_virtual_call(
+    void *original_call, void *rewritten_call)
+{
+  using namespace edg;
+  if (current_callback == nullptr || original_call == nullptr ||
+      rewritten_call == nullptr) return;
+  const auto original = prelower_virtual_calls.find(original_call);
+  if (original == prelower_virtual_calls.end() ||
+      original->second.ambiguous || original->second.routine == nullptr) return;
+  auto *parent = static_cast<an_expr_node_ptr>(original_call);
+  auto *lowered = static_cast<an_expr_node_ptr>(rewritten_call);
+  if (parent->kind != enk_operation ||
+      lowered->kind != enk_operation ||
+      lowered->variant.operation.kind != eok_call ||
+      lowered->variant.operation.operands == nullptr ||
+      lowered->variant.operation.operands->kind == enk_routine) return;
+  // EDG either overwrites the original node with the new eok_call, or
+  // retains it as a comma expression with the new call as a direct child.
+  bool source_rewrite_is_structurally_visible = false;
+  if (parent == lowered) {
+    source_rewrite_is_structurally_visible =
+        parent->variant.operation.kind == eok_call;
+  } else if (parent->variant.operation.kind == eok_comma) {
+    unsigned examined = 0;
+    for (an_expr_node_ptr child = parent->variant.operation.operands;
+         child != nullptr && examined++ < 16; child = child->next) {
+      if (child == lowered) {
+        source_rewrite_is_structurally_visible = true;
+        break;
+      }
+    }
+  }
+  if (!source_rewrite_is_structurally_visible) return;
+  auto added = postlower_virtual_calls.emplace(
+      rewritten_call,
+      PostlowerVirtualCall {
+          original->second, lowered->variant.operation.operands, false});
+  if (!added.second) {
+    // Even two apparently equal entries are ambiguous across EDG
+    // transformations. Never silently reuse a physical node address.
+    added.first->second.ambiguous = true;
+  }
+}
+
 extern "C" int edgcpp_compile(int argc, char **argv,
                                edgcpp_il_callback callback, void *user_data)
 {
@@ -2686,6 +2756,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_static_locals.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
+  postlower_virtual_calls.clear();
   current_callback = callback;
   current_user_data = user_data;
   // EDG is built with -fno-exceptions; its callable path returns a status.
@@ -2708,6 +2779,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   pending_static_locals.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
+  postlower_virtual_calls.clear();
   return status;
 }
 

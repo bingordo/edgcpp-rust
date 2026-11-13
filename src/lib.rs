@@ -1013,11 +1013,13 @@ pub struct CallDispatchProvenance {
     pub explicitly_virtual:bool,
 }
 
-/// Optional source-owned callback from *before* EDG rewrites a virtual
-/// member call into an ordinary indirect eok_call. The pointer carrier
-/// survived into this post-lowering call, but the original receiver tree
-/// may have been duplicated/rewritten. This is never a virtual ABI slot,
-/// object-lifetime certificate, or permission to execute indirect calls.
+/// Source-owned callbacks from both *before* and *after* EDG rewrites a
+/// virtual member call into an ordinary indirect eok_call. The bridge
+/// requires a structurally valid rewrite of the exact call and an unchanged
+/// callee pointer in the final snapshot. Copying/inlining may still lose
+/// the witness, and the original receiver tree may be duplicated/rewritten.
+/// This is never a virtual ABI slot, live-object certificate, receiver
+/// adjustment, or permission to execute indirect calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrelowerVirtualCallOrigin {
     pub function:String,
@@ -2218,10 +2220,13 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
 }
 
 /// A source-identified virtual routine can survive EDG lowering only via the
-/// optional native pre-lowering observer. Require unique observed call sites
-/// and source-consistent, still-indirect eok_call operands; absent witnesses
-/// are deliberately accepted because EDG copying/inlining can destroy raw
-/// node-address carriers. No consumer may use this as complete vtable ABI.
+/// optional paired native pre-lowering and *post-rewrite* observers.
+/// Require unique observed sites, a native virtual member declaration, and
+/// a source-consistent indirect eok_call. Bridge event 80 can now be
+/// emitted only if EDG explicitly confirmed the rewritten call node and its
+/// callee pointer survived to the snapshot. Absent witnesses are still legal:
+/// subsequent EDG copying/inlining can destroy physical node identity.
+/// No consumer may treat this as complete virtual ABI or call permission.
 fn validate_prelower_virtual_call_origins(il:&Il)->Result<(),&'static str> {
     if il.cpp_language!=Some(true) && !il.prelower_virtual_origins.is_empty() {
         return Err("prelower virtual call source proof in non-C++ IL");
@@ -2253,6 +2258,19 @@ fn validate_prelower_virtual_call_origins(il:&Il)->Result<(),&'static str> {
         if !il.symbols.iter().any(|s|
             s.id==proof.original_routine && s.kind==1) {
             return Err("prelower virtual routine identity missing");
+        }
+        // EDG's source hook reported an *actual virtual member call*.
+        // A routine ID in a namespace, nonvirtual method, or other unrelated
+        // symbol can never be substituted for that original routine.
+        let origin=il.native_virtual_members.iter().find(|v|
+            v.routine==proof.original_routine)
+            .ok_or("prelower routine lacks native virtual-member proof")?;
+        if !il.routine_attributes.iter().any(|v|
+            v.routine==proof.original_routine &&
+            v.is_virtual && v.has_this_parameter) ||
+           !il.member_functions.iter().any(|v|
+            v.routine==proof.original_routine && v.owner==origin.owner) {
+            return Err("prelower routine does not match a virtual class member");
         }
         if let Some(ty)=proof.original_receiver_type {
             if !il.types.iter().any(|t|t.id==ty) {
@@ -4403,6 +4421,20 @@ mod cxx5_prelower_virtual_call_origin_tests {
         });
         il.types.push(TypeDef {id:TypeId(4),kind:11,
             related_role:None,related:None});
+        il.member_functions.push(MemberFunction {
+            owner:TypeId(4),routine:SymbolId(9),
+        });
+        il.routine_attributes.push(RoutineAttributes {
+            routine:SymbolId(9),special_kind:0,is_virtual:true,
+            pure_virtual:false,is_override:false,is_final:false,
+            overrides_base_member:false,is_inline:false,is_constexpr:false,
+            defined:true,explicit_constructor:false,has_this_parameter:true,
+            compiler_generated:false,
+        });
+        il.native_virtual_members.push(NativeVirtualMemberInfo {
+            routine:SymbolId(9),owner:TypeId(4),virtual_number:Some(0),
+            virtual_info_offset:Some(0),sharing_base:None,
+        });
         il.calls.push(CallSite {
             function:"caller".into(),statement_path:"0.block.2".into(),
             path:"0".into(),first_argument:1,
@@ -4448,6 +4480,18 @@ mod cxx5_prelower_virtual_call_origin_tests {
         let mut wrong=il.clone();
         wrong.prelower_virtual_origins[0].original_receiver_type=Some(TypeId(999));
         assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.native_virtual_members.clear();
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err(),
+            "a routine name alone cannot prove virtual dispatch");
+        let mut wrong=il.clone();
+        wrong.routine_attributes[0].is_virtual=false;
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err(),
+            "original routine must remain an actual EDG virtual method");
+        let mut wrong=il.clone();
+        wrong.member_functions[0].owner=TypeId(999);
+        assert!(validate_prelower_virtual_call_origins(&wrong).is_err(),
+            "original virtual owner must match its class-member edge");
         let mut wrong=il.clone();
         wrong.call_targets[0].form=CallTargetForm::DirectRoutine;
         assert!(validate_prelower_virtual_call_origins(&wrong).is_err());
