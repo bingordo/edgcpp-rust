@@ -2198,7 +2198,8 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
        validate_native_call_target_coverage(il).is_err() ||
-       validate_native_call_dispatch_coverage(il).is_err() {
+       validate_native_call_dispatch_coverage(il).is_err() ||
+       graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
@@ -2264,6 +2265,27 @@ mod tests {
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)),
             "unrelated records do not replace a language mode event");
+    }
+
+    #[test]
+    fn native_success_rejects_duplicate_symbol_identity() {
+        let mut il = Il { cpp_language: Some(false), ..Il::default() };
+        il.symbols.extend([
+            Symbol { id: SymbolId(1), kind: 1, name: "first".into() },
+            Symbol { id: SymbolId(1), kind: 2, name: "second".into() },
+        ]);
+        assert!(matches!(graph::Graph::from_il(&il),
+            Err(graph::GraphError::DuplicateSymbol(SymbolId(1)))));
+        assert!(matches!(validate_complete_native_snapshot(&il),
+            Err(Error::MalformedCallback)));
+    }
+
+    #[test]
+    fn native_success_accepts_valid_symbol_identity() {
+        let mut il = Il { cpp_language: Some(true), ..Il::default() };
+        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "routine".into() });
+        validate_complete_native_snapshot(&il)
+            .expect("well-formed symbol must be accepted");
     }
 
     #[test]
@@ -3668,7 +3690,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=76_u32 {
+        for kind in 1..=78_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -3695,10 +3717,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,295);
+        assert_eq!(total,307);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(77).is_none());
+        assert!(expected_wire_field_tag_masks(79).is_none());
     }
 
     #[test]
