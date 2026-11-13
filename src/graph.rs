@@ -39,6 +39,20 @@ pub struct ExpressionNode {
     pub statement: StatementId,
 }
 
+/// A lowered indirect callee's *observed* expression-tree reference to a
+/// field named "__vptr", verified against its EDG record-field identity.
+/// Neither a class ABI certificate nor proof the source call was virtual.
+/// Literal values here are un-interpreted EDG expression constants, NOT
+/// virtual slots, byte displacements, vtable address points or this offsets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalleeVptrFieldReference {
+    pub field: SymbolId,
+    pub owner: TypeId,
+    pub field_path: String,
+    pub field_byte_offset: u64,
+    pub raw_integer_literals: Vec<(String, i64)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateStatement { function: String, path: String },
@@ -3269,6 +3283,59 @@ impl Graph {
     pub fn call_callee(&self, call: &CallSite) -> Option<ExpressionId> {
         let id = self.call_expression(call)?;
         self.expressions[id.0].operands.first().copied()
+    }
+
+    /// Inspect a *callee-only* tree for an exact EDG record-field reference
+    /// named "__vptr". No source member-call classification survives by
+    /// implication: the caller must independently require the event-77
+    /// IndirectUnresolved record, and this evidence never authorizes codegen.
+    ///
+    /// A fixed bound and rejection of multiple candidates avoid silently
+    /// choosing a vptr field in large/ambiguous lowered expressions. Raw
+    /// constants are reported with original expression paths, but never
+    /// interpreted as an Itanium slot or pointer arithmetic unit.
+    pub fn callee_vptr_field_reference(
+        &self, call: &CallSite
+    ) -> Option<CalleeVptrFieldReference> {
+        let callee=self.call_callee(call)?;
+        let mut stack=vec![callee];
+        let mut seen=std::collections::HashSet::new();
+        let mut field=None;
+        let mut integers=Vec::new();
+        while let Some(id)=stack.pop() {
+            if !seen.insert(id) || seen.len()>512 {return None;}
+            let node=self.expressions.get(id.0)?;
+            if node.data.function!=call.function ||
+               node.data.statement_path!=call.statement_path {
+                return None;
+            }
+            if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==5 {
+                if let Some(symbol)=node.data.symbol_id {
+                    if let Some(record)=self.record_fields.iter().find(|f|
+                        f.symbol==symbol && f.name=="__vptr") {
+                        if node.data.reference.as_deref()!=Some("__vptr") ||
+                           field.is_some() || record.bit_width!=0 {
+                            return None;
+                        }
+                        field=Some((symbol,record.owner,node.data.path.clone(),
+                                    record.byte_offset));
+                    }
+                }
+            }
+            if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==1 {
+                if let Some(value)=node.data.constant_integer {
+                    if integers.len()>=16 {return None;}
+                    integers.push((node.data.path.clone(),value));
+                }
+            }
+            stack.extend(node.operands.iter().copied());
+        }
+        let (field,owner,field_path,field_byte_offset)=field?;
+        integers.sort_by(|a,b|compare_tree_paths(&a.0,&b.0));
+        Some(CalleeVptrFieldReference {
+            field,owner,field_path,field_byte_offset,
+            raw_integer_literals:integers,
+        })
     }
 
     /// Implicit object operand for member calls; absent for ordinary calls.
