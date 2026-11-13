@@ -232,6 +232,10 @@ pub struct Il {
     /// where the same index node survives in the final indirect callee.
     /// Does NOT certify the physical vtable slot, thunk or address point.
     pub virtual_entry_indexes: Vec<VirtualEntryIndexSelection>,
+    /// Optional event 85: source-paired vptr lookup object and EDG reusable
+    /// argument of the same lowered call, both still visible at emission.
+    /// Does not prove machine receiver adjustment or live object layout.
+    pub virtual_vptr_receiver_pairs: Vec<VirtualVptrReceiverPair>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
     pub implicit_pointer_casts: Vec<ImplicitPointerCast>,
@@ -1096,6 +1100,20 @@ pub struct VirtualEntryIndexSelection {
     pub entry_bytes:u64,
 }
 
+/// Event 85: EDG native virtual vptr lookup and reusable call-argument
+/// linkage. The exact lookup-object node remains in the vptr subtree;
+/// its EDG-created reusable receiver remains the same final call's unique
+/// direct argument. No identity of runtime subobjects, address point,
+/// pointer adjustments, thunk or lifetime semantics is certified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualVptrReceiverPair {
+    pub function:String,
+    pub statement_path:String,
+    pub path:String,
+    pub lookup_object_type:TypeId,
+    pub argument_position:u32,
+}
+
 /// Original source-operand C type for a native compiler-generated pointer
 /// cast. Explicit source casts never emit this event. The expression path
 /// identifies the cast wrapper, not its child or surrounding call.
@@ -1310,6 +1328,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         82 => Some(il.virtual_entry_indexes.len()),
         83 => Some(il.native_expression_child_counts.len()),
         84 => Some(il.native_statement_sibling_counts.len()),
+        85 => Some(il.virtual_vptr_receiver_pairs.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2087,6 +2106,20 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 entry_bytes:u64::from(entry_bytes),
             });
         }
+        85 => {
+            let (Some(function),Some(statement_path),Some(path),
+                 Some(lookup_ty),Some(position)) =
+                (t(0),t(1),t(2),n(3),n(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+               path.is_empty() || lookup_ty==0 || position>=16 {
+                return;
+            }
+            output.virtual_vptr_receiver_pairs.push(VirtualVptrReceiverPair {
+                function,statement_path,path,
+                lookup_object_type:TypeId(lookup_ty),
+                argument_position:position,
+            });
+        }
         79 => {
             let (Some(routine),Some(owner))=(n(0),n(1)) else {return;};
             if routine==0 || owner==0 {return;}
@@ -2488,6 +2521,46 @@ fn validate_virtual_entry_index_selections(il:&Il)->Result<(),&'static str> {
     Ok(())
 }
 
+/// Event 85 must be a strict subset of the paired source-event 80,
+/// exact virtual lookup event 82, and EDG reused receiver event 81.
+/// It binds two expression *origins* in native IL, not physical
+/// subobject offsets or executable virtual call ABI.
+fn validate_virtual_vptr_receiver_pairs(il:&Il)->Result<(),&'static str> {
+    if il.cpp_language!=Some(true) && !il.virtual_vptr_receiver_pairs.is_empty() {
+        return Err("vptr receiver pair in non-C++ IL");
+    }
+    let mut seen=HashSet::new();
+    for pair in &il.virtual_vptr_receiver_pairs {
+        let key=(pair.function.as_str(),pair.statement_path.as_str(),
+                 pair.path.as_str());
+        if !seen.insert(key) {
+            return Err("duplicate virtual vptr receiver pair");
+        }
+        if pair.argument_position>=16 ||
+           !il.types.iter().any(|t|t.id==pair.lookup_object_type) {
+            return Err("invalid EDG vptr lookup object type or argument");
+        }
+        if !il.prelower_virtual_origins.iter().any(|v|
+            v.function==pair.function &&
+            v.statement_path==pair.statement_path &&
+            v.path==pair.path) ||
+           !il.virtual_entry_indexes.iter().any(|v|
+            v.function==pair.function &&
+            v.statement_path==pair.statement_path &&
+            v.path==pair.path) {
+            return Err("vptr receiver pair lacks exact source virtual lookup");
+        }
+        if !il.virtual_receiver_reuses.iter().any(|v|
+            v.function==pair.function &&
+            v.statement_path==pair.statement_path &&
+            v.path==pair.path &&
+            v.argument_position==pair.argument_position) {
+            return Err("vptr receiver pair contradicts reusable call argument");
+        }
+    }
+    Ok(())
+}
+
 /// Native event 79 belongs to each exported virtual member. Validate
 /// original EDG routine/class identity, not a guessed ABI dispatch slot.
 /// This boundary does NOT grant codegen permission for indirect calls.
@@ -2674,6 +2747,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_prelower_virtual_call_origins(il).is_err() ||
        validate_virtual_receiver_reuses(il).is_err() ||
        validate_virtual_entry_index_selections(il).is_err() ||
+       validate_virtual_vptr_receiver_pairs(il).is_err() ||
        validate_native_statement_attribute_coverage(il).is_err() ||
        validate_native_tree_count_coverage(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
@@ -4242,7 +4316,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=84_u32 {
+        for kind in 1..=85_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4269,10 +4343,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,338);
+        assert_eq!(total,343);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(85).is_none());
+        assert!(expected_wire_field_tag_masks(86).is_none());
     }
 
     #[test]
@@ -4846,6 +4920,111 @@ mod cxx5_virtual_receiver_reuse_tests {
         unsafe {collect((&mut invalid as *mut Collector).cast(),81,
                         bad.as_ptr(),bad.len(),0);}
         assert!(invalid.malformed);
+    }
+}
+
+#[cfg(test)]
+mod cxx5_virtual_vptr_receiver_pair_tests {
+    use super::*;
+
+    fn source() -> Il {
+        let mut il=Il {cpp_language:Some(true), ..Il::default()};
+        il.types.push(TypeDef {
+            id:TypeId(4),kind:11,related_role:None,related:None,
+        });
+        il.prelower_virtual_origins.push(PrelowerVirtualCallOrigin {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),original_routine:SymbolId(9),
+            original_receiver_type:Some(TypeId(4)),
+            original_operator:107,receiver_node_retained:false,
+        });
+        il.virtual_entry_indexes.push(VirtualEntryIndexSelection {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),source_index:0,entry_bytes:8,
+        });
+        il.virtual_receiver_reuses.push(VirtualReceiverReuse {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),receiver_type:TypeId(4),
+            argument_position:0,original_node_reused:false,
+        });
+        il.virtual_vptr_receiver_pairs.push(VirtualVptrReceiverPair {
+            function:"caller".into(),statement_path:"0.block.2".into(),
+            path:"0".into(),lookup_object_type:TypeId(4),
+            argument_position:0,
+        });
+        il
+    }
+
+    #[test]
+    fn source_pair_requires_independent_call_lookup_and_receiver_evidence() {
+        let il=source();
+        assert!(validate_virtual_vptr_receiver_pairs(&il).is_ok());
+        let mut partial=il.clone();
+        partial.virtual_vptr_receiver_pairs.clear();
+        assert!(validate_virtual_vptr_receiver_pairs(&partial).is_ok(),
+            "the new source observer is intentionally optional");
+        for which in 0..3 {
+            let mut bad=il.clone();
+            match which {
+                0 => bad.prelower_virtual_origins.clear(),
+                1 => bad.virtual_entry_indexes.clear(),
+                _ => bad.virtual_receiver_reuses.clear(),
+            }
+            assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+        }
+        let mut bad=il.clone();
+        bad.virtual_vptr_receiver_pairs.push(
+            bad.virtual_vptr_receiver_pairs[0].clone());
+        assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_vptr_receiver_pairs[0].lookup_object_type=TypeId(999);
+        assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_vptr_receiver_pairs[0].argument_position=1;
+        assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+        let mut bad=il.clone();
+        bad.virtual_vptr_receiver_pairs[0].path="different".into();
+        assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+        let mut bad=il.clone();
+        bad.cpp_language=Some(false);
+        assert!(validate_virtual_vptr_receiver_pairs(&bad).is_err());
+    }
+
+    #[test]
+    fn typed_source_pair_event_85_rejects_invalid_fields() {
+        let text=|value:&[u8]| WireField {
+            data:value.as_ptr(),length:value.len(),value:0,
+            tag:wire_tags::TEXT,
+        };
+        let number=|value:u64| WireField {
+            data:std::ptr::null(),length:0,value,
+            tag:wire_tags::UNSIGNED,
+        };
+        let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                    number(4),number(0)];
+        let mut state=Collector::default();
+        unsafe {collect((&mut state as *mut Collector).cast(),85,
+                        fields.as_ptr(),fields.len(),0);}
+        assert!(!state.malformed);
+        assert_eq!(state.il.virtual_vptr_receiver_pairs.len(),1);
+        assert_eq!(state.il.virtual_vptr_receiver_pairs[0]
+                   .lookup_object_type,TypeId(4));
+        assert_eq!(state.il.virtual_vptr_receiver_pairs[0]
+                   .argument_position,0);
+        for (ty,pos) in [(0,0),(4,16)] {
+            let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
+                     number(ty),number(pos)];
+            let mut collector=Collector::default();
+            unsafe {collect((&mut collector as *mut Collector).cast(),85,
+                            bad.as_ptr(),bad.len(),0);}
+            assert!(collector.malformed);
+        }
+        let malformed_tags=[text(b"caller"),text(b"0.block.2"),
+                            text(b"0"),text(b"not_unsigned"),number(0)];
+        let mut collector=Collector::default();
+        unsafe {collect((&mut collector as *mut Collector).cast(),85,
+                        malformed_tags.as_ptr(),malformed_tags.len(),0);}
+        assert!(collector.malformed);
     }
 }
 
