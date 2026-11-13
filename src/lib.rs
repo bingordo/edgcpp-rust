@@ -81,6 +81,10 @@ pub struct Il {
     pub cxx_scalar_lifetime_admissions: Vec<CxxScalarLifetimeAdmission>,
     /// Structural statement records captured while function IL is live.
     pub statements: Vec<Statement>,
+    /// Independent EDG-derived counts for primary expression trees.
+    pub native_expression_child_counts: Vec<NativeExpressionChildCount>,
+    /// Independent EDG-derived counts for native statement sibling lists.
+    pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// Native flags retained for each emitted statement.
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
@@ -659,6 +663,24 @@ pub struct NativeRoutineSupplement {
 
 /// A statement node, identified by a stable path within one function.
 /// Kinds are EDG's a_statement_kind discriminants, not Rust syntax kinds.
+/// Native EDG count witness, independent of emitted child events (wire 81).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeExpressionChildCount {
+    pub function: String,
+    pub statement_path: String,
+    pub path: String,
+    pub count: u32,
+}
+
+/// Native EDG sibling-list witness (wire 82). Parent is absent for roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeStatementSiblingCount {
+    pub function: String,
+    pub parent: Option<String>,
+    pub edge: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
     pub function: String,
@@ -1286,6 +1308,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         80 => Some(il.prelower_virtual_origins.len()),
         81 => Some(il.virtual_receiver_reuses.len()),
         82 => Some(il.virtual_entry_indexes.len()),
+        83 => Some(il.native_expression_child_counts.len()),
+        84 => Some(il.native_statement_sibling_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -1400,6 +1424,28 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     let t = |i: usize| fields[i].string();
     let n = |i: usize| fields[i].u32();
     match kind {
+        83 => {
+            let (Some(function),Some(statement_path),Some(path),Some(count))=
+                (t(0),t(1),t(2),n(3)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+               path.is_empty() || count>10000 {return;}
+            output.native_expression_child_counts.push(NativeExpressionChildCount {
+                function,statement_path,path,count,
+            });
+        }
+        84 => {
+            let (Some(function),Some(edge),Some(count))=
+                (t(0),t(2),n(3)) else {return;};
+            if function.is_empty() || count>10000 {return;}
+            let parent=if fields[1].present() {
+                let Some(parent)=t(1) else {return;};
+                if parent.is_empty() {return;}
+                Some(parent)
+            } else {None};
+            output.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+                function,parent,edge,count,
+            });
+        }
         69 => {
             let (Some(derived),Some(position))=(n(0),n(1)) else {return;};
             if derived==0 || !seen.base_subobject_offsets.insert((TypeId(derived),position)) {return;}
@@ -2546,6 +2592,73 @@ fn validate_native_statement_attribute_coverage(il:&Il) -> Result<(),Error> {
     Ok(())
 }
 
+// Native count proofs must be independent of the events whose completeness
+// they establish; never infer the expected length from the received tail.
+fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
+    use std::collections::HashMap;
+    let mut expression_keys=HashSet::with_capacity(il.expressions.len());
+    let mut child_counts:HashMap<(String,String,String),u32>=HashMap::new();
+    for expr in &il.expressions {
+        let key=(expr.function.clone(),expr.statement_path.clone(),expr.path.clone());
+        if !expression_keys.insert(key) {return Err(Error::MalformedCallback);}
+        if let Some(parent)=&expr.parent {
+            let parent_key=(expr.function.clone(),expr.statement_path.clone(),parent.clone());
+            *child_counts.entry(parent_key).or_default()+=1;
+        }
+    }
+    let mut expr_proofs=HashSet::new();
+    for proof in &il.native_expression_child_counts {
+        let key=(proof.function.clone(),proof.statement_path.clone(),proof.path.clone());
+        if proof.count>10000 || !expression_keys.contains(&key) ||
+           !expr_proofs.insert(key.clone()) ||
+           child_counts.get(&key).copied().unwrap_or(0)!=proof.count {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if expr_proofs.len()!=expression_keys.len() {return Err(Error::MalformedCallback);}
+
+    type ListKey=(String,Option<String>,String);
+    let mut groups:HashMap<ListKey,Vec<u32>>=HashMap::new();
+    let mut statements=HashSet::new();
+    for stmt in &il.statements {
+        statements.insert((stmt.function.as_str(),stmt.path.as_str()));
+        let (edge,index)=if let Some(parent)=&stmt.parent {
+            let Some(rest)=stmt.path.strip_prefix(&format!("{parent}.")) else {
+                return Err(Error::MalformedCallback);
+            };
+            let Some((edge,index))=rest.rsplit_once('.') else {
+                return Err(Error::MalformedCallback);
+            };
+            (edge,index)
+        } else {("",stmt.path.as_str())};
+        let Ok(index)=index.parse::<u32>() else {return Err(Error::MalformedCallback);};
+        // The synthetic for-increment statement has a separately emitted
+        // expression and does not arise from emit_statements' EDG list.
+        if edge=="increment" && index==0 && stmt.parent.is_some() {
+            continue;
+        }
+        groups.entry((stmt.function.clone(),stmt.parent.clone(),edge.into()))
+            .or_default().push(index);
+    }
+    let mut seen=HashSet::new();
+    for proof in &il.native_statement_sibling_counts {
+        let key=(proof.function.clone(),proof.parent.clone(),proof.edge.clone());
+        if proof.count>10000 || !seen.insert(key.clone()) ||
+            proof.parent.as_ref().is_some_and(|parent|
+                !statements.contains(&(proof.function.as_str(),parent.as_str()))) {
+            return Err(Error::MalformedCallback);
+        }
+        let mut positions=groups.remove(&key).unwrap_or_default();
+        positions.sort_unstable();
+        if positions.len()!=proof.count as usize ||
+           positions.iter().enumerate().any(|(i,pos)| *pos!=i as u32) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if !groups.is_empty() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -2562,6 +2675,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_virtual_receiver_reuses(il).is_err() ||
        validate_virtual_entry_index_selections(il).is_err() ||
        validate_native_statement_attribute_coverage(il).is_err() ||
+       validate_native_tree_count_coverage(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -2643,6 +2757,9 @@ mod tests {
             lowering_generated:false,lowering_boilerplate:false,
         };
         il.statements.extend([statement("0"),statement("1")]);
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:None,edge:String::new(),count:2,
+        });
         il.statement_attributes.push(attributes("0"));
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)), "missing tail metadata must fail");
@@ -2655,6 +2772,51 @@ mod tests {
         il.statement_attributes[1].statement_path="2".into();
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)), "orphan metadata must fail");
+    }
+
+    #[test]
+    fn native_tree_counts_reject_dropped_final_child_and_sibling() {
+        let mut il=Il::default();
+        let expr=|path:&str,parent:Option<&str>| Expression {
+            function:"f".into(),statement_path:"0".into(),
+            path:path.into(),parent:parent.map(str::to_owned),kind:1,
+            operator:None,type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,constant_integer:None,
+            related_type_role:None,related_type_kind:None,type_id:None,symbol_id:None,
+        };
+        il.expressions.extend([expr("0",None),expr("0.0",Some("0")),
+                               expr("0.1",Some("0"))]);
+        for (path,count) in [("0",2),("0.0",0),("0.1",0)] {
+            il.native_expression_child_counts.push(NativeExpressionChildCount {
+                function:"f".into(),statement_path:"0".into(),path:path.into(),count,
+            });
+        }
+        validate_native_tree_count_coverage(&il).expect("complete operands");
+        il.expressions.pop();
+        il.native_expression_child_counts.pop();
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing last child must not shrink arity");
+        il.expressions.push(expr("0.1",Some("0")));
+        il.native_expression_child_counts.push(NativeExpressionChildCount {
+            function:"f".into(),statement_path:"0".into(),path:"0.1".into(),count:0,
+        });
+        il.statements.extend([
+            Statement {function:"f".into(),path:"0".into(),parent:None,kind:0},
+            Statement {function:"f".into(),path:"1".into(),parent:None,kind:0},
+        ]);
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:None,edge:String::new(),count:2,
+        });
+        validate_native_tree_count_coverage(&il).expect("complete siblings");
+        il.statements.pop();
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing final sibling must fail");
+        il.statements.push(Statement {
+            function:"f".into(),path:"1".into(),parent:None,kind:0,
+        });
+        il.native_statement_sibling_counts.push(il.native_statement_sibling_counts[0].clone());
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "duplicate proof must fail");
     }
 
     #[test]
@@ -4080,7 +4242,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=82_u32 {
+        for kind in 1..=84_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4107,10 +4269,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,330);
+        assert_eq!(total,338);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(83).is_none());
+        assert!(expected_wire_field_tag_masks(85).is_none());
     }
 
     #[test]
