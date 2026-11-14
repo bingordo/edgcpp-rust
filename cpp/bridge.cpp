@@ -1688,6 +1688,13 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
                    type_id ? num(type_id) : absent(),
                    symbol ? num(symbol) : absent()});
   const auto children = children_of(node);
+  uint32_t native_child_count = 0;
+  for (an_expr_node_ptr child = children.first;
+       child != nullptr && within_native_list_limit(native_child_count);
+       child = children.linked_list ? child->next : nullptr,
+       ++native_child_count) {}
+  emit_record(RECORD_NATIVE_CONTROL_CHILD_COUNT,
+              {txt(function),txt(statement),num(role),txt(path),num(native_child_count)});
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
        operand != nullptr && within_native_list_limit(index);
@@ -2374,6 +2381,18 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                      symbol ? num(symbol) : absent()});
   }
   const auto children = children_of(expr);
+  uint32_t native_child_count = 0;
+  for (an_expr_node_ptr child = children.first;
+       child != nullptr && within_native_list_limit(native_child_count);
+       child = children.linked_list ? child->next : nullptr,
+       ++native_child_count) {}
+  if (constructor) {
+    emit_record(RECORD_NATIVE_CONSTRUCTOR_CHILD_COUNT,
+                {num(owner),num(position),txt(path),num(native_child_count)});
+  } else {
+    emit_record(RECORD_NATIVE_INITIALIZER_CHILD_COUNT,
+                {num(owner),txt(path),num(native_child_count)});
+  }
   unsigned index = 0;
   for (an_expr_node_ptr operand = children.first;
        operand != nullptr && within_native_list_limit(index);
