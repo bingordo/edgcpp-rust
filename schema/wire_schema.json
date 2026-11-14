@@ -37,7 +37,9 @@
     "RECORD_NATIVE_LIFETIME_CHILD_COUNT": 94,
     "RECORD_NATIVE_LIFETIME_ROOT_ADMISSION": 95,
     "RECORD_NATIVE_SCOPE_LIFETIME_ADMISSION": 96,
-    "RECORD_NATIVE_SCOPE_CHILD_COUNT": 97
+    "RECORD_NATIVE_SCOPE_CHILD_COUNT": 97,
+    "RECORD_NATIVE_SCOPE_LOCAL_COUNT": 98,
+    "RECORD_NATIVE_FUNCTION_PARAMETER_COUNT": 99
   },
   "record_arities": {
     "1": 1,
@@ -136,7 +138,9 @@
     "94": 4,
     "95": 3,
     "96": 3,
-    "97": 3
+    "97": 3,
+    "98": 3,
+    "99": 3
   },
   "record_field_tags": {
     "1": [
@@ -711,6 +715,16 @@
       "ABSENT|UNSIGNED"
     ],
     "97": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "98": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "99": [
       "UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
