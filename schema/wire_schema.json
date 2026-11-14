@@ -26,7 +26,10 @@
     "RECORD_NATIVE_EXPRESSION_CHILD_COUNT": 83,
     "RECORD_NATIVE_STATEMENT_SIBLING_COUNT": 84,
     "RECORD_VIRTUAL_VPTR_RECEIVER_PAIR": 85,
-    "RECORD_NATIVE_TRY_HANDLER_COUNT": 86
+    "RECORD_NATIVE_TRY_HANDLER_COUNT": 86,
+    "RECORD_NATIVE_CONTROL_CHILD_COUNT": 87,
+    "RECORD_NATIVE_INITIALIZER_CHILD_COUNT": 88,
+    "RECORD_NATIVE_CONSTRUCTOR_CHILD_COUNT": 89
   },
   "record_arities": {
     "1": 1,
@@ -114,7 +117,10 @@
     "83": 4,
     "84": 4,
     "85": 5,
-    "86": 3
+    "86": 3,
+    "87": 5,
+    "88": 3,
+    "89": 4
   },
   "record_field_tags": {
     "1": [
@@ -632,6 +638,24 @@
     ],
     "86": [
       "TEXT",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "87": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "88": [
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED"
+    ],
+    "89": [
+      "UNSIGNED",
+      "UNSIGNED",
       "TEXT",
       "UNSIGNED"
     ]
