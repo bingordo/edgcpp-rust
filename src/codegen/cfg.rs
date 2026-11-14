@@ -1,8 +1,10 @@
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
-// Defensive implementation caps, not C language or target ABI limits.
-const MAX_AGGREGATE_IMAGE_BYTES: usize = 4096;
-const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_AGGREGATE_SCALAR_ELEMENTS: u64 = 256;
+// Shared defensive resource policy; these are not language or ABI limits.
+use crate::limits::{
+    MAX_NATIVE_AGGREGATE_IMAGE_BYTES as MAX_AGGREGATE_IMAGE_BYTES,
+    MAX_NATIVE_OBJECT_BYTES, MAX_AGGREGATE_SCALAR_ELEMENTS,
+    MAX_AGGREGATE_LAYOUT_DEPTH, MAX_CFG_LOCALS, bounded_array_bytes,
+};
 
 fn valid_aggregate_image_len(size: usize) -> bool {
     size > 0 && size <= MAX_AGGREGATE_IMAGE_BYTES
@@ -1192,7 +1194,7 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
     byte_size_depth(il,ty,0)
 }
 fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,CodegenError> {
-    if depth > 32 { return Err(invalid("nested aggregate layout exceeds depth limit")); }
+    if depth > MAX_AGGREGATE_LAYOUT_DEPTH { return Err(invalid("nested aggregate layout exceeds depth limit")); }
     let ty = canonical_abi_type(il,ty)?;
     let def = il.types.iter().find(|t| t.id == ty)
         .ok_or_else(|| invalid("missing memory type"))?;
@@ -1216,7 +1218,7 @@ fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,Codeg
             let count = il.array_bounds.iter().find(|b| b.array == ty)
                 .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
             let n = byte_size_depth(il,element,depth+1)?;
-            n.checked_mul(count).filter(|&n| n > 0 && n <= MAX_NATIVE_OBJECT_BYTES)
+            bounded_array_bytes(n,count)
                 .ok_or_else(|| invalid("array object too large"))
         }
         // Native EDG size includes the record's internal and trailing padding.
@@ -1273,7 +1275,7 @@ fn checked_record_fields<'a>(
 fn checked_record_fields_depth<'a>(
     il: &'a Il, owner: crate::TypeId, depth: usize,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
-    if depth > 32 { return Err(invalid("nested record layout exceeds depth limit")); }
+    if depth > MAX_AGGREGATE_LAYOUT_DEPTH { return Err(invalid("nested record layout exceeds depth limit")); }
     let kind=il.types.iter().find(|t|t.id==owner)
         .map(|t|semantic(4,t.kind)).ok_or_else(||invalid("missing record type"))?;
     if !matches!(kind,7|9) {return Err(invalid("unsupported record/union type"));}
@@ -1383,7 +1385,7 @@ fn checked_record_fields_depth<'a>(
 /// that would clobber adjacent fields and could overread a packed record.
 fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
     ->Result<bool,CodegenError> {
-    if depth>32 {return Err(invalid("recursive native bitfield layout"));}
+    if depth > MAX_AGGREGATE_LAYOUT_DEPTH {return Err(invalid("recursive native bitfield layout"));}
     let ty=canonical_abi_type(il,ty)?;
     let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing aggregate type"))?;
@@ -1418,7 +1420,7 @@ fn flatten_copy_type(
     il:&Il,ty:crate::TypeId,offset:u64,depth:usize,
     out:&mut Vec<(CAbiInt,i64)>,
 ) -> Result<(),CodegenError> {
-    if depth>32 {return Err(invalid("aggregate copy nesting exceeds depth limit"));}
+    if depth > MAX_AGGREGATE_LAYOUT_DEPTH {return Err(invalid("aggregate copy nesting exceeds depth limit"));}
     check_plain_storage_type(il,ty)?;
     let ty=canonical_abi_type(il,ty)?;
     let def=il.types.iter().find(|d|d.id==ty)
@@ -3027,7 +3029,7 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
         let parameter_accesses=ids.iter().map(|sym|
             parameter_memory_access(il,*sym)).collect::<Result<Vec<_>,_>>()?;
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
-        if locals.len() > 10_000 { return Err(invalid("too many locals")); }
+        if locals.len() > MAX_CFG_LOCALS { return Err(invalid("too many locals")); }
         let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
             .collect::<Result<Vec<_>,_>>()?;
         let mut local_storage=locals.iter().map(|v| {
