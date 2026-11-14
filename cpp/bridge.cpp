@@ -1799,6 +1799,21 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
                      variable ? num(variable) : absent(),
                      destructor ? num(destructor) : absent()});
   }
+  // Prove the EDG child list independently of event-38 subtree emission:
+  // dropping an entire final subtree otherwise preserves dense lifetime IDs.
+  uint32_t native_child_count = 0;
+  std::unordered_set<an_object_lifetime_ptr> count_seen_children;
+  for (an_object_lifetime_ptr child = lifetime->child_lifetime;
+       child != nullptr && within_native_list_limit(native_child_count);
+       child = child->next, ++native_child_count) {
+    if (child == lifetime || !count_seen_children.insert(child).second ||
+        child->parent_lifetime != lifetime) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
+  emit_record(RECORD_NATIVE_LIFETIME_CHILD_COUNT,
+              {num(routine), num(id), num(native_child_count)});
   unsigned children = 0;
   for (an_object_lifetime_ptr child = lifetime->child_lifetime;
        child != nullptr && within_native_list_limit(children++); child = child->next) {
