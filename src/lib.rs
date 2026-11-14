@@ -86,6 +86,10 @@ pub struct Il {
     pub native_control_child_counts: Vec<NativeControlChildCount>,
     pub native_initializer_child_counts: Vec<NativeInitializerChildCount>,
     pub native_constructor_child_counts: Vec<NativeConstructorChildCount>,
+    /// Per-statement EDG-authoritative role mask for control-expression roots.
+    pub native_control_root_admissions: Vec<NativeControlRootAdmission>,
+    /// Per-constructor initializer native expression-root presence.
+    pub native_constructor_root_admissions: Vec<NativeConstructorRootAdmission>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -673,6 +677,15 @@ pub struct NativeRoutineSupplement {
 /// A statement node, identified by a stable path within one function.
 /// Kinds are EDG's a_statement_kind discriminants, not Rust syntax kinds.
 /// EDG-authored child cardinality for one supplemental expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeControlRootAdmission {
+    pub function:String, pub statement_path:String, pub mask:u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructorRootAdmission {
+    pub routine:SymbolId, pub position:u32, pub present:bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeControlChildCount {
     pub function:String, pub statement_path:String, pub role:u32,
@@ -1361,6 +1374,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         87 => Some(il.native_control_child_counts.len()),
         88 => Some(il.native_initializer_child_counts.len()),
         89 => Some(il.native_constructor_child_counts.len()),
+        90 => Some(il.native_control_root_admissions.len()),
+        91 => Some(il.native_constructor_root_admissions.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2136,6 +2151,22 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 function,statement_path,path,
                 source_index:u64::from(source_index),
                 entry_bytes:u64::from(entry_bytes),
+            });
+        }
+        90 => {
+            let (Some(function),Some(statement_path),Some(mask))=
+                (t(0),t(1),n(2)) else {return;};
+            if function.is_empty() || statement_path.is_empty() || mask & !15!=0 {return;}
+            output.native_control_root_admissions.push(NativeControlRootAdmission {
+                function,statement_path,mask,
+            });
+        }
+        91 => {
+            let (Some(routine),Some(position),Some(present))=
+                (n(0),n(1),n(2)) else {return;};
+            if routine==0 || present>1 {return;}
+            output.native_constructor_root_admissions.push(NativeConstructorRootAdmission {
+                routine:SymbolId(routine),position,present:present==1,
             });
         }
         87 => {
@@ -2964,6 +2995,94 @@ fn validate_native_supplemental_child_counts(il:&Il)->Result<(),Error> {
     )
 }
 
+// Root admission must be certified by the owning EDG statement or
+// initializer record; per-node child counts cannot prove that a whole tree
+// was not lost together with all its child-count records.
+fn validate_native_supplemental_root_admission(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let statements:HashSet<_>=il.statements.iter()
+        .map(|s|(s.function.as_str(),s.path.as_str())).collect();
+    let mut control_masks=HashMap::new();
+    for admission in &il.native_control_root_admissions {
+        let key=(admission.function.as_str(),admission.statement_path.as_str());
+        if !statements.contains(&key) ||
+           control_masks.insert(key,admission.mask).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if control_masks.len()!=statements.len() {return Err(Error::MalformedCallback);}
+    let mut actual_roles:HashMap<(&str,&str),u32>=HashMap::new();
+    for expr in &il.control_expressions {
+        if expr.parent.is_some() {continue;}
+        if expr.path!="0" || !(1..=4).contains(&expr.role) {
+            return Err(Error::MalformedCallback);
+        }
+        let mask=actual_roles.entry((&expr.function,&expr.statement_path)).or_default();
+        let bit=1_u32 << (expr.role-1);
+        if *mask & bit!=0 {return Err(Error::MalformedCallback);}
+        *mask|=bit;
+    }
+    for (key,mask) in &control_masks {
+        if actual_roles.get(key).copied().unwrap_or(0)!=*mask {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    // Event 16 already carries native expression_kind iff the exported
+    // dynamic variable initializer owns an expression. Demand root "0".
+    let mut dynamic_roots=HashSet::new();
+    for expr in &il.initializer_expressions {
+        if expr.parent.is_none() &&
+            (expr.path!="0" || !dynamic_roots.insert(expr.owner)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut dynamic_owners=HashSet::new();
+    for init in &il.dynamic_initializers {
+        if !dynamic_owners.insert(init.symbol) ||
+           dynamic_roots.contains(&init.symbol)!=init.expression_kind.is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if dynamic_roots.len()!=il.dynamic_initializers.iter()
+        .filter(|i|i.expression_kind.is_some()).count() {
+        return Err(Error::MalformedCallback);
+    }
+    // Event 14 independently identifies dynamic-init variables. Therefore
+    // dropping both event 16 and the complete expression tree still fails.
+    let expected_dynamic:HashSet<_>=il.variable_initializers.iter()
+        .filter(|v|graph::native_variable_dynamic_init(v.kind))
+        .map(|v|v.symbol).collect();
+    if expected_dynamic.len()!=il.variable_initializers.iter()
+        .filter(|v|graph::native_variable_dynamic_init(v.kind)).count() ||
+       expected_dynamic!=dynamic_owners {
+        return Err(Error::MalformedCallback);
+    }
+    let mut ctor_roots=HashSet::new();
+    for expr in &il.constructor_initializer_expressions {
+        if expr.parent.is_none() &&
+            (expr.path!="0" || !ctor_roots.insert((expr.routine,expr.position))) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut ctor_admissions=HashMap::new();
+    for a in &il.native_constructor_root_admissions {
+        if ctor_admissions.insert((a.routine,a.position),a.present).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut ctor_owners=HashSet::new();
+    for init in &il.constructor_initializers {
+        let key=(init.routine,init.position);
+        if !ctor_owners.insert(key) ||
+           ctor_admissions.get(&key).copied()!=Some(ctor_roots.contains(&key)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if ctor_admissions.len()!=ctor_owners.len() || ctor_roots.len()>
+        ctor_admissions.len() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -2983,6 +3102,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_statement_attribute_coverage(il).is_err() ||
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
+       validate_native_supplemental_root_admission(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3064,6 +3184,11 @@ mod tests {
             lowering_generated:false,lowering_boilerplate:false,
         };
         il.statements.extend([statement("0"),statement("1")]);
+        for path in ["0","1"] {
+            il.native_control_root_admissions.push(NativeControlRootAdmission {
+                function:"f".into(),statement_path:path.into(),mask:0,
+            });
+        }
         il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
             function:"f".into(),parent:None,edge:String::new(),count:2,
         });
@@ -3406,6 +3531,79 @@ mod tests {
         duplicated.push((2,0));
         assert!(matches!(validate_native_child_witnesses(nodes,duplicated),
             Err(Error::MalformedCallback)));
+    }
+
+    #[test]
+    fn parent_owned_control_roots_reject_lost_entire_trees() {
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:0,
+        });
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "a native statement must itself have a control-role admission");
+        il.native_control_root_admissions.push(NativeControlRootAdmission {
+            function:"f".into(),statement_path:"0".into(),mask:1,
+        });
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "missing complete role-1 tree");
+        il.control_expressions.push(ControlExpression {
+            function:"f".into(),statement_path:"0".into(),role:1,
+            path:"0".into(),parent:None,kind:0,operator:None,
+            type_id:None,symbol_id:None,
+        });
+        validate_native_supplemental_root_admission(&il).expect("matched role-1 root");
+        il.control_expressions.clear();
+        assert!(validate_native_supplemental_root_admission(&il).is_err());
+        il.native_control_root_admissions[0].mask=0;
+        validate_native_supplemental_root_admission(&il).expect("genuinely absent root");
+        il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn dynamic_and_constructor_roots_must_match_native_owner_admission() {
+        let mut il=Il::default();
+        let dynamic_kind=(0..256).find(|&k|
+            graph::native_variable_dynamic_init(k)).expect("EDG dynamic init kind");
+        il.variable_initializers.push(VariableInitializer {
+            symbol:SymbolId(7),kind:dynamic_kind,explicit:true,uninitialized:false,
+        });
+        il.dynamic_initializers.push(DynamicInitializer {
+            symbol:SymbolId(7),kind:1,expression_kind:Some(3),operator:None,
+        });
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "event 16 mandates a dynamic initializer tree");
+        il.initializer_expressions.push(InitializerExpression {
+            owner:SymbolId(7),path:"0".into(),parent:None,kind:3,
+            operator:None,type_id:None,symbol_id:None,
+        });
+        validate_native_supplemental_root_admission(&il).expect("dynamic root retained");
+        let saved=il.dynamic_initializers.pop().expect("native dynamic initializer");
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "losing both event16 and its root must fail event14 coverage");
+        il.dynamic_initializers.push(saved);
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine:SymbolId(8),position:0,kind:3,target_type:None,target_field:None,
+            compiler_generated:false,braced:false,use_field_initializer:false,
+            pack_expansion:false,
+        });
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "event 20 requires an independent constructor-root admission");
+        il.native_constructor_root_admissions.push(NativeConstructorRootAdmission {
+            routine:SymbolId(8),position:0,present:true,
+        });
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "lost whole constructor expression must fail");
+        il.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+            routine:SymbolId(8),position:0,path:"0".into(),parent:None,kind:3,
+            operator:None,type_id:None,symbol_id:None,
+        });
+        validate_native_supplemental_root_admission(&il)
+            .expect("all native expression roots retained");
+        il.native_constructor_root_admissions[0].present=false;
+        assert!(validate_native_supplemental_root_admission(&il).is_err(),
+            "contradictory native constructor admission");
     }
 
     #[test]
@@ -4908,7 +5106,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=89_u32 {
+        for kind in 1..=91_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4935,10 +5133,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,358);
+        assert_eq!(total,364);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(90).is_none());
+        assert!(expected_wire_field_tag_masks(92).is_none());
     }
 
     #[test]
