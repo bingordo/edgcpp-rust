@@ -1882,6 +1882,14 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             var->type->source_corresp.decl_position, type_source_position);
         const char *source_type_name =
             source_name(var->type->source_corresp);
+        // Distinguish the precise EDG *structural* reason this type
+        // cannot enter the existing concrete-class semantic API. The
+        // template/nonreal cases must never invoke is_pod_class().
+        a_symbol_ptr class_tag = symbol_for(var->type);
+        const bool class_tag_valid = class_tag != nullptr &&
+            class_tag->kind == sk_class_or_struct_tag;
+        const auto *class_supplement = class_tag_valid ?
+            class_symbol_supp(class_tag) : nullptr;
         std::fprintf(stderr,
             "EDG_NATIVE_SCOPE_OWNER function=%s local_symbol=%u class_bytes=%lu "
             "scope_kind=%u source_local=%u owner_present=%u owner_matches=%u "
@@ -1889,6 +1897,9 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             "type_position_present=%u source_list=%u init_kind=%u "
             "explicit_init=%u type_name=%s nonreal_class=%u "
             "concrete_root=%u generated=%u storage_class=%u "
+            "class_tag_present=%u class_tag_kind=%u class_supplement=%u "
+            "class_template=%u class_incomplete=%u local_used=%u "
+            "address_taken=%u variable_nonreal=%u prototype_instance=%u "
             "diagnostic_only=true\n",
             function.c_str(), symbol,
             static_cast<unsigned long>(var->type->size),
@@ -1907,7 +1918,17 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             var->type->variant.class_struct_union.is_nonreal_class ? 1u : 0u,
             supported_concrete_class_proof_root(var->type) ? 1u : 0u,
             var->compiler_generated ? 1u : 0u,
-            static_cast<unsigned>(var->storage_class));
+            static_cast<unsigned>(var->storage_class),
+            class_tag != nullptr ? 1u : 0u,
+            class_tag != nullptr ? static_cast<unsigned>(class_tag->kind) : 0u,
+            class_supplement != nullptr ? 1u : 0u,
+            class_supplement != nullptr &&
+                class_supplement->class_template != nullptr ? 1u : 0u,
+            var->type->incomplete ? 1u : 0u,
+            var->used ? 1u : 0u,
+            var->address_taken ? 1u : 0u,
+            var->is_nonreal ? 1u : 0u,
+            var->is_prototype_instantiation ? 1u : 0u);
       }
       const uint32_t flags =
           (var->compiler_generated ? 1u : 0u) |
