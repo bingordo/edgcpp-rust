@@ -3386,9 +3386,10 @@ fn validate_native_lifetime_scope_owners(il:&Il)->Result<(),Error> {
         if !scope_keys.contains(&key) ||
             witness.lifetime.is_some_and(|id|
                 !lifetimes.contains(&(witness.routine,id))) ||
-            scope_admission.insert(key,witness.lifetime).is_some() {
+            scope_admission.contains_key(&key) {
             return Err(Error::MalformedCallback);
         }
+        scope_admission.insert(key,witness.lifetime);
         if let Some(id)=witness.lifetime {
             admitted.insert((witness.routine,id));
         }
@@ -3926,6 +3927,121 @@ mod tests {
         il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
         assert!(validate_native_supplemental_root_admission(&il).is_err(),
             "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn native_lifetime_owners_reject_missing_roots_scope_links_and_tail_scopes() {
+        let mut il=Il::default();
+        let routine=SymbolId(7);
+        il.entities.push(Entity::Routine{name:"f".into(),has_definition:true});
+        il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+        il.object_lifetimes.extend([
+            ObjectLifetime{routine,id:0,parent:None,kind:0},
+            ObjectLifetime{routine,id:1,parent:Some(0),kind:0},
+            // EDG scope fallback with a parent pointer, but not a native
+            // child-list traversal edge.
+            ObjectLifetime{routine,id:2,parent:Some(0),kind:0},
+        ]);
+        il.native_lifetime_child_counts.extend([
+            NativeLifetimeChildCount{routine,lifetime:0,count:1,native_child_edge:false},
+            NativeLifetimeChildCount{routine,lifetime:1,count:0,native_child_edge:true},
+            NativeLifetimeChildCount{routine,lifetime:2,count:0,native_child_edge:false},
+        ]);
+        let scope=|id,parent|LocalScope{
+            routine,id,parent,kind:0,statement_path:None,
+        };
+        il.local_scopes.extend([
+            scope(0,None),scope(1,Some(0)),scope(2,Some(0)),
+            scope(3,Some(1)),
+        ]);
+        il.scope_lifetimes.extend([
+            ScopeLifetime{routine,scope:0,lifetime:0},
+            ScopeLifetime{routine,scope:1,lifetime:1},
+            ScopeLifetime{routine,scope:2,lifetime:2},
+        ]);
+        il.native_scope_lifetime_admissions.extend([
+            NativeScopeLifetimeAdmission{routine,scope:0,lifetime:Some(0)},
+            NativeScopeLifetimeAdmission{routine,scope:1,lifetime:Some(1)},
+            NativeScopeLifetimeAdmission{routine,scope:2,lifetime:Some(2)},
+            NativeScopeLifetimeAdmission{routine,scope:3,lifetime:None},
+        ]);
+        il.native_scope_child_counts.extend([
+            NativeScopeChildCount{routine,scope:0,count:2},
+            NativeScopeChildCount{routine,scope:1,count:1},
+            NativeScopeChildCount{routine,scope:2,count:0},
+            NativeScopeChildCount{routine,scope:3,count:0},
+        ]);
+        assert!(validate_native_lifetime_scope_owners(&il).is_err(),
+            "missing function roots even if scopes own the same regions");
+        il.native_lifetime_root_admissions.push(NativeLifetimeRootAdmission {
+            routine,body:Some(0),local_static:Some(0),
+        });
+        validate_native_lifetime_scope_owners(&il)
+            .expect("aliasing roots, nullable scope, and fallback parent accepted");
+
+        let mut missing_root=il.clone();
+        missing_root.native_lifetime_root_admissions.clear();
+        assert!(validate_native_lifetime_scope_owners(&missing_root).is_err());
+        let mut missing_root_node=il.clone();
+        missing_root_node.object_lifetimes.retain(|region|region.id!=0);
+        assert!(validate_native_lifetime_scope_owners(&missing_root_node).is_err());
+        let mut unknown_root=il.clone();
+        unknown_root.native_lifetime_root_admissions[0].body=Some(99);
+        assert!(validate_native_lifetime_scope_owners(&unknown_root).is_err());
+        let mut duplicate_root=il.clone();
+        duplicate_root.native_lifetime_root_admissions.push(
+            duplicate_root.native_lifetime_root_admissions[0].clone());
+        assert!(validate_native_lifetime_scope_owners(&duplicate_root).is_err());
+
+        let mut absent_scope=il.clone();
+        absent_scope.native_scope_lifetime_admissions.remove(3);
+        assert!(validate_native_lifetime_scope_owners(&absent_scope).is_err(),
+            "even no-lifetime scopes need nullable admission");
+        let mut duplicate_absent=il.clone();
+        duplicate_absent.native_scope_lifetime_admissions.push(
+            NativeScopeLifetimeAdmission{routine,scope:3,lifetime:None});
+        assert!(validate_native_lifetime_scope_owners(&duplicate_absent).is_err(),
+            "duplicate absent scope witness must fail");
+        let mut lost_link=il.clone();
+        lost_link.scope_lifetimes.retain(|e|e.scope!=2);
+        assert!(validate_native_lifetime_scope_owners(&lost_link).is_err());
+        let mut forged_link=il.clone();
+        forged_link.scope_lifetimes.push(ScopeLifetime{routine,scope:3,lifetime:2});
+        assert!(validate_native_lifetime_scope_owners(&forged_link).is_err());
+        let mut wrong_link=il.clone();
+        wrong_link.native_scope_lifetime_admissions[1].lifetime=Some(2);
+        assert!(validate_native_lifetime_scope_owners(&wrong_link).is_err());
+
+        // Lose the whole last scope, its nullable link and child-count
+        // proof: the parent's independently counted native children remain.
+        let mut lost_subtree=il.clone();
+        lost_subtree.local_scopes.retain(|s|s.id!=2);
+        lost_subtree.native_scope_lifetime_admissions.retain(|s|s.scope!=2);
+        lost_subtree.scope_lifetimes.retain(|s|s.scope!=2);
+        lost_subtree.native_scope_child_counts.retain(|s|s.scope!=2);
+        assert!(validate_native_lifetime_scope_owners(&lost_subtree).is_err());
+        let mut lost_child_count=il.clone();
+        lost_child_count.native_scope_child_counts.retain(|w|w.scope!=3);
+        assert!(validate_native_lifetime_scope_owners(&lost_child_count).is_err());
+        let mut extra_child_count=il.clone();
+        extra_child_count.native_scope_child_counts[0].count=3;
+        assert!(validate_native_lifetime_scope_owners(&extra_child_count).is_err());
+        let mut no_root_scope=il.clone();
+        no_root_scope.local_scopes.retain(|s|s.id!=0);
+        no_root_scope.native_scope_lifetime_admissions.retain(|s|s.scope!=0);
+        no_root_scope.native_scope_child_counts.retain(|s|s.scope!=0);
+        no_root_scope.scope_lifetimes.retain(|s|s.scope!=0);
+        assert!(validate_native_lifetime_scope_owners(&no_root_scope).is_err());
+
+        let mut orphan=il.clone();
+        orphan.object_lifetimes.push(ObjectLifetime {
+            routine,id:3,parent:None,kind:0,
+        });
+        orphan.native_lifetime_child_counts.push(NativeLifetimeChildCount{
+            routine,lifetime:3,count:0,native_child_edge:false,
+        });
+        assert!(validate_native_lifetime_scope_owners(&orphan).is_err(),
+            "unadmitted standalone region fails even with its own count");
     }
 
     #[test]
