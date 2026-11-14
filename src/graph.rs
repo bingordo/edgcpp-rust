@@ -13,6 +13,11 @@ pub(crate) fn native_statement_kind(kind: u32) -> u32 {
     unsafe { edgcpp_codegen_kind(1, kind) }
 }
 
+/// EDG-native expression kind normalization, including GNU statement expressions.
+pub(crate) fn native_expression_kind(kind: u32) -> u32 {
+    unsafe { edgcpp_codegen_kind(2, kind) }
+}
+
 fn native_call_argument_offset(expr: &Expression) -> Option<u32> {
     let op = expr.operator?;
     match unsafe { edgcpp_codegen_kind(3, op) } {
