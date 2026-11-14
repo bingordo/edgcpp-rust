@@ -4065,6 +4065,103 @@ mod tests {
     }
 
     #[test]
+    fn native_declaration_counts_reject_lost_parameter_and_local_tail_records() {
+        let mut il=Il::default();
+        let routine=SymbolId(7);
+        il.entities.push(Entity::Routine{name:"f".into(),has_definition:true});
+        il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+        let parameter=|position,symbol,implicit_this|FunctionParameter{
+            routine,position,symbol:SymbolId(symbol),ty:TypeId(9),
+            implicit_this,compiler_generated:false,
+        };
+        il.function_parameters.extend([
+            parameter(Some(0),10,false),
+            parameter(Some(1),11,false),
+            parameter(None,12,true),
+        ]);
+        il.native_function_parameter_counts.push(NativeFunctionParameterCount{
+            routine,explicit:2,implicit_this:true,
+        });
+        let scope=|id,parent|LocalScope{
+            routine,id,parent,kind:0,statement_path:None,
+        };
+        il.local_scopes.extend([scope(0,None),scope(1,Some(0))]);
+        let local=|scope,symbol|LocalVariable{
+            routine,scope,symbol:SymbolId(symbol),ty:TypeId(9),
+            storage_class:0,compiler_generated:false,static_storage:false,
+            structured_binding:false,handler_parameter:false,
+        };
+        il.local_variables.extend([local(0,13),local(0,14),local(1,15)]);
+        il.native_scope_local_counts.extend([
+            NativeScopeLocalCount{routine,scope:0,count:2},
+            NativeScopeLocalCount{routine,scope:1,count:1},
+        ]);
+        validate_native_function_declaration_counts(&il)
+            .expect("complete declarations, including this and both scopes");
+        let mut lost_last_param=il.clone();
+        lost_last_param.function_parameters.retain(|p|p.position!=Some(1));
+        assert!(validate_native_function_declaration_counts(&lost_last_param).is_err(),
+            "dense but truncated explicit parameter prefix must fail");
+        let mut lost_this=il.clone();
+        lost_this.function_parameters.retain(|p|!p.implicit_this);
+        assert!(validate_native_function_declaration_counts(&lost_this).is_err());
+        let mut extra_this=il.clone();
+        extra_this.function_parameters.push(parameter(None,21,true));
+        assert!(validate_native_function_declaration_counts(&extra_this).is_err());
+        let mut gap=il.clone();
+        gap.function_parameters[1].position=Some(3);
+        assert!(validate_native_function_declaration_counts(&gap).is_err());
+        let mut duplicate_params=il.clone();
+        duplicate_params.native_function_parameter_counts.push(
+            duplicate_params.native_function_parameter_counts[0].clone());
+        assert!(validate_native_function_declaration_counts(&duplicate_params).is_err());
+        let mut no_param_witness=il.clone();
+        no_param_witness.native_function_parameter_counts.clear();
+        assert!(validate_native_function_declaration_counts(&no_param_witness).is_err());
+        let mut mismatched_this=il.clone();
+        mismatched_this.native_function_parameter_counts[0].implicit_this=false;
+        assert!(validate_native_function_declaration_counts(&mismatched_this).is_err());
+
+        let mut last_local=il.clone();
+        last_local.local_variables.retain(|v|v.symbol!=SymbolId(15));
+        assert!(validate_native_function_declaration_counts(&last_local).is_err(),
+            "a missing final variable in the last nested scope must fail");
+        let mut last_same_scope=il.clone();
+        last_same_scope.local_variables.retain(|v|v.symbol!=SymbolId(14));
+        assert!(validate_native_function_declaration_counts(&last_same_scope).is_err());
+        let mut no_local_witness=il.clone();
+        no_local_witness.native_scope_local_counts.remove(1);
+        assert!(validate_native_function_declaration_counts(&no_local_witness).is_err());
+        let mut dup_scope_witness=il.clone();
+        dup_scope_witness.native_scope_local_counts.push(
+            NativeScopeLocalCount{routine,scope:1,count:1});
+        assert!(validate_native_function_declaration_counts(&dup_scope_witness).is_err());
+        let mut wrong_scope=il.clone();
+        wrong_scope.local_variables[2].scope=0;
+        assert!(validate_native_function_declaration_counts(&wrong_scope).is_err());
+        let mut bogus_scope=il.clone();
+        bogus_scope.native_scope_local_counts[1].scope=200;
+        assert!(validate_native_function_declaration_counts(&bogus_scope).is_err());
+        let mut duplicate_local=il.clone();
+        duplicate_local.local_variables.push(local(1,15));
+        assert!(validate_native_function_declaration_counts(&duplicate_local).is_err());
+
+        let mut empty=il.clone();
+        empty.function_parameters.clear();
+        empty.local_variables.clear();
+        empty.native_function_parameter_counts[0]=NativeFunctionParameterCount{
+            routine,explicit:0,implicit_this:false,
+        };
+        empty.native_scope_local_counts[0].count=0;
+        empty.native_scope_local_counts[1].count=0;
+        validate_native_function_declaration_counts(&empty)
+            .expect("all-zero native declaration proofs are valid");
+        empty.native_scope_local_counts.remove(1);
+        assert!(validate_native_function_declaration_counts(&empty).is_err(),
+            "even empty native scopes require a declaration count proof");
+    }
+
+    #[test]
     fn native_lifetime_owners_reject_missing_roots_scope_links_and_tail_scopes() {
         let mut il=Il::default();
         let routine=SymbolId(7);
