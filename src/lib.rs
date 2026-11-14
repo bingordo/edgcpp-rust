@@ -131,6 +131,12 @@ pub struct Il {
     pub native_lifetime_destruction_counts: Vec<NativeLifetimeDestructionCount>,
     /// EDG-owned child-list cardinality for each lifetime, including leaves.
     pub native_lifetime_child_counts: Vec<NativeLifetimeChildCount>,
+    /// Defined function-scope lifetime owners, including absent roots.
+    pub native_lifetime_root_admissions: Vec<NativeLifetimeRootAdmission>,
+    /// Nullable scope-to-lifetime owner witnesses, including empty links.
+    pub native_scope_lifetime_admissions: Vec<NativeScopeLifetimeAdmission>,
+    /// Native lexical-scope child cardinality, including empty scopes.
+    pub native_scope_child_counts: Vec<NativeScopeChildCount>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -942,6 +948,30 @@ pub struct NativeLifetimeChildCount {
     pub native_child_edge: bool,
 }
 
+/// Defined-function owner proof independent of lifetime record emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLifetimeRootAdmission {
+    pub routine: SymbolId,
+    pub body: Option<u32>,
+    pub local_static: Option<u32>,
+}
+
+/// Every native local scope owns one nullable lifetime relationship.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScopeLifetimeAdmission {
+    pub routine: SymbolId,
+    pub scope: u32,
+    pub lifetime: Option<u32>,
+}
+
+/// Independent EDG scope-child linked-list cardinality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScopeChildCount {
+    pub routine: SymbolId,
+    pub scope: u32,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifetimeDestruction {
     pub routine: SymbolId,
@@ -1411,6 +1441,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         92 => Some(il.native_constructor_initializer_counts.len()),
         93 => Some(il.native_lifetime_destruction_counts.len()),
         94 => Some(il.native_lifetime_child_counts.len()),
+        95 => Some(il.native_lifetime_root_admissions.len()),
+        96 => Some(il.native_scope_lifetime_admissions.len()),
+        97 => Some(il.native_scope_child_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2210,6 +2243,28 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if routine==0 || count>10000 || edge>1 {return;}
             output.native_lifetime_child_counts.push(NativeLifetimeChildCount {
                 routine:SymbolId(routine),lifetime,count,native_child_edge:edge==1,
+            });
+        }
+        95 => {
+            let Some(routine)=n(0) else {return;};
+            if routine==0 {return;}
+            output.native_lifetime_root_admissions.push(NativeLifetimeRootAdmission {
+                routine:SymbolId(routine),body:n(1),local_static:n(2),
+            });
+        }
+        96 => {
+            let (Some(routine),Some(scope))=(n(0),n(1)) else {return;};
+            if routine==0 {return;}
+            output.native_scope_lifetime_admissions.push(NativeScopeLifetimeAdmission {
+                routine:SymbolId(routine),scope,lifetime:n(2),
+            });
+        }
+        97 => {
+            let (Some(routine),Some(scope),Some(count))=
+                (n(0),n(1),n(2)) else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_scope_child_counts.push(NativeScopeChildCount {
+                routine:SymbolId(routine),scope,count,
             });
         }
         92 => {
@@ -3271,6 +3326,126 @@ fn validate_native_lifetime_child_counts(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// Defined functions own nullable body/static lifetime roots. Native scope
+// nodes independently own nullable lifetime associations and child lists.
+// This closes the correlated-loss cases that a lifetime-only witness misses.
+fn validate_native_lifetime_scope_owners(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let defined:HashSet<&str>=il.entities.iter().filter_map(|entity|
+        match entity {
+            Entity::Routine{name,has_definition:true}=>Some(name.as_str()),
+            _=>None,
+        }).collect();
+    let mut routines=HashSet::new();
+    for identity in &il.routine_identities {
+        if defined.contains(identity.function.as_str()) &&
+            !routines.insert(identity.routine) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if routines.len()!=defined.len() {return Err(Error::MalformedCallback);}
+    let lifetimes:HashSet<(SymbolId,u32)>=il.object_lifetimes.iter()
+        .map(|item|(item.routine,item.id)).collect();
+    if lifetimes.len()!=il.object_lifetimes.len() {
+        return Err(Error::MalformedCallback);
+    }
+    let mut roots=HashMap::new();
+    let mut admitted=HashSet::new();
+    for entry in &il.native_lifetime_root_admissions {
+        if !routines.contains(&entry.routine) ||
+            roots.insert(entry.routine,(entry.body,entry.local_static)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+        for id in [entry.body,entry.local_static].into_iter().flatten() {
+            let key=(entry.routine,id);
+            if !lifetimes.contains(&key) {return Err(Error::MalformedCallback);}
+            admitted.insert(key);
+        }
+    }
+    if roots.len()!=routines.len() {return Err(Error::MalformedCallback);}
+
+    let scope_keys:HashSet<(SymbolId,u32)>=il.local_scopes.iter()
+        .map(|s|(s.routine,s.id)).collect();
+    if scope_keys.len()!=il.local_scopes.len() {
+        return Err(Error::MalformedCallback);
+    }
+    let mut root_scopes=HashSet::new();
+    for scope in &il.local_scopes {
+        if !routines.contains(&scope.routine) ||
+            (scope.id==0 && (scope.parent.is_some() ||
+                             !root_scopes.insert(scope.routine))) ||
+            (scope.id!=0 && scope.parent.is_none()) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if root_scopes!=routines {return Err(Error::MalformedCallback);}
+
+    let mut scope_admission=HashMap::new();
+    for witness in &il.native_scope_lifetime_admissions {
+        let key=(witness.routine,witness.scope);
+        if !scope_keys.contains(&key) ||
+            witness.lifetime.is_some_and(|id|
+                !lifetimes.contains(&(witness.routine,id))) ||
+            scope_admission.insert(key,witness.lifetime).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+        if let Some(id)=witness.lifetime {
+            admitted.insert((witness.routine,id));
+        }
+    }
+    if scope_admission.len()!=scope_keys.len() {
+        return Err(Error::MalformedCallback);
+    }
+    let mut links=HashMap::new();
+    for edge in &il.scope_lifetimes {
+        let key=(edge.routine,edge.scope);
+        if !scope_keys.contains(&key) ||
+            links.insert(key,edge.lifetime).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (key,admission) in &scope_admission {
+        if links.get(key).copied()!=*admission {
+            return Err(Error::MalformedCallback);
+        }
+    }
+
+    // Every non-child-list lifetime was introduced by a root or a scope
+    // fallback. Referencing a child-only descendant cannot justify an
+    // unrelated orphan lifetime node.
+    for witness in &il.native_lifetime_child_counts {
+        if !witness.native_child_edge &&
+            !admitted.contains(&(witness.routine,witness.lifetime)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+
+    let mut child_counts=HashMap::new();
+    for proof in &il.native_scope_child_counts {
+        let key=(proof.routine,proof.scope);
+        if proof.count>10000 || !scope_keys.contains(&key) ||
+            child_counts.insert(key,proof.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if child_counts.len()!=scope_keys.len() {return Err(Error::MalformedCallback);}
+    let mut observed:HashMap<(SymbolId,u32),u32>=HashMap::new();
+    for scope in &il.local_scopes {
+        if let Some(parent)=scope.parent {
+            if parent>=scope.id || !scope_keys.contains(&(scope.routine,parent)) {
+                return Err(Error::MalformedCallback);
+            }
+            *observed.entry((scope.routine,parent)).or_default()+=1;
+        }
+    }
+    for (key,count) in child_counts {
+        if observed.get(&key).copied().unwrap_or(0)!=count {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3294,6 +3469,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
+       validate_native_lifetime_scope_owners(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -5508,7 +5684,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=94_u32 {
+        for kind in 1..=97_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5535,10 +5711,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,373);
+        assert_eq!(total,382);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(95).is_none());
+        assert!(expected_wire_field_tag_masks(98).is_none());
     }
 
     #[test]
