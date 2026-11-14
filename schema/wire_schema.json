@@ -31,7 +31,8 @@
     "RECORD_NATIVE_INITIALIZER_CHILD_COUNT": 88,
     "RECORD_NATIVE_CONSTRUCTOR_CHILD_COUNT": 89,
     "RECORD_NATIVE_CONTROL_ROOT_ADMISSION": 90,
-    "RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION": 91
+    "RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION": 91,
+    "RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT": 92
   },
   "record_arities": {
     "1": 1,
@@ -124,7 +125,8 @@
     "88": 3,
     "89": 4,
     "90": 3,
-    "91": 3
+    "91": 3,
+    "92": 2
   },
   "record_field_tags": {
     "1": [
@@ -670,6 +672,10 @@
     ],
     "91": [
       "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "92": [
       "UNSIGNED",
       "UNSIGNED"
     ]
