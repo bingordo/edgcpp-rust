@@ -937,6 +937,9 @@ pub struct NativeLifetimeChildCount {
     pub routine: SymbolId,
     pub lifetime: u32,
     pub count: u32,
+    /// True only when reached via the EDG child_lifetime list. A scope
+    /// fallback may have a parent pointer but is not a listed child.
+    pub native_child_edge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2202,11 +2205,11 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             });
         }
         94 => {
-            let (Some(routine),Some(lifetime),Some(count))=(n(0),n(1),n(2))
-                else {return;};
-            if routine==0 || count>10000 {return;}
+            let (Some(routine),Some(lifetime),Some(count),Some(edge))=
+                (n(0),n(1),n(2),n(3)) else {return;};
+            if routine==0 || count>10000 || edge>1 {return;}
             output.native_lifetime_child_counts.push(NativeLifetimeChildCount {
-                routine:SymbolId(routine),lifetime,count,
+                routine:SymbolId(routine),lifetime,count,native_child_edge:edge==1,
             });
         }
         92 => {
@@ -3238,14 +3241,21 @@ fn validate_native_lifetime_child_counts(il:&Il)->Result<(),Error> {
     for proof in &il.native_lifetime_child_counts {
         let owner=(proof.routine,proof.lifetime);
         if proof.count>10000 || !lifetimes.contains(&owner) ||
-            witnessed.insert(owner,proof.count).is_some() {
+            witnessed.insert(owner,(proof.count,proof.native_child_edge)).is_some() {
             return Err(Error::MalformedCallback);
         }
     }
     if witnessed.len()!=lifetimes.len() {return Err(Error::MalformedCallback);}
     let mut actual:HashMap<(SymbolId,u32),HashSet<u32>>=HashMap::new();
     for region in &il.object_lifetimes {
-        if let Some(parent)=region.parent {
+        let key=(region.routine,region.id);
+        let Some(&(_,native_child_edge))=witnessed.get(&key) else {
+            return Err(Error::MalformedCallback);
+        };
+        if native_child_edge {
+            let Some(parent)=region.parent else {
+                return Err(Error::MalformedCallback);
+            };
             let owner=(region.routine,parent);
             if parent>=region.id || !lifetimes.contains(&owner) ||
                 !actual.entry(owner).or_default().insert(region.id) {
@@ -3253,7 +3263,7 @@ fn validate_native_lifetime_child_counts(il:&Il)->Result<(),Error> {
             }
         }
     }
-    for (owner,count) in witnessed {
+    for (owner,(count,_)) in witnessed {
         if actual.get(&owner).map_or(0,HashSet::len)!=count as usize {
             return Err(Error::MalformedCallback);
         }
@@ -3747,23 +3757,27 @@ mod tests {
         let mut il=Il::default();
         let routine=SymbolId(7);
         let region=|id,parent|ObjectLifetime{routine,id,parent,kind:0};
-        let witness=|lifetime,count|NativeLifetimeChildCount{
-            routine,lifetime,count,
+        let witness=|lifetime,count,native_child_edge|NativeLifetimeChildCount{
+            routine,lifetime,count,native_child_edge,
         };
         // Three siblings and a grandchild; the unrelated root exercises
         // the legitimate multiple-root case.
         il.object_lifetimes.extend([
             region(0,None),region(1,Some(0)),region(2,Some(0)),
             region(3,Some(0)),region(4,Some(3)),region(5,None),
+            // This is a scope fallback: EDG reports a known parent,
+            // but the lifetime was not on that parent's child list.
+            region(6,Some(0)),
         ]);
         assert!(validate_native_lifetime_child_counts(&il).is_err(),
             "even empty root/leaf lists must be certified");
         il.native_lifetime_child_counts.extend([
-            witness(0,3),witness(1,0),witness(2,0),
-            witness(3,1),witness(4,0),witness(5,0),
+            witness(0,3,false),witness(1,0,true),witness(2,0,true),
+            witness(3,1,true),witness(4,0,true),witness(5,0,false),
+            witness(6,0,false),
         ]);
         validate_native_lifetime_child_counts(&il)
-            .expect("complete child lists, including a detached root");
+            .expect("complete child lists and scope-fallback parent");
         for removed in [1,2,3] {
             let mut dropped=il.clone();
             dropped.object_lifetimes.retain(|r|r.id!=removed &&
@@ -3782,13 +3796,21 @@ mod tests {
         assert!(validate_native_lifetime_child_counts(&orphan).is_err(),
             "orphan witness");
         let mut duplicate=il.clone();
-        duplicate.native_lifetime_child_counts.push(witness(0,3));
+        duplicate.native_lifetime_child_counts.push(witness(0,3,false));
         assert!(validate_native_lifetime_child_counts(&duplicate).is_err(),
             "duplicate witness");
         let mut extra=il.clone();
         extra.native_lifetime_child_counts[0].count=4;
         assert!(validate_native_lifetime_child_counts(&extra).is_err(),
             "wrong native count");
+        let mut missing_native_edge=il.clone();
+        missing_native_edge.native_lifetime_child_counts[1].native_child_edge=false;
+        assert!(validate_native_lifetime_child_counts(&missing_native_edge).is_err(),
+            "a child-list edge cannot silently become a fallback");
+        let mut false_root_edge=il.clone();
+        false_root_edge.native_lifetime_child_counts[0].native_child_edge=true;
+        assert!(validate_native_lifetime_child_counts(&false_root_edge).is_err(),
+            "native child-list edge requires a concrete parent");
         let mut wrong_parent=il.clone();
         wrong_parent.object_lifetimes[2].parent=Some(3);
         assert!(validate_native_lifetime_child_counts(&wrong_parent).is_err(),
@@ -5513,7 +5535,7 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,372);
+        assert_eq!(total,373);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
         assert!(expected_wire_field_tag_masks(95).is_none());
