@@ -9,6 +9,12 @@ planned, not yet implemented; see
 [the integration contract](docs/EDG_COMPILER_INTEGRATION.md) and
 [the clarified M9–M13 roadmap](docs/YARPGEN_CRANELIFT_MILESTONES.md#m9--control-flow-semantics-and-first-compiler-adapter).
 
+**EDG backend interface:** The native bridge now consumes the standard
+post-lowering EDG IL through `back_end()` instead of custom lowering
+callbacks. Historical hook-only virtual-call diagnostics are not emitted;
+unsupported virtual dispatch remains fail-closed. See the
+[standard backend contract](docs/EDG_STANDARD_BACKEND_INTERFACE.md).
+
 This branch includes a **reference code-generation implementation**, built
 on the previously working EDG C/C++ frontend bridge. The historical implementation,
 including experimental type dependency and interprocedural analysis, remains
