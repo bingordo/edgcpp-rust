@@ -1745,7 +1745,7 @@ static uint32_t emit_variable_type(a_variable_ptr var)
 // ID assignment and traversal are limited to one function's live IL region.
 static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
                                uint32_t routine, unsigned parent,
-                               unsigned depth)
+                               unsigned depth, bool native_child_edge = false)
 {
   if (lifetime == nullptr || current_callback == nullptr) return;
   if (current_lifetime_ids.find(lifetime) != current_lifetime_ids.end()) return;
@@ -1812,12 +1812,16 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
       return;
     }
   }
+  // Scope fallback can preserve a parent_lifetime pointer without
+  // discovering this node through that parent's child_lifetime list.
+  // Report the *traversal edge* separately from the exported parent.
   emit_record(RECORD_NATIVE_LIFETIME_CHILD_COUNT,
-              {num(routine), num(id), num(native_child_count)});
+              {num(routine), num(id), num(native_child_count),
+               num(native_child_edge ? 1u : 0u)});
   unsigned children = 0;
   for (an_object_lifetime_ptr child = lifetime->child_lifetime;
        child != nullptr && within_native_list_limit(children++); child = child->next) {
-    emit_lifetime_tree(child, routine, id, depth + 1);
+    emit_lifetime_tree(child, routine, id, depth + 1, true);
   }
 }
 
