@@ -79,8 +79,8 @@ impl ScalarKind {
 }
 const SYSV_INTEGER_ARGUMENT_REGISTERS:u8=6;
 const SYSV_SSE_ARGUMENT_REGISTERS:u8=8;
-// Defensive implementation cap, not a SysV ABI limit.
-pub(crate) const MAX_SUPPORTED_PARAMETERS:usize=256;
+// The implementation cap is shared with FP source lowering, not SysV.
+pub(crate) use crate::limits::MAX_SUPPORTED_PARAMETERS;
 
 impl Signature {
     pub fn plan_sysv_x86_64(&self)->Result<PassingPlan,PlanError> {
