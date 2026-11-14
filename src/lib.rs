@@ -584,7 +584,6 @@ pub struct BaseClassAccess {
 /// One constructor/destructor subobject initializer in execution order.
 ///
 /// Native EDG kind: 0=virtual base, 1=direct base, 2=field, 3=delegation.
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// EDG-owned number of constructor/destructor initializer entries (wire 92).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeConstructorInitializerCount {
@@ -592,6 +591,7 @@ pub struct NativeConstructorInitializerCount {
     pub count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorInitializer {
     pub routine: SymbolId,
     pub position: u32,
