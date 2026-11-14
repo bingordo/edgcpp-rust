@@ -5446,7 +5446,7 @@ mod tests {
             });
             // A wide but bounded-depth scope tree exercises parent indexes
             // without constructing impossible >64-deep EDG scope regions.
-            let parent=(i!=0).then_some((i-1)/2);
+            let parent=(i!=0).then(||(i-1)/2);
             il.local_scopes.push(LocalScope{
                 routine,id:i,parent,kind:17,statement_path:None,
             });
