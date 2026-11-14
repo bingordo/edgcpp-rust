@@ -1877,7 +1877,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             "scope_kind=%u source_local=%u owner_present=%u owner_matches=%u "
             "parent_present=%u parent_matches=%u position_present=%u "
             "type_name=%s nonreal_class=%u concrete_root=%u generated=%u "
-            "storage_class=%u diagnostic_only=true\\n",
+            "storage_class=%u diagnostic_only=true\n",
             function.c_str(), symbol,
             static_cast<unsigned long>(var->type->size),
             static_cast<unsigned>(scope->kind),
