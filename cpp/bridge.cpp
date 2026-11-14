@@ -422,7 +422,17 @@ static bool tagless_cpp_storage_only(a_type_ptr type) {
         extra->assoc_template != nullptr ||
         extra->template_arg_list != nullptr) return false;
 #if DO_IL_LOWERING
-    if (extra->compiler_generated || extra->has_subobject_type) return false;
+    if (extra->compiler_generated) return false;
+    // The original EDG class may have been pre-lowered into a distinct
+    // subobject type (il_def.h::subobject_partner). This is a source
+    // representation relationship, NOT a semantic triviality claim.
+    // Admit only the exact known original struct+distinct partner storage
+    // descriptor; direct value/constructor/destructor/ABI use is verified
+    // separately and still rejected unless independently supported.
+    if (extra->has_subobject_type &&
+        (type->kind!=tk_struct ||
+         extra->subobject_partner==nullptr ||
+         extra->subobject_partner==type)) return false;
 #endif
 #if MAINTAIN_CLASS_MEMBER_LIST
     unsigned count=0;
@@ -602,7 +612,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           "extra=%u supp_scope=%u supp_routines=%u supp_variables=%u "
           "supp_bases=%u supp_template=%u supp_field_init=%u "
           "nonreal=%u virtual=%u flexible=%u lambda=%u generated=%u "
-          "subobject_type=%u nonfield_member=%u "
+          "subobject_type=%u subobject_partner_present=%u subobject_partner_self=%u nonfield_member=%u "
           "plain=%u structural_only=%u field_pos=%u field_kind=%u "
           "field_bytes=%lu field_align=%lu offset=%lu bitfield=%u\n",
           id,static_cast<unsigned long>(type->size),
@@ -631,8 +641,10 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
 #if DO_IL_LOWERING
           extra!=nullptr && extra->compiler_generated ? 1u : 0u,
           extra!=nullptr && extra->has_subobject_type ? 1u : 0u,
+          extra!=nullptr && extra->subobject_partner!=nullptr ? 1u : 0u,
+          extra!=nullptr && extra->subobject_partner==type ? 1u : 0u,
 #else
-          0u,0u,
+          0u,0u,0u,0u,
 #endif
           // Member declarations may be retained even when the executable
           // member-function list is empty; do not infer absent methods.
