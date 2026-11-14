@@ -43,6 +43,25 @@ struct PendingStaticLocal {
   const void *routine;
 };
 thread_local std::vector<PendingStaticLocal> pending_static_locals;
+// Recorded inside EDG's own file-scope lowering loop, before the source
+// dynamic-init entries are detached or rewritten. Producer-owned end count
+// proves member observation completeness for each *observed* routine; this
+// does not certify complete TU startup, ELF init order or shutdown semantics.
+struct NativeFileInitMember {
+  const void *source_init;
+  const void *variable;
+  const void *destructor;
+  uint32_t native_kind;
+};
+struct NativeFileInitSlice {
+  const void *routine;
+  uint32_t priority;
+  bool is_tls;
+  bool ended;
+  std::vector<NativeFileInitMember> members;
+};
+thread_local std::vector<NativeFileInitSlice> pending_file_init_slices;
+
 struct PendingNamedStatic {
   const void *variable;
   std::string qualified_name;
@@ -3154,6 +3173,49 @@ void back_end(void)
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
   collect_scope(il_header.primary_scope, "", 0);
 
+  // Wire 94/95: source-owned EDG-generated routine-to-processed-init edges.
+  // A complete *slice* is never a complete TU startup/shutdown certificate.
+  // Require producer-side terminal count and unique native symbol identities.
+  for (const NativeFileInitSlice &slice : pending_file_init_slices) {
+    const auto routine = symbol_ids.find(slice.routine);
+    if (!slice.ended || routine == symbol_ids.end() ||
+        emitted_routines.find(slice.routine) == emitted_routines.end() ||
+        slice.members.size() > 1024) {
+      report_incomplete_snapshot();
+      continue;
+    }
+    auto *native = static_cast<a_routine_ptr>(const_cast<void *>(slice.routine));
+    if (!native->compiler_generated ||
+        native->function_def_number == NULL_function_def_number) {
+      report_incomplete_snapshot();
+      continue;
+    }
+    emit_record(RECORD_NATIVE_FILE_INIT_SLICE, {
+        num(routine->second),num(slice.priority),num(slice.is_tls ? 1 : 0),
+        num(slice.members.size())});
+    for (std::size_t i = 0; i != slice.members.size(); ++i) {
+      const NativeFileInitMember &member = slice.members[i];
+      const auto variable = symbol_ids.find(member.variable);
+      if (variable == symbol_ids.end()) {
+        report_incomplete_snapshot();
+        continue;
+      }
+      uint32_t destructor_id = 0;
+      if (member.destructor != nullptr) {
+        auto destructor = symbol_ids.find(member.destructor);
+        if (destructor == symbol_ids.end()) {
+          report_incomplete_snapshot();
+          continue;
+        }
+        destructor_id = destructor->second;
+      }
+      emit_record(RECORD_NATIVE_FILE_INIT_SLICE_ENTRY, {
+          num(routine->second),num(i),num(variable->second),
+          destructor_id != 0 ? num(destructor_id) : absent(),
+          num(member.native_kind)});
+    }
+  }
+
   // EDG explicitly owns this ordered runtime initialization schedule when
   // the separate-file-scope-init configuration is enabled. Preserve the
   // actual routine pointers and order, never reconstruct names/calls from
@@ -3252,6 +3314,87 @@ void back_end(void)
   }
 }
 } // namespace edg
+
+// These three optional hooks observe native EDG file-scope lowering at
+// the producer, not the demangled '__sti__' naming convention. They copy
+// only source identities/counts and never change the generated startup.
+extern "C" void edgcpp_capture_file_scope_init_slice_v1(
+    void *generated_routine, void *first_source_init,
+    unsigned long source_priority, int thread_local_slice)
+{
+  using namespace edg;
+  if (current_callback == nullptr) return;
+  if (generated_routine == nullptr || first_source_init == nullptr ||
+      source_priority > std::numeric_limits<uint32_t>::max() ||
+      (thread_local_slice != 0 && thread_local_slice != 1) ||
+      pending_file_init_slices.size() >= 128) {
+    report_incomplete_snapshot();
+    return;
+  }
+  for (const auto &prior : pending_file_init_slices) {
+    if (prior.routine == generated_routine) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
+  pending_file_init_slices.push_back(NativeFileInitSlice{
+      generated_routine, static_cast<uint32_t>(source_priority),
+      thread_local_slice != 0, false, {}});
+}
+
+extern "C" void edgcpp_capture_file_scope_init_member_v1(
+    void *generated_routine, void *processed_source_init)
+{
+  using namespace edg;
+  if (current_callback == nullptr) return;
+  if (generated_routine == nullptr || processed_source_init == nullptr) {
+    report_incomplete_snapshot();
+    return;
+  }
+  auto slice = std::find_if(pending_file_init_slices.begin(),
+      pending_file_init_slices.end(),
+      [generated_routine](const NativeFileInitSlice &s) {
+          return s.routine == generated_routine;
+      });
+  if (slice == pending_file_init_slices.end() || slice->ended ||
+      slice->members.size() >= 1024) {
+    report_incomplete_snapshot();
+    return;
+  }
+  auto *init = static_cast<a_dynamic_init_ptr>(processed_source_init);
+  if (init->variable == nullptr) {
+    report_incomplete_snapshot();
+    return;
+  }
+  for (const auto &old : slice->members) {
+    if (old.source_init == processed_source_init) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
+  slice->members.push_back(NativeFileInitMember{
+      processed_source_init, init->variable, init->destructor,
+      static_cast<uint32_t>(init->kind)});
+}
+
+extern "C" void edgcpp_capture_file_scope_init_end_v1(
+    void *generated_routine, unsigned long processed_count)
+{
+  using namespace edg;
+  if (current_callback == nullptr) return;
+  auto slice = std::find_if(pending_file_init_slices.begin(),
+      pending_file_init_slices.end(),
+      [generated_routine](const NativeFileInitSlice &s) {
+          return s.routine == generated_routine;
+      });
+  if (generated_routine == nullptr ||
+      slice == pending_file_init_slices.end() || slice->ended ||
+      processed_count != slice->members.size()) {
+    report_incomplete_snapshot();
+    return;
+  }
+  slice->ended=true;
+}
 
 // Optional source hooks at the entrance and exit of EDG's *same*
 // lower_virtual_function_call invocation. The first observes the original
@@ -3440,6 +3583,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   unresolved_members.clear();
   named_class_types.clear();
   pending_static_locals.clear();
+  pending_file_init_slices.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
   native_virtual_entry_selections.clear();
@@ -3465,6 +3609,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   unresolved_members.clear();
   named_class_types.clear();
   pending_static_locals.clear();
+  pending_file_init_slices.clear();
   pending_named_statics.clear();
   prelower_virtual_calls.clear();
   native_virtual_entry_selections.clear();
