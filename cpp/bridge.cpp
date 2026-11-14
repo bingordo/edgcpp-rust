@@ -2276,6 +2276,22 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       emit_record(53, {txt(function), txt(path), num(status),
                        status == 1 ? signed_num(bits) : absent()});
     }
+    // Independently certify which optional supplemental control roots
+    // were owned by this native statement, including all-zero masks.
+    uint32_t control_root_mask = 0;
+    if (stmt->kind == stmk_for) {
+      const auto *info = stmt->variant.for_loop.extra_info;
+      if (info != nullptr && info->increment != nullptr) control_root_mask |= 1u;
+    } else if (stmt->kind == stmk_range_based_for) {
+      const auto *info = stmt->variant.range_based_for_loop.extra_info;
+      if (info != nullptr && info->ne_call_expr != nullptr) control_root_mask |= 2u;
+      if (info != nullptr && info->incr_call_expr != nullptr) control_root_mask |= 4u;
+    }
+    if (init != nullptr &&
+        (init->kind == dik_expression || init->kind == dik_class_result_via_ctor) &&
+        init->variant.expression != nullptr) control_root_mask |= 8u;
+    emit_record(RECORD_NATIVE_CONTROL_ROOT_ADMISSION,
+                {txt(function),txt(path),num(control_root_mask)});
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
@@ -2323,6 +2339,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           // Synthetic increments have no source flags but still require
           // the mandatory native statement-attributes witness.
           emit_record(26, {txt(function), txt(increment_path), num(0)});
+          emit_record(RECORD_NATIVE_CONTROL_ROOT_ADMISSION,
+                      {txt(function), txt(increment_path), num(0)});
           emit_expr(info->increment, function, increment_path, "0", "", 0);
         }
       }
@@ -2673,6 +2691,9 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
               init_expr = init->initializer->variant.expression;
             }
             if (init_expr == nullptr) init_expr = init->source_expr;
+            emit_record(RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION,
+                        {num(routine_symbol),num(init_position),
+                         num(init_expr != nullptr ? 1 : 0)});
             if (init_expr != nullptr) {
               emit_initializer_expr(init_expr, routine_symbol, "0", "",
                                     0, true, init_position);
@@ -3311,6 +3332,9 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     // Dynamic-initializer kinds, normalized for the reference backend.
     // Only native dik_zero promises full-object zero initialization.
     if (value == static_cast<unsigned>(dik_zero)) return 1;
+  } else if (category == 6) {
+    // Native variable init-kind witness (record 14) proves record 16 exists.
+    if (value == static_cast<unsigned>(initk_dynamic)) return 1;
   }
   return 0;
 }
