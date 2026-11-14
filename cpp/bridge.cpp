@@ -1762,6 +1762,20 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
                        absent() : num(parent),
                    num(static_cast<unsigned>(lifetime->kind))});
 
+  // Count independently of event-41 emission. Otherwise a lost final
+  // destruction entry leaves a deceptively dense observed prefix.
+  uint32_t native_destruction_count = 0;
+  std::unordered_set<a_dynamic_init_ptr> count_seen;
+  for (a_dynamic_init_ptr entry = lifetime->destructions;
+       entry != nullptr && within_native_list_limit(native_destruction_count);
+       entry = entry->next_in_destruction_list, ++native_destruction_count) {
+    if (!count_seen.insert(entry).second) {
+      report_incomplete_snapshot();
+      break;
+    }
+  }
+  emit_record(RECORD_NATIVE_LIFETIME_DESTRUCTION_COUNT,
+              {num(routine),num(id),num(native_destruction_count)});
   // EDG orders this list in destruction order; preserve that order.
   unsigned position = 0;
   std::unordered_set<a_dynamic_init_ptr> seen;

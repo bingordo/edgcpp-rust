@@ -127,6 +127,8 @@ pub struct Il {
     pub scope_lifetimes: Vec<ScopeLifetime>,
     pub initialization_lifetimes: Vec<InitializationLifetime>,
     pub lifetime_destructions: Vec<LifetimeDestruction>,
+    /// EDG-native independent destruction count for each emitted lifetime.
+    pub native_lifetime_destruction_counts: Vec<NativeLifetimeDestructionCount>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -919,6 +921,14 @@ pub struct InitializationLifetime {
 
 /// Destruction list position in the order EDG requires cleanup to run.
 /// A destructor may be absent for generated guards and related cleanup.
+/// EDG-owned destruction-list cardinality (wire event 93).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLifetimeDestructionCount {
+    pub routine: SymbolId,
+    pub lifetime: u32,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifetimeDestruction {
     pub routine: SymbolId,
@@ -1386,6 +1396,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         90 => Some(il.native_control_root_admissions.len()),
         91 => Some(il.native_constructor_root_admissions.len()),
         92 => Some(il.native_constructor_initializer_counts.len()),
+        93 => Some(il.native_lifetime_destruction_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2169,6 +2180,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if function.is_empty() || statement_path.is_empty() || mask & !15!=0 {return;}
             output.native_control_root_admissions.push(NativeControlRootAdmission {
                 function,statement_path,mask,
+            });
+        }
+        93 => {
+            let (Some(routine),Some(lifetime),Some(count))=(n(0),n(1),n(2))
+                else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount {
+                routine:SymbolId(routine),lifetime,count,
             });
         }
         92 => {
@@ -3146,6 +3165,45 @@ fn validate_native_constructor_initializer_lists(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// An emitted native lifetime always owns a destruction list (possibly
+// empty). Check independent EDG counts rather than accepting any dense
+// prefix of the observed event-41 positions.
+fn validate_native_lifetime_destruction_counts(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let mut lifetimes=HashSet::new();
+    for lifetime in &il.object_lifetimes {
+        if !lifetimes.insert((lifetime.routine,lifetime.id)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut witnesses=HashMap::new();
+    for proof in &il.native_lifetime_destruction_counts {
+        let key=(proof.routine,proof.lifetime);
+        if proof.count>10000 || !lifetimes.contains(&key) ||
+            witnesses.insert(key,proof.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if witnesses.len()!=lifetimes.len() {return Err(Error::MalformedCallback);}
+    let mut positions:HashMap<_,HashSet<u32>>=HashMap::new();
+    for entry in &il.lifetime_destructions {
+        let key=(entry.routine,entry.lifetime);
+        let Some(&count)=witnesses.get(&key) else {
+            return Err(Error::MalformedCallback);
+        };
+        if entry.position>=count ||
+            !positions.entry(key).or_default().insert(entry.position) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (key,count) in witnesses {
+        if positions.get(&key).map_or(0,HashSet::len)!=count as usize {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3167,6 +3225,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_child_counts(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
+       validate_native_lifetime_destruction_counts(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3623,6 +3682,71 @@ mod tests {
         il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
         assert!(validate_native_supplemental_root_admission(&il).is_err(),
             "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn lifetime_destruction_counts_reject_missing_first_middle_and_tail() {
+        let mut il=Il::default();
+        il.object_lifetimes.push(ObjectLifetime {
+            routine:SymbolId(7),id:0,parent:None,kind:0,
+        });
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err(),
+            "missing zero-length list witness");
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount {
+            routine:SymbolId(7),lifetime:0,count:0,
+        });
+        validate_native_lifetime_destruction_counts(&il)
+            .expect("native empty destruction list");
+        let item=|position|LifetimeDestruction {
+            routine:SymbolId(7),lifetime:0,position,
+            variable:None,destructor:None,
+        };
+        il.lifetime_destructions.extend((0..3).map(item));
+        il.native_lifetime_destruction_counts[0].count=3;
+        validate_native_lifetime_destruction_counts(&il)
+            .expect("complete native destruction list");
+        for removed in 0..3 {
+            let mut truncated=il.clone();
+            truncated.lifetime_destructions.remove(removed);
+            assert!(validate_native_lifetime_destruction_counts(&truncated).is_err(),
+                "missing destruction {removed}");
+        }
+        let mut duplicated=il.clone();
+        duplicated.lifetime_destructions.push(item(2));
+        assert!(validate_native_lifetime_destruction_counts(&duplicated).is_err(),
+            "duplicate destruction position");
+        let mut extra=il.clone();
+        extra.lifetime_destructions.push(item(3));
+        assert!(validate_native_lifetime_destruction_counts(&extra).is_err(),
+            "extra destruction beyond native count");
+        let mut dropped=il.clone();
+        dropped.native_lifetime_destruction_counts.clear();
+        assert!(validate_native_lifetime_destruction_counts(&dropped).is_err(),
+            "lost list witness");
+        let mut orphan=il.clone();
+        orphan.native_lifetime_destruction_counts[0].lifetime=99;
+        assert!(validate_native_lifetime_destruction_counts(&orphan).is_err(),
+            "orphan witness");
+        il.native_lifetime_destruction_counts.push(
+            il.native_lifetime_destruction_counts[0].clone());
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err(),
+            "duplicate native witness");
+    }
+
+    #[test]
+    fn all_lifetime_regions_require_independent_zero_count_witnesses() {
+        let mut il=Il::default();
+        il.object_lifetimes.extend((0..2).map(|id|ObjectLifetime{
+            routine:SymbolId(9),id,parent:None,kind:0,
+        }));
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount{
+            routine:SymbolId(9),lifetime:0,count:0,
+        });
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err());
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount{
+            routine:SymbolId(9),lifetime:1,count:0,
+        });
+        validate_native_lifetime_destruction_counts(&il).expect("two empty regions");
     }
 
     #[test]
@@ -5243,7 +5367,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=92_u32 {
+        for kind in 1..=93_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5270,10 +5394,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,366);
+        assert_eq!(total,369);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(93).is_none());
+        assert!(expected_wire_field_tag_masks(94).is_none());
     }
 
     #[test]
