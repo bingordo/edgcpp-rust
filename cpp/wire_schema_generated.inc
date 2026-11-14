@@ -971,7 +971,7 @@ static bool wire_record_field_tags_valid(
     return true;
   }
   case 94: {
-    const uint8_t masks[] = {4, 4, 4};
+    const uint8_t masks[] = {4, 4, 4, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
