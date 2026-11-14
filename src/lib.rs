@@ -3626,6 +3626,79 @@ mod tests {
     }
 
     #[test]
+    fn constructor_initializer_list_proofs_reject_missing_first_middle_and_tail() {
+        let mut il=Il::default();
+        il.entities.push(Entity::Routine{name:"ctor".into(),has_definition:true});
+        il.routine_identities.push(RoutineIdentity{
+            routine:SymbolId(7),function:"ctor".into(),
+        });
+        let item=|position|ConstructorInitializer{
+            routine:SymbolId(7),position,kind:3,target_type:None,
+            target_field:None,compiler_generated:false,braced:false,
+            use_field_initializer:false,pack_expansion:false,
+        };
+        assert!(validate_native_constructor_initializer_lists(&il).is_err(),
+            "even an empty native list must carry an independent witness");
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(7),count:0});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("empty native list certified");
+        il.constructor_initializers.extend((0..3).map(item));
+        il.native_constructor_initializer_counts[0].count=3;
+        validate_native_constructor_initializer_lists(&il)
+            .expect("complete native list");
+        for removed in 0..3 {
+            let mut truncated=il.clone();
+            truncated.constructor_initializers.remove(removed);
+            assert!(validate_native_constructor_initializer_lists(&truncated).is_err(),
+                "dropping item {removed} must fail");
+        }
+        let mut duplicated=il.clone();
+        duplicated.constructor_initializers.push(item(2));
+        assert!(validate_native_constructor_initializer_lists(&duplicated).is_err(),
+            "duplicate initializer position must fail");
+        let mut extra=il.clone();
+        extra.constructor_initializers.push(item(3));
+        assert!(validate_native_constructor_initializer_lists(&extra).is_err(),
+            "unexpected extra initializer must fail");
+        let mut orphan=il.clone();
+        orphan.native_constructor_initializer_counts[0].routine=SymbolId(99);
+        assert!(validate_native_constructor_initializer_lists(&orphan).is_err(),
+            "orphan list count must fail");
+        let mut no_proof=il.clone();
+        no_proof.native_constructor_initializer_counts.clear();
+        assert!(validate_native_constructor_initializer_lists(&no_proof).is_err(),
+            "entire list witness cannot disappear");
+        let mut two_proofs=il.clone();
+        two_proofs.native_constructor_initializer_counts.push(
+            two_proofs.native_constructor_initializer_counts[0].clone());
+        assert!(validate_native_constructor_initializer_lists(&two_proofs).is_err(),
+            "duplicate native list witness must fail");
+    }
+
+    #[test]
+    fn constructor_list_count_is_per_defined_routine() {
+        let mut il=Il::default();
+        for (name,id) in [("one",7),("two",8)] {
+            il.entities.push(Entity::Routine{name:name.into(),has_definition:true});
+            il.routine_identities.push(RoutineIdentity{
+                routine:SymbolId(id),function:name.into(),
+            });
+        }
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(7),count:0});
+        assert!(validate_native_constructor_initializer_lists(&il).is_err(),
+            "second defined routine also needs a zero count");
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(8),count:0});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("both empty lists independently certified");
+        il.entities.push(Entity::Routine{name:"declaration".into(),has_definition:false});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("declarations do not own a native initializer list");
+    }
+
+    #[test]
     fn dynamic_and_constructor_roots_must_match_native_owner_admission() {
         let mut il=Il::default();
         let dynamic_kind=(0..256).find(|&k|
