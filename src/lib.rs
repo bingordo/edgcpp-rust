@@ -921,7 +921,6 @@ pub struct InitializationLifetime {
 
 /// Destruction list position in the order EDG requires cleanup to run.
 /// A destructor may be absent for generated guards and related cleanup.
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// EDG-owned destruction-list cardinality (wire event 93).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeLifetimeDestructionCount {
@@ -930,6 +929,7 @@ pub struct NativeLifetimeDestructionCount {
     pub count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifetimeDestruction {
     pub routine: SymbolId,
     pub lifetime: u32,
@@ -3682,6 +3682,71 @@ mod tests {
         il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
         assert!(validate_native_supplemental_root_admission(&il).is_err(),
             "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn lifetime_destruction_counts_reject_missing_first_middle_and_tail() {
+        let mut il=Il::default();
+        il.object_lifetimes.push(ObjectLifetime {
+            routine:SymbolId(7),id:0,parent:None,kind:0,
+        });
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err(),
+            "missing zero-length list witness");
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount {
+            routine:SymbolId(7),lifetime:0,count:0,
+        });
+        validate_native_lifetime_destruction_counts(&il)
+            .expect("native empty destruction list");
+        let item=|position|LifetimeDestruction {
+            routine:SymbolId(7),lifetime:0,position,
+            variable:None,destructor:None,
+        };
+        il.lifetime_destructions.extend((0..3).map(item));
+        il.native_lifetime_destruction_counts[0].count=3;
+        validate_native_lifetime_destruction_counts(&il)
+            .expect("complete native destruction list");
+        for removed in 0..3 {
+            let mut truncated=il.clone();
+            truncated.lifetime_destructions.remove(removed);
+            assert!(validate_native_lifetime_destruction_counts(&truncated).is_err(),
+                "missing destruction {removed}");
+        }
+        let mut duplicated=il.clone();
+        duplicated.lifetime_destructions.push(item(2));
+        assert!(validate_native_lifetime_destruction_counts(&duplicated).is_err(),
+            "duplicate destruction position");
+        let mut extra=il.clone();
+        extra.lifetime_destructions.push(item(3));
+        assert!(validate_native_lifetime_destruction_counts(&extra).is_err(),
+            "extra destruction beyond native count");
+        let mut dropped=il.clone();
+        dropped.native_lifetime_destruction_counts.clear();
+        assert!(validate_native_lifetime_destruction_counts(&dropped).is_err(),
+            "lost list witness");
+        let mut orphan=il.clone();
+        orphan.native_lifetime_destruction_counts[0].lifetime=99;
+        assert!(validate_native_lifetime_destruction_counts(&orphan).is_err(),
+            "orphan witness");
+        il.native_lifetime_destruction_counts.push(
+            il.native_lifetime_destruction_counts[0].clone());
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err(),
+            "duplicate native witness");
+    }
+
+    #[test]
+    fn all_lifetime_regions_require_independent_zero_count_witnesses() {
+        let mut il=Il::default();
+        il.object_lifetimes.extend((0..2).map(|id|ObjectLifetime{
+            routine:SymbolId(9),id,parent:None,kind:0,
+        }));
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount{
+            routine:SymbolId(9),lifetime:0,count:0,
+        });
+        assert!(validate_native_lifetime_destruction_counts(&il).is_err());
+        il.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount{
+            routine:SymbolId(9),lifetime:1,count:0,
+        });
+        validate_native_lifetime_destruction_counts(&il).expect("two empty regions");
     }
 
     #[test]
