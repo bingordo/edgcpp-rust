@@ -85,6 +85,8 @@ pub struct Il {
     pub native_expression_child_counts: Vec<NativeExpressionChildCount>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
+    /// EDG-native count of catch handlers owned by each try statement (wire 86).
+    pub native_try_handler_counts: Vec<NativeTryHandlerCount>,
     /// Native flags retained for each emitted statement.
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
@@ -682,6 +684,14 @@ pub struct NativeStatementSiblingCount {
     pub function: String,
     pub parent: Option<String>,
     pub edge: String,
+    pub count: u32,
+}
+
+/// Independent EDG-native handler-list cardinality witness for a try block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTryHandlerCount {
+    pub function: String,
+    pub statement_path: String,
     pub count: u32,
 }
 
@@ -1329,6 +1339,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         83 => Some(il.native_expression_child_counts.len()),
         84 => Some(il.native_statement_sibling_counts.len()),
         85 => Some(il.virtual_vptr_receiver_pairs.len()),
+        86 => Some(il.native_try_handler_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2106,6 +2117,15 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 entry_bytes:u64::from(entry_bytes),
             });
         }
+        86 => {
+            let (Some(function),Some(statement_path),Some(count))=
+                (t(0),t(1),n(2)) else {return;};
+            if function.is_empty() || statement_path.is_empty() ||
+                count>10000 {return;}
+            output.native_try_handler_counts.push(NativeTryHandlerCount {
+                function,statement_path,count,
+            });
+        }
         85 => {
             let (Some(function),Some(statement_path),Some(path),
                  Some(lookup_ty),Some(position)) =
@@ -2740,6 +2760,47 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
         }
     }
     if !groups.is_empty() {return Err(Error::MalformedCallback);}
+    // Record 86 certifies the complete EDG handler list. The catchN
+    // sibling-list witnesses alone could lose a final handler undetected.
+    let mut handlers=HashMap::new();
+    for proof in &il.native_try_handler_counts {
+        let key=(proof.function.as_str(),proof.statement_path.as_str());
+        if proof.count>10000 ||
+            statement_kinds.get(&key)!=Some(&19) ||
+            handlers.insert(key,proof.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for stmt in &il.statements {
+        if graph::native_statement_kind(stmt.kind)!=19 {continue;}
+        let Some(&count)=handlers.get(&(stmt.function.as_str(),stmt.path.as_str()))
+            else {return Err(Error::MalformedCallback);};
+        for i in 0..count {
+            if !seen.contains(&(stmt.function.clone(),Some(stmt.path.clone()),
+                                format!("catch{i}"))) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    // Reject extra or malformed catch edges beyond the independently
+    // recorded count, not just missing ones.
+    for proof in &il.native_statement_sibling_counts {
+        if !proof.edge.starts_with("catch") {continue;}
+        let Some(parent)=proof.parent.as_deref() else {
+            return Err(Error::MalformedCallback);
+        };
+        let key=(proof.function.as_str(),parent);
+        let Some(&count)=handlers.get(&key) else {
+            return Err(Error::MalformedCallback);
+        };
+        let Some(index)=proof.edge.strip_prefix("catch")
+            .and_then(|n|n.parse::<u32>().ok()) else {
+            return Err(Error::MalformedCallback);
+        };
+        if proof.edge!=format!("catch{index}") || index>=count {
+            return Err(Error::MalformedCallback);
+        }
+    }
     // Event 1 independently marks EDG routines with native definitions.
     // Every defined routine emits event 42 identifying its function key,
     // then emit_statements emits a root count even for an empty body.
@@ -2986,6 +3047,56 @@ mod tests {
     }
 
     #[test]
+    fn native_try_handler_cardinality_rejects_missing_tail_and_extra_catch() {
+        let kind=(0..256).find(|&k|graph::native_statement_kind(k)==19)
+            .expect("EDG try block kind");
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind,
+        });
+        il.native_statement_sibling_counts.extend([
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:None,edge:String::new(),count:1,
+            },
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),
+                edge:"try".into(),count:0,
+            },
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),
+                edge:"catch0".into(),count:0,
+            },
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),
+                edge:"catch1".into(),count:0,
+            },
+        ]);
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing handler-count witness");
+        il.native_try_handler_counts.push(NativeTryHandlerCount {
+            function:"f".into(),statement_path:"0".into(),count:2,
+        });
+        validate_native_tree_count_coverage(&il).expect("two native handlers certified");
+        il.native_statement_sibling_counts.pop();
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing final catch list");
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:Some("0".into()),
+            edge:"catch1".into(),count:0,
+        });
+        il.native_try_handler_counts[0].count=1;
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "extra catch beyond EDG count");
+        il.native_try_handler_counts[0].count=3;
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing catch2");
+        il.native_try_handler_counts[0].count=2;
+        il.native_try_handler_counts.push(il.native_try_handler_counts[0].clone());
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "duplicate owner count");
+    }
+
+    #[test]
     fn specialized_native_statement_owners_require_complete_empty_proofs() {
         // These lists are EDG-owned; do not derive their presence from
         // observed child records or hard-code configuration-dependent kinds.
@@ -3002,6 +3113,11 @@ mod tests {
             il.statements.push(Statement {
                 function:"f".into(),path:"0".into(),parent:None,kind,
             });
+            if normalized==19 {
+                il.native_try_handler_counts.push(NativeTryHandlerCount {
+                    function:"f".into(),statement_path:"0".into(),count:0,
+                });
+            }
             il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
                 function:"f".into(),parent:None,edge:String::new(),count:1,
             });
@@ -4630,7 +4746,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=85_u32 {
+        for kind in 1..=86_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4657,10 +4773,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,343);
+        assert_eq!(total,346);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(86).is_none());
+        assert!(expected_wire_field_tag_masks(87).is_none());
     }
 
     #[test]

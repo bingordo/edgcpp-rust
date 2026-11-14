@@ -2274,6 +2274,15 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                       function, path, "body", depth + 1, true);
     } else if (stmt->kind == stmk_try_block) {
       a_try_supplement_ptr info = stmt->variant.try_block;
+      // Independent EDG handler-list cardinality witness. Without it,
+      // losing a final catchN list (including its event-84 proof) would
+      // make a truncated try/catch tree appear complete.
+      uint32_t native_handler_count = 0;
+      for (a_handler_ptr handler = info != nullptr ? info->handlers : nullptr;
+           handler != nullptr && within_native_list_limit(native_handler_count);
+           handler = handler->next, ++native_handler_count) {}
+      emit_record(RECORD_NATIVE_TRY_HANDLER_COUNT,
+                  {txt(function), txt(path), num(native_handler_count)});
       emit_statements(info != nullptr ? info->statement : nullptr,
                       function, path, "try", depth + 1, true);
       if (info != nullptr) {
