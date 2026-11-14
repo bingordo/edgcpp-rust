@@ -601,6 +601,8 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           "tag_present=%u tag_kind=%u template_class=%u originally_unnamed=%u "
           "extra=%u supp_scope=%u supp_routines=%u supp_variables=%u "
           "supp_bases=%u supp_template=%u supp_field_init=%u "
+          "nonreal=%u virtual=%u flexible=%u lambda=%u generated=%u "
+          "subobject_type=%u nonfield_member=%u "
           "plain=%u structural_only=%u field_pos=%u field_kind=%u "
           "field_bytes=%lu field_align=%lu offset=%lu bitfield=%u\n",
           id,static_cast<unsigned long>(type->size),
@@ -620,6 +622,26 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           extra!=nullptr && (extra->assoc_template!=nullptr ||
               extra->template_arg_list!=nullptr) ? 1u : 0u,
           extra!=nullptr && extra->has_field_initializer ? 1u : 0u,
+          type->variant.class_struct_union.is_nonreal_class ? 1u : 0u,
+          (type->variant.class_struct_union.any_virtual_functions ||
+           type->variant.class_struct_union.any_virtual_base_classes ||
+           type->variant.class_struct_union.any_virtual_functions_including_in_base_classes) ? 1u : 0u,
+          type->variant.class_struct_union.contains_flexible_array_member ? 1u : 0u,
+          extra!=nullptr && extra->is_lambda_closure_class ? 1u : 0u,
+#if DO_IL_LOWERING
+          extra!=nullptr && extra->compiler_generated ? 1u : 0u,
+          extra!=nullptr && extra->has_subobject_type ? 1u : 0u,
+#else
+          0u,0u,
+#endif
+          // Member declarations may be retained even when the executable
+          // member-function list is empty; do not infer absent methods.
+#if MAINTAIN_CLASS_MEMBER_LIST
+          extra!=nullptr && extra->member_declarations!=nullptr &&
+            extra->member_declarations->entity.kind!=iek_field ? 1u : 0u,
+#else
+          0u,
+#endif
           plain_cpp_record(type) ? 1u : 0u,
           tagless_cpp_storage_only(type) ? 1u : 0u,
           nfields,
