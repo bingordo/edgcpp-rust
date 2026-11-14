@@ -2729,6 +2729,24 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
         }
     }
     if !groups.is_empty() {return Err(Error::MalformedCallback);}
+    // A zero-length list contains no statement records. Its absence is only
+    // visible when the native owner's required outgoing edges are checked.
+    // Use EDG's normalized enum, never guess numeric statement discriminants.
+    for stmt in &il.statements {
+        let kind=graph::native_statement_kind(stmt.kind);
+        let required:&[&str]=match kind {
+            2 => &["block"],
+            3 => &["then","else"],
+            7 | 8 | 9 | 13 => &["body"],
+            _ => &[],
+        };
+        for edge in required {
+            if !seen.contains(&(stmt.function.clone(),Some(stmt.path.clone()),
+                                (*edge).to_owned())) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2846,6 +2864,58 @@ mod tests {
         il.statement_attributes[1].statement_path="2".into();
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)), "orphan metadata must fail");
+    }
+
+    #[test]
+    fn native_empty_statement_list_owner_requires_witness() {
+        // The native bridge always traverses a block's contained list, even
+        // when that list is empty. Losing its zero-count proof must fail.
+        let block_kind=(0..256).find(|&kind|
+            graph::native_statement_kind(kind)==2)
+            .expect("EDG exposes its native block kind");
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:block_kind,
+        });
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:None,edge:String::new(),count:1,
+        });
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "dropped empty block proof");
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:Some("0".into()),edge:"block".into(),count:0,
+        });
+        validate_native_tree_count_coverage(&il)
+            .expect("native empty block is certified by zero-count witness");
+        il.native_statement_sibling_counts.pop();
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:Some("0".into()),edge:"then".into(),count:0,
+        });
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "wrong edge cannot substitute");
+    }
+
+    #[test]
+    fn native_if_requires_both_empty_branch_proofs() {
+        let if_kind=(0..256).find(|&kind|
+            graph::native_statement_kind(kind)==3)
+            .expect("EDG exposes its native if kind");
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:if_kind,
+        });
+        for (parent,edge,count) in [(None,"",1),(Some("0"),"then",0)] {
+            il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+                function:"f".into(),parent:parent.map(str::to_owned),
+                edge:edge.into(),count,
+            });
+        }
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)), "missing empty else branch witness");
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:Some("0".into()),edge:"else".into(),count:0,
+        });
+        validate_native_tree_count_coverage(&il).expect("both branches witnessed");
     }
 
     #[test]

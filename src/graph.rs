@@ -7,6 +7,12 @@ extern "C" {
     fn edgcpp_codegen_kind(category: u32, value: u32) -> u32;
 }
 
+/// Normalize EDG's configuration-dependent statement enum. Used to ensure
+/// that native list-owner statements cannot lose an empty-list witness.
+pub(crate) fn native_statement_kind(kind: u32) -> u32 {
+    unsafe { edgcpp_codegen_kind(1, kind) }
+}
+
 fn native_call_argument_offset(expr: &Expression) -> Option<u32> {
     let op = expr.operator?;
     match unsafe { edgcpp_codegen_kind(3, op) } {
