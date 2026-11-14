@@ -173,6 +173,11 @@ pub struct Il {
     /// Native generated __sti__ routine candidates in the non-patch mode.
     /// EDG's own raw C backend classifier is used, not user source names.
     pub file_scope_lowered_startup_routines: Vec<FileScopeLoweredStartupRoutine>,
+    /// Exact generated EDG startup slices observed during source lowering.
+    /// Absence of records means no observer evidence, NOT no global effects.
+    pub source_file_init_slices: Vec<SourceFileInitSlice>,
+    /// Source-owned initializer entries actually lowered in each slice.
+    pub source_file_init_members: Vec<SourceFileInitMember>,
     /// Native per-scope dynamic initializers in EDG's own list order.
     pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
@@ -449,6 +454,31 @@ pub struct FileScopeRuntimeLink {
 pub struct FileScopeLoweredStartupRoutine {
     pub routine: SymbolId,
     pub priority: u32,
+}
+
+/// Exact generated startup routine and producer-side selected-member count.
+///
+/// Only this one observed source-lowering slice has complete member
+/// coverage; it does NOT prove TU init order, finalization or ELF admission.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct SourceFileInitSlice {
+    pub routine: SymbolId,
+    pub priority: u32,
+    pub thread_local: bool,
+    pub member_count: u32,
+}
+
+/// Source member selected and lowered by EDG for a generated startup routine.
+///
+/// Position is its ordinal within the single producer-observed slice. The
+/// native initializer kind is opaque, not a constructor ABI classifier.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct SourceFileInitMember {
+    pub routine: SymbolId,
+    pub position: u32,
+    pub variable: SymbolId,
+    pub destructor: Option<SymbolId>,
+    pub kind: u32,
 }
 
 /// Source-level initialization entries in an EDG file/namespace scope.
@@ -1380,6 +1410,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         71 => Some(il.routine_supplements.len()),
         72 => Some(il.file_scope_runtime_links.len()),
         73 => Some(il.file_scope_lowered_startup_routines.len()),
+        94 => Some(il.source_file_init_slices.len()),
+        95 => Some(il.source_file_init_members.len()),
         74 => Some(il.native_record_shapes.len()),
         75 => Some(il.native_type_layout_proofs.len()),
         76 => Some(il.native_scalar_proofs.len()),
@@ -1587,6 +1619,36 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 r.routine==SymbolId(routine)) {return;}
             output.file_scope_lowered_startup_routines.push(FileScopeLoweredStartupRoutine {
                 routine:SymbolId(routine),priority,
+            });
+        }
+        94 => {
+            let (Some(routine),Some(priority),Some(tls),Some(count))=
+                (n(0),n(1),n(2),n(3)) else {return;};
+            if routine==0 || tls>1 || count>1024 ||
+               output.source_file_init_slices.iter().any(|s|
+                   s.routine==SymbolId(routine)) {return;}
+            output.source_file_init_slices.push(SourceFileInitSlice {
+                routine:SymbolId(routine),priority,
+                thread_local:tls==1,member_count:count,
+            });
+        }
+        95 => {
+            let (Some(routine),Some(position),Some(variable),Some(kind))=
+                (n(0),n(1),n(2),n(4)) else {return;};
+            let destructor=n(3).map(SymbolId);
+            if routine==0 || variable==0 || destructor==Some(SymbolId(0)) {
+                return;
+            }
+            let Some(slice)=output.source_file_init_slices.iter()
+                .find(|s|s.routine==SymbolId(routine)) else {return;};
+            let prior=output.source_file_init_members.iter()
+                .filter(|m|m.routine==SymbolId(routine)).count();
+            if position as usize != prior || position>=slice.member_count {
+                return;
+            }
+            output.source_file_init_members.push(SourceFileInitMember {
+                routine:SymbolId(routine),position,
+                variable:SymbolId(variable),destructor,kind,
             });
         }
         1..=4 => {
@@ -3210,6 +3272,42 @@ fn validate_native_lifetime_destruction_counts(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+/// Ensure each producer-counted startup slice has every ordered member.
+///
+/// No slices means the optional observer did not produce evidence, not an
+/// authoritative assertion that the translation unit has no constructors.
+fn validate_source_file_init_slices(il:&Il)->Result<(),&'static str> {
+    for slice in &il.source_file_init_slices {
+        let attrs:Vec<_>=il.routine_attributes.iter()
+            .filter(|a|a.routine==slice.routine).collect();
+        if attrs.len()!=1 || !attrs[0].compiler_generated || !attrs[0].defined ||
+            !il.symbols.iter().any(|s|
+                s.id==slice.routine && s.kind==1) {
+            return Err("producer startup slice lacks generated defined routine");
+        }
+        let members:Vec<_>=il.source_file_init_members.iter()
+            .filter(|m|m.routine==slice.routine).collect();
+        if members.len()!=slice.member_count as usize {
+            return Err("producer startup slice lacks complete ordered members");
+        }
+        for (position,member) in members.iter().enumerate() {
+            if member.position as usize != position ||
+                !il.symbols.iter().any(|s|
+                    s.id==member.variable && s.kind==2) ||
+                member.destructor.is_some_and(|d|
+                    !il.symbols.iter().any(|s|s.id==d && s.kind==1)) {
+                return Err("producer startup slice has invalid native member identity");
+            }
+        }
+    }
+    if il.source_file_init_members.iter().any(|member|
+        !il.source_file_init_slices.iter().any(|s|
+            s.routine==member.routine)) {
+        return Err("orphaned native startup slice member");
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3232,6 +3330,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
+       validate_source_file_init_slices(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3275,6 +3374,9 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
     }
     Ok(Compilation { status: code, il: collector.il })
 }
+
+#[cfg(test)]
+mod file_scope_source_init_slice_tests;
 
 #[cfg(test)]
 mod tests {
