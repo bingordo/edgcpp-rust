@@ -5429,71 +5429,162 @@ mod tests {
             GraphError::InvalidLocalVariable(SymbolId(130)));
     }
 
-    #[test]
-    fn audit_indexed_scope_and_lifetime_validation_on_many_records() {
-        let mut il = Il::default();
-        il.symbols.push(Symbol { id: SymbolId(1), kind: 1, name: "f".into() });
-        il.types.push(TypeDef {
-            id: TypeId(1), kind: 1, related_role: None, related: None,
+    // Build a large native-like partial IL snapshot with independent scope,
+    // local, lifetime, initialization, VLA and destruction relationships.
+    fn indexed_scope_lifetime_fixture(count:u32)->Il {
+        let mut il=Il::default();
+        let routine=SymbolId(1);
+        il.symbols.push(Symbol{id:routine,kind:1,name:"f".into()});
+        il.types.push(TypeDef{
+            id:TypeId(1),kind:1,related_role:None,related:None,
         });
-        for i in 0..128u32 {
-            let statement = i.to_string();
-            let symbol = SymbolId(i + 2);
-            il.symbols.push(Symbol {
-                id: symbol, kind: 2, name: format!("static_{i}"),
+        for i in 0..count {
+            let name=i.to_string();
+            let symbol=SymbolId(i+2);
+            il.symbols.push(Symbol{
+                id:symbol,kind:2,name:format!("static_{i}"),
             });
-            il.local_scopes.push(LocalScope {
-                routine: SymbolId(1), id: i,
-                parent: if i == 0 { None } else { Some(i - 1) },
-                kind: 17, statement_path: None,
+            // A wide but bounded-depth scope tree exercises parent indexes
+            // without constructing impossible >64-deep EDG scope regions.
+            let parent=(i!=0).then(||(i-1)/2);
+            il.local_scopes.push(LocalScope{
+                routine,id:i,parent,kind:17,statement_path:None,
             });
-            il.local_variables.push(LocalVariable {
-                routine: SymbolId(1), scope: i, symbol, ty: TypeId(1),
-                storage_class: 0, compiler_generated: false,
-                static_storage: true, structured_binding: false,
-                handler_parameter: false,
+            il.local_variables.push(LocalVariable{
+                routine,scope:i,symbol,ty:TypeId(1),
+                storage_class:0,compiler_generated:false,
+                static_storage:true,structured_binding:false,
+                handler_parameter:false,
             });
-            il.static_local_owners.push(StaticLocalOwner {
-                routine: SymbolId(1), symbol,
+            il.static_local_owners.push(StaticLocalOwner{routine,symbol});
+            il.object_lifetimes.push(ObjectLifetime{
+                routine,id:i,parent,kind:0,
             });
-            il.object_lifetimes.push(ObjectLifetime {
-                routine: SymbolId(1), id: i,
-                parent: if i == 0 { None } else { Some(i - 1) }, kind: 0,
+            il.scope_lifetimes.push(ScopeLifetime{
+                routine,scope:i,lifetime:i,
             });
-            il.scope_lifetimes.push(ScopeLifetime {
-                routine: SymbolId(1), scope: i, lifetime: i,
+            il.lifetime_destructions.push(LifetimeDestruction{
+                routine,lifetime:i,position:0,
+                variable:Some(symbol),destructor:None,
             });
-            il.lifetime_destructions.push(LifetimeDestruction {
-                routine: SymbolId(1), lifetime: i, position: 0,
-                variable: Some(symbol), destructor: None,
+            il.statements.push(Statement{
+                function:"f".into(),path:name.clone(),
+                parent:None,kind:1,
             });
-            il.statements.push(Statement {
-                function: "f".into(), path: statement.clone(),
-                parent: None, kind: 1,
+            il.statement_initializations.push(StatementInitialization{
+                function:"f".into(),statement_path:name.clone(),
+                symbol:Some(symbol),kind:1,
+                follows_execution:false,braced:false,role:0,
             });
-            il.statement_initializations.push(StatementInitialization {
-                function: "f".into(), statement_path: statement.clone(),
-                symbol: Some(symbol), kind: 1, follows_execution: false,
-                braced: false, role: 0,
+            il.initialization_lifetimes.push(InitializationLifetime{
+                function:"f".into(),statement_path:name.clone(),
+                lifetime:Some(i),destructor:None,
             });
-            il.initialization_lifetimes.push(InitializationLifetime {
-                function: "f".into(), statement_path: statement.clone(),
-                lifetime: Some(i), destructor: None,
-            });
-            il.vla_dimensions.push(VlaDimension {
-                function: "f".into(), statement_path: statement,
-                array_type: TypeId(1), has_expression: false, copied: false,
+            il.vla_dimensions.push(VlaDimension{
+                function:"f".into(),statement_path:name,
+                array_type:TypeId(1),has_expression:false,copied:false,
             });
         }
-        let graph = Graph::from_il(&il).expect("valid indexed native metadata");
-        assert_eq!(graph.scope_lifetimes.len(), 128);
-        assert_eq!(graph.initialization_lifetimes.len(), 128);
-        assert_eq!(graph.static_local_owners.len(), 128);
+        il
+    }
+
+    #[test]
+    fn audit_indexed_scope_and_lifetime_validation_on_many_records() {
+        let mut il=indexed_scope_lifetime_fixture(128);
+        let graph=Graph::from_il(&il).expect("valid indexed native metadata");
+        assert_eq!(graph.scope_lifetimes.len(),128);
+        assert_eq!(graph.initialization_lifetimes.len(),128);
+        assert_eq!(graph.static_local_owners.len(),128);
         il.lifetime_destructions.push(il.lifetime_destructions[0].clone());
         assert_eq!(Graph::from_il(&il).unwrap_err(),
-            GraphError::DuplicateLifetimeDestruction {
-                routine: SymbolId(1), lifetime: 0, position: 0,
+            GraphError::DuplicateLifetimeDestruction{
+                routine:SymbolId(1),lifetime:0,position:0,
             });
+    }
+
+    // Test first/middle/tail corruptions and shuffled delivery at multiple
+    // sizes without imposing benchmark timing assumptions on CI runners.
+    #[test]
+    fn audit_indexed_scope_lifetime_large_snapshot_corruptions() {
+        for count in [32_u32,128,512] {
+            let il=indexed_scope_lifetime_fixture(count);
+            let graph=Graph::from_il(&il).expect("complete synthetic snapshot");
+            assert_eq!(graph.local_scopes.len(),count as usize);
+            assert_eq!(graph.scope_lifetimes.len(),count as usize);
+            assert_eq!(graph.initialization_lifetimes.len(),count as usize);
+            assert_eq!(graph.lifetime_destructions.len(),count as usize);
+            assert_eq!(graph.vla_dimensions.len(),count as usize);
+
+            let mut shuffled=il.clone();
+            // A deterministic permutation probes callback record order,
+            // while retaining independently numbered native identities.
+            shuffled.local_scopes.reverse();
+            shuffled.object_lifetimes.reverse();
+            shuffled.scope_lifetimes.reverse();
+            shuffled.static_local_owners.reverse();
+            shuffled.initialization_lifetimes.reverse();
+            shuffled.lifetime_destructions.reverse();
+            let restored=Graph::from_il(&shuffled)
+                .expect("order-independent validation of indexed relationships");
+            assert_eq!(restored.scope_lifetimes.len(),count as usize);
+            assert_eq!(restored.lifetime_destructions.len(),count as usize);
+
+            for lost in [0,count/2,count-1] {
+                let mut removed_scope=il.clone();
+                removed_scope.local_scopes.retain(|x|x.id!=lost);
+                assert!(Graph::from_il(&removed_scope).is_err(),
+                    "scope {lost} omitted from {count} scopes");
+                let mut removed_lifetime=il.clone();
+                removed_lifetime.object_lifetimes.retain(|x|x.id!=lost);
+                assert!(Graph::from_il(&removed_lifetime).is_err(),
+                    "lifetime {lost} omitted from {count} regions");
+                let mut removed_init=il.clone();
+                removed_init.statement_initializations.retain(|x|
+                    x.statement_path!=lost.to_string());
+                assert!(Graph::from_il(&removed_init).is_err(),
+                    "initialization owner {lost} omitted");
+            }
+            let mut duplicate=il.clone();
+            duplicate.lifetime_destructions.push(
+                duplicate.lifetime_destructions[count as usize/2].clone());
+            assert_eq!(Graph::from_il(&duplicate).unwrap_err(),
+                GraphError::DuplicateLifetimeDestruction{
+                    routine:SymbolId(1),lifetime:count/2,position:0,
+                });
+            let mut invalid_vla=il;
+            invalid_vla.vla_dimensions[count as usize/2].has_expression=true;
+            assert!(Graph::from_il(&invalid_vla).is_err(),
+                "a missing VLA expression root must not be accepted");
+        }
+    }
+
+    /// Measure complete Graph::from_il construction at 1x/2x/4x scope scale.
+    /// Run explicitly with: cargo test --lib --features codegen
+    /// audit_indexed_scope_lifetime_graph_scaling -- --ignored --nocapture
+    #[test]
+    #[ignore = "profiling-only; run explicitly with --ignored --nocapture"]
+    fn audit_indexed_scope_lifetime_graph_scaling() {
+        let mut base_ms=None;
+        for count in [128_u32,256,512] {
+            let il=indexed_scope_lifetime_fixture(count);
+            let mut samples=Vec::new();
+            for _ in 0..5 {
+                let started=std::time::Instant::now();
+                let graph=Graph::from_il(std::hint::black_box(&il))
+                    .expect("synthetic graph must stay valid");
+                let elapsed=started.elapsed();
+                assert_eq!(graph.scope_lifetimes.len(),count as usize);
+                std::hint::black_box(graph);
+                samples.push(elapsed);
+            }
+            samples.sort_unstable();
+            let ms=samples[2].as_secs_f64()*1000.0;
+            let reference=*base_ms.get_or_insert(ms);
+            println!(
+                "indexed-scope-lifetime from_il records={count} median_ms={ms:.3} relative_128={:.2}x",
+                ms/reference,
+            );
+        }
     }
 
     #[test]
