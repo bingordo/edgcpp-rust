@@ -5024,6 +5024,66 @@ mod tests {
 #[cfg(test)]
 mod audit_resource_limits_tests {
     use super::*;
+
+    /// Ensure nested direct and indirect aggregate calls reserve one slot each.
+    #[test]
+    fn aggregate_call_temporary_stack_slots_are_counted_even_when_nested() {
+        let aggregate=CAbi {
+            parameters:vec![],aggregate_parameters:vec![],
+            result:None,aggregate_result:Some(16),
+        };
+        let scalar=CAbi {
+            parameters:vec![],aggregate_parameters:vec![],
+            result:Some(CAbiInt{bits:64,signed:true,is_bool:false}),
+            aggregate_result:None,
+        };
+        let body=vec![
+            Stmt::Eval(Expr::Call(
+                crate::SymbolId(1),aggregate.clone(),vec![
+                    Expr::CallIndirect(
+                        Box::new(Expr::AddressFunction(crate::SymbolId(2))),
+                        aggregate.clone(),vec![],
+                    )
+                ],
+            )),
+            Stmt::Eval(Expr::Call(crate::SymbolId(3),scalar,vec![])),
+            Stmt::Eval(Expr::AddressLocal(2)),
+            Stmt::Return(Expr::Constant(0)),
+        ];
+        let mut collected=AddressedStorage::default();
+        addressed_stmt(&body,&mut collected);
+        assert_eq!(collected.locals,HashSet::from([2]));
+        assert_eq!(collected.temporary_bytes,2*(16+7));
+        assert_eq!(crate::limits::bounded_explicit_stack_bytes(
+            [(8,0)],collected.temporary_bytes),Some(8+2*(16+7)));
+    }
+
+    /// Reject multiple large addressable locals before creating Cranelift slots.
+    #[test]
+    fn aggregate_stack_budget_rejects_sum_of_individually_valid_objects() {
+        let half=(crate::limits::MAX_FUNCTION_EXPLICIT_STACK_BYTES/2) as u32;
+        let make=|second:u32|Routine {
+            name:"stack_budget_unit".into(),parameters:0,locals:2,
+            body:vec![
+                Stmt::Eval(Expr::AddressLocal(0)),
+                Stmt::Eval(Expr::AddressLocal(1)),
+                Stmt::Return(Expr::Constant(0)),
+            ],
+            abi:None,local_types:None,
+            local_storage:Some(vec![half,second]),
+            local_alignments:Some(vec![0,0]),
+            parameter_accesses:vec![],
+        };
+        let err=emit_routines(&[make(half+1)]).unwrap_err();
+        assert!(matches!(err,CodegenError::InvalidFunction(msg)
+            if msg.contains("explicit stack slots exceed per-function budget")));
+        // An unused, unaddressed local is SSA-only and does not reserve
+        // the supplied source object's entire storage as an explicit slot.
+        let mut only_one=make(half+1);
+        only_one.body.remove(1);
+        assert!(&emit_routines(&[only_one]).unwrap()[..4]==b"\x7fELF");
+    }
+
     #[test]
     fn aggregate_image_boundaries_are_checked() {
         assert!(!valid_aggregate_image_len(0));
