@@ -94,7 +94,7 @@ fn duplicate_or_out_of_order_source_wire_is_malformed() {
 
 #[test]
 fn absent_observer_is_unknown_not_a_complete_initialization_certificate() {
-    let mut state=Collector::default();
+    let state=Collector::default();
     assert!(validate_source_file_init_slices(&state.il).is_ok());
     assert!(state.il.source_file_init_slices.is_empty());
     for (routine,tls,count) in [(0,0,1),(17,2,1),(17,0,1025)] {
