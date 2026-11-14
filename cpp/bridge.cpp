@@ -1941,7 +1941,8 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             "explicit_init=%u type_name=%s nonreal_class=%u "
             "concrete_root=%u generated=%u storage_class=%u "
             "class_tag_present=%u class_tag_kind=%u class_supplement=%u "
-            "class_template=%u class_incomplete=%u local_used=%u "
+            "class_template=%u class_incomplete=%u extra_info_present=%u "
+            "tagless_storage_only=%u local_used=%u "
             "address_taken=%u variable_nonreal=%u prototype_instance=%u "
             "diagnostic_only=true\n",
             function.c_str(), symbol,
@@ -1968,6 +1969,8 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             class_supplement != nullptr &&
                 class_supplement->class_template != nullptr ? 1u : 0u,
             var->type->incomplete ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr ? 1u : 0u,
+            tagless_cpp_storage_only(var->type) ? 1u : 0u,
             var->used ? 1u : 0u,
             var->address_taken ? 1u : 0u,
             var->is_nonreal ? 1u : 0u,
