@@ -1877,14 +1877,19 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
         ResolvedSource source_position{};
         const bool has_position =
             resolve_source(var->source_corresp.decl_position, source_position);
+        ResolvedSource type_source_position{};
+        const bool has_type_position = resolve_source(
+            var->type->source_corresp.decl_position, type_source_position);
         const char *source_type_name =
             source_name(var->type->source_corresp);
         std::fprintf(stderr,
             "EDG_NATIVE_SCOPE_OWNER function=%s local_symbol=%u class_bytes=%lu "
             "scope_kind=%u source_local=%u owner_present=%u owner_matches=%u "
             "parent_present=%u parent_matches=%u position_present=%u "
-            "type_name=%s nonreal_class=%u concrete_root=%u generated=%u "
-            "storage_class=%u diagnostic_only=true\n",
+            "type_position_present=%u source_list=%u init_kind=%u "
+            "explicit_init=%u type_name=%s nonreal_class=%u "
+            "concrete_root=%u generated=%u storage_class=%u "
+            "diagnostic_only=true\n",
             function.c_str(), symbol,
             static_cast<unsigned long>(var->type->size),
             static_cast<unsigned>(scope->kind),
@@ -1894,6 +1899,10 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             var->source_corresp.parent_scope != nullptr ? 1u : 0u,
             var->source_corresp.parent_scope == scope ? 1u : 0u,
             has_position ? 1u : 0u,
+            has_type_position ? 1u : 0u,
+            group, // 0: nonstatic_variables, 1: variables.
+            static_cast<unsigned>(var->init_kind),
+            var->has_explicit_initializer ? 1u : 0u,
             source_type_name != nullptr ? source_type_name : "<none>",
             var->type->variant.class_struct_union.is_nonreal_class ? 1u : 0u,
             supported_concrete_class_proof_root(var->type) ? 1u : 0u,
