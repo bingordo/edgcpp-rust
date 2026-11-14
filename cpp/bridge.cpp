@@ -1945,6 +1945,37 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
     emit_record(39, {num(routine), num(id), num(region->second)});
   }
 
+  // Independently walk EDG's two native local-variable lists before
+  // exporting any event-31 declarations. The two lists may alias and
+  // variables may already belong to an earlier scope: count each
+  // declaration only where event 31 will first emit it.
+  uint32_t native_local_count = 0;
+  std::unordered_set<a_variable_ptr> native_scope_locals;
+  for (unsigned group = 0; group < 2; ++group) {
+    a_variable_ptr first = group == 0 ?
+        scope->nonstatic_variables : scope->variables;
+    uint32_t visited_count = 0;
+    std::unordered_set<a_variable_ptr> native_list_seen;
+    a_variable_ptr var = first;
+    for (; var != nullptr && within_native_list_limit(visited_count);
+         var = var->next, ++visited_count) {
+      if (!native_list_seen.insert(var).second) {
+        report_incomplete_snapshot();
+        return;
+      }
+      if (!var->is_parameter && !var->is_this_parameter &&
+          seen_locals.find(var) == seen_locals.end() &&
+          native_scope_locals.insert(var).second) {
+        ++native_local_count;
+      }
+    }
+    if (var != nullptr) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
+  emit_record(RECORD_NATIVE_SCOPE_LOCAL_COUNT,
+              {num(routine),num(id),num(native_local_count)});
   for (unsigned group = 0; group < 2; ++group) {
     a_variable_ptr first = group == 0 ?
         scope->nonstatic_variables : scope->variables;
@@ -2097,6 +2128,28 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
 {
   if (body == nullptr || body->kind != sck_function) return;
   unsigned position = 0;
+  // The ABI signature proof alone cannot certify omitted tail entries
+  // of the function-scope EDG parameter chain. Source-count the *actual*
+  // non-this declarations before emitting any parameter event-29 records.
+  uint32_t native_parameter_count = 0;
+  uint32_t counted = 0;
+  std::unordered_set<a_variable_ptr> native_parameters;
+  a_variable_ptr scan = body->variant.routine.parameters;
+  for (; scan != nullptr && within_native_list_limit(counted);
+       scan = scan->next, ++counted) {
+    if (!native_parameters.insert(scan).second) {
+      report_incomplete_snapshot();
+      return;
+    }
+    if (!scan->is_this_parameter) ++native_parameter_count;
+  }
+  if (scan != nullptr) {
+    report_incomplete_snapshot();
+    return;
+  }
+  emit_record(RECORD_NATIVE_FUNCTION_PARAMETER_COUNT,
+              {num(routine),num(native_parameter_count),
+               num(body->variant.routine.this_param_variable != nullptr ? 1u : 0u)});
   unsigned count = 0;
   std::unordered_set<a_variable_ptr> seen_parameters;
   for (a_variable_ptr var = body->variant.routine.parameters;
