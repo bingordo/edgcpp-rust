@@ -76,6 +76,9 @@ pub struct Il {
     /// C++ local object admission after inspecting EDG's complete class
     /// member scope, including methods inlined away from routine bodies.
     pub cxx_record_admissions: Vec<CxxRecordAdmission>,
+    /// EDG event 63 discriminant=2: complete tagless record without class
+    /// supplement. Strictly storage shape; NOT plain_object or lifetime.
+    pub cxx_tagless_storage_proofs: Vec<TypeId>,
     /// Distinct source-certified candidate for a bounded user ctor/dtor.
     /// This never implies ordinary POD or proves path-sensitive cleanup.
     pub cxx_scalar_lifetime_admissions: Vec<CxxScalarLifetimeAdmission>,
@@ -1658,13 +1661,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         63 => {
             let (Some(owner),Some(plain)) = (n(0),n(1)) else {return;};
-            if owner==0 || plain>1 ||
+            if owner==0 || plain>2 ||
                 !seen.cxx_records.insert(TypeId(owner)) {
                 return;
             }
             output.cxx_record_admissions.push(CxxRecordAdmission {
                 owner:TypeId(owner),plain_object:plain==1,
             });
+            if plain==2 {
+                output.cxx_tagless_storage_proofs.push(TypeId(owner));
+            }
         }
         65 => {
             let (Some(owner),Some(proven)) = (n(0),n(1)) else {return;};
@@ -4178,6 +4184,31 @@ mod tests {
         unsafe {
             collect((&mut state as *mut Collector).cast(), 22,
                     invalid_attributes.as_ptr(), invalid_attributes.len(), 0);
+        }
+        assert!(state.malformed);
+    }
+
+    #[test]
+    fn tagless_storage_certificate_never_upgrades_class_to_pod() {
+        let field=|value| WireField {
+            data:std::ptr::null(),length:0,value,tag:2,
+        };
+        let mut state=Collector::default();
+        let tagless=[field(733),field(2)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),63,
+                tagless.as_ptr(),tagless.len(),0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.cxx_tagless_storage_proofs,vec![TypeId(733)]);
+        assert_eq!(state.il.cxx_record_admissions,vec![
+            CxxRecordAdmission{owner:TypeId(733),plain_object:false}
+        ]);
+        // A forged, unknown semantic class discriminant must fail closed.
+        let bad=[field(734),field(3)];
+        unsafe {
+            collect((&mut state as *mut Collector).cast(),63,
+                bad.as_ptr(),bad.len(),0);
         }
         assert!(state.malformed);
     }
