@@ -9,6 +9,7 @@
 pub mod graph;
 pub mod memory_order;
 pub mod scalar_abi;
+mod limits;
 #[cfg(feature = "codegen")]
 pub mod codegen;
 
@@ -1534,9 +1535,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
     }
 }
 
-// Keep in sync with cpp/bridge.cpp::MAX_NATIVE_AGGREGATE_IMAGE_BYTES.
+// The shared limit mirrors cpp/bridge.cpp::MAX_NATIVE_AGGREGATE_IMAGE_BYTES.
 // C++ sends hex images with two ASCII characters per byte.
-const MAX_NATIVE_AGGREGATE_IMAGE_BYTES: usize = 4096;
+use crate::limits::MAX_NATIVE_AGGREGATE_IMAGE_BYTES;
 const MAX_NATIVE_AGGREGATE_HEX_CHARS: usize = MAX_NATIVE_AGGREGATE_IMAGE_BYTES * 2;
 
 /// Decode a bounded native byte image. Reject arbitrary strings and odd

@@ -193,7 +193,7 @@ fn emit_expr(
         })?,
         Expr::StoreLocal(index, value, body) => {
             let value = emit_expr(value, builder, params, locals)?;
-            if *index >= 10_000 {
+            if *index >= crate::limits::MAX_CFG_LOCALS {
                 return Err(CodegenError::InvalidFunction(format!(
                     "local index {index} exceeds reference backend limit")));
             }

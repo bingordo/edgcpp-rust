@@ -6,9 +6,23 @@
 //! The eventual full EDG adapter must share a typed scalar passing plan with
 //! the integer CFG; do not weaken the older integer ABI checks in the meantime.
 // Defensive implementation caps, not C language or target ABI limits.
-const MAX_FP_ARGUMENTS: usize = crate::scalar_abi::MAX_SUPPORTED_PARAMETERS;
-const MAX_FP_LOCALS: usize = 4096;
-const MAX_FP_STATEMENTS: usize = 10000;
+use crate::limits::{
+    MAX_SUPPORTED_PARAMETERS as MAX_FP_ARGUMENTS,
+    MAX_FP_LOCALS, MAX_FP_STATEMENTS,
+};
+
+/// Check resource budgets before creating FP vectors or Cranelift locals.
+fn checked_fp_function_resources(
+    parameters: usize, locals: usize, statements: usize,
+) -> Result<(), CodegenError> {
+    if parameters > MAX_FP_ARGUMENTS || locals > MAX_FP_LOCALS {
+        return Err(reject("invalid FP function variable count"));
+    }
+    if statements == 0 || statements > MAX_FP_STATEMENTS {
+        return Err(reject("FP function body is empty or oversized"));
+    }
+    Ok(())
+}
 
 use super::*;
 use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
@@ -1811,13 +1825,12 @@ fn emit_scalar_float_bodies_with_globals(
     let mut exports=Vec::new();
     for f in functions {
         checked_scalar_passing_plan(&f.parameters,f.result)?;
-        if f.name.is_empty()||f.name.contains('\0') ||
-            f.parameters.len()>MAX_FP_ARGUMENTS || f.locals.len()>MAX_FP_LOCALS {
+        if f.name.is_empty()||f.name.contains('\0') {
             return Err(reject("invalid FP function name or variable count"));
         }
-        if f.statements.is_empty() || f.statements.len()>MAX_FP_STATEMENTS {
-            return Err(reject("FP function body is empty or oversized"));
-        }
+        checked_fp_function_resources(
+            f.parameters.len(), f.locals.len(), f.statements.len(),
+        )?;
         let checked=check_fp_statements(&f.statements,f,
             vec![false;f.locals.len()],0,0)?;
         if checked.normal.is_some() {
@@ -4657,5 +4670,30 @@ int main(void) {
         let run=Command::new(&exe).output().unwrap();
         assert!(run.status.success(),"FP ABI execution: {}",String::from_utf8_lossy(&run.stderr));
         let _=std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod audit_resource_budget_tests {
+    use super::*;
+
+    /// Check inclusive FP limits without allocating thousands of codegen nodes.
+    #[test]
+    fn fp_parameter_local_and_statement_limits_are_checked_independently() {
+        let p=MAX_FP_ARGUMENTS;
+        let l=MAX_FP_LOCALS;
+        let s=MAX_FP_STATEMENTS;
+        assert!(checked_fp_function_resources(0,0,1).is_ok());
+        assert!(checked_fp_function_resources(p,l,s).is_ok());
+        assert!(checked_fp_function_resources(p+1,0,1).is_err());
+        assert!(checked_fp_function_resources(0,l+1,1).is_err());
+        assert!(checked_fp_function_resources(0,0,s+1).is_err());
+        assert!(checked_fp_function_resources(0,0,0).is_err());
+        // Reject the over-limit resource even with all other counts minimal.
+        for (params,locals,stmts) in [
+            (p+1,l,s), (p,l+1,s), (p,l,s+1),
+        ] {
+            assert!(checked_fp_function_resources(params,locals,stmts).is_err());
+        }
     }
 }
