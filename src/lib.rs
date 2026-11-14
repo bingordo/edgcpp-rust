@@ -195,6 +195,8 @@ pub struct Il {
     pub base_class_access: Vec<BaseClassAccess>,
     /// Constructor and destructor subobject initialization records.
     pub constructor_initializers: Vec<ConstructorInitializer>,
+    /// EDG-native independent constructor initializer list size per defined routine.
+    pub native_constructor_initializer_counts: Vec<NativeConstructorInitializerCount>,
     /// Owned expression trees attached to constructor initializer entries.
     pub constructor_initializer_expressions: Vec<ConstructorInitializerExpression>,
     /// Class ownership edges for declared member functions.
@@ -583,6 +585,13 @@ pub struct BaseClassAccess {
 ///
 /// Native EDG kind: 0=virtual base, 1=direct base, 2=field, 3=delegation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// EDG-owned number of constructor/destructor initializer entries (wire 92).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructorInitializerCount {
+    pub routine: SymbolId,
+    pub count: u32,
+}
+
 pub struct ConstructorInitializer {
     pub routine: SymbolId,
     pub position: u32,
@@ -1376,6 +1385,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         89 => Some(il.native_constructor_child_counts.len()),
         90 => Some(il.native_control_root_admissions.len()),
         91 => Some(il.native_constructor_root_admissions.len()),
+        92 => Some(il.native_constructor_initializer_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2159,6 +2169,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if function.is_empty() || statement_path.is_empty() || mask & !15!=0 {return;}
             output.native_control_root_admissions.push(NativeControlRootAdmission {
                 function,statement_path,mask,
+            });
+        }
+        92 => {
+            let (Some(routine),Some(count))=(n(0),n(1)) else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_constructor_initializer_counts.push(NativeConstructorInitializerCount {
+                routine:SymbolId(routine),count,
             });
         }
         91 => {
@@ -3083,6 +3100,52 @@ fn validate_native_supplemental_root_admission(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// EDG constructor-initializer list cardinality is independent of the
+// initializer entry emissions: a missing last event-20/91 pair is not
+// detectable from dense observed positions alone.
+fn validate_native_constructor_initializer_lists(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let defined:HashSet<&str>=il.entities.iter().filter_map(|entity|
+        match entity {
+            Entity::Routine{name,has_definition:true} => Some(name.as_str()),
+            _=>None,
+        }).collect();
+    let mut defined_routines=HashSet::new();
+    for identity in &il.routine_identities {
+        if defined.contains(identity.function.as_str()) &&
+            !defined_routines.insert(identity.routine) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    // Defined-name/identity coverage is also checked by
+    // validate_native_tree_count_coverage.
+    if defined_routines.len()!=defined.len() {return Err(Error::MalformedCallback);}
+    let mut proofs=HashMap::new();
+    for witness in &il.native_constructor_initializer_counts {
+        if witness.count>10000 || !defined_routines.contains(&witness.routine) ||
+            proofs.insert(witness.routine,witness.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if proofs.len()!=defined_routines.len() {return Err(Error::MalformedCallback);}
+    let mut positions:HashMap<SymbolId,HashSet<u32>>=HashMap::new();
+    for init in &il.constructor_initializers {
+        let Some(&count)=proofs.get(&init.routine) else {
+            return Err(Error::MalformedCallback);
+        };
+        if init.position>=count ||
+            !positions.entry(init.routine).or_default().insert(init.position) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (routine,count) in proofs {
+        if positions.get(&routine).map_or(0,HashSet::len)!=count as usize {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3103,6 +3166,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
+       validate_native_constructor_initializer_lists(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -5106,7 +5170,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=91_u32 {
+        for kind in 1..=92_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5133,10 +5197,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,364);
+        assert_eq!(total,366);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(92).is_none());
+        assert!(expected_wire_field_tag_masks(93).is_none());
     }
 
     #[test]
