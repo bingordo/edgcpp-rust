@@ -588,7 +588,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
             "is_template=%u nonreal=%u compiler_generated=%u "
             "supplement=%u scope=%u routines=%u variables=%u "
             "bases=%u field_initializers=%u assoc_template=%u "
-            "tagless_structural=%u plain_class=%u fields=%u diagnostic_only=true\\n",
+            "tagless_structural=%u plain_class=%u fields=%u diagnostic_only=true\n",
             id,source_type_name!=nullptr?source_type_name:"<none>",
             static_cast<unsigned>(type->kind),
             tag!=nullptr?1u:0u,
@@ -625,7 +625,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           std::fprintf(stderr,
               "EDG_NATIVE_NESTED_224_FIELD owner=%u pos=%u name=%s "
               "field_kind=%u size=%lu align=%lu offset=%lu "
-              "bit_offset=%u bits=%u tag_present=%u diagnostic_only=true\\n",
+              "bit_offset=%u bits=%u tag_present=%u diagnostic_only=true\n",
               id,index,field_name!=nullptr?field_name:"<none>",
               child!=nullptr?static_cast<unsigned>(child->kind):0u,
               child!=nullptr?static_cast<unsigned long>(child->size):0ul,
