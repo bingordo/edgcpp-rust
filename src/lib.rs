@@ -195,6 +195,8 @@ pub struct Il {
     pub base_class_access: Vec<BaseClassAccess>,
     /// Constructor and destructor subobject initialization records.
     pub constructor_initializers: Vec<ConstructorInitializer>,
+    /// EDG-native independent constructor initializer list size per defined routine.
+    pub native_constructor_initializer_counts: Vec<NativeConstructorInitializerCount>,
     /// Owned expression trees attached to constructor initializer entries.
     pub constructor_initializer_expressions: Vec<ConstructorInitializerExpression>,
     /// Class ownership edges for declared member functions.
@@ -582,6 +584,13 @@ pub struct BaseClassAccess {
 /// One constructor/destructor subobject initializer in execution order.
 ///
 /// Native EDG kind: 0=virtual base, 1=direct base, 2=field, 3=delegation.
+/// EDG-owned number of constructor/destructor initializer entries (wire 92).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructorInitializerCount {
+    pub routine: SymbolId,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorInitializer {
     pub routine: SymbolId,
@@ -1376,6 +1385,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         89 => Some(il.native_constructor_child_counts.len()),
         90 => Some(il.native_control_root_admissions.len()),
         91 => Some(il.native_constructor_root_admissions.len()),
+        92 => Some(il.native_constructor_initializer_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2159,6 +2169,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if function.is_empty() || statement_path.is_empty() || mask & !15!=0 {return;}
             output.native_control_root_admissions.push(NativeControlRootAdmission {
                 function,statement_path,mask,
+            });
+        }
+        92 => {
+            let (Some(routine),Some(count))=(n(0),n(1)) else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_constructor_initializer_counts.push(NativeConstructorInitializerCount {
+                routine:SymbolId(routine),count,
             });
         }
         91 => {
@@ -3083,6 +3100,52 @@ fn validate_native_supplemental_root_admission(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// EDG constructor-initializer list cardinality is independent of the
+// initializer entry emissions: a missing last event-20/91 pair is not
+// detectable from dense observed positions alone.
+fn validate_native_constructor_initializer_lists(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let defined:HashSet<&str>=il.entities.iter().filter_map(|entity|
+        match entity {
+            Entity::Routine{name,has_definition:true} => Some(name.as_str()),
+            _=>None,
+        }).collect();
+    let mut defined_routines=HashSet::new();
+    for identity in &il.routine_identities {
+        if defined.contains(identity.function.as_str()) &&
+            !defined_routines.insert(identity.routine) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    // Defined-name/identity coverage is also checked by
+    // validate_native_tree_count_coverage.
+    if defined_routines.len()!=defined.len() {return Err(Error::MalformedCallback);}
+    let mut proofs=HashMap::new();
+    for witness in &il.native_constructor_initializer_counts {
+        if witness.count>10000 || !defined_routines.contains(&witness.routine) ||
+            proofs.insert(witness.routine,witness.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if proofs.len()!=defined_routines.len() {return Err(Error::MalformedCallback);}
+    let mut positions:HashMap<SymbolId,HashSet<u32>>=HashMap::new();
+    for init in &il.constructor_initializers {
+        let Some(&count)=proofs.get(&init.routine) else {
+            return Err(Error::MalformedCallback);
+        };
+        if init.position>=count ||
+            !positions.entry(init.routine).or_default().insert(init.position) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (routine,count) in proofs {
+        if positions.get(&routine).map_or(0,HashSet::len)!=count as usize {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3103,6 +3166,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
+       validate_native_constructor_initializer_lists(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3559,6 +3623,79 @@ mod tests {
         il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
         assert!(validate_native_supplemental_root_admission(&il).is_err(),
             "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn constructor_initializer_list_proofs_reject_missing_first_middle_and_tail() {
+        let mut il=Il::default();
+        il.entities.push(Entity::Routine{name:"ctor".into(),has_definition:true});
+        il.routine_identities.push(RoutineIdentity{
+            routine:SymbolId(7),function:"ctor".into(),
+        });
+        let item=|position|ConstructorInitializer{
+            routine:SymbolId(7),position,kind:3,target_type:None,
+            target_field:None,compiler_generated:false,braced:false,
+            use_field_initializer:false,pack_expansion:false,
+        };
+        assert!(validate_native_constructor_initializer_lists(&il).is_err(),
+            "even an empty native list must carry an independent witness");
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(7),count:0});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("empty native list certified");
+        il.constructor_initializers.extend((0..3).map(item));
+        il.native_constructor_initializer_counts[0].count=3;
+        validate_native_constructor_initializer_lists(&il)
+            .expect("complete native list");
+        for removed in 0..3 {
+            let mut truncated=il.clone();
+            truncated.constructor_initializers.remove(removed);
+            assert!(validate_native_constructor_initializer_lists(&truncated).is_err(),
+                "dropping item {removed} must fail");
+        }
+        let mut duplicated=il.clone();
+        duplicated.constructor_initializers.push(item(2));
+        assert!(validate_native_constructor_initializer_lists(&duplicated).is_err(),
+            "duplicate initializer position must fail");
+        let mut extra=il.clone();
+        extra.constructor_initializers.push(item(3));
+        assert!(validate_native_constructor_initializer_lists(&extra).is_err(),
+            "unexpected extra initializer must fail");
+        let mut orphan=il.clone();
+        orphan.native_constructor_initializer_counts[0].routine=SymbolId(99);
+        assert!(validate_native_constructor_initializer_lists(&orphan).is_err(),
+            "orphan list count must fail");
+        let mut no_proof=il.clone();
+        no_proof.native_constructor_initializer_counts.clear();
+        assert!(validate_native_constructor_initializer_lists(&no_proof).is_err(),
+            "entire list witness cannot disappear");
+        let mut two_proofs=il.clone();
+        two_proofs.native_constructor_initializer_counts.push(
+            two_proofs.native_constructor_initializer_counts[0].clone());
+        assert!(validate_native_constructor_initializer_lists(&two_proofs).is_err(),
+            "duplicate native list witness must fail");
+    }
+
+    #[test]
+    fn constructor_list_count_is_per_defined_routine() {
+        let mut il=Il::default();
+        for (name,id) in [("one",7),("two",8)] {
+            il.entities.push(Entity::Routine{name:name.into(),has_definition:true});
+            il.routine_identities.push(RoutineIdentity{
+                routine:SymbolId(id),function:name.into(),
+            });
+        }
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(7),count:0});
+        assert!(validate_native_constructor_initializer_lists(&il).is_err(),
+            "second defined routine also needs a zero count");
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(8),count:0});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("both empty lists independently certified");
+        il.entities.push(Entity::Routine{name:"declaration".into(),has_definition:false});
+        validate_native_constructor_initializer_lists(&il)
+            .expect("declarations do not own a native initializer list");
     }
 
     #[test]
@@ -5106,7 +5243,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=91_u32 {
+        for kind in 1..=92_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5133,10 +5270,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,364);
+        assert_eq!(total,366);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(92).is_none());
+        assert!(expected_wire_field_tag_masks(93).is_none());
     }
 
     #[test]
