@@ -3068,14 +3068,34 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
     }
     Ok(out)
 }
-/// Gather only variables whose addresses escape into pointer expressions.
-/// SSA locals remain cheap virtual registers; addressed locals use stack slots.
-fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
+/// Collect addressable named locals and every aggregate-return temporary.
+/// These are the explicit Cranelift slots whose conservative upper bound is
+/// checked before any FunctionBuilder::create_sized_stack_slot call.
+#[derive(Default)]
+struct AddressedStorage {
+    locals: HashSet<usize>,
+    temporary_bytes: u64,
+}
+impl AddressedStorage {
+    /// Include one 8-byte-aligned result slot for each 9–16 byte call value.
+    fn record_call(&mut self, abi:&CAbi) {
+        if let Some(bytes)=abi.aggregate_result.filter(|&bytes|bytes>8) {
+            self.temporary_bytes=self.temporary_bytes.saturating_add(
+                u64::from(bytes)+7);
+        }
+    }
+}
+/// SSA locals remain cheap virtual registers; only addressed locals take slots.
+fn addressed_expr(expr:&Expr,found:&mut AddressedStorage) {
     match expr {
-        Expr::AddressLocal(i) => {found.insert(*i);}
-        Expr::Call(_,_,args) => for arg in args { addressed_expr(arg,found); },
+        Expr::AddressLocal(i) => {found.locals.insert(*i);}
+        Expr::Call(_,abi,args) => {
+            found.record_call(abi);
+            for arg in args {addressed_expr(arg,found);}
+        },
         Expr::VlaAlloc(_,call) => addressed_expr(call,found),
-        Expr::CallIndirect(callee,_,args) => {
+        Expr::CallIndirect(callee,abi,args) => {
+            found.record_call(abi);
             addressed_expr(callee,found);
             for arg in args {addressed_expr(arg,found);}
         },
@@ -3123,11 +3143,11 @@ fn addressed_expr(expr:&Expr,found:&mut HashSet<usize>) {
         Expr::AddressGlobal(_) | Expr::AddressFunction(_) => {}
     }
 }
-fn addressed_stmt(body:&[Stmt],found:&mut HashSet<usize>) {
+fn addressed_stmt(body:&[Stmt],found:&mut AddressedStorage) {
     for statement in body {
         match statement {
             Stmt::ZeroAggregate(index,_) |
-            Stmt::InitializeAggregate(index,_) => {found.insert(*index);}
+            Stmt::InitializeAggregate(index,_) => {found.locals.insert(*index);}
             Stmt::Store(_,e) | Stmt::Eval(e) | Stmt::Return(e) |
             Stmt::ReturnAggregate(_,e) => addressed_expr(e,found),
             Stmt::If(c,a,b) => { addressed_expr(c,found);
@@ -4392,20 +4412,20 @@ fn emit_routines_with_globals(
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            let mut addressed=HashSet::new();
+            let mut addressed=AddressedStorage::default();
             addressed_stmt(&func.body,&mut addressed);
             let label_ids=source_labels(&func.body)?;
             // A source goto may bypass lexical SSA initialization; address
             // all local/parameter slots so stores and reads preserve C memory
             // semantics irrespective of the predecessor edge.
-            if !label_ids.is_empty() {addressed.extend(0..local_types.len());}
+            if !label_ids.is_empty() {addressed.locals.extend(0..local_types.len());}
             let labels:HashMap<_,_>=label_ids.into_iter()
                 .map(|id|(id,fb.create_block())).collect();
             // Aggregate formal parameters are addressable C objects,
             // not SSA scalar values. Materialize exactly the native object
             // width from the incoming INTEGER-class register.
             for (index,aggregate) in abi.aggregate_parameters.iter().enumerate() {
-                if aggregate.is_some() {addressed.insert(func.locals+index);}
+                if aggregate.is_some() {addressed.locals.insert(func.locals+index);}
             }
             if !func.parameter_accesses.is_empty() &&
                func.parameter_accesses.len()!=func.parameters {
@@ -4413,7 +4433,7 @@ fn emit_routines_with_globals(
             }
             for (index,access) in func.parameter_accesses.iter().enumerate() {
                 if *access!=MemoryAccess::Ordinary {
-                    addressed.insert(func.locals+index);
+                    addressed.locals.insert(func.locals+index);
                 }
             }
             let storage=func.local_storage.clone().unwrap_or_else(||
@@ -4426,9 +4446,23 @@ fn emit_routines_with_globals(
             if alignments.len()!=storage.len() {
                 return Err(invalid("stack alignment/type count mismatch"));
             }
+            // Every explicit slot, including transient aggregate-valued
+            // call results, participates in one per-function budget. Check
+            // before emitting any Cranelift slot to avoid oversized frames
+            // or silent u32/offset wrap in later lowering.
+            let slots=addressed.locals.iter().map(|&index| {
+                let bytes=*storage.get(index)
+                    .ok_or_else(||invalid("invalid stack local"))?;
+                let alignment=*alignments.get(index)
+                    .ok_or_else(||invalid("invalid stack local alignment"))?;
+                Ok((bytes,alignment))
+            }).collect::<Result<Vec<_>,CodegenError>>()?;
+            crate::limits::bounded_explicit_stack_bytes(
+                slots.into_iter(),addressed.temporary_bytes)
+                .ok_or_else(||invalid("explicit stack slots exceed per-function budget"))?;
             let mut stack=HashMap::new();
-            for index in addressed {
-                let bytes=*storage.get(index).ok_or_else(||invalid("invalid stack local"))?;
+            for index in addressed.locals {
+                let bytes=storage[index];
                 let slot=fb.create_sized_stack_slot(
                     StackSlotData::new(StackSlotKind::ExplicitSlot,bytes,alignments[index]));
                 stack.insert(index,slot);
@@ -4990,6 +5024,66 @@ mod tests {
 #[cfg(test)]
 mod audit_resource_limits_tests {
     use super::*;
+
+    /// Ensure nested direct and indirect aggregate calls reserve one slot each.
+    #[test]
+    fn aggregate_call_temporary_stack_slots_are_counted_even_when_nested() {
+        let aggregate=CAbi {
+            parameters:vec![],aggregate_parameters:vec![],
+            result:None,aggregate_result:Some(16),
+        };
+        let scalar=CAbi {
+            parameters:vec![],aggregate_parameters:vec![],
+            result:Some(CAbiInt{bits:64,signed:true,is_bool:false}),
+            aggregate_result:None,
+        };
+        let body=vec![
+            Stmt::Eval(Expr::Call(
+                crate::SymbolId(1),aggregate.clone(),vec![
+                    Expr::CallIndirect(
+                        Box::new(Expr::AddressFunction(crate::SymbolId(2))),
+                        aggregate.clone(),vec![],
+                    )
+                ],
+            )),
+            Stmt::Eval(Expr::Call(crate::SymbolId(3),scalar,vec![])),
+            Stmt::Eval(Expr::AddressLocal(2)),
+            Stmt::Return(Expr::Constant(0)),
+        ];
+        let mut collected=AddressedStorage::default();
+        addressed_stmt(&body,&mut collected);
+        assert_eq!(collected.locals,HashSet::from([2]));
+        assert_eq!(collected.temporary_bytes,2*(16+7));
+        assert_eq!(crate::limits::bounded_explicit_stack_bytes(
+            [(8,0)],collected.temporary_bytes),Some(8+2*(16+7)));
+    }
+
+    /// Reject multiple large addressable locals before creating Cranelift slots.
+    #[test]
+    fn aggregate_stack_budget_rejects_sum_of_individually_valid_objects() {
+        let half=(crate::limits::MAX_FUNCTION_EXPLICIT_STACK_BYTES/2) as u32;
+        let make=|second:u32|Routine {
+            name:"stack_budget_unit".into(),parameters:0,locals:2,
+            body:vec![
+                Stmt::Eval(Expr::AddressLocal(0)),
+                Stmt::Eval(Expr::AddressLocal(1)),
+                Stmt::Return(Expr::Constant(0)),
+            ],
+            abi:None,local_types:None,
+            local_storage:Some(vec![half,second]),
+            local_alignments:Some(vec![0,0]),
+            parameter_accesses:vec![],
+        };
+        let err=emit_routines(&[make(half+1)]).unwrap_err();
+        assert!(matches!(err,CodegenError::InvalidFunction(msg)
+            if msg.contains("explicit stack slots exceed per-function budget")));
+        // An unused, unaddressed local is SSA-only and does not reserve
+        // the supplied source object's entire storage as an explicit slot.
+        let mut only_one=make(half+1);
+        only_one.body.remove(1);
+        assert!(&emit_routines(&[only_one]).unwrap()[..4]==b"\x7fELF");
+    }
+
     #[test]
     fn aggregate_image_boundaries_are_checked() {
         assert!(!valid_aggregate_image_len(0));
