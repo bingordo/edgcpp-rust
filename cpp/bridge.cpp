@@ -602,7 +602,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
           "extra=%u supp_scope=%u supp_routines=%u supp_variables=%u "
           "supp_bases=%u supp_template=%u supp_field_init=%u "
           "plain=%u structural_only=%u field_pos=%u field_kind=%u "
-          "field_bytes=%lu field_align=%lu offset=%lu bitfield=%u\\n",
+          "field_bytes=%lu field_align=%lu offset=%lu bitfield=%u\n",
           id,static_cast<unsigned long>(type->size),
           static_cast<unsigned long>(type->alignment),
           tag!=nullptr ? 1u : 0u,
