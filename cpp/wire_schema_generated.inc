@@ -32,6 +32,7 @@ enum : uint32_t {
   RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION = 91,
   RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT = 92,
   RECORD_NATIVE_LIFETIME_DESTRUCTION_COUNT = 93,
+  RECORD_NATIVE_LIFETIME_CHILD_COUNT = 94,
 };
 
 // Validate field tags before emitting typed native wire records.
@@ -960,6 +961,16 @@ static bool wire_record_field_tags_valid(
     return true;
   }
   case 93: {
+    const uint8_t masks[] = {4, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 94: {
     const uint8_t masks[] = {4, 4, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
