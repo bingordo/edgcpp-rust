@@ -249,21 +249,19 @@ pub struct Il {
     /// EDG's source-owned member-call dispatch bit. Plain calls may be
     /// lowered from virtual calls; their zero bit is not a nonvirtual proof.
     pub call_dispatches: Vec<CallDispatchProvenance>,
-    /// Optional EDG hook before lower_virtual_function_call replaces its
-    /// routine and receiver operands. Node carriers may be lost to copying:
-    /// surviving records are diagnostic-only, not complete ABI admission.
+    /// Legacy optional wire event 80 from a retired pre-lowering EDG hook.
+    /// New bridge builds cannot produce this record; it is decoded only for
+    /// historical fixtures and never establishes executable virtual-call ABI.
     pub prelower_virtual_origins: Vec<PrelowerVirtualCallOrigin>,
-    /// Source-owned receiver returned by EDG get_virtual_function_address
-    /// and still present as a unique direct ordinary-call argument. Optional
-    /// independent wire event 81: this is NOT an ABI this-adjustment.
+    /// Legacy optional wire event 81 paired with a retired EDG source hook.
+    /// New bridge builds do not produce it; it was never an ABI adjustment proof.
     pub virtual_receiver_reuses: Vec<VirtualReceiverReuse>,
-    /// EDG source-observed native Itanium vptr + exact constant index,
-    /// where the same index node survives in the final indirect callee.
-    /// Does NOT certify the physical vtable slot, thunk or address point.
+    /// Legacy optional wire event 82 from retired EDG source instrumentation.
+    /// New bridge builds do not produce it; no physical ABI slot is inferred.
     pub virtual_entry_indexes: Vec<VirtualEntryIndexSelection>,
-    /// Optional event 85: source-paired vptr lookup object and EDG reusable
-    /// argument of the same lowered call, both still visible at emission.
-    /// Does not prove machine receiver adjustment or live object layout.
+    /// Legacy optional wire event 85 from retired EDG source instrumentation.
+    /// New bridge builds do not produce it; no machine receiver adjustment
+    /// or live object layout is inferred.
     pub virtual_vptr_receiver_pairs: Vec<VirtualVptrReceiverPair>,
     /// Native compiler-generated pointer conversion wrappers, retaining the
     /// operand source C type before EDG inserts an implicit cast.
@@ -2668,7 +2666,7 @@ fn validate_prelower_virtual_call_origins(il:&Il)->Result<(),&'static str> {
             s.id==proof.original_routine && s.kind==1) {
             return Err("prelower virtual routine identity missing");
         }
-        // EDG's source hook reported an *actual virtual member call*.
+        // Historical source-hook payloads must be validated independently;
         // A routine ID in a namespace, nonvirtual method, or other unrelated
         // symbol can never be substituted for that original routine.
         let origin=il.native_virtual_members.iter().find(|v|
