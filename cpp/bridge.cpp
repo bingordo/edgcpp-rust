@@ -387,6 +387,54 @@ static bool supported_concrete_class_proof_root(a_type_ptr type) {
   return supplement != nullptr && supplement->class_template == nullptr;
 }
 
+// C++5: EDG's source-lowered C back end can describe a complete anonymous
+// record that has no class tag or class supplement. Such a record is NOT
+// admissible through is_pod_class(), which requires a concrete tag/member
+// scope and may dereference absent supplements. Export a different, strictly
+// structural storage certificate instead. It is never a ctor/dtor or by-value
+// ABI certificate, and the Rust lowering MUST verify every actual operation,
+// automatic source owner, and nested target field layout separately.
+static bool tagless_cpp_storage_only(a_type_ptr type) {
+  if (type == nullptr ||
+      (type->kind != tk_struct && type->kind != tk_class) ||
+      type->incomplete || type->size == 0 || type->alignment == 0 ||
+      type->variant.class_struct_union.is_nonreal_class ||
+      type->variant.class_struct_union.is_template_class ||
+      type->variant.class_struct_union.any_virtual_functions ||
+      type->variant.class_struct_union.any_virtual_base_classes ||
+      type->variant.class_struct_union.any_virtual_functions_including_in_base_classes ||
+      type->variant.class_struct_union.contains_flexible_array_member ||
+      type->variant.class_struct_union.field_list == nullptr ||
+      symbol_for(type) != nullptr) return false;
+  // A supplement can exist for ordinary class-layout bookkeeping even when
+  // there is no source tag. Certify only *structural* field membership:
+  // no method or static-member scope, direct/indirect bases, initializer,
+  // lambda, template, or generated subobject-class mechanics.
+  const auto *extra=type->variant.class_struct_union.extra_info;
+  if (extra != nullptr) {
+    if (extra->assoc_scope == nullptr ||
+        extra->assoc_scope->routines != nullptr ||
+        extra->assoc_scope->variables != nullptr ||
+        extra->base_classes != nullptr ||
+        extra->direct_base_classes != nullptr ||
+        extra->has_field_initializer ||
+        extra->is_lambda_closure_class ||
+        extra->assoc_template != nullptr ||
+        extra->template_arg_list != nullptr) return false;
+#if DO_IL_LOWERING
+    if (extra->compiler_generated || extra->has_subobject_type) return false;
+#endif
+#if MAINTAIN_CLASS_MEMBER_LIST
+    unsigned count=0;
+    for (an_il_entity_list_entry_ptr m=extra->member_declarations;
+         m!=nullptr; m=m->next) {
+      if (++count>128 || m->entity.kind != iek_field) return false;
+    }
+#endif
+  }
+  return true;
+}
+
 static bool plain_cpp_record(a_type_ptr type) {
   if (!supported_concrete_class_proof_root(type)) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
@@ -522,7 +570,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   // In C++ mode a missing or false proof must fail closed even if a
   // constructor was optimized into ordinary scalar stores.
   if (type->kind == tk_class || type->kind == tk_struct) {
-    emit_record(63, {num(id), num(plain_cpp_record(type) ? 1 : 0)});
+    // 0: nontrivial/unsupported class; 1: EDG-certified POD/trivial class;
+    // 2: tagless, no-supplement structural *storage only* (NOT a POD claim).
+    const unsigned record_proof = plain_cpp_record(type) ? 1u :
+        (tagless_cpp_storage_only(type) ? 2u : 0u);
+    emit_record(63, {num(id), num(record_proof)});
     emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
@@ -1912,7 +1964,10 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             "explicit_init=%u type_name=%s nonreal_class=%u "
             "concrete_root=%u generated=%u storage_class=%u "
             "class_tag_present=%u class_tag_kind=%u class_supplement=%u "
-            "class_template=%u class_incomplete=%u local_used=%u "
+            "class_template=%u class_incomplete=%u extra_info_present=%u "
+            "supp_scope=%u supp_routines=%u supp_variables=%u supp_bases=%u "
+            "supp_field_init=%u supp_assoc_template=%u supp_generated=%u "
+            "tagless_storage_only=%u local_used=%u "
             "address_taken=%u variable_nonreal=%u prototype_instance=%u "
             "diagnostic_only=true\n",
             function.c_str(), symbol,
@@ -1939,6 +1994,29 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
             class_supplement != nullptr &&
                 class_supplement->class_template != nullptr ? 1u : 0u,
             var->type->incomplete ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_scope != nullptr ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_scope != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_scope->routines != nullptr ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_scope != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_scope->variables != nullptr ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                (var->type->variant.class_struct_union.extra_info->base_classes != nullptr ||
+                 var->type->variant.class_struct_union.extra_info->direct_base_classes != nullptr) ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->has_field_initializer ? 1u : 0u,
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->assoc_template != nullptr ? 1u : 0u,
+#if DO_IL_LOWERING
+            var->type->variant.class_struct_union.extra_info != nullptr &&
+                var->type->variant.class_struct_union.extra_info->compiler_generated ? 1u : 0u,
+#else
+            0u,
+#endif
+            tagless_cpp_storage_only(var->type) ? 1u : 0u,
             var->used ? 1u : 0u,
             var->address_taken ? 1u : 0u,
             var->is_nonreal ? 1u : 0u,
