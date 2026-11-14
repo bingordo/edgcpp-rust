@@ -1629,7 +1629,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   // occurrence a unique child edge under its enclosing statement so the
   // existing graph can validate and lower declarations in execution order.
   // Never turn a statement expression into a fake constant/value.
-  if (node->kind == enk_statement && node->variant.statement != nullptr) {
+  if (node->kind == enk_statement) {
     std::string edge = "gnu" + path;
     for (char &c : edge) if (c == '.') c = '_';
     emit_statements(node->variant.statement, function, stmt_path, edge,
@@ -2220,10 +2220,12 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                       function, path, "else", depth + 1, true);
     } else if (stmt->kind == stmk_constexpr_if) {
       a_constexpr_if_ptr info = stmt->variant.constexpr_if;
-      if (info != nullptr) {
-        emit_statements(info->then_statement, function, path, "then", depth + 1, true);
-        emit_statements(info->else_statement, function, path, "else", depth + 1, true);
-      }
+      // Even a missing supplement has both empty native branch-list
+      // witnesses: otherwise a dropped last event-84 is undetectable.
+      emit_statements(info != nullptr ? info->then_statement : nullptr,
+                      function, path, "then", depth + 1, true);
+      emit_statements(info != nullptr ? info->else_statement : nullptr,
+                      function, path, "else", depth + 1, true);
     } else if (stmt->kind == stmk_while ||
                stmt->kind == stmk_end_test_while) {
       emit_statements(stmt->variant.loop_statement,
@@ -2260,10 +2262,11 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         if (info->iterator_scope != nullptr) {
           scope_statement_paths.emplace(info->iterator_scope, path);
         }
-        emit_statements(info->initialization, function, path, "init", depth + 1, true);
         emit_control_expr(info->ne_call_expr, function, path, 2, "0", "", 0);
         emit_control_expr(info->incr_call_expr, function, path, 3, "0", "", 0);
       }
+      emit_statements(info != nullptr ? info->initialization : nullptr,
+                      function, path, "init", depth + 1, true);
       emit_statements(stmt->variant.range_based_for_loop.statement,
                       function, path, "body", depth + 1, true);
     } else if (stmt->kind == stmk_switch) {
@@ -2271,8 +2274,9 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                       function, path, "body", depth + 1, true);
     } else if (stmt->kind == stmk_try_block) {
       a_try_supplement_ptr info = stmt->variant.try_block;
+      emit_statements(info != nullptr ? info->statement : nullptr,
+                      function, path, "try", depth + 1, true);
       if (info != nullptr) {
-        emit_statements(info->statement, function, path, "try", depth + 1, true);
         unsigned handler_index = 0;
         for (a_handler_ptr handler = info->handlers;
              handler != nullptr && within_native_list_limit(handler_index);
@@ -3116,6 +3120,11 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(stmk_switch_case)) return 14;
     if (value == static_cast<unsigned>(stmk_set_vla_size)) return 15;
     if (value == static_cast<unsigned>(stmk_vla_decl)) return 16;
+    if (value == static_cast<unsigned>(stmk_constexpr_if)) return 17;
+    if (value == static_cast<unsigned>(stmk_range_based_for)) return 18;
+    if (value == static_cast<unsigned>(stmk_try_block)) return 19;
+    if (value == static_cast<unsigned>(stmk_if_consteval)) return 20;
+    if (value == static_cast<unsigned>(stmk_if_not_consteval)) return 21;
   } else if (category == 2) {
     if (value == static_cast<unsigned>(enk_constant)) return 1;
     if (value == static_cast<unsigned>(enk_variable)) return 2;
