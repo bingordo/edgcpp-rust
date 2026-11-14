@@ -1932,6 +1932,15 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
                    known_path == scope_statement_paths.end() ?
                        absent() : txt(known_path->second)});
   const auto region = current_lifetime_ids.find(scope->lifetime);
+  if (scope->lifetime != nullptr && region == current_lifetime_ids.end()) {
+    report_incomplete_snapshot();
+  }
+  // The scope owns a nullable lifetime link even if no event 39 follows.
+  // An absent witness is not interchangeable with an omitted event 39.
+  emit_record(RECORD_NATIVE_SCOPE_LIFETIME_ADMISSION,
+              {num(routine),num(id),
+               region == current_lifetime_ids.end() ?
+                   absent() : num(region->second)});
   if (region != current_lifetime_ids.end()) {
     emit_record(39, {num(routine), num(id), num(region->second)});
   }
@@ -2060,6 +2069,20 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       }
     }
   }
+  // Count the native scope child list independently of event-30 traversal:
+  // otherwise the last scope and its lifetime record can disappear together.
+  uint32_t native_child_count = 0;
+  std::unordered_set<a_scope_ptr> count_seen_children;
+  for (a_scope_ptr child = scope->scopes;
+       child != nullptr && within_native_list_limit(native_child_count);
+       child = child->next, ++native_child_count) {
+    if (child == scope || !count_seen_children.insert(child).second) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
+  emit_record(RECORD_NATIVE_SCOPE_CHILD_COUNT,
+              {num(routine),num(id),num(native_child_count)});
   unsigned child_count = 0;
   for (a_scope_ptr child = scope->scopes;
        child != nullptr && within_native_list_limit(child_count++); child = child->next) {
@@ -2826,6 +2849,23 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             scope_statement_paths.emplace(body, "0");
           }
           prepare_lifetimes(body, routine_symbol);
+          // Independent roots from the EDG function scope, not from the
+          // already exported event-38 list. Always emit even if both are null.
+          const auto body_region = current_lifetime_ids.find(body->lifetime);
+          const auto static_region = current_lifetime_ids.find(
+              body->variant.routine.lifetime_of_local_static_vars);
+          if ((body->lifetime != nullptr &&
+               body_region == current_lifetime_ids.end()) ||
+              (body->variant.routine.lifetime_of_local_static_vars != nullptr &&
+               static_region == current_lifetime_ids.end())) {
+            report_incomplete_snapshot();
+          }
+          emit_record(RECORD_NATIVE_LIFETIME_ROOT_ADMISSION,
+                      {num(routine_symbol),
+                       body_region == current_lifetime_ids.end() ?
+                           absent() : num(body_region->second),
+                       static_region == current_lifetime_ids.end() ?
+                           absent() : num(static_region->second)});
           emit_statements(body->assoc_block, name, "", "", 0);
           emit_function_locals(body, routine_symbol, r, name);
           current_lifetime_ids.clear();
