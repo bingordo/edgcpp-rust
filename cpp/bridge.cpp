@@ -2654,6 +2654,14 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
+          // Count EDG-owned initializer entries independently from the
+          // record-20 emission loop. Even zero entries have a witness.
+          uint32_t native_initializer_count = 0;
+          for (a_constructor_init_ptr entry = body->variant.routine.constructor_inits;
+               entry != nullptr && within_native_list_limit(native_initializer_count);
+               entry = entry->next, ++native_initializer_count) {}
+          emit_record(RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT,
+                      {num(routine_symbol), num(native_initializer_count)});
           // The function scope owns constructor/destructor subobject
           // initialization entries, ordered by actual execution order.
           unsigned init_position = 0;
