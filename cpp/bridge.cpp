@@ -7,6 +7,7 @@
 #include "fe_common.h"
 #include "const_ints.h"
 #include "lower_name.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
