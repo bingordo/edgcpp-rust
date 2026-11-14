@@ -2774,8 +2774,10 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
         let kind=graph::native_statement_kind(stmt.kind);
         let required:&[&str]=match kind {
             2 => &["block"],
-            3 => &["then","else"],
+            3 | 17 | 20 | 21 => &["then","else"],
             7 | 8 | 9 | 13 => &["body"],
+            18 => &["init","body"],
+            19 => &["try"],
             _ => &[],
         };
         for edge in required {
@@ -2783,6 +2785,16 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
                                 (*edge).to_owned())) {
                 return Err(Error::MalformedCallback);
             }
+        }
+    }
+    // A GNU statement expression owns an embedded statement subtree named
+    // "gnu" plus the underscore-separated expression path. Even an empty
+    // embedded statement requires a zero-count witness from the bridge.
+    for expr in &il.expressions {
+        if graph::native_expression_kind(expr.kind)!=4 {continue;}
+        let edge=format!("gnu{}",expr.path.replace('.',"_"));
+        if !seen.contains(&(expr.function.clone(),Some(expr.statement_path.clone()),edge)) {
+            return Err(Error::MalformedCallback);
         }
     }
     Ok(())
@@ -2971,6 +2983,80 @@ mod tests {
         });
         assert!(matches!(validate_native_tree_count_coverage(&il),
             Err(Error::MalformedCallback)), "wrong edge cannot substitute");
+    }
+
+    #[test]
+    fn specialized_native_statement_owners_require_complete_empty_proofs() {
+        // These lists are EDG-owned; do not derive their presence from
+        // observed child records or hard-code configuration-dependent kinds.
+        for (normalized,edges) in [
+            (17,&["then","else"][..]),
+            (18,&["init","body"][..]),
+            (19,&["try"][..]),
+            (20,&["then","else"][..]),
+            (21,&["then","else"][..]),
+        ] {
+            let kind=(0..256).find(|&k|graph::native_statement_kind(k)==normalized)
+                .expect("EDG specialized statement enum");
+            let mut il=Il::default();
+            il.statements.push(Statement {
+                function:"f".into(),path:"0".into(),parent:None,kind,
+            });
+            il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+                function:"f".into(),parent:None,edge:String::new(),count:1,
+            });
+            for edge in edges {
+                assert!(matches!(validate_native_tree_count_coverage(&il),
+                    Err(Error::MalformedCallback)),
+                    "missing edge {edge} on owner {normalized}");
+                il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+                    function:"f".into(),parent:Some("0".into()),
+                    edge:(*edge).into(),count:0,
+                });
+            }
+            validate_native_tree_count_coverage(&il)
+                .expect("all specialized native owner edges witnessed");
+            il.native_statement_sibling_counts.pop();
+            assert!(matches!(validate_native_tree_count_coverage(&il),
+                Err(Error::MalformedCallback)),
+                "dropped final empty edge on owner {normalized}");
+        }
+    }
+
+    #[test]
+    fn gnu_statement_expression_requires_even_empty_subtree_witness() {
+        let kind=(0..256).find(|&k|graph::native_expression_kind(k)==4)
+            .expect("EDG GNU statement expression kind");
+        let mut il=Il::default();
+        il.expressions.push(Expression {
+            function:"f".into(),statement_path:"0".into(),path:"0.1".into(),
+            parent:None,kind,operator:None,type_kind:None,reference:None,
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:None,related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        });
+        il.native_expression_child_counts.push(NativeExpressionChildCount {
+            function:"f".into(),statement_path:"0".into(),path:"0.1".into(),count:0,
+        });
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)),
+            "empty GNU statement subtree must be witnessed");
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:Some("0".into()),edge:"gnu0_1".into(),count:0,
+        });
+        // Native graph fixtures normally also supply the owning statement.
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind:0,
+        });
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:None,edge:String::new(),count:1,
+        });
+        validate_native_tree_count_coverage(&il)
+            .expect("GNU empty statement witness is retained");
+        il.native_statement_sibling_counts[0].edge="gnu0_2".into();
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)),
+            "unrelated GNU subtree must not substitute");
     }
 
     #[test]
