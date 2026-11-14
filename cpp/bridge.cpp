@@ -387,6 +387,31 @@ static bool supported_concrete_class_proof_root(a_type_ptr type) {
   return supplement != nullptr && supplement->class_template == nullptr;
 }
 
+// C++5: EDG's source-lowered C back end can describe a complete anonymous
+// record that has no class tag or class supplement. Such a record is NOT
+// admissible through is_pod_class(), which requires a concrete tag/member
+// scope and may dereference absent supplements. Export a different, strictly
+// structural storage certificate instead. It is never a ctor/dtor or by-value
+// ABI certificate, and the Rust lowering MUST verify every actual operation,
+// automatic source owner, and nested target field layout separately.
+static bool tagless_cpp_storage_only(a_type_ptr type) {
+  if (type == nullptr ||
+      (type->kind != tk_struct && type->kind != tk_class) ||
+      type->incomplete || type->size == 0 || type->alignment == 0 ||
+      type->variant.class_struct_union.is_nonreal_class ||
+      type->variant.class_struct_union.is_template_class ||
+      type->variant.class_struct_union.any_virtual_functions ||
+      type->variant.class_struct_union.any_virtual_base_classes ||
+      type->variant.class_struct_union.any_virtual_functions_including_in_base_classes ||
+      type->variant.class_struct_union.contains_flexible_array_member ||
+      // A class supplement could carry constructors, destructors, bases,
+      // member initializers or template semantics. No such class is admitted.
+      type->variant.class_struct_union.extra_info != nullptr ||
+      type->variant.class_struct_union.field_list == nullptr ||
+      symbol_for(type) != nullptr) return false;
+  return true;
+}
+
 static bool plain_cpp_record(a_type_ptr type) {
   if (!supported_concrete_class_proof_root(type)) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
@@ -522,7 +547,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   // In C++ mode a missing or false proof must fail closed even if a
   // constructor was optimized into ordinary scalar stores.
   if (type->kind == tk_class || type->kind == tk_struct) {
-    emit_record(63, {num(id), num(plain_cpp_record(type) ? 1 : 0)});
+    // 0: nontrivial/unsupported class; 1: EDG-certified POD/trivial class;
+    // 2: tagless, no-supplement structural *storage only* (NOT a POD claim).
+    const unsigned record_proof = plain_cpp_record(type) ? 1u :
+        (tagless_cpp_storage_only(type) ? 2u : 0u);
+    emit_record(63, {num(id), num(record_proof)});
     emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
