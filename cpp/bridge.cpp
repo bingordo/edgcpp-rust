@@ -719,7 +719,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
       lowered_portable_eh_variant_storage(type) && type->size==32) {
     std::fprintf(stderr,
-        "EDG_NATIVE_EH_FUNCTION_STORAGE type_id=%u bytes=%lu align=%lu source_generated_layout=true\\n",
+        "EDG_NATIVE_EH_FUNCTION_STORAGE type_id=%u bytes=%lu align=%lu source_generated_layout=true\n",
         id,static_cast<unsigned long>(type->size),
         static_cast<unsigned long>(type->alignment));
   }
