@@ -140,6 +140,10 @@ pub struct Il {
     pub native_scope_lifetime_admissions: Vec<NativeScopeLifetimeAdmission>,
     /// Native lexical-scope child cardinality, including empty scopes.
     pub native_scope_child_counts: Vec<NativeScopeChildCount>,
+    /// Native independent declaration count per lexical scope.
+    pub native_scope_local_counts: Vec<NativeScopeLocalCount>,
+    /// Native independent explicit/implicit parameter count per routine.
+    pub native_function_parameter_counts: Vec<NativeFunctionParameterCount>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -1067,6 +1071,22 @@ pub struct FunctionParameter {
     pub compiler_generated: bool,
 }
 
+/// Count of EDG's native explicit parameter chain and implicit this owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeFunctionParameterCount {
+    pub routine: SymbolId,
+    pub explicit: u32,
+    pub implicit_this: bool,
+}
+
+/// Independently counted emitted-eligible EDG scope locals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScopeLocalCount {
+    pub routine: SymbolId,
+    pub scope: u32,
+    pub count: u32,
+}
+
 /// A scope in the owned lexical tree of one function definition.
 /// Scope zero is the function scope, with no parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1447,6 +1467,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         95 => Some(il.native_lifetime_root_admissions.len()),
         96 => Some(il.native_scope_lifetime_admissions.len()),
         97 => Some(il.native_scope_child_counts.len()),
+        98 => Some(il.native_scope_local_counts.len()),
+        99 => Some(il.native_function_parameter_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2271,6 +2293,22 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if routine==0 || count>10000 {return;}
             output.native_scope_child_counts.push(NativeScopeChildCount {
                 routine:SymbolId(routine),scope,count,
+            });
+        }
+        98 => {
+            let (Some(routine),Some(scope),Some(count))=
+                (n(0),n(1),n(2)) else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_scope_local_counts.push(NativeScopeLocalCount {
+                routine:SymbolId(routine),scope,count,
+            });
+        }
+        99 => {
+            let (Some(routine),Some(explicit),Some(implicit_this))=
+                (n(0),n(1),n(2)) else {return;};
+            if routine==0 || explicit>10000 || implicit_this>1 {return;}
+            output.native_function_parameter_counts.push(NativeFunctionParameterCount {
+                routine:SymbolId(routine),explicit,implicit_this:implicit_this==1,
             });
         }
         92 => {
@@ -3453,6 +3491,96 @@ fn validate_native_lifetime_scope_owners(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// Compare EDG-source counts against every event-29 parameter and event-31
+// local declaration; a dense observed prefix alone cannot prove completeness.
+fn validate_native_function_declaration_counts(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let defined:HashSet<&str>=il.entities.iter().filter_map(|entity|
+        match entity {
+            Entity::Routine{name,has_definition:true}=>Some(name.as_str()),
+            _=>None,
+        }).collect();
+    let mut routines=HashSet::new();
+    for identity in &il.routine_identities {
+        if defined.contains(identity.function.as_str()) &&
+            !routines.insert(identity.routine) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if routines.len()!=defined.len() {return Err(Error::MalformedCallback);}
+
+    let mut parameter_proofs=HashMap::new();
+    for proof in &il.native_function_parameter_counts {
+        if proof.explicit>10000 || !routines.contains(&proof.routine) ||
+            parameter_proofs.insert(proof.routine,
+                (proof.explicit,proof.implicit_this)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if parameter_proofs.len()!=routines.len() {
+        return Err(Error::MalformedCallback);
+    }
+    let mut parameter_positions:HashMap<SymbolId,HashSet<u32>>=HashMap::new();
+    let mut implicit=HashSet::new();
+    let mut parameter_symbols=HashSet::new();
+    for param in &il.function_parameters {
+        if !parameter_proofs.contains_key(&param.routine) ||
+            !parameter_symbols.insert(param.symbol) {
+            return Err(Error::MalformedCallback);
+        }
+        if param.implicit_this {
+            if param.position.is_some() || !implicit.insert(param.routine) {
+                return Err(Error::MalformedCallback);
+            }
+        } else {
+            let Some(position)=param.position else {
+                return Err(Error::MalformedCallback);
+            };
+            if !parameter_positions.entry(param.routine).or_default().insert(position) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    for (routine,(expected,has_this)) in parameter_proofs {
+        let positions=parameter_positions.get(&routine);
+        if positions.map_or(0,HashSet::len)!=expected as usize ||
+            positions.is_some_and(|positions|
+                positions.iter().any(|&position|position>=expected)) ||
+            implicit.contains(&routine)!=has_this {
+            return Err(Error::MalformedCallback);
+        }
+    }
+
+    let scopes:HashSet<(SymbolId,u32)>=il.local_scopes.iter()
+        .map(|scope|(scope.routine,scope.id)).collect();
+    if scopes.len()!=il.local_scopes.len() {return Err(Error::MalformedCallback);}
+    let mut local_proofs=HashMap::new();
+    for proof in &il.native_scope_local_counts {
+        let key=(proof.routine,proof.scope);
+        if proof.count>10000 || !scopes.contains(&key) ||
+            local_proofs.insert(key,proof.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if local_proofs.len()!=scopes.len() {return Err(Error::MalformedCallback);}
+    let mut local_count:HashMap<(SymbolId,u32),u32>=HashMap::new();
+    let mut local_symbols=HashSet::new();
+    for local in &il.local_variables {
+        let key=(local.routine,local.scope);
+        if !local_proofs.contains_key(&key) ||
+            !local_symbols.insert(local.symbol) {
+            return Err(Error::MalformedCallback);
+        }
+        *local_count.entry(key).or_default()+=1;
+    }
+    for (key,count) in local_proofs {
+        if local_count.get(&key).copied().unwrap_or(0)!=count {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3477,6 +3605,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
        validate_native_lifetime_scope_owners(il).is_err() ||
+       validate_native_function_declaration_counts(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -5831,7 +5960,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=97_u32 {
+        for kind in 1..=99_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5858,10 +5987,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,382);
+        assert_eq!(total,388);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(98).is_none());
+        assert!(expected_wire_field_tag_masks(100).is_none());
     }
 
     #[test]
