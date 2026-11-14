@@ -4672,3 +4672,28 @@ int main(void) {
         let _=std::fs::remove_dir_all(root);
     }
 }
+
+#[cfg(test)]
+mod audit_resource_budget_tests {
+    use super::*;
+
+    /// Check inclusive FP limits without allocating thousands of codegen nodes.
+    #[test]
+    fn fp_parameter_local_and_statement_limits_are_checked_independently() {
+        let p=MAX_FP_ARGUMENTS;
+        let l=MAX_FP_LOCALS;
+        let s=MAX_FP_STATEMENTS;
+        assert!(checked_fp_function_resources(0,0,1).is_ok());
+        assert!(checked_fp_function_resources(p,l,s).is_ok());
+        assert!(checked_fp_function_resources(p+1,0,1).is_err());
+        assert!(checked_fp_function_resources(0,l+1,1).is_err());
+        assert!(checked_fp_function_resources(0,0,s+1).is_err());
+        assert!(checked_fp_function_resources(0,0,0).is_err());
+        // Reject the over-limit resource even with all other counts minimal.
+        for (params,locals,stmts) in [
+            (p+1,l,s), (p,l+1,s), (p,l,s+1),
+        ] {
+            assert!(checked_fp_function_resources(params,locals,stmts).is_err());
+        }
+    }
+}
