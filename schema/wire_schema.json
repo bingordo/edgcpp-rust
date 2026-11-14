@@ -33,7 +33,9 @@
     "RECORD_NATIVE_CONTROL_ROOT_ADMISSION": 90,
     "RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION": 91,
     "RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT": 92,
-    "RECORD_NATIVE_LIFETIME_DESTRUCTION_COUNT": 93
+    "RECORD_NATIVE_LIFETIME_DESTRUCTION_COUNT": 93,
+    "RECORD_NATIVE_FILE_INIT_SLICE": 94,
+    "RECORD_NATIVE_FILE_INIT_SLICE_ENTRY": 95
   },
   "record_arities": {
     "1": 1,
@@ -128,7 +130,9 @@
     "90": 3,
     "91": 3,
     "92": 2,
-    "93": 3
+    "93": 3,
+    "94": 4,
+    "95": 5
   },
   "record_field_tags": {
     "1": [
@@ -684,6 +688,19 @@
     "93": [
       "UNSIGNED",
       "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "94": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
+    ],
+    "95": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
       "UNSIGNED"
     ]
   }
