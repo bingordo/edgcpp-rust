@@ -83,6 +83,9 @@ pub struct Il {
     pub statements: Vec<Statement>,
     /// Independent EDG-derived counts for primary expression trees.
     pub native_expression_child_counts: Vec<NativeExpressionChildCount>,
+    pub native_control_child_counts: Vec<NativeControlChildCount>,
+    pub native_initializer_child_counts: Vec<NativeInitializerChildCount>,
+    pub native_constructor_child_counts: Vec<NativeConstructorChildCount>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -669,7 +672,22 @@ pub struct NativeRoutineSupplement {
 
 /// A statement node, identified by a stable path within one function.
 /// Kinds are EDG's a_statement_kind discriminants, not Rust syntax kinds.
-/// Native EDG count witness, independent of emitted child events (wire 81).
+/// EDG-authored child cardinality for one supplemental expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeControlChildCount {
+    pub function:String, pub statement_path:String, pub role:u32,
+    pub path:String, pub count:u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeInitializerChildCount {
+    pub owner:SymbolId, pub path:String, pub count:u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructorChildCount {
+    pub routine:SymbolId, pub position:u32, pub path:String, pub count:u32,
+}
+
+/// Native EDG count witness, independent of emitted child events (wire 83).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeExpressionChildCount {
     pub function: String,
@@ -1340,6 +1358,9 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         84 => Some(il.native_statement_sibling_counts.len()),
         85 => Some(il.virtual_vptr_receiver_pairs.len()),
         86 => Some(il.native_try_handler_counts.len()),
+        87 => Some(il.native_control_child_counts.len()),
+        88 => Some(il.native_initializer_child_counts.len()),
+        89 => Some(il.native_constructor_child_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2117,6 +2138,31 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 entry_bytes:u64::from(entry_bytes),
             });
         }
+        87 => {
+            let (Some(function),Some(statement_path),Some(role),Some(path),Some(count))=
+                (t(0),t(1),n(2),t(3),n(4)) else {return;};
+            if function.is_empty() || statement_path.is_empty() || path.is_empty() ||
+                count>10000 || role==0 {return;}
+            output.native_control_child_counts.push(NativeControlChildCount {
+                function,statement_path,role,path,count,
+            });
+        }
+        88 => {
+            let (Some(owner),Some(path),Some(count))=
+                (n(0),t(1),n(2)) else {return;};
+            if owner==0 || path.is_empty() || count>10000 {return;}
+            output.native_initializer_child_counts.push(NativeInitializerChildCount {
+                owner:SymbolId(owner),path,count,
+            });
+        }
+        89 => {
+            let (Some(routine),Some(position),Some(path),Some(count))=
+                (n(0),n(1),t(2),n(3)) else {return;};
+            if routine==0 || path.is_empty() || count>10000 {return;}
+            output.native_constructor_child_counts.push(NativeConstructorChildCount {
+                routine:SymbolId(routine),position,path,count,
+            });
+        }
         86 => {
             let (Some(function),Some(statement_path),Some(count))=
                 (t(0),t(1),n(2)) else {return;};
@@ -2861,6 +2907,63 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// Independently certify the three supplemental expression tree families.
+// This is deliberately generic: all use the same dense native child-path
+// construction but distinct owner identities.
+fn validate_native_child_witnesses<K:Eq+std::hash::Hash+Clone>(
+    nodes:impl IntoIterator<Item=(K,Option<K>)>,
+    proofs:impl IntoIterator<Item=(K,u32)>,
+)->Result<(),Error> {
+    use std::collections::HashMap;
+    let mut keys=HashSet::new();
+    let mut counts:HashMap<K,u32>=HashMap::new();
+    for (key,parent) in nodes {
+        if !keys.insert(key) {return Err(Error::MalformedCallback);}
+        if let Some(parent)=parent {
+            *counts.entry(parent).or_default()+=1;
+        }
+    }
+    if counts.keys().any(|key|!keys.contains(key)) {
+        return Err(Error::MalformedCallback);
+    }
+    let mut seen=HashSet::new();
+    for (key,count) in proofs {
+        if count>10000 || !keys.contains(&key) || !seen.insert(key.clone()) ||
+            counts.get(&key).copied().unwrap_or(0)!=count {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if seen.len()!=keys.len() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
+
+fn validate_native_supplemental_child_counts(il:&Il)->Result<(),Error> {
+    validate_native_child_witnesses(
+        il.control_expressions.iter().map(|e|{
+            let identity=|p:&str| (e.function.clone(),e.statement_path.clone(),e.role,p.to_owned());
+            (identity(&e.path),e.parent.as_deref().map(identity))
+        }),
+        il.native_control_child_counts.iter().map(|p|
+            ((p.function.clone(),p.statement_path.clone(),p.role,p.path.clone()),p.count))
+    )?;
+    validate_native_child_witnesses(
+        il.initializer_expressions.iter().map(|e|{
+            let identity=|p:&str|(e.owner,p.to_owned());
+            (identity(&e.path),e.parent.as_deref().map(identity))
+        }),
+        il.native_initializer_child_counts.iter().map(|p|
+            ((p.owner,p.path.clone()),p.count))
+    )?;
+    validate_native_child_witnesses(
+        il.constructor_initializer_expressions.iter().map(|e|{
+            let identity=|p:&str|(e.routine,e.position,p.to_owned());
+            (identity(&e.path),e.parent.as_deref().map(identity))
+        }),
+        il.native_constructor_child_counts.iter().map(|p|
+            ((p.routine,p.position,p.path.clone()),p.count))
+    )
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -2879,6 +2982,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_virtual_vptr_receiver_pairs(il).is_err() ||
        validate_native_statement_attribute_coverage(il).is_err() ||
        validate_native_tree_count_coverage(il).is_err() ||
+       validate_native_supplemental_child_counts(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3276,6 +3380,64 @@ mod tests {
         assert!(matches!(validate_native_tree_count_coverage(&il),
             Err(Error::MalformedCallback)),
             "non-expression synthetic child must fail closed");
+    }
+
+    #[test]
+    fn supplemental_tree_counts_reject_missing_final_child_and_proof() {
+        // Common verifier covers all three owner identities, including zero
+        // children, duplicate proofs, and missing final child events.
+        let nodes=vec![(0_u32,None),(1,Some(0)),(2,Some(0))];
+        let proofs=vec![(0,2),(1,0),(2,0)];
+        validate_native_child_witnesses(nodes.clone(),proofs.clone())
+            .expect("complete supplemental tree");
+        for removed in [1,2] {
+            let mut missing=nodes.clone();
+            missing.remove(removed);
+            let mut short_proofs=proofs.clone();
+            short_proofs.remove(removed);
+            assert!(matches!(validate_native_child_witnesses(missing,short_proofs),
+                Err(Error::MalformedCallback)));
+        }
+        let mut missing=proofs.clone();
+        missing.pop();
+        assert!(matches!(validate_native_child_witnesses(nodes.clone(),missing),
+            Err(Error::MalformedCallback)));
+        let mut duplicated=proofs.clone();
+        duplicated.push((2,0));
+        assert!(matches!(validate_native_child_witnesses(nodes,duplicated),
+            Err(Error::MalformedCallback)));
+    }
+
+    #[test]
+    fn supplemental_count_witnesses_are_required_for_all_three_families() {
+        let mut il=Il::default();
+        il.control_expressions.push(ControlExpression {
+            function:"f".into(),statement_path:"0".into(),role:1,path:"0".into(),
+            parent:None,kind:0,operator:None,type_id:None,symbol_id:None,
+        });
+        il.initializer_expressions.push(InitializerExpression {
+            owner:SymbolId(7),path:"0".into(),parent:None,kind:0,
+            operator:None,type_id:None,symbol_id:None,
+        });
+        il.constructor_initializer_expressions.push(ConstructorInitializerExpression {
+            routine:SymbolId(8),position:0,path:"0".into(),parent:None,kind:0,
+            operator:None,type_id:None,symbol_id:None,
+        });
+        assert!(validate_native_supplemental_child_counts(&il).is_err());
+        il.native_control_child_counts.push(NativeControlChildCount {
+            function:"f".into(),statement_path:"0".into(),role:1,path:"0".into(),count:0,
+        });
+        assert!(validate_native_supplemental_child_counts(&il).is_err());
+        il.native_initializer_child_counts.push(NativeInitializerChildCount {
+            owner:SymbolId(7),path:"0".into(),count:0,
+        });
+        assert!(validate_native_supplemental_child_counts(&il).is_err());
+        il.native_constructor_child_counts.push(NativeConstructorChildCount {
+            routine:SymbolId(8),position:0,path:"0".into(),count:0,
+        });
+        validate_native_supplemental_child_counts(&il).expect("all native witnesses");
+        il.native_constructor_child_counts[0].count=1;
+        assert!(validate_native_supplemental_child_counts(&il).is_err());
     }
 
     #[test]
@@ -4746,7 +4908,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=86_u32 {
+        for kind in 1..=89_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -4773,10 +4935,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,346);
+        assert_eq!(total,358);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(87).is_none());
+        assert!(expected_wire_field_tag_masks(90).is_none());
     }
 
     #[test]
