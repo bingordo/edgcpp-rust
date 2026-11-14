@@ -2693,6 +2693,9 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     type ListKey=(String,Option<String>,String);
     let mut groups:HashMap<ListKey,Vec<u32>>=HashMap::new();
     let mut statements=HashSet::new();
+    let statement_kinds:HashMap<(&str,&str),u32>=il.statements.iter()
+        .map(|stmt| ((stmt.function.as_str(),stmt.path.as_str()),
+                      graph::native_statement_kind(stmt.kind))).collect();
     for stmt in &il.statements {
         statements.insert((stmt.function.as_str(),stmt.path.as_str()));
         let (edge,index)=if let Some(parent)=&stmt.parent {
@@ -2708,6 +2711,14 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
         // The synthetic for-increment statement has a separately emitted
         // expression and does not arise from emit_statements' EDG list.
         if edge=="increment" && index==0 && stmt.parent.is_some() {
+            // The bridge synthesizes this expression statement ONLY for
+            // the increment of a native for-loop. Arbitrary user-provided
+            // "increment.0" paths cannot bypass sibling-list proofs.
+            let parent=stmt.parent.as_deref().expect("checked above");
+            if statement_kinds.get(&(stmt.function.as_str(),parent))!=Some(&9)
+                || graph::native_statement_kind(stmt.kind)!=6 {
+                return Err(Error::MalformedCallback);
+            }
             continue;
         }
         groups.entry((stmt.function.clone(),stmt.parent.clone(),edge.into()))
@@ -2916,6 +2927,86 @@ mod tests {
             function:"f".into(),parent:Some("0".into()),edge:"else".into(),count:0,
         });
         validate_native_tree_count_coverage(&il).expect("both branches witnessed");
+    }
+
+    #[test]
+    fn native_count_proofs_reject_first_and_middle_record_deletions() {
+        let mut il=Il::default();
+        il.statements.extend((0..3).map(|i| Statement {
+            function:"f".into(),path:i.to_string(),parent:None,kind:0,
+        }));
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+            function:"f".into(),parent:None,edge:String::new(),count:3,
+        });
+        validate_native_tree_count_coverage(&il).expect("complete sibling list");
+        for removed in [0,1] {
+            let mut truncated=il.clone();
+            truncated.statements.remove(removed);
+            assert!(matches!(validate_native_tree_count_coverage(&truncated),
+                Err(Error::MalformedCallback)),
+                "missing first/middle statement at {removed}");
+        }
+        il.expressions.extend((0..3).map(|i| Expression {
+            function:"f".into(),statement_path:"0".into(),
+            path:if i==0 {"0".into()} else {format!("0.{}",i-1)},
+            parent:if i==0 {None} else {Some("0".into())},
+            kind:1,operator:None,type_kind:None,reference:None,
+            type_size:None,type_alignment:None,constant_kind:None,
+            constant_integer:None,related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        }));
+        il.native_expression_child_counts.extend([
+            NativeExpressionChildCount {
+                function:"f".into(),statement_path:"0".into(),path:"0".into(),count:2,
+            },
+            NativeExpressionChildCount {
+                function:"f".into(),statement_path:"0".into(),path:"0.0".into(),count:0,
+            },
+            NativeExpressionChildCount {
+                function:"f".into(),statement_path:"0".into(),path:"0.1".into(),count:0,
+            },
+        ]);
+        validate_native_tree_count_coverage(&il).expect("complete expression tree");
+        for removed in [1,2] {
+            let mut truncated=il.clone();
+            truncated.expressions.remove(removed);
+            truncated.native_expression_child_counts.remove(removed);
+            assert!(matches!(validate_native_tree_count_coverage(&truncated),
+                Err(Error::MalformedCallback)),
+                "missing expression at {removed}");
+        }
+    }
+
+    #[test]
+    fn only_native_for_increment_may_bypass_sibling_counts() {
+        let for_kind=(0..256).find(|&k|graph::native_statement_kind(k)==9)
+            .expect("EDG for kind");
+        let expr_kind=(0..256).find(|&k|graph::native_statement_kind(k)==6)
+            .expect("EDG expression kind");
+        let mut il=Il::default();
+        il.statements.extend([
+            Statement {function:"f".into(),path:"0".into(),parent:None,kind:for_kind},
+            Statement {function:"f".into(),path:"0.increment.0".into(),
+                       parent:Some("0".into()),kind:expr_kind},
+        ]);
+        il.native_statement_sibling_counts.extend([
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:None,edge:String::new(),count:1,
+            },
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),edge:"body".into(),count:0,
+            },
+        ]);
+        validate_native_tree_count_coverage(&il).expect("synthetic increment");
+        il.statements[0].kind=expr_kind;
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)),
+            "non-for parent must not bypass its list proof");
+        il.statements[0].kind=for_kind;
+        il.statements[1].kind=for_kind;
+        assert!(matches!(validate_native_tree_count_coverage(&il),
+            Err(Error::MalformedCallback)),
+            "non-expression synthetic child must fail closed");
     }
 
     #[test]
