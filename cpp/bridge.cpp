@@ -565,6 +565,79 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   uint32_t child = emit_type(related, depth + 1);
   if (child == 0) relation = 0; // Never export a relationship without a target.
+  // One bounded native provenance witness for the four-field 224-byte
+  // class subrecord in the original GCC15 iostream __C8 aggregate.
+  // This is DIAGNOSTIC ONLY; never authorizes an object or changes wire
+  // semantics. A real class tag is not proof of trivial constructors.
+  if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
+      (type->kind == tk_struct || type->kind == tk_class) &&
+      type->size == 224 && type->alignment == 8 &&
+      type->variant.class_struct_union.field_list != nullptr) {
+    unsigned fields_count=0;
+    for (a_field_ptr fld=type->variant.class_struct_union.field_list;
+         fld!=nullptr && fields_count<6;fld=fld->next) ++fields_count;
+    if (fields_count==4) {
+      static unsigned witness_count=0;
+      if (witness_count++<12) {
+        a_symbol_ptr tag=symbol_for(type);
+        const auto *extra=type->variant.class_struct_union.extra_info;
+        const char *source_type_name=source_name(type->source_corresp);
+        std::fprintf(stderr,
+            "EDG_NATIVE_NESTED_224 type_id=%u type_name=%s class_kind=%u "
+            "tag_present=%u tag_kind=%u original_unnamed=%u "
+            "is_template=%u nonreal=%u compiler_generated=%u "
+            "supplement=%u scope=%u routines=%u variables=%u "
+            "bases=%u field_initializers=%u assoc_template=%u "
+            "tagless_structural=%u plain_class=%u fields=%u diagnostic_only=true\\n",
+            id,source_type_name!=nullptr?source_type_name:"<none>",
+            static_cast<unsigned>(type->kind),
+            tag!=nullptr?1u:0u,
+            tag!=nullptr?static_cast<unsigned>(tag->kind):0u,
+            type->variant.class_struct_union.originally_unnamed?1u:0u,
+            type->variant.class_struct_union.is_template_class?1u:0u,
+            type->variant.class_struct_union.is_nonreal_class?1u:0u,
+#if DO_IL_LOWERING
+            extra!=nullptr && extra->compiler_generated?1u:0u,
+#else
+            0u,
+#endif
+            extra!=nullptr?1u:0u,
+            extra!=nullptr && extra->assoc_scope!=nullptr?1u:0u,
+            extra!=nullptr && extra->assoc_scope!=nullptr &&
+                extra->assoc_scope->routines!=nullptr?1u:0u,
+            extra!=nullptr && extra->assoc_scope!=nullptr &&
+                extra->assoc_scope->variables!=nullptr?1u:0u,
+            extra!=nullptr && (extra->base_classes!=nullptr ||
+                extra->direct_base_classes!=nullptr)?1u:0u,
+            extra!=nullptr && extra->has_field_initializer?1u:0u,
+            extra!=nullptr && extra->assoc_template!=nullptr?1u:0u,
+            tagless_cpp_storage_only(type)?1u:0u,
+            plain_cpp_record(type)?1u:0u,
+            fields_count);
+        unsigned index=0;
+        for(a_field_ptr fld=type->variant.class_struct_union.field_list;
+            fld!=nullptr && index<6;fld=fld->next,++index) {
+          const char *field_name=source_name(fld->source_corresp);
+          a_type_ptr child=fld->type;
+          a_symbol_ptr childtag=child!=nullptr &&
+              (child->kind==tk_class || child->kind==tk_struct ||
+               child->kind==tk_union)?symbol_for(child):nullptr;
+          std::fprintf(stderr,
+              "EDG_NATIVE_NESTED_224_FIELD owner=%u pos=%u name=%s "
+              "field_kind=%u size=%lu align=%lu offset=%lu "
+              "bit_offset=%u bits=%u tag_present=%u diagnostic_only=true\\n",
+              id,index,field_name!=nullptr?field_name:"<none>",
+              child!=nullptr?static_cast<unsigned>(child->kind):0u,
+              child!=nullptr?static_cast<unsigned long>(child->size):0ul,
+              child!=nullptr?static_cast<unsigned long>(child->alignment):0ul,
+              static_cast<unsigned long>(fld->offset),
+              static_cast<unsigned>(fld->offset_bit_remainder),
+              fld->is_bit_field?static_cast<unsigned>(fld->bit_size):0u,
+              childtag!=nullptr?1u:0u);
+        }
+      }
+    }
+  }
   // Event 63 is an immutable EDG class-scope proof. A bare C record has
   // no C++ class ABI; event 64 separately identifies the language.
   // In C++ mode a missing or false proof must fail closed even if a
