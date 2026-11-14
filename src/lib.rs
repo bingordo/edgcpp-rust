@@ -672,8 +672,6 @@ pub struct NativeRoutineSupplement {
 
 /// A statement node, identified by a stable path within one function.
 /// Kinds are EDG's a_statement_kind discriminants, not Rust syntax kinds.
-/// Native EDG count witness, independent of emitted child events (wire 81).
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// EDG-authored child cardinality for one supplemental expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeControlChildCount {
@@ -689,6 +687,8 @@ pub struct NativeConstructorChildCount {
     pub routine:SymbolId, pub position:u32, pub path:String, pub count:u32,
 }
 
+/// Native EDG count witness, independent of emitted child events (wire 83).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeExpressionChildCount {
     pub function: String,
     pub statement_path: String,
