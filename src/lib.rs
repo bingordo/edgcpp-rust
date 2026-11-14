@@ -5500,7 +5500,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=93_u32 {
+        for kind in 1..=95_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -5527,10 +5527,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,369);
+        assert_eq!(total,378);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(94).is_none());
+        assert!(expected_wire_field_tag_masks(96).is_none());
     }
 
     #[test]
