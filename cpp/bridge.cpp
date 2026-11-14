@@ -618,18 +618,23 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
         for(a_field_ptr fld=type->variant.class_struct_union.field_list;
             fld!=nullptr && index<6;fld=fld->next,++index) {
           const char *field_name=source_name(fld->source_corresp);
-          a_type_ptr child=fld->type;
-          a_symbol_ptr childtag=child!=nullptr &&
-              (child->kind==tk_class || child->kind==tk_struct ||
-               child->kind==tk_union)?symbol_for(child):nullptr;
+          a_type_ptr nested_field_type=fld->type;
+          a_symbol_ptr childtag=nested_field_type!=nullptr &&
+              (nested_field_type->kind==tk_class ||
+               nested_field_type->kind==tk_struct ||
+               nested_field_type->kind==tk_union)?
+              symbol_for(nested_field_type):nullptr;
           std::fprintf(stderr,
               "EDG_NATIVE_NESTED_224_FIELD owner=%u pos=%u name=%s "
               "field_kind=%u size=%lu align=%lu offset=%lu "
               "bit_offset=%u bits=%u tag_present=%u diagnostic_only=true\n",
               id,index,field_name!=nullptr?field_name:"<none>",
-              child!=nullptr?static_cast<unsigned>(child->kind):0u,
-              child!=nullptr?static_cast<unsigned long>(child->size):0ul,
-              child!=nullptr?static_cast<unsigned long>(child->alignment):0ul,
+              nested_field_type!=nullptr?
+                  static_cast<unsigned>(nested_field_type->kind):0u,
+              nested_field_type!=nullptr?
+                  static_cast<unsigned long>(nested_field_type->size):0ul,
+              nested_field_type!=nullptr?
+                  static_cast<unsigned long>(nested_field_type->alignment):0ul,
               static_cast<unsigned long>(fld->offset),
               static_cast<unsigned>(fld->offset_bit_remainder),
               fld->is_bit_field?static_cast<unsigned>(fld->bit_size):0u,
