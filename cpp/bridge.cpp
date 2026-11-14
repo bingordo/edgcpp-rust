@@ -14,6 +14,7 @@
 #include <string>
 #include <cxxabi.h>
 #include <cstdlib>
+#include <cstdio>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1816,6 +1817,7 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
 }
 
 static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
+                             a_routine_ptr source_owner,
                              const std::string &function, uint32_t parent,
                              unsigned &next_id,
                              std::unordered_set<a_scope_ptr> &seen_scopes,
@@ -1856,6 +1858,41 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       const uint32_t symbol = emit_symbol(var, 2, name);
       const uint32_t ty = emit_variable_type(var);
       if (symbol == 0 || ty == 0) continue;
+      // Diagnostic ONLY, enabled by the exclusive compiler-ci oracle.
+      // EDG's a_source_correspondence explicitly owns local-to-function
+      // and enclosing_routine metadata; never infer routine ownership
+      // from a symbol spelling, memory address, or a generic scope list.
+      // The ordinary wire and C++ admission checks are unchanged.
+      if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
+          raw_name == nullptr && var->type != nullptr &&
+          (var->type->kind == tk_class || var->type->kind == tk_struct) &&
+          var->type->size >= 128) {
+        ResolvedSource source_position{};
+        const bool has_position =
+            resolve_source(var->source_corresp.decl_position, source_position);
+        const char *source_type_name =
+            source_name(var->type->source_corresp);
+        std::fprintf(stderr,
+            "EDG_NATIVE_SCOPE_OWNER function=%s local_symbol=%u class_bytes=%lu "
+            "scope_kind=%u source_local=%u owner_present=%u owner_matches=%u "
+            "parent_present=%u parent_matches=%u position_present=%u "
+            "type_name=%s nonreal_class=%u concrete_root=%u generated=%u "
+            "storage_class=%u diagnostic_only=true\\n",
+            function.c_str(), symbol,
+            static_cast<unsigned long>(var->type->size),
+            static_cast<unsigned>(scope->kind),
+            var->source_corresp.is_local_to_function ? 1u : 0u,
+            var->source_corresp.enclosing_routine != nullptr ? 1u : 0u,
+            var->source_corresp.enclosing_routine == source_owner ? 1u : 0u,
+            var->source_corresp.parent_scope != nullptr ? 1u : 0u,
+            var->source_corresp.parent_scope == scope ? 1u : 0u,
+            has_position ? 1u : 0u,
+            source_type_name != nullptr ? source_type_name : "<none>",
+            var->type->variant.class_struct_union.is_nonreal_class ? 1u : 0u,
+            supported_concrete_class_proof_root(var->type) ? 1u : 0u,
+            var->compiler_generated ? 1u : 0u,
+            static_cast<unsigned>(var->storage_class));
+      }
       const uint32_t flags =
           (var->compiler_generated ? 1u : 0u) |
           // scope->variables can also contain lowered automatic temporaries.
@@ -1878,12 +1915,13 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
   unsigned child_count = 0;
   for (a_scope_ptr child = scope->scopes;
        child != nullptr && within_native_list_limit(child_count++); child = child->next) {
-    emit_local_scope(child, routine, function, id, next_id,
+    emit_local_scope(child, routine, source_owner, function, id, next_id,
                      seen_scopes, seen_locals, depth + 1);
   }
 }
 
 static void emit_function_locals(a_scope_ptr body, uint32_t routine,
+                                 a_routine_ptr source_owner,
                                  const std::string &function)
 {
   if (body == nullptr || body->kind != sck_function) return;
@@ -1915,7 +1953,7 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   unsigned next_id = 0;
   std::unordered_set<a_scope_ptr> seen_scopes;
   std::unordered_set<a_variable_ptr> seen_locals;
-  emit_local_scope(body, routine, function,
+  emit_local_scope(body, routine, source_owner, function,
                    std::numeric_limits<uint32_t>::max(), next_id,
                    seen_scopes, seen_locals, 0);
 }
@@ -2591,7 +2629,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           }
           prepare_lifetimes(body, routine_symbol);
           emit_statements(body->assoc_block, name, "", "", 0);
-          emit_function_locals(body, routine_symbol, name);
+          emit_function_locals(body, routine_symbol, r, name);
           current_lifetime_ids.clear();
         }
       }
