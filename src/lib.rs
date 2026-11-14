@@ -129,6 +129,8 @@ pub struct Il {
     pub lifetime_destructions: Vec<LifetimeDestruction>,
     /// EDG-native independent destruction count for each emitted lifetime.
     pub native_lifetime_destruction_counts: Vec<NativeLifetimeDestructionCount>,
+    /// EDG-owned child-list cardinality for each lifetime, including leaves.
+    pub native_lifetime_child_counts: Vec<NativeLifetimeChildCount>,
     /// Defined routine parameters, including an optional implicit this.
     pub function_parameters: Vec<FunctionParameter>,
     /// Lexical scope tree for routine bodies.
@@ -929,6 +931,14 @@ pub struct NativeLifetimeDestructionCount {
     pub count: u32,
 }
 
+/// EDG-derived child_lifetime count, independent of exported child nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLifetimeChildCount {
+    pub routine: SymbolId,
+    pub lifetime: u32,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifetimeDestruction {
     pub routine: SymbolId,
@@ -1397,6 +1407,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         91 => Some(il.native_constructor_root_admissions.len()),
         92 => Some(il.native_constructor_initializer_counts.len()),
         93 => Some(il.native_lifetime_destruction_counts.len()),
+        94 => Some(il.native_lifetime_child_counts.len()),
         13 => Some(il.symbols.len()),
         14 => Some(il.variable_initializers.len()),
         15 => Some(il.initializer_integers.len()),
@@ -2187,6 +2198,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if routine==0 || count>10000 {return;}
             output.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount {
+                routine:SymbolId(routine),lifetime,count,
+            });
+        }
+        94 => {
+            let (Some(routine),Some(lifetime),Some(count))=(n(0),n(1),n(2))
+                else {return;};
+            if routine==0 || count>10000 {return;}
+            output.native_lifetime_child_counts.push(NativeLifetimeChildCount {
                 routine:SymbolId(routine),lifetime,count,
             });
         }
@@ -3204,6 +3223,44 @@ fn validate_native_lifetime_destruction_counts(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+// A lifetime child-tree witness is counted by native EDG before the
+// individual child nodes are emitted. A dense observed prefix is not proof
+// that the final native child or an entire tail subtree was retained.
+fn validate_native_lifetime_child_counts(il:&Il)->Result<(),Error> {
+    use std::collections::{HashMap,HashSet};
+    let mut lifetimes=HashSet::new();
+    for region in &il.object_lifetimes {
+        if !lifetimes.insert((region.routine,region.id)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut witnessed=HashMap::new();
+    for proof in &il.native_lifetime_child_counts {
+        let owner=(proof.routine,proof.lifetime);
+        if proof.count>10000 || !lifetimes.contains(&owner) ||
+            witnessed.insert(owner,proof.count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if witnessed.len()!=lifetimes.len() {return Err(Error::MalformedCallback);}
+    let mut actual:HashMap<(SymbolId,u32),HashSet<u32>>=HashMap::new();
+    for region in &il.object_lifetimes {
+        if let Some(parent)=region.parent {
+            let owner=(region.routine,parent);
+            if parent>=region.id || !lifetimes.contains(&owner) ||
+                !actual.entry(owner).or_default().insert(region.id) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    for (owner,count) in witnessed {
+        if actual.get(&owner).map_or(0,HashSet::len)!=count as usize {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
@@ -3226,6 +3283,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
+       validate_native_lifetime_child_counts(il).is_err() ||
        graph::Graph::from_il(il).is_err() {
         return Err(Error::MalformedCallback);
     }
@@ -3682,6 +3740,67 @@ mod tests {
         il.native_control_root_admissions.push(il.native_control_root_admissions[0].clone());
         assert!(validate_native_supplemental_root_admission(&il).is_err(),
             "duplicate parent admissions fail closed");
+    }
+
+    #[test]
+    fn lifetime_child_counts_reject_dropped_subtrees_and_mismatched_owners() {
+        let mut il=Il::default();
+        let routine=SymbolId(7);
+        let region=|id,parent|ObjectLifetime{routine,id,parent,kind:0};
+        let witness=|lifetime,count|NativeLifetimeChildCount{
+            routine,lifetime,count,
+        };
+        // Three siblings and a grandchild; the unrelated root exercises
+        // the legitimate multiple-root case.
+        il.object_lifetimes.extend([
+            region(0,None),region(1,Some(0)),region(2,Some(0)),
+            region(3,Some(0)),region(4,Some(3)),region(5,None),
+        ]);
+        assert!(validate_native_lifetime_child_counts(&il).is_err(),
+            "even empty root/leaf lists must be certified");
+        il.native_lifetime_child_counts.extend([
+            witness(0,3),witness(1,0),witness(2,0),
+            witness(3,1),witness(4,0),witness(5,0),
+        ]);
+        validate_native_lifetime_child_counts(&il)
+            .expect("complete child lists, including a detached root");
+        for removed in [1,2,3] {
+            let mut dropped=il.clone();
+            dropped.object_lifetimes.retain(|r|r.id!=removed &&
+                !(removed==3 && r.id==4));
+            dropped.native_lifetime_child_counts.retain(|w|w.lifetime!=removed &&
+                !(removed==3 && w.lifetime==4));
+            assert!(validate_native_lifetime_child_counts(&dropped).is_err(),
+                "dropped entire first/middle/tail subtree: {removed}");
+        }
+        let mut missing=il.clone();
+        missing.native_lifetime_child_counts.retain(|w|w.lifetime!=5);
+        assert!(validate_native_lifetime_child_counts(&missing).is_err(),
+            "missing zero-child witness");
+        let mut orphan=il.clone();
+        orphan.native_lifetime_child_counts[0].lifetime=90;
+        assert!(validate_native_lifetime_child_counts(&orphan).is_err(),
+            "orphan witness");
+        let mut duplicate=il.clone();
+        duplicate.native_lifetime_child_counts.push(witness(0,3));
+        assert!(validate_native_lifetime_child_counts(&duplicate).is_err(),
+            "duplicate witness");
+        let mut extra=il.clone();
+        extra.native_lifetime_child_counts[0].count=4;
+        assert!(validate_native_lifetime_child_counts(&extra).is_err(),
+            "wrong native count");
+        let mut wrong_parent=il.clone();
+        wrong_parent.object_lifetimes[2].parent=Some(3);
+        assert!(validate_native_lifetime_child_counts(&wrong_parent).is_err(),
+            "contradictory parent edge");
+        let mut dangling_parent=il.clone();
+        dangling_parent.object_lifetimes[2].parent=Some(99);
+        assert!(validate_native_lifetime_child_counts(&dangling_parent).is_err(),
+            "missing parent owner");
+        let mut duplicate_region=il.clone();
+        duplicate_region.object_lifetimes.push(region(2,Some(0)));
+        assert!(validate_native_lifetime_child_counts(&duplicate_region).is_err(),
+            "duplicate region identity");
     }
 
     #[test]
