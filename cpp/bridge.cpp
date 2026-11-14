@@ -422,7 +422,17 @@ static bool tagless_cpp_storage_only(a_type_ptr type) {
         extra->assoc_template != nullptr ||
         extra->template_arg_list != nullptr) return false;
 #if DO_IL_LOWERING
-    if (extra->compiler_generated || extra->has_subobject_type) return false;
+    if (extra->compiler_generated) return false;
+    // The original EDG class may have been pre-lowered into a distinct
+    // subobject type (il_def.h::subobject_partner). This is a source
+    // representation relationship, NOT a semantic triviality claim.
+    // Admit only the exact known original struct+distinct partner storage
+    // descriptor; direct value/constructor/destructor/ABI use is verified
+    // separately and still rejected unless independently supported.
+    if (extra->has_subobject_type &&
+        (type->kind!=tk_struct ||
+         extra->subobject_partner==nullptr ||
+         extra->subobject_partner==type)) return false;
 #endif
 #if MAINTAIN_CLASS_MEMBER_LIST
     unsigned count=0;
@@ -585,6 +595,75 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (type->kind == tk_class || type->kind == tk_struct || type->kind == tk_union) {
     // Native count proof is independent of event 10 and events 19/24/69.
     // A lost last field or base must not appear as a shorter valid layout.
+    // Diagnostic-only provenance for C++5 nested aggregate rejection.
+    // Source authority is the EDG type; this is not an admission rule.
+    // Limit both scope and emitted fields, independently of user names.
+    if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
+        type->size >= 128 && type->size <= 256 &&
+        (type->kind == tk_class || type->kind == tk_struct)) {
+      a_symbol_ptr tag=symbol_for(type);
+      const auto *extra=type->variant.class_struct_union.extra_info;
+      unsigned nfields=0;
+      for (a_field_ptr fld=type->variant.class_struct_union.field_list;
+           fld!=nullptr && nfields<16; fld=fld->next,++nfields) {
+        std::fprintf(stderr,
+          "EDG_CXX5_NESTED_STORAGE type_id=%u bytes=%lu align=%lu "
+          "tag_present=%u tag_kind=%u template_class=%u originally_unnamed=%u "
+          "extra=%u supp_scope=%u supp_routines=%u supp_variables=%u "
+          "supp_bases=%u supp_template=%u supp_field_init=%u "
+          "nonreal=%u virtual=%u flexible=%u lambda=%u generated=%u "
+          "subobject_type=%u subobject_partner_present=%u subobject_partner_self=%u nonfield_member=%u "
+          "plain=%u structural_only=%u field_pos=%u field_kind=%u "
+          "field_bytes=%lu field_align=%lu offset=%lu bitfield=%u\n",
+          id,static_cast<unsigned long>(type->size),
+          static_cast<unsigned long>(type->alignment),
+          tag!=nullptr ? 1u : 0u,
+          tag!=nullptr ? static_cast<unsigned>(tag->kind) : 0u,
+          type->variant.class_struct_union.is_template_class ? 1u : 0u,
+          type->variant.class_struct_union.originally_unnamed ? 1u : 0u,
+          extra!=nullptr ? 1u : 0u,
+          extra!=nullptr && extra->assoc_scope!=nullptr ? 1u : 0u,
+          extra!=nullptr && extra->assoc_scope!=nullptr &&
+              extra->assoc_scope->routines!=nullptr ? 1u : 0u,
+          extra!=nullptr && extra->assoc_scope!=nullptr &&
+              extra->assoc_scope->variables!=nullptr ? 1u : 0u,
+          extra!=nullptr && (extra->base_classes!=nullptr ||
+              extra->direct_base_classes!=nullptr) ? 1u : 0u,
+          extra!=nullptr && (extra->assoc_template!=nullptr ||
+              extra->template_arg_list!=nullptr) ? 1u : 0u,
+          extra!=nullptr && extra->has_field_initializer ? 1u : 0u,
+          type->variant.class_struct_union.is_nonreal_class ? 1u : 0u,
+          (type->variant.class_struct_union.any_virtual_functions ||
+           type->variant.class_struct_union.any_virtual_base_classes ||
+           type->variant.class_struct_union.any_virtual_functions_including_in_base_classes) ? 1u : 0u,
+          type->variant.class_struct_union.contains_flexible_array_member ? 1u : 0u,
+          extra!=nullptr && extra->is_lambda_closure_class ? 1u : 0u,
+#if DO_IL_LOWERING
+          extra!=nullptr && extra->compiler_generated ? 1u : 0u,
+          extra!=nullptr && extra->has_subobject_type ? 1u : 0u,
+          extra!=nullptr && extra->subobject_partner!=nullptr ? 1u : 0u,
+          extra!=nullptr && extra->subobject_partner==type ? 1u : 0u,
+#else
+          0u,0u,0u,0u,
+#endif
+          // Member declarations may be retained even when the executable
+          // member-function list is empty; do not infer absent methods.
+#if MAINTAIN_CLASS_MEMBER_LIST
+          extra!=nullptr && extra->member_declarations!=nullptr &&
+            extra->member_declarations->entity.kind!=iek_field ? 1u : 0u,
+#else
+          0u,
+#endif
+          plain_cpp_record(type) ? 1u : 0u,
+          tagless_cpp_storage_only(type) ? 1u : 0u,
+          nfields,
+          fld->type!=nullptr ? static_cast<unsigned>(fld->type->kind) : 0u,
+          fld->type!=nullptr ? static_cast<unsigned long>(fld->type->size) : 0ul,
+          fld->type!=nullptr ? static_cast<unsigned long>(fld->type->alignment) : 0ul,
+          static_cast<unsigned long>(fld->offset),
+          fld->is_bit_field ? 1u : 0u);
+      }
+    }
     uint32_t field_count = 0;
     for (a_field_ptr field = type->variant.class_struct_union.field_list;
          field != nullptr && within_native_list_limit(field_count);
