@@ -3622,8 +3622,36 @@ fn validate_native_function_declaration_counts(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+/// Native event 100 is mandatory once event 47 has identified a file-scope
+/// variable. A missing final provenance record must never make a template
+/// variable look like ordinary executable storage or a harmless import.
+/// This checks exact one-to-one ownership; the collector separately rejects
+/// malformed fields and out-of-order records.
+fn validate_native_global_materialization_coverage(il:&Il)->Result<(),&'static str> {
+    if il.global_materializations.len()!=il.global_variables.len() {
+        return Err("native file-scope variables lack complete materialization provenance");
+    }
+    let mut globals=HashSet::with_capacity(il.global_variables.len());
+    for global in &il.global_variables {
+        if !globals.insert(global.symbol) {
+            return Err("duplicate native file-scope variable identity");
+        }
+    }
+    let mut witnessed=HashSet::with_capacity(il.global_materializations.len());
+    for materialization in &il.global_materializations {
+        if !globals.contains(&materialization.symbol) {
+            return Err("native materialization provenance has no file-scope owner");
+        }
+        if !witnessed.insert(materialization.symbol) {
+            return Err("duplicate native materialization provenance");
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
+       validate_native_global_materialization_coverage(il).is_err() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
        graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
        graph::Graph::validate_native_routine_signature_coverage(il).is_err() ||
