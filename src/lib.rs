@@ -7307,3 +7307,7 @@ mod retired_source_hook_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path="global_materialization_tests.rs"]
+mod global_materialization_tests;
