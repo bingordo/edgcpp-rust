@@ -7,6 +7,12 @@
 #include "fe_common.h"
 #include "const_ints.h"
 #include "lower_name.h"
+// Match EDG's C-generating back_end() when its IL is serialized first.
+#if IL_SHOULD_BE_WRITTEN_TO_FILE
+#include "il_file.h"
+#include "il_read.h"
+#include "il_write.h"
+#endif
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -2917,6 +2923,22 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 
 void back_end(void)
 {
+#if IL_SHOULD_BE_WRITTEN_TO_FILE
+  // Keep the same in-memory/serialized-IL contract as EDG c_gen_be.c.
+  primary_source_file_name = nullptr;
+  if (!skip_il_read) {
+    il_read(f_il_output);
+  }
+  if (il_header.primary_source_file == nullptr) {
+    report_incomplete_snapshot();
+    return;
+  }
+  primary_source_file_name = il_header.primary_source_file->file_name;
+#endif
+  if (il_header.primary_scope == nullptr) {
+    report_incomplete_snapshot();
+    return;
+  }
   // EDG's normal C-backend entry point runs after front-end wrap-up. Read
   // the native, lowered IL directly; do not interpose on EDG's lowering.
   // In particular, indirect calls provide no original virtual routine
