@@ -374,7 +374,7 @@ as described in the [integration plan](docs/EDG_COMPILER_INTEGRATION.md).
   at milestones or by manual dispatch.
 - Avoid duplicate PR/push builds and documentation-only rebuilds.
 
-**CI:** [bingordo/edgcpp-rust Actions](https://github.com/bingordo/edgcpp-rust/actions/workflows/build.yml).
+**Active CI:** [bingordo/compiler-ci — EDG standard-backend validation](https://github.com/bingordo/compiler-ci/actions/workflows/validate-edgcpp-rust.yml), using the verified [hook-free upstream EDG release](https://github.com/bingundu/edgcpp/releases/tag/edgcpfe-v2026.11.14-upstream-177765bb7731). The source repository's Actions workflows are manual-only to avoid duplicate minute usage. [Full passing bridge/native run #43658741984](https://github.com/bingordo/compiler-ci/actions/runs/43658741984).
 
 
 ## EDG-to-Cranelift smoke test

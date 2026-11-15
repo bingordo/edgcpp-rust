@@ -51,9 +51,11 @@ in [bridge PR #255](https://github.com/bingordo/edgcpp-rust/pull/255)
 and [EDG PR #7](https://github.com/bingundu/edgcpp/pull/7)
 are not part of this contract. Rework their diagnostics from ordinary
 post-lowering IL if possible; do not merge hook dependencies merely to
-preserve them. The fork's remaining **weak optional** callback call sites
-do not have definitions supplied by this bridge and should be deleted
-separately.
+preserve them. The EDG fork's `main` is the exact unmodified upstream
+`edgcpp/compiler` commit `177765bb773156a7f3d77fa989f11bc9e1715cfe`,
+so there are **no private source observer sites** in the active upstream
+lowering. The old fork with its historical hooks is preserved at
+`archive/pre-upstream-sync-with-edg-hooks-20261114`, not used for releases.
 
 ## Validation
 
@@ -69,3 +71,16 @@ separately.
 - Do not treat a static source guard as native compile/link or runtime
   validation. The CI run and exact EDG revision must be recorded before
   merging.
+
+## Verified source and release (November 2026)
+
+The validated EDG callable-library release is
+[`edgcpfe-v2026.11.14-upstream-177765bb7731`](https://github.com/bingundu/edgcpp/releases/tag/edgcpfe-v2026.11.14-upstream-177765bb7731),
+from package commit `b195677be8b9b56c8337afad6be8064d21a54082`.
+The source lowering is exactly the unmodified upstream tree. The archive
+SHA-256 is `1ce495b629924f31382ecccc891a7a72caae1014ddfa2ba7dd39b44d8b0a9526`.
+A full native/Rust validation passed in
+[compiler-ci run #43658741984](https://github.com/bingordo/compiler-ci/actions/runs/43658741984)
+and [CI PR #854](https://github.com/bingordo/compiler-ci/pull/854).
+Only `compiler-ci` runs routine automated tests; source workflows are
+manual-only.

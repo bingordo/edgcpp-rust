@@ -1,15 +1,7 @@
 name: M10 indirect-call baseline
+# Automatic builds run on bingordo/compiler-ci, not in this source repo.
+# Keep this workflow manually dispatchable for historical diagnostics.
 on:
-  push:
-    paths:
-      - 'tests/fixtures/m10_indirect_*.c'
-      - 'tools/m10_indirect_baseline.py'
-      - '.github/workflows/m10-indirect-baseline.yml'
-  pull_request:
-    paths:
-      - 'tests/fixtures/m10_indirect_*.c'
-      - 'tools/m10_indirect_baseline.py'
-      - '.github/workflows/m10-indirect-baseline.yml'
   workflow_dispatch:
 
 concurrency:

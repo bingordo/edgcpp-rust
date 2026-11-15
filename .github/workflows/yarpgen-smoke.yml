@@ -2,23 +2,9 @@ name: Pinned YARPGen C baseline smoke
 
 # Separate from expensive EDG + Cranelift CI. Reuse the existing YARPGen
 # Linux binary Release; compile only generated code, never the generator.
+# Automatic builds run on bingordo/compiler-ci, not in this source repo.
+# Keep this workflow manually dispatchable for historical diagnostics.
 on:
-  push:
-    branches: [cranelift-codegen]
-    paths:
-      - 'tools/yarpgen_smoke.py'
-      - 'tests/test_yarpgen_smoke.py'
-      - 'tools/m6_gnu_differential.py'
-      - 'tests/fixtures/m6_gnu_statement_expr.c'
-      - '.github/workflows/yarpgen-smoke.yml'
-  pull_request:
-    branches: [cranelift-codegen]
-    paths:
-      - 'tools/yarpgen_smoke.py'
-      - 'tests/test_yarpgen_smoke.py'
-      - 'tools/m6_gnu_differential.py'
-      - 'tests/fixtures/m6_gnu_statement_expr.c'
-      - '.github/workflows/yarpgen-smoke.yml'
   workflow_dispatch:
     inputs:
       seeds:

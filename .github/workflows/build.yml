@@ -3,23 +3,9 @@ name: Rust EDG bridge (Linux x86-64)
 # Only the default branch is verified on push. Pull requests get their own
 # verification, avoiding duplicate push + PR builds on feature branches.
 # Documentation-only updates do not compile C++/Rust.
+# Automatic builds run on bingordo/compiler-ci, not in this source repo.
+# Keep this workflow manually dispatchable for historical diagnostics.
 on:
-  push:
-    branches: [cranelift-codegen]
-    paths-ignore:
-      - README.md
-      - docs/**
-      - '**/*.md'
-      # A separate small workflow validates YARPGen harness edits.
-      - tools/yarpgen_smoke.py
-      - tests/test_yarpgen_smoke.py
-      - .github/workflows/yarpgen-smoke.yml
-  pull_request:
-    branches: [cranelift-codegen]
-    paths-ignore:
-      - README.md
-      - docs/**
-      - '**/*.md'
   workflow_dispatch:
     inputs:
       audit_type_index_benchmark:
