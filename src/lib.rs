@@ -176,6 +176,8 @@ pub struct Il {
     /// Byte-exact native IEEE file-scope definition image, event 60.
     pub global_float_initializers: Vec<GlobalFloatInitializer>,
     pub global_variables: Vec<GlobalVariable>,
+    /// EDG's nonreal/template/prototype classification of each file-scope variable.
+    pub global_materializations: Vec<GlobalMaterialization>,
     /// Diagnostic EDG global-init scheduler mode and completeness, never an ELF admission proof.
     pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
     /// EDG's explicit file-scope init routine list in native order (if configured).
@@ -426,6 +428,20 @@ pub struct GlobalVariable {
     pub explicit_initializer: bool,
     pub thread_local: bool,
     pub local_to_function: bool,
+}
+
+/// The source EDG variable properties that distinguish template metadata from
+/// real executable storage; none of these bits alone is a startup/ABI proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalMaterialization {
+    pub symbol: SymbolId,
+    pub is_nonreal: bool,
+    pub is_prototype_instantiation: bool,
+    pub is_template_variable: bool,
+    pub compiler_generated: bool,
+    pub used: bool,
+    pub address_taken: bool,
+    pub is_class_member: bool,
 }
 
 /// Whether EDG's separately scheduled file-scope initialization list is available.
@@ -1522,6 +1538,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         61 => Some(il.symbol_link_names.len()),
         62 => Some(il.string_literals.len()),
         47 => Some(il.global_variables.len()),
+        100 => Some(il.global_materializations.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
         63 => Some(il.cxx_record_admissions.len()),
@@ -1810,6 +1827,23 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             }
             output.constant_addresses.push(ConstantAddress {
                 function,statement_path,path,symbol:SymbolId(symbol),byte_offset,
+            });
+        }
+        100 => {
+            let (Some(symbol),Some(flags))=(n(0),n(1)) else {return;};
+            if symbol==0 || flags>127 || !seen.globals.contains(&SymbolId(symbol)) ||
+                output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
+                return;
+            }
+            output.global_materializations.push(GlobalMaterialization {
+                symbol:SymbolId(symbol),
+                is_nonreal: flags&1!=0,
+                is_prototype_instantiation: flags&2!=0,
+                is_template_variable: flags&4!=0,
+                compiler_generated: flags&8!=0,
+                used: flags&16!=0,
+                address_taken: flags&32!=0,
+                is_class_member: flags&64!=0,
             });
         }
         47 => {
@@ -6064,7 +6098,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=99_u32 {
+        for kind in 1..=100_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6091,10 +6125,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,388);
+        assert_eq!(total,390);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(100).is_none());
+        assert!(expected_wire_field_tag_masks(101).is_none());
     }
 
     #[test]
@@ -7273,3 +7307,7 @@ mod retired_source_hook_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path="global_materialization_tests.rs"]
+mod global_materialization_tests;
