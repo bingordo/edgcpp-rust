@@ -321,55 +321,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  info.virtual_number,info.virtual_info_offset,
                  info.sharing_base.map(|id|id.0));
     }
-    // Event 80 requires paired native EDG callbacks before and after the
-    // same virtual-call rewrite and an exact final callee-node match.
-    // The mapped identity is still optional after copying/inlining; no
-    // physical slot, receiver adjustment, or executable ABI is proven.
-    for origin in &result.il.prelower_virtual_origins {
-        let name=result.il.symbols.iter().find(|s|
-            s.id==origin.original_routine).map(|s|s.name.as_str());
-        println!("EDG_PRELOWER_VIRTUAL_ORIGIN function={} statement={} path={} original_routine={} original_name={:?} receiver_type={:?} original_operator={} receiver_node_retained={} postlower_rewrite_proven=true callee_pointer_stable=true machine_slot_proven=false executable_abi_proven=false",
-            origin.function,origin.statement_path,origin.path,
-            origin.original_routine.0,name,
-            origin.original_receiver_type.map(|id|id.0),
-            origin.original_operator,origin.receiver_node_retained);
-    }
-    // Event 81 is an independent source-backed reuse proof: EDG's
-    // get_virtual_function_address returned this exact receiver expression,
-    // which remained a unique direct argument of the paired lowered call.
-    // The copied expression need not share the original source-node address.
-    // It does not prove a complete object, vtable address, subobject
-    // offset, thunk, or runtime machine this-adjustment.
-    for reuse in &result.il.virtual_receiver_reuses {
-        println!("EDG_VIRTUAL_RECEIVER_REUSE function={} statement={} path={} receiver_type={} arg_index={} original_node_same={} edg_reuse_proven=true subobject_abi_proven=false executable_abi_proven=false",
-                 reuse.function,reuse.statement_path,reuse.path,
-                 reuse.receiver_type.0,reuse.argument_position,
-                 reuse.original_node_reused);
-    }
-    // Native Itanium-class-ABI EDG eok_padd(vptr, index) was witnessed
-    // at source construction, and the exact parent plus BOTH original
-    // operand nodes remain linked in the final call's callee subtree.
-    // A detached index node is not sufficient. Scale using
-    // EDG's actual table-element width, not a hard-coded pointer width.
-    // This is source displacement, NOT a verified physical G++ ABI slot,
-    // address point, thunk adjustment, or executable indirect call.
-    for entry in &result.il.virtual_entry_indexes {
-        if let Some(source_byte_displacement)=
-            entry.source_index.checked_mul(entry.entry_bytes) {
-            println!("EDG_NATIVE_VIRTUAL_INDEX function={} statement={} path={} source_index={} native_entry_bytes={} source_byte_displacement={} exact_index_node_proven=true exact_source_padd_proven=true machine_address_point_proven=false machine_slot_proven=false executable_abi_proven=false",
-                entry.function,entry.statement_path,entry.path,
-                entry.source_index,entry.entry_bytes,source_byte_displacement);
-        }
-    }
-    // Source event 83 ties EDG's exact vptr-lookup object expression
-    // to its reusable virtual call receiver, only when both original
-    // nodes still appear in the same source-proven rewritten call.
-    // Not evidence of runtime subobject offsets or adjusted machine this.
-    for pair in &result.il.virtual_vptr_receiver_pairs {
-        println!("EDG_VIRTUAL_VPTR_RECEIVER function={} statement={} path={} lookup_object_type={} arg_index={} source_lookup_object_proven=true reused_call_argument_proven=true subobject_offset_proven=false machine_this_adjustment_proven=false executable_abi_proven=false",
-                 pair.function,pair.statement_path,pair.path,
-                 pair.lookup_object_type.0,pair.argument_position);
-    }
+    // The normal EDG C-backend interface exposes the lowered call tree,
+    // not the original virtual dispatch rewrite or its private node pairs.
+    // No synthetic virtual-slot/receiver provenance is reported here.
     // A lowered ordinary eok_call can contain an exact record-field
     // reference to "__vptr" without retaining its pre-lowering virtual
     // routine/receiver identity. Record this *observed tree* only for
