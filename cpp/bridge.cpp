@@ -2763,6 +2763,20 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                        num(v->has_explicit_initializer ? 1u : 0u),
                        num(v->is_thread_local ? 1u : 0u),
                        num(is_local ? 1u : 0u)});
+      // Source-owned materialization classification. These flags describe
+      // whether a C++ template/prototype declaration can represent a
+      // runtime object; they do not prove there is no startup effect.
+      // This is an ordinary back_end() IL snapshot, not an EDG source hook.
+      const unsigned materialization_flags =
+          (v->is_nonreal ? 1u : 0u) |
+          (v->is_prototype_instantiation ? 2u : 0u) |
+          (v->is_template_variable ? 4u : 0u) |
+          (v->compiler_generated ? 8u : 0u) |
+          (v->used ? 16u : 0u) |
+          (v->address_taken ? 32u : 0u) |
+          (v->source_corresp.is_class_member ? 64u : 0u);
+      emit_record(RECORD_NATIVE_GLOBAL_MATERIALIZATION,
+                  {num(symbol_id), num(materialization_flags)});
       if ((v->storage_class == sc_static || v->is_thread_local) &&
           v->source_corresp.is_local_to_function) {
         if (v->source_corresp.enclosing_routine != nullptr &&
