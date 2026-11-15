@@ -1391,6 +1391,12 @@ struct WireSeen {
     layouts: HashSet<TypeId>,
     c_integer_types: HashSet<TypeId>,
     c_float_types: HashSet<TypeId>,
+    /// Event 58 is unique per primary source expression (not per IEEE value).
+    float_constant_sites: HashSet<(String,String,String)>,
+    /// Event 59 is unique per local source initialization site and symbol.
+    float_initializer_sites: HashSet<(String,String,SymbolId)>,
+    /// Event 60 describes at most one exact image per defined global.
+    global_float_images: HashSet<SymbolId>,
     signed_i64_types: HashSet<TypeId>,
     symbol_types: HashSet<SymbolId>,
     globals: HashSet<SymbolId>,
@@ -1889,7 +1895,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if function.is_empty() || statement_path.is_empty() ||
                 path.is_empty() || ty==0 || !matches!(width,32|64) ||
-                (width==32 && bits>u64::from(u32::MAX)) {
+                (width==32 && bits>u64::from(u32::MAX)) ||
+                !seen.float_constant_sites.insert((
+                    function.clone(),statement_path.clone(),path.clone())) {
                 return;
             }
             output.float_constants.push(FloatConstant {
@@ -1902,7 +1910,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 (n(0),n(1),n(2),fields[3].unsigned())
                 else {return;};
             if symbol==0 || ty==0 || !matches!(width,32|64) ||
-                (width==32 && bits>u64::from(u32::MAX)) {
+                (width==32 && bits>u64::from(u32::MAX)) ||
+                !seen.global_float_images.insert(SymbolId(symbol)) {
                 return;
             }
             output.global_float_initializers.push(GlobalFloatInitializer {
@@ -1916,7 +1925,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if function.is_empty() || statement_path.is_empty() ||
                 symbol==0 || ty==0 || !matches!(width,32|64) ||
-                (width==32 && bits>u64::from(u32::MAX)) {
+                (width==32 && bits>u64::from(u32::MAX)) ||
+                !seen.float_initializer_sites.insert((
+                    function.clone(),statement_path.clone(),SymbolId(symbol))) {
                 return;
             }
             output.float_initializers.push(FloatInitializer {
@@ -5341,6 +5352,82 @@ mod tests {
         assert!(malformed.malformed);
         assert!(malformed.il.global_float_initializers.is_empty());
     }
+
+    #[test]
+    fn m14_float_expression_images_reject_duplicate_source_path() {
+        let text = |v:&'static [u8]| WireField {
+            data:v.as_ptr(),length:v.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let num = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let first=[text(b"source"),text(b"0.block.1"),text(b"0.1"),
+                   num(44),num(32),num(0x8000_0000)];
+        let other=[text(b"source"),text(b"0.block.1"),text(b"0.2"),
+                   num(44),num(32),num(7)];
+        let duplicate=[text(b"source"),text(b"0.block.1"),text(b"0.1"),
+                       num(45),num(64),num(0x7ff8_0000_0000_0001)];
+        let mut state=Collector::default();
+        for fields in [&first,&other] {
+            unsafe {collect((&mut state as *mut Collector).cast(),58,
+                            fields.as_ptr(),fields.len(),0);}
+            assert!(!state.malformed);
+        }
+        assert_eq!(state.il.float_constants.len(),2);
+        unsafe {collect((&mut state as *mut Collector).cast(),58,
+                        duplicate.as_ptr(),duplicate.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.float_constants.len(),2);
+    }
+
+    #[test]
+    fn m14_float_local_images_reject_duplicate_execution_site_and_symbol() {
+        let text = |v:&'static [u8]| WireField {
+            data:v.as_ptr(),length:v.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let num = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let first=[text(b"local"),text(b"0.block.1"),
+                   num(17),num(23),num(64),num(1)];
+        let distinct_symbol=[text(b"local"),text(b"0.block.1"),
+                             num(18),num(23),num(64),num(1)];
+        let duplicate=[text(b"local"),text(b"0.block.1"),
+                       num(17),num(23),num(64),num(2)];
+        let mut state=Collector::default();
+        for fields in [&first,&distinct_symbol] {
+            unsafe {collect((&mut state as *mut Collector).cast(),59,
+                            fields.as_ptr(),fields.len(),0);}
+            assert!(!state.malformed);
+        }
+        assert_eq!(state.il.float_initializers.len(),2);
+        unsafe {collect((&mut state as *mut Collector).cast(),59,
+                        duplicate.as_ptr(),duplicate.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.float_initializers.len(),2);
+    }
+
+    #[test]
+    fn m14_float_global_images_reject_duplicated_symbol_identity() {
+        let num = |value| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let first=[num(17),num(23),num(64),num(0x8000_0000_0000_0000)];
+        let second=[num(18),num(23),num(32),num(0x7fc0_0000)];
+        let duplicate=[num(17),num(24),num(64),num(0)];
+        let mut state=Collector::default();
+        for fields in [&first,&second] {
+            unsafe {collect((&mut state as *mut Collector).cast(),60,
+                            fields.as_ptr(),fields.len(),0);}
+            assert!(!state.malformed);
+        }
+        assert_eq!(state.il.global_float_initializers.len(),2);
+        unsafe {collect((&mut state as *mut Collector).cast(),60,
+                        duplicate.as_ptr(),duplicate.len(),0);}
+        assert!(state.malformed);
+        assert_eq!(state.il.global_float_initializers.len(),2);
+    }
+
     #[test]
     fn m11_vla_dimension_wire_requires_valid_runtime_expression_shape() {
         let string = |bytes: &[u8]| WireField {
