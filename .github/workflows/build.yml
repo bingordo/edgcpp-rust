@@ -201,6 +201,34 @@ jobs:
               cxx5-global-init-edg.out || true
           )
 
+      # C++ reference formation is a distinct native operator (56), not
+      # address-of (43); this is a source-only gate, not an ELF admission.
+      - name: C++ reference-formation native operator regression
+        working-directory: edgcpp-rust
+        env:
+          EDGCPP_SOURCE_DIR: ${{ github.workspace }}/edgcpp
+          EDGCPP_COMPILE_COMMANDS: ${{ github.workspace }}/edgcpp/build/gcc-release/compile_commands.json
+          EDGCPP_LIB_DIR: ${{ github.workspace }}/edgcpp/build/gcc-release/lib
+          EDGCPP_EDG_REVISION: ${{ env.EDG_SOURCE_SHA }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tests/fixtures/cxx_reference_formation.cpp \
+            -o /tmp/cxx-reference-formation-oracle
+          /tmp/cxx-reference-formation-oracle
+          cargo build --example reference_formation
+          cp tests/fixtures/cxx_reference_formation.cpp ../edgcpp/build/gcc-release/
+          (
+            cd ../edgcpp/build/gcc-release
+            source environment.sh
+            ../../../edgcpp-rust/target/debug/examples/reference_formation \
+              --c++17 cxx_reference_formation.cpp >cxx-reference-formation.log
+            cat cxx-reference-formation.log
+            grep -Eq '^EDG_CXX_REFERENCE_FORMATION reference_to=[0-9]+ address_of=[0-9]+ calls=2 reference_formal=true pointer_formal=true$' \
+              cxx-reference-formation.log
+          )
+
       - name: Build bindings and tests
         working-directory: edgcpp-rust
         env:
