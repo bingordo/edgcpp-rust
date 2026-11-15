@@ -25,16 +25,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut references = 0usize;
     let mut addresses = 0usize;
-    for expr in result.il.expressions.iter().filter(|expr|
-        expr.function.contains("reference_formation_probe::exercise")
-    ) {
+    let mut operators = std::collections::BTreeMap::<String, Vec<(u32, u32)>>::new();
+    for expr in &result.il.expressions {
         let Some(native_op) = expr.operator else { continue };
         let normalized = unsafe { edgcpp_codegen_kind(3, native_op) };
-        match normalized {
-            56 => references += 1,
-            43 => addresses += 1,
-            _ => {}
+        operators.entry(expr.function.clone()).or_default().push((native_op, normalized));
+        if expr.function.contains("reference_formation_probe::exercise") {
+            match normalized {
+                56 => references += 1,
+                43 => addresses += 1,
+                _ => {}
+            }
         }
+    }
+    // Source-level diagnostics are intentionally visible on CI failure.
+    // The probe must never silently reinterpret a different native operator
+    // as a reference binding to satisfy the fixture.
+    for (function, kinds) in &operators {
+        println!("EDG_CXX_OPERATOR_TRACE function={function:?} native_and_semantic={kinds:?}");
     }
     println!("EDG_CXX_REFERENCE_FORMATION reference_to={references} address_of={addresses}");
     if references == 0 {
