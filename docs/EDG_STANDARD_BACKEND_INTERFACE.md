@@ -28,8 +28,11 @@ It does not inspect pre-lowering nodes or pair private EDG rewrite pointers.
 In particular, wire events 80, 81, 82 and 85 (pre-lowering virtual origin,
 receiver reuse, vtable index selection and vptr/receiver pairing) are
 **not produced** by this bridge. Their historical wire definitions and Rust
-validators remain temporarily for compatibility with existing fixtures,
-not as current evidence or a promise to reintroduce source hooks.
+validators remain temporarily for compatibility with existing fixtures.
+The live Rust callback **rejects all four retired record IDs**, even when
+syntactically well-formed; the old validators can only be exercised by
+fixture/unit tests. Neither they nor the schema are current evidence or
+a promise to reintroduce source hooks.
 
 The existing post-lowered IL records (notably 66/67 for the generated
 initialization roster, 77 for call targets, 78 for native call forms and
