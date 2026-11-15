@@ -3187,6 +3187,7 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     if (value == static_cast<unsigned>(eok_pre_decr)) return 42;
     // Memory/lvalue operators share stable semantic IDs; do not bake EDG
     // private enum discriminants into Rust.
+    if (value == static_cast<unsigned>(eok_reference_to)) return 56;
     if (value == static_cast<unsigned>(eok_address_of)) return 43;
     if (value == static_cast<unsigned>(eok_indirect)) return 44;
     if (value == static_cast<unsigned>(eok_subscript)) return 45;
