@@ -1406,6 +1406,14 @@ unsafe extern "C" fn collect(context: *mut c_void, kind: u32,
     if context.is_null() { return; }
     let state = &mut *(context as *mut Collector);
     if state.panicked || state.malformed { return; }
+    // Retired private EDG lowering hooks have no place in the live back-end
+    // protocol. Keep their historical wire shape for fixture migration, but
+    // reject these records even if a stale or mixed-version native producer
+    // still emits a syntactically valid event.
+    if matches!(kind, 80 | 81 | 82 | 85) {
+        state.malformed = true;
+        return;
+    }
     // Reject unknown event IDs, arity mismatches and missing field arrays
     // before constructing a slice from the C++ callback pointer. In
     // particular, a bogus length must never reach from_raw_parts.
@@ -7216,5 +7224,42 @@ mod cxx5_native_call_dispatch_wire_tests {
         not_proven.call_dispatches[0].explicitly_virtual=false;
         assert!(validate_native_call_dispatch_coverage(&not_proven).is_ok(),
             "false source virtual bit cannot authorize or forbid lowered dispatch");
+    }
+}
+
+#[cfg(test)]
+mod retired_source_hook_wire_tests {
+    use super::*;
+
+    #[test]
+    fn live_callback_rejects_all_retired_virtual_source_events() {
+        // The legacy arities are still defined by the schema, so this
+        // proves rejection is due to unsupported provenance, not bad arity.
+        for kind in [80_u32, 81, 82, 85] {
+            let arity = expected_wire_field_count(kind)
+                .expect("historical wire kind must remain reserved");
+            let values = vec![WireField {
+                data: std::ptr::null(),
+                length: 0,
+                value: 0,
+                tag: wire_tags::ABSENT,
+            }; arity];
+            let mut state = Collector::default();
+            unsafe {
+                collect(
+                    (&mut state as *mut Collector).cast::<c_void>(),
+                    kind,
+                    values.as_ptr(),
+                    values.len(),
+                    0,
+                );
+            }
+            assert!(state.malformed, "retired wire event {kind} was accepted");
+            assert!(!state.panicked, "retired wire event {kind} panicked");
+            assert!(state.il.prelower_virtual_origins.is_empty());
+            assert!(state.il.virtual_receiver_reuses.is_empty());
+            assert!(state.il.virtual_entry_indexes.is_empty());
+            assert!(state.il.virtual_vptr_receiver_pairs.is_empty());
+        }
     }
 }
