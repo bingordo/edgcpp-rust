@@ -6557,6 +6557,27 @@ mod cxx5_call_target_wire_tests {
     }
 }
 
+// Historical source-hook events are decoded only in these unit fixtures.
+// The live EDG callback deliberately rejects them before record parsing.
+#[cfg(test)]
+fn collect_retired_wire_fixture(state: &mut Collector, kind: u32, fields: &[WireField]) {
+    assert!(matches!(kind, 80 | 81 | 82 | 85));
+    let before = callback_record_count(&state.il, kind);
+    if expected_wire_field_count(kind) != Some(fields.len()) {
+        state.malformed = true;
+        return;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        collect_event(&mut state.il, &mut state.seen, kind, fields.as_ptr(), fields.len(), 0);
+    }));
+    if result.is_err() {
+        state.panicked = true;
+        state.malformed = true;
+    } else if callback_record_count(&state.il, kind) == before {
+        state.malformed = true;
+    }
+}
+
 #[cfg(test)]
 mod cxx5_virtual_receiver_reuse_tests {
     use super::*;
@@ -6649,8 +6670,7 @@ mod cxx5_virtual_receiver_reuse_tests {
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                     number(4),number(0),number(0)];
         let mut state=Collector::default();
-        unsafe {collect((&mut state as *mut Collector).cast(),81,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut state, 81, &fields);
         assert!(!state.malformed);
         assert_eq!(state.il.virtual_receiver_reuses.len(),1);
         assert_eq!(state.il.virtual_receiver_reuses[0].receiver_type,TypeId(4));
@@ -6659,14 +6679,12 @@ mod cxx5_virtual_receiver_reuse_tests {
         let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                  number(4),number(16),number(0)];
         let mut invalid=Collector::default();
-        unsafe {collect((&mut invalid as *mut Collector).cast(),81,
-                        bad.as_ptr(),bad.len(),0);}
+        collect_retired_wire_fixture(&mut invalid, 81, &bad);
         assert!(invalid.malformed);
         let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                  number(4),number(0),number(2)];
         let mut invalid=Collector::default();
-        unsafe {collect((&mut invalid as *mut Collector).cast(),81,
-                        bad.as_ptr(),bad.len(),0);}
+        collect_retired_wire_fixture(&mut invalid, 81, &bad);
         assert!(invalid.malformed);
     }
 }
@@ -6751,8 +6769,7 @@ mod cxx5_virtual_vptr_receiver_pair_tests {
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                     number(4),number(0)];
         let mut state=Collector::default();
-        unsafe {collect((&mut state as *mut Collector).cast(),85,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut state, 85, &fields);
         assert!(!state.malformed);
         assert_eq!(state.il.virtual_vptr_receiver_pairs.len(),1);
         assert_eq!(state.il.virtual_vptr_receiver_pairs[0]
@@ -6763,15 +6780,13 @@ mod cxx5_virtual_vptr_receiver_pair_tests {
             let bad=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                      number(ty),number(pos)];
             let mut collector=Collector::default();
-            unsafe {collect((&mut collector as *mut Collector).cast(),85,
-                            bad.as_ptr(),bad.len(),0);}
+            collect_retired_wire_fixture(&mut collector, 85, &bad);
             assert!(collector.malformed);
         }
         let malformed_tags=[text(b"caller"),text(b"0.block.2"),
                             text(b"0"),text(b"not_unsigned"),number(0)];
         let mut collector=Collector::default();
-        unsafe {collect((&mut collector as *mut Collector).cast(),85,
-                        malformed_tags.as_ptr(),malformed_tags.len(),0);}
+        collect_retired_wire_fixture(&mut collector, 85, &malformed_tags);
         assert!(collector.malformed);
     }
 }
@@ -6872,8 +6887,7 @@ mod cxx5_virtual_entry_index_selection_tests {
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                     number(0),number(8)];
         let mut collector=Collector::default();
-        unsafe {collect((&mut collector as *mut Collector).cast(),82,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut collector, 82, &fields);
         assert!(!collector.malformed);
         let got=&collector.il.virtual_entry_indexes[0];
         assert_eq!(got.source_index,0);
@@ -6881,8 +6895,7 @@ mod cxx5_virtual_entry_index_selection_tests {
         let overflow=[text(b"caller"),text(b"0.block.2"),text(b"0"),
                       number(u64::MAX),number(8)];
         let mut collector=Collector::default();
-        unsafe {collect((&mut collector as *mut Collector).cast(),82,
-                        overflow.as_ptr(),overflow.len(),0);}
+        collect_retired_wire_fixture(&mut collector, 82, &overflow);
         assert!(collector.malformed);
     }
 }
@@ -6994,8 +7007,7 @@ mod cxx5_prelower_virtual_call_origin_tests {
         };
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
             num(9),num(4),num(107),num(1)];
-        unsafe {collect((&mut collector as *mut Collector).cast(),80,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut collector, 80, &fields);
         assert!(!collector.malformed);
         assert_eq!(collector.il.prelower_virtual_origins.len(),1);
         let got=&collector.il.prelower_virtual_origins[0];
@@ -7006,15 +7018,13 @@ mod cxx5_prelower_virtual_call_origin_tests {
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
             num(9),absent,num(107),num(0)];
         let mut absent_owner=Collector::default();
-        unsafe {collect((&mut absent_owner as *mut Collector).cast(),80,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut absent_owner, 80, &fields);
         assert!(!absent_owner.malformed);
         assert_eq!(absent_owner.il.prelower_virtual_origins[0].original_receiver_type,None);
         let fields=[text(b"caller"),text(b"0.block.2"),text(b"0"),
             num(9),absent,num(107),num(2)];
         let mut invalid=Collector::default();
-        unsafe {collect((&mut invalid as *mut Collector).cast(),80,
-                        fields.as_ptr(),fields.len(),0);}
+        collect_retired_wire_fixture(&mut invalid, 80, &fields);
         assert!(invalid.malformed);
     }
 }
