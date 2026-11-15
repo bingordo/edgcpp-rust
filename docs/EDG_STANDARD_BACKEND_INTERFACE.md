@@ -8,6 +8,11 @@ wire representation before EDG cleans up its compilation state.
 
 ## Source of truth
 
+- Match EDG's C backend when `IL_SHOULD_BE_WRITTEN_TO_FILE` is enabled:
+  read `f_il_output` via `il_read` unless `skip_il_read` is set, then restore
+  `primary_source_file_name` from `il_header.primary_source_file`. Reject a
+  missing native source-file entry or missing primary scope rather than
+  returning an apparently valid empty snapshot.
 - Traverse `il_header.primary_scope` for declarations, native types and
   layouts, routine scopes, statements, expressions and ordinary call targets.
 - Read `il_header.file_scope_dynamic_init_routines` (when
