@@ -64,6 +64,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
         }
     }
+    println!("EDG_CXX5_SCOPE_ASM count={} diagnostic_only=true",
+             result.il.native_scope_asm.len());
+    for entry in &result.il.native_scope_asm {
+        println!("EDG_CXX5_SCOPE_ASM_ENTRY scope={:?} position={} flags={} text={:?} diagnostic_only=true",
+                 entry.scope,entry.position,entry.flags,entry.assembly);
+    }
     println!("scope dynamic init entries={}",
              result.il.scope_dynamic_initializers.len());
     for init in &result.il.scope_dynamic_initializers {

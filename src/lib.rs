@@ -191,6 +191,9 @@ pub struct Il {
     pub file_scope_lowered_startup_routines: Vec<FileScopeLoweredStartupRoutine>,
     /// Native per-scope dynamic initializers in EDG's own list order.
     pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
+    /// Opaque source-owned file/namespace asm declarations. Diagnostic only:
+    /// the bridge neither assembles them nor claims complete linker semantics.
+    pub native_scope_asm: Vec<NativeScopeAsm>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
     /// Folded source expression constants holding C routine pointers.
@@ -488,6 +491,17 @@ pub struct ScopeDynamicInitializer {
     pub variable: Option<SymbolId>,
     pub destructor: Option<SymbolId>,
     pub kind: u32,
+}
+
+/// Source-owned EDG namespace/file-scope asm declaration (wire 101).
+/// Raw assembly text is untrusted and never admitted to the compiler backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScopeAsm {
+    pub scope: String,
+    pub position: u32,
+    pub assembly: String,
+    /// EDG GNU asm form/volatile/keyword/inline/goto flags (low five bits).
+    pub flags: u32,
 }
 
 /// Address-valued constant in an expression snapshot.
@@ -1546,6 +1560,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         62 => Some(il.string_literals.len()),
         47 => Some(il.global_variables.len()),
         100 => Some(il.global_materializations.len()),
+        101 => Some(il.native_scope_asm.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
         63 => Some(il.cxx_record_admissions.len()),
@@ -1634,6 +1649,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             } else {None};
             output.native_statement_sibling_counts.push(NativeStatementSiblingCount {
                 function,parent,edge,count,
+            });
+        }
+        101 => {
+            let (Some(scope),Some(position),Some(assembly),Some(flags))=
+                (t(0),n(1),t(2),n(3)) else {return;};
+            if scope.is_empty() || scope.len()>1024 || (flags & !31)!=0 ||
+               position as usize!=output.native_scope_asm.iter()
+                   .filter(|e|e.scope==scope).count() {return;}
+            output.native_scope_asm.push(NativeScopeAsm {
+                scope,position,assembly,flags,
             });
         }
         69 => {
@@ -6461,6 +6486,55 @@ mod file_scope_runtime_link_wire_tests {
             assert!(state.malformed);
             assert!(state.il.file_scope_runtime_links.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod native_scope_asm_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,scope:&str,position:u32,assembly:&str,flags:u32) {
+        let fields=[
+            WireField{data:scope.as_ptr(),length:scope.len(),value:0,tag:wire_tags::TEXT},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(position),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:assembly.as_ptr(),length:assembly.len(),value:0,tag:wire_tags::TEXT},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(flags),
+                      tag:wire_tags::UNSIGNED},
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),101,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn opaque_native_asm_preserves_gnu_linker_anchor_and_scope_order() {
+        let mut state=Collector::default();
+        let raw=".globl _ZSt21ios_base_library_initv";
+        send(&mut state,"1:",0,raw,2);
+        send(&mut state,"2:std::",0,"",0);
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_scope_asm,vec![
+            NativeScopeAsm{scope:"1:".into(),position:0,
+                           assembly:raw.into(),flags:2},
+            NativeScopeAsm{scope:"2:std::".into(),position:0,
+                           assembly:String::new(),flags:0},
+        ]);
+    }
+
+    #[test]
+    fn native_asm_invalid_flags_and_noncontiguous_ordinals_fail_closed() {
+        let mut state=Collector::default();
+        send(&mut state,"1:",0,".globl ext",0);
+        send(&mut state,"1:",2,"nop",0);
+        assert!(state.malformed);
+        let mut invalid=Collector::default();
+        send(&mut invalid,"1:",0,"nop",32);
+        assert!(invalid.malformed);
+        let mut missing=Collector::default();
+        send(&mut missing,"",0,"nop",0);
+        assert!(missing.malformed);
     }
 }
 
