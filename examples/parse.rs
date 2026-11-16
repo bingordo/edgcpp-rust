@@ -103,6 +103,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              result.il.global_variables.len(), materialized,
              result.il.dynamic_initializers.len(),
              result.il.scope_dynamic_initializers.len(), io_symbols.len());
+    for mat in result.il.global_materializations.iter().filter(|m|
+        !m.is_nonreal && !m.is_prototype_instantiation) {
+        let sym=result.il.symbols.iter().find(|s|s.id==mat.symbol);
+        let global=result.il.global_variables.iter().find(|g|g.symbol==mat.symbol);
+        let init=result.il.variable_initializers.iter().find(|v|v.symbol==mat.symbol);
+        let src=result.il.symbol_sources.iter().find(|s|s.symbol==mat.symbol);
+        let link=result.il.symbol_link_names.iter().find(|v|v.symbol==mat.symbol);
+        println!("EDG_CXX5_MATERIALIZED_GLOBAL id={} name={:?} link={:?} linkage={:?} explicit={:?} init_kind={:?} thread_local={:?} used={} address_taken={} source={:?} line={:?} diagnostic_only=true",
+                 mat.symbol.0,sym.map(|s|s.name.as_str()),
+                 link.map(|v|v.link_name.as_str()),
+                 global.map(|v|v.linkage),global.map(|v|v.explicit_initializer),
+                 init.map(|v|v.kind),global.map(|v|v.thread_local),
+                 mat.used,mat.address_taken,
+                 src.map(|v|v.location.file.as_str()),
+                 src.map(|v|v.location.line));
+    }
     for sym in &io_symbols {
         let global=result.il.global_variables.iter().find(|v|v.symbol==sym.id);
         let mat=result.il.global_materializations.iter().find(|v|v.symbol==sym.id);
