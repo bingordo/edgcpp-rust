@@ -9,6 +9,7 @@
 pub mod graph;
 pub mod memory_order;
 pub mod scalar_abi;
+pub mod startup_provenance;
 mod limits;
 #[cfg(feature = "codegen")]
 pub mod codegen;
