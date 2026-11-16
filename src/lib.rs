@@ -191,6 +191,9 @@ pub struct Il {
     pub file_scope_lowered_startup_routines: Vec<FileScopeLoweredStartupRoutine>,
     /// Native per-scope dynamic initializers in EDG's own list order.
     pub scope_dynamic_initializers: Vec<ScopeDynamicInitializer>,
+    /// Opaque source-owned file/namespace asm declarations. Diagnostic only:
+    /// the bridge neither assembles them nor claims complete linker semantics.
+    pub native_scope_asm: Vec<NativeScopeAsm>,
     /// EDG ck_address/abk_variable literal: base symbol plus signed byte offset.
     pub constant_addresses: Vec<ConstantAddress>,
     /// Folded source expression constants holding C routine pointers.
@@ -488,6 +491,17 @@ pub struct ScopeDynamicInitializer {
     pub variable: Option<SymbolId>,
     pub destructor: Option<SymbolId>,
     pub kind: u32,
+}
+
+/// Source-owned EDG namespace/file-scope asm declaration (wire 101).
+/// Raw assembly text is untrusted and never admitted to the compiler backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeScopeAsm {
+    pub scope: String,
+    pub position: u32,
+    pub assembly: String,
+    /// EDG GNU asm form/volatile/keyword/inline/goto flags (low five bits).
+    pub flags: u32,
 }
 
 /// Address-valued constant in an expression snapshot.
@@ -1546,6 +1560,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         62 => Some(il.string_literals.len()),
         47 => Some(il.global_variables.len()),
         100 => Some(il.global_materializations.len()),
+        101 => Some(il.native_scope_asm.len()),
         48 => Some(il.constant_addresses.len()),
         49 => Some(il.type_object_sizes.len()),
         63 => Some(il.cxx_record_admissions.len()),
@@ -1634,6 +1649,16 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             } else {None};
             output.native_statement_sibling_counts.push(NativeStatementSiblingCount {
                 function,parent,edge,count,
+            });
+        }
+        101 => {
+            let (Some(scope),Some(position),Some(assembly),Some(flags))=
+                (t(0),n(1),t(2),n(3)) else {return;};
+            if scope.is_empty() || scope.len()>1024 || (flags & !31)!=0 ||
+               position as usize!=output.native_scope_asm.iter()
+                   .filter(|e|e.scope==scope).count() {return;}
+            output.native_scope_asm.push(NativeScopeAsm {
+                scope,position,assembly,flags,
             });
         }
         69 => {
