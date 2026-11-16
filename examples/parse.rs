@@ -37,6 +37,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  link.link_variable.0, variable.map(|s|s.name.as_str()),
                  link.startup_routine.0, routine.map(|s|s.name.as_str()));
     }
+    // EDG's generated startup bodies are often the only remaining source
+    // of file-scope initializer execution after post-lowering list draining.
+    // Report native immediate call identities, not a complete ELF schedule.
+    match edgcpp::startup_provenance::collect_startup_evidence(&result.il) {
+        Ok(proof) => {
+            println!("EDG_CXX5_STARTUP_EVIDENCE roots={} calls={} executable_schedule_proven=false",
+                     proof.roots.len(), proof.immediate_calls.len());
+            for root in &proof.roots {
+                println!("EDG_CXX5_STARTUP_ROOT_SOURCE routine={} function={:?} source={:?} ordinal={:?} priority={:?} link={:?}",
+                         root.routine.0, root.function, root.source, root.ordinal,
+                         root.priority, root.link_variable.map(|s|s.0));
+            }
+            for edge in &proof.immediate_calls {
+                let callee_link=edge.callee_symbol.and_then(|id| result.il.symbol_link_names
+                    .iter().find(|name|name.symbol==id));
+                println!("EDG_CXX5_STARTUP_CALL root={} function={:?} statement={:?} path={:?} form={:?} callee={:?} link={:?} type={:?} diagnostic_only=true",
+                         edge.root.0, edge.function, edge.statement_path,
+                         edge.expression_path, edge.form,
+                         edge.callee_symbol.map(|id|id.0),
+                         callee_link.map(|s|s.link_name.as_str()),
+                         edge.callee_type.map(|id|id.0));
+            }
+        }
+        Err(error) => {
+            println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
+        }
+    }
     println!("scope dynamic init entries={}",
              result.il.scope_dynamic_initializers.len());
     for init in &result.il.scope_dynamic_initializers {
