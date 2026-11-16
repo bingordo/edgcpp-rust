@@ -117,7 +117,7 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
         if !attributes.defined ||
             !il.entities.iter().any(|e| matches!(e, crate::Entity::Routine {
                 name, has_definition:true,
-            } if name == function))
+            } if name.as_str() == *function))
         {
             return Err(StartupEvidenceError::MissingDefinition(root.routine));
         }
