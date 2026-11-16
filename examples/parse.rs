@@ -90,6 +90,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      offset.byte_offset);
         }
     }
+    // Diagnose which *source-owned* globals and dynamic initializer entries
+    // remain after EDG lowering. A missing __ioinit in these exported records
+    // does NOT mean that libstdc++ needs no startup effects: it can mean that
+    // a candidate was suppressed, not materialized, or not visited.
+    let io_symbols: Vec<_> = result.il.symbols.iter().filter(|sym|
+        sym.name.contains("__ioinit") || sym.name.contains("_ZStL8__ioinit"))
+        .collect();
+    let materialized = result.il.global_materializations.iter()
+        .filter(|m| !m.is_nonreal && !m.is_prototype_instantiation).count();
+    println!("EDG_CXX5_INIT_OWNER_CENSUS globals={} materialized_candidates={} dynamic_entries={} scoped_entries={} ioinit_symbols={} executable_schedule_proven=false",
+             result.il.global_variables.len(), materialized,
+             result.il.dynamic_initializers.len(),
+             result.il.scope_dynamic_initializers.len(), io_symbols.len());
+    for mat in result.il.global_materializations.iter().filter(|m|
+        !m.is_nonreal && !m.is_prototype_instantiation) {
+        let sym=result.il.symbols.iter().find(|s|s.id==mat.symbol);
+        let global=result.il.global_variables.iter().find(|g|g.symbol==mat.symbol);
+        let init=result.il.variable_initializers.iter().find(|v|v.symbol==mat.symbol);
+        let src=result.il.symbol_sources.iter().find(|s|s.symbol==mat.symbol);
+        let link=result.il.symbol_link_names.iter().find(|v|v.symbol==mat.symbol);
+        println!("EDG_CXX5_MATERIALIZED_GLOBAL id={} name={:?} link={:?} linkage={:?} explicit={:?} init_kind={:?} thread_local={:?} used={} address_taken={} source={:?} line={:?} diagnostic_only=true",
+                 mat.symbol.0,sym.map(|s|s.name.as_str()),
+                 link.map(|v|v.link_name.as_str()),
+                 global.map(|v|v.linkage),global.map(|v|v.explicit_initializer),
+                 init.map(|v|v.kind),global.map(|v|v.thread_local),
+                 mat.used,mat.address_taken,
+                 src.map(|v|v.location.file.as_str()),
+                 src.map(|v|v.location.line));
+    }
+    for sym in &io_symbols {
+        let global=result.il.global_variables.iter().find(|v|v.symbol==sym.id);
+        let mat=result.il.global_materializations.iter().find(|v|v.symbol==sym.id);
+        let init=result.il.variable_initializers.iter().find(|v|v.symbol==sym.id);
+        let dynamic=result.il.dynamic_initializers.iter().find(|v|v.symbol==sym.id);
+        let link=result.il.symbol_link_names.iter().find(|v|v.symbol==sym.id);
+        let source=result.il.symbol_sources.iter().find(|v|v.symbol==sym.id);
+        println!("EDG_CXX5_IOINIT_SYMBOL id={} kind={} name={:?} link={:?} linkage={:?} explicit={:?} init_kind={:?} dynamic_kind={:?} nonreal={:?} prototype={:?} template={:?} used={:?} address_taken={:?} source={:?} line={:?} diagnostic_only=true",
+                 sym.id.0,sym.kind,sym.name,link.map(|v|v.link_name.as_str()),
+                 global.map(|v|v.linkage),global.map(|v|v.explicit_initializer),
+                 init.map(|v|v.kind),dynamic.map(|v|v.kind),
+                 mat.map(|v|v.is_nonreal),mat.map(|v|v.is_prototype_instantiation),
+                 mat.map(|v|v.is_template_variable),
+                 mat.map(|v|v.used),mat.map(|v|v.address_taken),
+                 source.map(|v|v.location.file.as_str()),
+                 source.map(|v|v.location.line));
+    }
+    for owner in &result.il.dynamic_initializers {
+        let sym=result.il.symbols.iter().find(|s|s.id==owner.symbol);
+        let mat=result.il.global_materializations.iter().find(|v|v.symbol==owner.symbol);
+        let global=result.il.global_variables.iter().find(|v|v.symbol==owner.symbol);
+        let source=result.il.symbol_sources.iter().find(|v|v.symbol==owner.symbol);
+        println!("EDG_CXX5_DYNAMIC_OWNER id={} name={:?} dynamic_kind={} linkage={:?} nonreal={:?} prototype={:?} template={:?} used={:?} source={:?} line={:?} diagnostic_only=true",
+                 owner.symbol.0,sym.map(|s|s.name.as_str()),owner.kind,
+                 global.map(|v|v.linkage),
+                 mat.map(|v|v.is_nonreal),mat.map(|v|v.is_prototype_instantiation),
+                 mat.map(|v|v.is_template_variable),mat.map(|v|v.used),
+                 source.map(|v|v.location.file.as_str()),
+                 source.map(|v|v.location.line));
+    }
     // C++5 std::cout is an imported *data* symbol, not a function.
     // Display raw EDG linkage as evidence only, never invent an ABI name.
     for sym in result.il.symbols.iter().filter(|s|
