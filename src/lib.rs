@@ -1645,8 +1645,12 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         66 => {
             let (Some(available),Some(complete))=(n(0),n(1)) else {return;};
+            // A source that reports no separate scheduler cannot also
+            // export ordered roots from that scheduler. Record 66 normally
+            // follows record 67; check either callback ordering to fail closed.
             if available>1 || complete>1 || (available==0 && complete!=0) ||
-               output.file_scope_init_schedule.is_some() {return;}
+               output.file_scope_init_schedule.is_some() ||
+               (available==0 && !output.file_scope_init_routines.is_empty()) {return;}
             output.file_scope_init_schedule=Some(FileScopeInitSchedule {
                 available:available==1,complete:complete==1,
             });
@@ -1665,7 +1669,10 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         67 => {
             let (Some(position),Some(routine))=(n(0),n(1)) else {return;};
-            if routine==0 || position as usize != output.file_scope_init_routines.len() {return;}
+            if routine==0 ||
+               matches!(output.file_scope_init_schedule,
+                        Some(FileScopeInitSchedule{available:false,..})) ||
+               position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
             });
@@ -6511,6 +6518,29 @@ mod file_scope_init_schedule_wire_tests {
                         fields.as_ptr(),fields.len(),0);}
         assert!(state.malformed,"duplicate per-scope initializer ordinal accepted");
     }
+    #[test]
+    fn unavailable_scheduler_and_ordered_roots_are_mutually_exclusive() {
+        // EDG normally emits roots before the availability witness. The
+        // decoder must reject contradictory records in either arrival order,
+        // including synthetic or version-mismatched native streams.
+        for roots_first in [false, true] {
+            let mut state=Collector::default();
+            if roots_first {
+                send(&mut state,67,[0,42]);
+                assert!(!state.malformed);
+                send(&mut state,66,[0,0]);
+                assert!(state.malformed);
+                assert!(state.il.file_scope_init_schedule.is_none());
+            } else {
+                send(&mut state,66,[0,0]);
+                assert!(!state.malformed);
+                send(&mut state,67,[0,42]);
+                assert!(state.malformed);
+                assert!(state.il.file_scope_init_routines.is_empty());
+            }
+        }
+    }
+
     #[test]
     fn unavailable_scheduler_is_not_a_no_effects_certificate() {
         let mut state=Collector::default();
