@@ -2501,6 +2501,45 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                        destructor_id ? num(destructor_id) : absent(),
                        num(static_cast<unsigned>(init->kind))});
     }
+
+    // Native EDG file/namespace asm is a source-level linker directive
+    // candidate (e.g. GCC15 <iostream>'s .globl library-init anchor).
+    // This callback is diagnostic only: do not interpret or execute it.
+    std::unordered_set<an_asm_entry_ptr> seen_asm;
+    std::size_t asm_position = 0;
+    for (an_asm_entry_ptr entry = scope->asm_entries;
+         entry != nullptr && within_native_list_limit(asm_position);
+         entry = entry->next, ++asm_position) {
+      if (!seen_asm.insert(entry).second ||
+          entry->asm_string == nullptr ||
+          entry->asm_string->kind != ck_string ||
+          entry->asm_string->variant.string.value == nullptr) {
+        report_incomplete_snapshot();
+        break;
+      }
+      const a_constant_ptr constant = entry->asm_string;
+      const auto native_length = constant->variant.string.length;
+      // Mirror Rust's MAX_WIRE_TEXT_BYTES; never overrun native string data.
+      if (native_length > (1u << 20)) {
+        report_incomplete_snapshot();
+        break;
+      }
+      std::size_t length = static_cast<std::size_t>(native_length);
+      const char *data = constant->variant.string.value;
+      if (length && data[length - 1] == '\0') --length;
+      const std::string assembly(data, length);
+      unsigned flags = 0;
+#if GNU_EXTENSIONS_ALLOWED
+      flags = (entry->gnu_asm_form ? 1u : 0u) |
+              (entry->is_volatile ? 2u : 0u) |
+              (entry->has_volatile_keyword ? 4u : 0u) |
+              (entry->has_inline_keyword ? 8u : 0u) |
+              (entry->is_asm_goto ? 16u : 0u);
+#endif
+      emit_record(RECORD_NATIVE_SCOPE_ASM,
+                  {txt(scope_key), num(asm_position), txt(assembly),
+                   num(flags)});
+    }
   }
 
   // Overloaded functions cannot be keyed solely by qualified base name:
