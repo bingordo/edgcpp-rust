@@ -6490,6 +6490,55 @@ mod file_scope_runtime_link_wire_tests {
 }
 
 #[cfg(test)]
+mod native_scope_asm_wire_tests {
+    use super::*;
+
+    fn send(state:&mut Collector,scope:&str,position:u32,assembly:&str,flags:u32) {
+        let fields=[
+            WireField{data:scope.as_ptr(),length:scope.len(),value:0,tag:wire_tags::TEXT},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(position),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:assembly.as_ptr(),length:assembly.len(),value:0,tag:wire_tags::TEXT},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(flags),
+                      tag:wire_tags::UNSIGNED},
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),101,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn opaque_native_asm_preserves_gnu_linker_anchor_and_scope_order() {
+        let mut state=Collector::default();
+        let raw=".globl _ZSt21ios_base_library_initv";
+        send(&mut state,"1:",0,raw,2);
+        send(&mut state,"2:std::",0,"",0);
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_scope_asm,vec![
+            NativeScopeAsm{scope:"1:".into(),position:0,
+                           assembly:raw.into(),flags:2},
+            NativeScopeAsm{scope:"2:std::".into(),position:0,
+                           assembly:String::new(),flags:0},
+        ]);
+    }
+
+    #[test]
+    fn native_asm_invalid_flags_and_noncontiguous_ordinals_fail_closed() {
+        let mut state=Collector::default();
+        send(&mut state,"1:",0,".globl ext",0);
+        send(&mut state,"1:",2,"nop",0);
+        assert!(state.malformed);
+        let mut invalid=Collector::default();
+        send(&mut invalid,"1:",0,"nop",32);
+        assert!(invalid.malformed);
+        let mut missing=Collector::default();
+        send(&mut missing,"",0,"nop",0);
+        assert!(missing.malformed);
+    }
+}
+
+#[cfg(test)]
 mod file_scope_init_schedule_wire_tests {
     use super::*;
     fn send(state:&mut Collector,kind:u32,values:[u32;2]) {
