@@ -15,7 +15,7 @@ mod limits;
 pub mod codegen;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{c_char, c_int, c_void, CString},
     sync::Mutex,
 };
@@ -1427,6 +1427,9 @@ struct WireSeen {
     linkable_symbols: HashSet<SymbolId>,
     source_link_names: HashSet<SymbolId>,
     base_subobject_offsets: HashSet<(TypeId,u32)>,
+    /// The next EDG-native file/namespace-scope asm ordinal, per exact scope.
+    /// Avoid rescanning all earlier directives for each newly emitted record.
+    native_scope_asm_next: HashMap<String, u32>,
 }
 #[derive(Default)]
 struct Collector {
@@ -1654,9 +1657,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         101 => {
             let (Some(scope),Some(position),Some(assembly),Some(flags))=
                 (t(0),n(1),t(2),n(3)) else {return;};
-            if scope.is_empty() || scope.len()>1024 || (flags & !31)!=0 ||
-               position as usize!=output.native_scope_asm.iter()
-                   .filter(|e|e.scope==scope).count() {return;}
+            if scope.is_empty() || scope.len()>1024 || (flags & !31)!=0 {return;}
+            // EDG emits a contiguous ordinal sequence independently in each
+            // scope. Validate in O(1) expected time per callback, not by
+            // repeatedly scanning the entire compiled directive roster.
+            let expected=seen.native_scope_asm_next.get(&scope).copied().unwrap_or(0);
+            if position!=expected {return;}
+            let Some(next)=position.checked_add(1) else {return;};
+            seen.native_scope_asm_next.insert(scope.clone(),next);
             output.native_scope_asm.push(NativeScopeAsm {
                 scope,position,assembly,flags,
             });
@@ -6246,7 +6254,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=100_u32 {
+        for kind in 1..=101_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6273,10 +6281,10 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,390);
+        assert_eq!(total,394);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(101).is_none());
+        assert!(expected_wire_field_tag_masks(102).is_none());
     }
 
     #[test]
@@ -6535,6 +6543,36 @@ mod native_scope_asm_wire_tests {
         let mut missing=Collector::default();
         send(&mut missing,"",0,"nop",0);
         assert!(missing.malformed);
+    }
+
+    #[test]
+    fn interleaved_scopes_keep_independent_native_asm_ordinals() {
+        let mut state=Collector::default();
+        for position in 0..2048_u32 {
+            send(&mut state,"1:",position,".globl exact_linker_anchor",2);
+            send(&mut state,"2:std::",position,"",0);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.native_scope_asm.len(),4096);
+        assert_eq!(state.seen.native_scope_asm_next.get("1:"),Some(&2048));
+        assert_eq!(state.seen.native_scope_asm_next.get("2:std::"),Some(&2048));
+        assert_eq!(state.il.native_scope_asm[4094].position,2047);
+        assert_eq!(state.il.native_scope_asm[4095].scope,"2:std::");
+
+        // A missing or duplicated ordinal is rejected even if other scopes
+        // have emitted arbitrary numbers of correctly ordered directives.
+        let mut missing=Collector::default();
+        send(&mut missing,"1:",0,"a",0);
+        send(&mut missing,"2:std::",0,"b",0);
+        send(&mut missing,"2:std::",2,"c",0);
+        assert!(missing.malformed);
+        assert_eq!(missing.il.native_scope_asm.len(),2);
+        let mut duplicate=Collector::default();
+        send(&mut duplicate,"1:",0,"a",0);
+        send(&mut duplicate,"2:std::",0,"b",0);
+        send(&mut duplicate,"1:",0,"duplicate",0);
+        assert!(duplicate.malformed);
+        assert_eq!(duplicate.il.native_scope_asm.len(),2);
     }
 }
 
