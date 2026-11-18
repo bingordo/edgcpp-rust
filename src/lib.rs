@@ -1430,6 +1430,9 @@ struct WireSeen {
     /// The next EDG-native file/namespace-scope asm ordinal, per exact scope.
     /// Avoid rescanning all earlier directives for each newly emitted record.
     native_scope_asm_next: HashMap<String, u32>,
+    /// Next source-owned dynamic initializer ordinal per exact native scope.
+    /// Repeated callbacks must not rescan the full translation-unit roster.
+    scope_dynamic_initializer_next: HashMap<String, u32>,
 }
 #[derive(Default)]
 struct Collector {
@@ -1695,8 +1698,11 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let variable=n(2).map(SymbolId);
             let destructor=n(3).map(SymbolId);
             if variable==Some(SymbolId(0)) || destructor==Some(SymbolId(0)) {return;}
-            let prior=output.scope_dynamic_initializers.iter().filter(|e|e.scope==scope).count();
-            if position as usize != prior {return;}
+            let expected=seen.scope_dynamic_initializer_next
+                .get(&scope).copied().unwrap_or(0);
+            if position!=expected {return;}
+            let Some(next)=position.checked_add(1) else {return;};
+            seen.scope_dynamic_initializer_next.insert(scope.clone(),next);
             output.scope_dynamic_initializers.push(ScopeDynamicInitializer {
                 scope,position,variable,destructor,kind,
             });
@@ -6631,6 +6637,62 @@ mod file_scope_init_schedule_wire_tests {
                         fields.as_ptr(),fields.len(),0);}
         assert!(state.malformed,"duplicate per-scope initializer ordinal accepted");
     }
+    /// Send a native scope-local initializer with independent ordinal and owners.
+    fn send_scope(state:&mut Collector,scope:&str,position:u32,
+                  variable:u32,destructor:u32) {
+        let fields=[
+            WireField{data:scope.as_ptr(),length:scope.len(),value:0,tag:wire_tags::TEXT},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(position),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(variable),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:u64::from(destructor),
+                      tag:wire_tags::UNSIGNED},
+            WireField{data:std::ptr::null(),length:0,value:0,tag:wire_tags::UNSIGNED},
+        ];
+        unsafe {
+            collect((state as *mut Collector).cast(),68,
+                    fields.as_ptr(),fields.len(),0);
+        }
+    }
+
+    #[test]
+    fn interleaved_scope_initializers_have_linear_independent_ordinals() {
+        let mut state=Collector::default();
+        for position in 0..2048_u32 {
+            send_scope(&mut state,"1:",position,11,31);
+            send_scope(&mut state,"2:std::",position,12,32);
+        }
+        assert!(!state.malformed);
+        assert!(!state.panicked);
+        assert_eq!(state.il.scope_dynamic_initializers.len(),4096);
+        assert_eq!(state.seen.scope_dynamic_initializer_next.get("1:"),Some(&2048));
+        assert_eq!(state.seen.scope_dynamic_initializer_next.get("2:std::"),Some(&2048));
+        assert_eq!(state.il.scope_dynamic_initializers[4094].position,2047);
+        assert_eq!(state.il.scope_dynamic_initializers[4095].scope,"2:std::");
+        assert_eq!(state.il.scope_dynamic_initializers[4095].destructor,
+                   Some(SymbolId(32)));
+
+        let mut missing=Collector::default();
+        send_scope(&mut missing,"1:",0,11,31);
+        send_scope(&mut missing,"2:std::",0,12,32);
+        send_scope(&mut missing,"2:std::",2,12,32);
+        assert!(missing.malformed,"missing per-scope ordinal must fail closed");
+        assert_eq!(missing.il.scope_dynamic_initializers.len(),2);
+
+        let mut duplicate=Collector::default();
+        send_scope(&mut duplicate,"1:",0,11,31);
+        send_scope(&mut duplicate,"2:std::",0,12,32);
+        send_scope(&mut duplicate,"1:",0,11,31);
+        assert!(duplicate.malformed,"duplicate per-scope ordinal must fail closed");
+        assert_eq!(duplicate.il.scope_dynamic_initializers.len(),2);
+
+        let mut overflow=Collector::default();
+        send_scope(&mut overflow,"1:",u32::MAX,11,31);
+        assert!(overflow.malformed,"nonzero first ordinal must fail closed");
+        assert!(overflow.il.scope_dynamic_initializers.is_empty());
+    }
+
     #[test]
     fn unavailable_scheduler_and_ordered_roots_are_mutually_exclusive() {
         // EDG normally emits roots before the availability witness. The
