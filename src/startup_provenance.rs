@@ -63,18 +63,36 @@ pub enum StartupEvidenceError {
     DuplicateCallTarget,
     MissingCallTarget,
     OrphanedCallTarget,
+    /// A native routine symbol must have one unique function-body identity.
+    DuplicateRoutineIdentity(SymbolId),
+    /// Different native routine symbols cannot share one body key when
+    /// attributing startup calls: this would silently select one root.
+    AmbiguousRootFunction(String),
+    /// An ordered native scheduler roster requires the mode witness.
+    MissingScheduler,
+    /// Native ordered roster must start at zero and remain gap-free.
+    InvalidSchedulerOrder(u32),
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
 /// native IL identities. Does not authorize object construction or codegen.
 pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvidenceError> {
     let mut roots = Vec::new();
-    if il.file_scope_init_schedule.is_some_and(|s| !s.available)
-        && !il.file_scope_init_routines.is_empty()
-    {
-        return Err(StartupEvidenceError::ContradictoryScheduler);
+    if !il.file_scope_init_routines.is_empty() {
+        match il.file_scope_init_schedule {
+            None => return Err(StartupEvidenceError::MissingScheduler),
+            Some(FileScopeInitSchedule{available:false,..}) =>
+                return Err(StartupEvidenceError::ContradictoryScheduler),
+            Some(_) => {}
+        }
     }
+    let mut next_ordinal = 0u32;
     for entry in &il.file_scope_init_routines {
+        if entry.position != next_ordinal {
+            return Err(StartupEvidenceError::InvalidSchedulerOrder(entry.position));
+        }
+        next_ordinal = next_ordinal.checked_add(1)
+            .ok_or(StartupEvidenceError::InvalidSchedulerOrder(entry.position))?;
         roots.push(StartupRootEvidence {
             routine: entry.routine, function: String::new(),
             source: StartupRootSource::SeparateNativeScheduler,
@@ -101,8 +119,16 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
             link_variable: None,
         });
     }
-    let by_id: HashMap<_, _> = il.routine_identities.iter()
-        .map(|entry| (entry.routine, entry.function.as_str())).collect();
+    // The wire collector already checks identity uniqueness. Recheck at the
+    // diagnostic API boundary because callers can build/modify Il directly.
+    // Silently overwriting a duplicate lets a different function body claim
+    // a native initializer routine's identity.
+    let mut by_id = HashMap::new();
+    for entry in &il.routine_identities {
+        if by_id.insert(entry.routine, entry.function.as_str()).is_some() {
+            return Err(StartupEvidenceError::DuplicateRoutineIdentity(entry.routine));
+        }
+    }
     for root in &mut roots {
         if !il.symbols.iter().any(|s| s.id == root.routine && s.kind == 1) {
             return Err(StartupEvidenceError::MissingRoutine(root.routine));
@@ -131,7 +157,12 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
     // root witness. Do not pretend this establishes two runtime invocations.
     let mut root_by_function: HashMap<&str, SymbolId> = HashMap::new();
     for root in &roots {
-        root_by_function.entry(root.function.as_str()).or_insert(root.routine);
+        match root_by_function.get(root.function.as_str()) {
+            Some(&routine) if routine != root.routine =>
+                return Err(StartupEvidenceError::AmbiguousRootFunction(root.function.clone())),
+            Some(_) => {} // Multiple witnesses for the same native routine.
+            None => { root_by_function.insert(root.function.as_str(),root.routine); }
+        }
     }
 
     let mut targets = HashMap::new();
@@ -276,6 +307,56 @@ mod tests {
         generated(&mut il,42,"user_code",false);
         assert_eq!(collect_startup_evidence(&il),
                    Err(StartupEvidenceError::NotGenerated(SymbolId(42))));
+    }
+
+
+    #[test]
+    fn reject_startup_roster_without_native_scheduler_or_gap_free_order() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__example",true);
+        il.file_scope_init_routines.push(FileScopeInitRoutine {
+            position:0,routine:SymbolId(42),
+        });
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::MissingScheduler));
+        il.file_scope_init_schedule=Some(FileScopeInitSchedule {
+            available:true,complete:true,
+        });
+        il.file_scope_init_routines[0].position=1;
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::InvalidSchedulerOrder(1)));
+        il.file_scope_init_routines[0].position=0;
+        il.file_scope_init_routines.push(FileScopeInitRoutine {
+            position:2,routine:SymbolId(42),
+        });
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::InvalidSchedulerOrder(2)));
+    }
+
+    #[test]
+    fn reject_duplicate_native_routine_identity_without_overwriting_its_body() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__example",true);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine {routine:SymbolId(42),priority:0});
+        il.routine_identities.push(RoutineIdentity {
+            routine:SymbolId(42),function:"unrelated-body".into(),
+        });
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::DuplicateRoutineIdentity(SymbolId(42))));
+    }
+
+    #[test]
+    fn reject_different_startup_routines_with_same_function_body_key() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__shared",true);
+        generated(&mut il,43,"__sti__shared",true);
+        il.file_scope_lowered_startup_routines.extend([
+            FileScopeLoweredStartupRoutine {routine:SymbolId(42),priority:0},
+            FileScopeLoweredStartupRoutine {routine:SymbolId(43),priority:0},
+        ]);
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::AmbiguousRootFunction("__sti__shared".into())));
     }
 
     #[test]
