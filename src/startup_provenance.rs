@@ -9,7 +9,7 @@
 //! effects of transitive calls, constructor/destructor ABI identities,
 //! registration order, or ELF .init_array admission.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use crate::{CallTargetForm, FileScopeInitSchedule, Il, SymbolId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,10 @@ pub enum StartupEvidenceError {
     MissingScheduler,
     /// Native ordered roster must start at zero and remain gap-free.
     InvalidSchedulerOrder(u32),
+    /// A reachable function body cannot be attributed to two native routines.
+    AmbiguousReachableFunction(String),
+    /// The diagnostic has a finite analysis budget; never silently truncate.
+    ReachabilityLimit,
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -211,6 +215,156 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
     })
 }
 
+
+/// A single EDG-owned call occurrence reached from a source-identified
+/// startup root through locally defined routine bodies. The same occurrence
+/// may appear under multiple roots; no actual invocation count or order is
+/// inferred from this diagnostic graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupReachableCall {
+    pub root: SymbolId,
+    pub caller: SymbolId,
+    pub function: String,
+    pub statement_path: String,
+    pub expression_path: String,
+    pub form: CallTargetForm,
+    pub callee_symbol: Option<SymbolId>,
+    pub callee_type: Option<TypeId>,
+    /// True only when the exact native callee SymbolId identifies a defined
+    /// local routine body. Does not prove C++ calling ABI or object lifetime.
+    pub local_body: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupCallTrace {
+    pub edges: Vec<StartupReachableCall>,
+    /// Indirect call without a proven local callee; may hide side effects.
+    pub unresolved_indirect: usize,
+    /// Direct known callee without a defined body in this translation unit.
+    /// It can execute external constructors, destructors or runtime helpers.
+    pub external_calls: usize,
+    /// A body reached again from the same root (shared helper or recursion).
+    /// A revisitation is not an executable cycle or ordering proof.
+    pub revisited_local_bodies: usize,
+}
+
+// Hard caps protect diagnostics from pathological or corrupt IL snapshots.
+// Exceeding either budget is an error, never a seemingly complete trace.
+const MAX_TRACE_BODIES_PER_ROOT: usize = 4096;
+const MAX_TRACE_EDGES: usize = 100_000;
+
+/// Trace source-owned *syntactic* direct call chains from all startup roots.
+/// This adds transitive helper visibility beyond `immediate_calls` without
+/// attempting to execute any C++ initialization, reconstruct call order,
+/// follow indirect functions, or infer destructor registration.
+pub fn trace_startup_calls(
+    il: &Il, proof: &StartupEvidence,
+) -> Result<StartupCallTrace, StartupEvidenceError> {
+    let mut by_symbol = HashMap::new();
+    let mut by_function: HashMap<&str, Option<SymbolId>> = HashMap::new();
+    for id in &il.routine_identities {
+        if by_symbol.insert(id.routine, id.function.as_str()).is_some() {
+            return Err(StartupEvidenceError::DuplicateRoutineIdentity(id.routine));
+        }
+        let previous = by_function.entry(id.function.as_str())
+            .or_insert(Some(id.routine));
+        if *previous != Some(id.routine) { *previous = None; }
+    }
+
+    let defined: HashSet<SymbolId> = il.routine_attributes.iter()
+        .filter(|attr| attr.defined)
+        .map(|attr| attr.routine).collect();
+    let routine_symbols: HashSet<SymbolId> = il.symbols.iter()
+        .filter(|sym| sym.kind == 1).map(|sym| sym.id).collect();
+    // Build a single index over all native calls and their independent
+    // target-evidence events. Do not repeatedly scan large <iostream> IL.
+    let mut sites: HashMap<&str,Vec<&crate::CallSite>> = HashMap::new();
+    for site in &il.calls {
+        sites.entry(site.function.as_str()).or_default().push(site);
+    }
+    let mut targets: HashMap<&str,Vec<&crate::CallTargetProvenance>> = HashMap::new();
+    for target in &il.call_targets {
+        targets.entry(target.function.as_str()).or_default().push(target);
+    }
+
+    let mut edges = Vec::new();
+    let mut unresolved_indirect = 0;
+    let mut external_calls = 0;
+    let mut revisited_local_bodies = 0;
+    let mut seen_roots = HashSet::new();
+    for root in &proof.roots {
+        // One native root can have multiple scheduling/link witnesses.
+        if !seen_roots.insert(root.routine) { continue; }
+        if by_symbol.get(&root.routine) != Some(&root.function.as_str()) ||
+           !defined.contains(&root.routine) ||
+           !routine_symbols.contains(&root.routine) {
+            return Err(StartupEvidenceError::MissingDefinition(root.routine));
+        }
+        let mut queue = VecDeque::from([root.routine]);
+        let mut visited = HashSet::new();
+        while let Some(caller) = queue.pop_front() {
+            if !visited.insert(caller) {
+                revisited_local_bodies += 1;
+                continue;
+            }
+            if visited.len() > MAX_TRACE_BODIES_PER_ROOT {
+                return Err(StartupEvidenceError::ReachabilityLimit);
+            }
+            let function = by_symbol[&caller];
+            if by_function.get(function) != Some(&Some(caller)) {
+                return Err(StartupEvidenceError::AmbiguousReachableFunction(
+                    function.to_owned()));
+            }
+            let mut matching_targets = HashMap::new();
+            for target in targets.get(function).into_iter().flatten() {
+                let key=(target.statement_path.as_str(),target.path.as_str());
+                if matching_targets.insert(key,*target).is_some() {
+                    return Err(StartupEvidenceError::DuplicateCallTarget);
+                }
+            }
+            let mut consumed = HashSet::new();
+            for site in sites.get(function).into_iter().flatten() {
+                let key=(site.statement_path.as_str(),site.path.as_str());
+                let Some(target) = matching_targets.get(&key) else {
+                    return Err(StartupEvidenceError::MissingCallTarget);
+                };
+                if !consumed.insert(key) {
+                    return Err(StartupEvidenceError::DuplicateCallTarget);
+                }
+                if edges.len() >= MAX_TRACE_EDGES {
+                    return Err(StartupEvidenceError::ReachabilityLimit);
+                }
+                let direct = matches!(target.form,CallTargetForm::DirectRoutine |
+                                                CallTargetForm::ConstantRoutineAddress);
+                let local_body = direct && target.callee_symbol.is_some_and(|id|
+                    defined.contains(&id) &&
+                    routine_symbols.contains(&id) &&
+                    by_symbol.contains_key(&id));
+                if local_body {
+                    queue.push_back(target.callee_symbol.expect("checked above"));
+                } else if !direct || target.callee_symbol.is_none() {
+                    unresolved_indirect += 1;
+                } else {
+                    external_calls += 1;
+                }
+                edges.push(StartupReachableCall {
+                    root:root.routine,caller,function:function.into(),
+                    statement_path:site.statement_path.clone(),
+                    expression_path:site.path.clone(),
+                    form:target.form,callee_symbol:target.callee_symbol,
+                    callee_type:target.callee_type,local_body,
+                });
+            }
+            if matching_targets.len() != consumed.len() {
+                return Err(StartupEvidenceError::OrphanedCallTarget);
+            }
+        }
+    }
+    Ok(StartupCallTrace {
+        edges,unresolved_indirect,external_calls,revisited_local_bodies,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +388,90 @@ mod tests {
             explicit_constructor:false, has_this_parameter:false,
             compiler_generated,
         });
+    }
+
+
+    fn add_call(il:&mut Il, function:&str, statement:&str,
+                form:CallTargetForm, callee:Option<SymbolId>) {
+        il.calls.push(CallSite {
+            function:function.into(),statement_path:statement.into(),
+            path:"0".into(),first_argument:1,
+        });
+        il.call_targets.push(CallTargetProvenance {
+            function:function.into(),statement_path:statement.into(),
+            path:"0".into(),form,callee_symbol:callee,callee_type:None,
+        });
+    }
+
+    #[test]
+    fn trace_follows_owning_startup_helper_calls_without_inventing_elf_order() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__root",true);
+        generated(&mut il,43,"local_helper",false);
+        generated(&mut il,44,"local_ctor",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:200});
+        // Independent link witness for the same exact generated routine.
+        il.symbols.push(Symbol{id:SymbolId(17),kind:2,name:"link".into()});
+        il.file_scope_runtime_links.push(FileScopeRuntimeLink{
+            link_variable:SymbolId(17),startup_routine:SymbolId(42),
+        });
+        add_call(&mut il,"__sti__root","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        add_call(&mut il,"local_helper","0",CallTargetForm::DirectRoutine,Some(SymbolId(44)));
+        add_call(&mut il,"local_helper","1",CallTargetForm::IndirectUnresolved,None);
+        add_call(&mut il,"local_ctor","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        add_call(&mut il,"local_ctor","1",CallTargetForm::DirectRoutine,Some(SymbolId(99)));
+
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(proof.roots.len(),2);
+        assert_eq!(proof.immediate_calls.len(),1);
+        let trace=trace_startup_calls(&il,&proof).unwrap();
+        assert_eq!(trace.edges.len(),5); // one root, no duplicate traversal
+        assert_eq!(trace.unresolved_indirect,1);
+        assert_eq!(trace.external_calls,1);
+        assert_eq!(trace.revisited_local_bodies,1);
+        assert_eq!(trace.edges.iter().filter(|e|e.local_body).count(),3);
+        assert!(trace.edges.iter().any(|edge| edge.caller==SymbolId(43) &&
+            edge.callee_symbol==Some(SymbolId(44))));
+        assert!(trace.edges.iter().all(|e|e.root==SymbolId(42)));
+    }
+
+    #[test]
+    fn trace_rejects_colliding_nonroot_helper_bodies() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__root",true);
+        generated(&mut il,43,"helper",false);
+        generated(&mut il,44,"helper",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        add_call(&mut il,"__sti__root","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::AmbiguousReachableFunction("helper".into())));
+    }
+
+    #[test]
+    fn trace_rejects_missing_and_orphaned_helper_target_events() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__root",true);
+        generated(&mut il,43,"helper",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        add_call(&mut il,"__sti__root","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        il.calls.push(CallSite{
+            function:"helper".into(),statement_path:"1".into(),
+            path:"0".into(),first_argument:1,
+        });
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::MissingCallTarget));
+        il.calls.pop();
+        il.call_targets.push(CallTargetProvenance {
+            function:"helper".into(),statement_path:"1".into(),path:"0".into(),
+            form:CallTargetForm::IndirectUnresolved,callee_type:None,callee_symbol:None,
+        });
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::OrphanedCallTarget));
     }
 
     #[test]
