@@ -59,6 +59,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                          callee_link.map(|s|s.link_name.as_str()),
                          edge.callee_type.map(|id|id.0));
             }
+            // Explore exact native direct calls in *defined local bodies*
+            // beyond each root's immediate call sites. This diagnostic does
+            // not establish startup order, constructor ownership, destructor
+            // registration, cross-TU effects or executable C++ ABI.
+            match edgcpp::startup_provenance::trace_startup_calls(&result.il,&proof) {
+                Ok(trace) => {
+                    println!("EDG_CXX5_STARTUP_TRANSITIVE roots={} calls={} indirect={} external={} revisits={} executable_schedule_proven=false",
+                             proof.roots.len(),trace.edges.len(),
+                             trace.unresolved_indirect,trace.external_calls,
+                             trace.revisited_local_bodies);
+                    for edge in trace.edges.iter().take(64) {
+                        let link=edge.callee_symbol.and_then(|id|result.il.symbol_link_names
+                            .iter().find(|name|name.symbol==id));
+                        println!("EDG_CXX5_STARTUP_REACHABLE_CALL root={} caller={} function={:?} statement={:?} path={:?} form={:?} callee={:?} link={:?} local_body={} diagnostic_only=true",
+                                 edge.root.0,edge.caller.0,edge.function,
+                                 edge.statement_path,edge.expression_path,edge.form,
+                                 edge.callee_symbol.map(|id|id.0),
+                                 link.map(|name|name.link_name.as_str()),edge.local_body);
+                    }
+                    if trace.edges.len()>64 {
+                        println!("EDG_CXX5_STARTUP_REACHABLE_TRUNCATED count={} output_only=true",
+                                 trace.edges.len()-64);
+                    }
+                }
+                Err(error) => {
+                    println!("EDG_CXX5_STARTUP_TRANSITIVE incomplete={error:?} executable_schedule_proven=false");
+                }
+            }
         }
         Err(error) => {
             println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
