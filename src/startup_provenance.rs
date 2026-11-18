@@ -155,14 +155,22 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
 
     // The same native routine can have more than one independently emitted
     // root witness. Do not pretend this establishes two runtime invocations.
+    // Check ALL body identities, not only those on the startup-root roster:
+    // calls in an unrelated routine with a colliding function key would
+    // otherwise be misattributed to a generated startup body.
+    let mut unique_body_owner: HashMap<&str, Option<SymbolId>> = HashMap::new();
+    for entry in &il.routine_identities {
+        let owner = unique_body_owner.entry(entry.function.as_str())
+            .or_insert(Some(entry.routine));
+        if *owner != Some(entry.routine) { *owner = None; }
+    }
     let mut root_by_function: HashMap<&str, SymbolId> = HashMap::new();
     for root in &roots {
-        match root_by_function.get(root.function.as_str()) {
-            Some(&routine) if routine != root.routine =>
-                return Err(StartupEvidenceError::AmbiguousRootFunction(root.function.clone())),
-            Some(_) => {} // Multiple witnesses for the same native routine.
-            None => { root_by_function.insert(root.function.as_str(),root.routine); }
+        if unique_body_owner.get(root.function.as_str()) != Some(&Some(root.routine)) {
+            return Err(StartupEvidenceError::AmbiguousRootFunction(root.function.clone()));
         }
+        // Repeated witnesses for the same exact routine remain valid.
+        root_by_function.insert(root.function.as_str(),root.routine);
     }
 
     let mut targets = HashMap::new();
@@ -344,6 +352,19 @@ mod tests {
         });
         assert_eq!(collect_startup_evidence(&il),
                    Err(StartupEvidenceError::DuplicateRoutineIdentity(SymbolId(42))));
+    }
+
+    #[test]
+    fn reject_nonstartup_routine_aliasing_startup_function_body_key() {
+        let mut il=Il::default();
+        generated(&mut il,42,"__sti__shared",true);
+        generated(&mut il,43,"__sti__shared",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine {routine:SymbolId(42),priority:0});
+        // Routine 43 is not a startup root. Its body must not be mistaken
+        // for routine 42's body merely because it has the same string key.
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::AmbiguousRootFunction("__sti__shared".into())));
     }
 
     #[test]
