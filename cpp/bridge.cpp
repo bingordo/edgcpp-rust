@@ -452,8 +452,12 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  // Candidate only: the downstream TypeId verifier still proves each
+  // ctor/D1 body and global-startup/teardown operation. Restrict layout
+  // to exactly one native word (I32 or I64), no aggregate/padding inference.
   if (!supported_concrete_class_proof_root(type) ||
-      type->size != 4 || type->alignment != 4) return false;
+      (type->size != 4 && type->size != 8) ||
+      type->alignment != type->size) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
   if (extra == nullptr || extra->assoc_scope == nullptr ||
       extra->direct_base_classes != nullptr ||
@@ -462,13 +466,13 @@ static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
       type->variant.class_struct_union.any_virtual_base_classes ||
       extra->assoc_scope->variables != nullptr ||
       !type_has_nontrivial_destructor(type)) return false;
-  // One ordinary 32-bit scalar, at byte offset zero; no bitfields,
-  // subobjects or hidden layout that our first native P2 caller could
-  // initialize or destroy accidentally.
+  // One ordinary native 32/64-bit integer at byte offset zero; no
+  // bitfields, subobjects or hidden object layout can be inferred from it.
   a_field_ptr field = type->variant.class_struct_union.field_list;
   if (field == nullptr || field->next != nullptr ||
       field->type == nullptr || field->type->kind != tk_integer ||
-      field->type->size != 4 || field->type->alignment != 4 ||
+      field->type->size != type->size ||
+      field->type->alignment != type->alignment ||
       field->offset != 0 || field->offset_bit_remainder != 0 ||
       field->is_bit_field) return false;
 #if MAINTAIN_CLASS_MEMBER_LIST
