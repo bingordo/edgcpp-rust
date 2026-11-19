@@ -446,6 +446,15 @@ pub struct GlobalMaterialization {
     pub used: bool,
     pub address_taken: bool,
     pub is_class_member: bool,
+    /// EDG's *applied* GNU weak flag; storage class alone is not a binding proof.
+    pub is_weak: bool,
+    /// Weak alias declaration, not an ordinary weak object definition.
+    pub is_weakref: bool,
+    /// GNU alias declaration, requiring a separately verified alias target.
+    pub is_gnu_alias: bool,
+    /// An explicit GNU/MS data section is present. Its full section name is
+    /// not yet exported, so this flag MUST NOT authorize ELF emission.
+    pub has_explicit_section: bool,
 }
 
 /// Whether EDG's separately scheduled file-scope initialization list is available.
@@ -1884,7 +1893,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         100 => {
             let (Some(symbol),Some(flags))=(n(0),n(1)) else {return;};
-            if symbol==0 || flags>127 || !seen.globals.contains(&SymbolId(symbol)) ||
+            if symbol==0 || flags>2047 || !seen.globals.contains(&SymbolId(symbol)) ||
                 output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
                 return;
             }
@@ -1897,6 +1906,10 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 used: flags&16!=0,
                 address_taken: flags&32!=0,
                 is_class_member: flags&64!=0,
+                is_weak: flags&128!=0,
+                is_weakref: flags&256!=0,
+                is_gnu_alias: flags&512!=0,
+                has_explicit_section: flags&1024!=0,
             });
         }
         47 => {
