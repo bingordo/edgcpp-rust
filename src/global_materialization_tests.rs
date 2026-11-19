@@ -42,7 +42,9 @@ fn concrete_variable_is_distinct_from_uninstantiated_template() {
 
 #[test]
 fn orphan_duplicate_and_unknown_native_property_bits_fail_closed() {
-    for bad in [0u64,128u64] {
+    // 128 is the valid native weak-attribute bit. 2048 is the first
+    // unknown bit after the complete event-100 attribute mask (0..=2047).
+    for bad in [0u64,2048u64] {
         let mut state=Collector::default();
         send(&mut state,47,[91,3,0,0,0]);
         send(&mut state,100,[91,bad]);
