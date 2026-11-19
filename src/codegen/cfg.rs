@@ -1395,24 +1395,47 @@ fn checked_record_fields_depth<'a>(
 /// that would clobber adjacent fields and could overread a packed record.
 fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
     ->Result<bool,CodegenError> {
-    if depth > MAX_AGGREGATE_LAYOUT_DEPTH {return Err(invalid("recursive native bitfield layout"));}
-    let ty=canonical_abi_type(il,ty)?;
-    let def=il.types.iter().find(|t|t.id==ty)
-        .ok_or_else(||invalid("missing aggregate type"))?;
-    match semantic(4,def.kind) {
-        6 => has_native_bitfield(il,def.related
-            .ok_or_else(||invalid("aggregate array missing element"))?,depth+1),
-        7|9 => {
-            for field in checked_record_fields_depth(il,ty,depth+1)? {
-                if field.bit_width!=0 || field.bit_offset!=0 ||
-                    has_native_bitfield(il,field.ty,depth+1)? {
+    // Only record nesting consumes the bounded layout-recursion policy.
+    // Iterative array descent handles otherwise-valid deep dimensions, and
+    // the active path (not a global visited set) rejects cycles without
+    // mistaking independent uses of the same field type for recursion.
+    enum Work { Visit(crate::TypeId,usize), Exit(crate::TypeId) }
+    let mut active=HashSet::new();
+    let mut work=vec![Work::Visit(ty,depth)];
+    while let Some(frame)=work.pop() {
+        let (ty,depth)=match frame {
+            Work::Exit(ty)=>{active.remove(&ty);continue;}
+            Work::Visit(ty,depth)=>(canonical_abi_type(il,ty)?,depth),
+        };
+        let def=il.types.iter().find(|t|t.id==ty)
+            .ok_or_else(||invalid("missing aggregate type"))?;
+        let kind=semantic(4,def.kind);
+        if matches!(kind,6|7|9) && !active.insert(ty) {
+            return Err(invalid("cyclic aggregate bitfield layout"));
+        }
+        match kind {
+            6=>{
+                let element=checked_native_pointer_element(il,ty)?;
+                work.push(Work::Exit(ty));
+                work.push(Work::Visit(element,depth));
+            }
+            7|9=>{
+                if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
+                    return Err(invalid("recursive native bitfield layout"));
+                }
+                let fields=checked_record_fields_depth(il,ty,depth+1)?;
+                if fields.iter().any(|f|f.bit_width!=0 || f.bit_offset!=0) {
                     return Ok(true);
                 }
+                work.push(Work::Exit(ty));
+                for field in fields.into_iter().rev() {
+                    work.push(Work::Visit(field.ty,depth+1));
+                }
             }
-            Ok(false)
+            _=>{}
         }
-        _ => Ok(false),
     }
+    Ok(false)
 }
 /// Expand a supported value-semantic aggregate into scalar fields at native
 /// byte offsets. This copies array elements and nested records without
@@ -1430,48 +1453,73 @@ fn flatten_copy_type(
     il:&Il,ty:crate::TypeId,offset:u64,depth:usize,
     out:&mut Vec<(CAbiInt,i64)>,
 ) -> Result<(),CodegenError> {
-    if depth > MAX_AGGREGATE_LAYOUT_DEPTH {return Err(invalid("aggregate copy nesting exceeds depth limit"));}
-    check_plain_storage_type(il,ty)?;
-    let ty=canonical_abi_type(il,ty)?;
-    let def=il.types.iter().find(|d|d.id==ty)
-        .ok_or_else(||invalid("missing aggregate copy type"))?;
-    match semantic(4,def.kind) {
-        1|5 => {
-            if out.len() as u64>=MAX_AGGREGATE_SCALAR_ELEMENTS {
-                return Err(invalid("aggregate copy has over 256 scalar elements"));
-            }
-            let field_offset=i64::try_from(offset)
-                .map_err(|_|invalid("aggregate copy offset overflow"))?;
-            let abi=call_type_abi(il,ty)?;
-            if !matches!(abi.bits,8|16|32|64) {
-                return Err(invalid("unsupported aggregate copy element width"));
-            }
-            out.push((abi,field_offset));
+    // Expand explicit source-order scalar copies with a bounded worklist,
+    // rather than one Rust recursive call per nested array dimension.
+    // Record nesting retains the 32-level layout policy, while repeated
+    // 1-element array dimensions cannot exhaust the native Rust stack.
+    enum Work {
+        Visit(crate::TypeId,u64,usize),
+        Exit(crate::TypeId),
+    }
+    let mut active=HashSet::new();
+    let mut work=vec![Work::Visit(ty,offset,depth)];
+    while let Some(frame)=work.pop() {
+        let (ty,offset,depth)=match frame {
+            Work::Exit(ty)=>{active.remove(&ty);continue;}
+            Work::Visit(ty,offset,depth)=>(ty,offset,depth),
+        };
+        check_plain_storage_type(il,ty)?;
+        let ty=canonical_abi_type(il,ty)?;
+        let def=il.types.iter().find(|d|d.id==ty)
+            .ok_or_else(||invalid("missing aggregate copy type"))?;
+        let kind=semantic(4,def.kind);
+        if matches!(kind,6|7) && !active.insert(ty) {
+            return Err(invalid("cyclic aggregate copy type"));
         }
-        6 => {
-            let element=checked_native_pointer_element(il,ty)?;
-            let count=il.array_bounds.iter().find(|b|b.array==ty)
-                .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
-            if count==0 || count>MAX_AGGREGATE_SCALAR_ELEMENTS {
-                return Err(invalid("aggregate copy array bound unsupported"));
+        match kind {
+            1|5=>{
+                if out.len() as u64>=MAX_AGGREGATE_SCALAR_ELEMENTS {
+                    return Err(invalid("aggregate copy has over 256 scalar elements"));
+                }
+                let field_offset=i64::try_from(offset)
+                    .map_err(|_|invalid("aggregate copy offset overflow"))?;
+                let abi=call_type_abi(il,ty)?;
+                if !matches!(abi.bits,8|16|32|64) {
+                    return Err(invalid("unsupported aggregate copy element width"));
+                }
+                out.push((abi,field_offset));
             }
-            let stride=byte_size(il,element)?;
-            for i in 0..count {
-                let delta=i.checked_mul(stride)
-                    .ok_or_else(||invalid("aggregate copy stride overflow"))?;
-                let member=offset.checked_add(delta)
-                    .ok_or_else(||invalid("aggregate copy address overflow"))?;
-                flatten_copy_type(il,element,member,depth+1,out)?;
+            6=>{
+                let element=checked_native_pointer_element(il,ty)?;
+                let count=il.array_bounds.iter().find(|b|b.array==ty)
+                    .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
+                if count==0 || count>MAX_AGGREGATE_SCALAR_ELEMENTS {
+                    return Err(invalid("aggregate copy array bound unsupported"));
+                }
+                let stride=byte_size(il,element)?;
+                work.push(Work::Exit(ty));
+                for i in (0..count).rev() {
+                    let delta=i.checked_mul(stride)
+                        .ok_or_else(||invalid("aggregate copy stride overflow"))?;
+                    let member=offset.checked_add(delta)
+                        .ok_or_else(||invalid("aggregate copy address overflow"))?;
+                    work.push(Work::Visit(element,member,depth));
+                }
             }
+            7=>{
+                if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
+                    return Err(invalid("aggregate copy record nesting exceeds depth limit"));
+                }
+                let fields=checked_record_fields_depth(il,ty,depth+1)?;
+                work.push(Work::Exit(ty));
+                for field in fields.into_iter().rev() {
+                    let member=offset.checked_add(field.byte_offset)
+                        .ok_or_else(||invalid("nested record field offset overflow"))?;
+                    work.push(Work::Visit(field.ty,member,depth+1));
+                }
+            }
+            _=>return Err(invalid("unsupported aggregate copy element type")),
         }
-        7 => {
-            for field in checked_record_fields(il,ty)? {
-                let member=offset.checked_add(field.byte_offset)
-                    .ok_or_else(||invalid("nested record field offset overflow"))?;
-                flatten_copy_type(il,field.ty,member,depth+1,out)?;
-            }
-        }
-        _ => return Err(invalid("unsupported aggregate copy element type")),
     }
     Ok(())
 }
