@@ -92,6 +92,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
         }
     }
+    // Mandatory native event 100 preserves applied weak/alias/section flags.
+    // This is diagnostic only: section bytes and target ELF visibility are
+    // not yet exported, so no native object admission follows from it.
+    for mat in &result.il.global_materializations {
+        let symbol = result.il.symbols.iter().find(|s|s.id == mat.symbol);
+        println!("EDG_NATIVE_GLOBAL_ATTR id={} name={:?} weak={} weakref={} alias={} section_present={} diagnostic_only=true",
+                 mat.symbol.0,symbol.map(|s|s.name.as_str()),
+                 mat.is_weak,mat.is_weakref,mat.is_gnu_alias,
+                 mat.has_explicit_section);
+    }
     println!("EDG_CXX5_SCOPE_ASM count={} diagnostic_only=true",
              result.il.native_scope_asm.len());
     for entry in &result.il.native_scope_asm {
