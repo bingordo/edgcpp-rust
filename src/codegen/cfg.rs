@@ -5154,6 +5154,93 @@ mod audit_resource_limits_tests {
 }
 
 #[cfg(test)]
+mod audit_deep_native_array_layout_tests {
+    use super::*;
+
+    fn native_kind(semantic_id:u32)->u32 {
+        (0..4096).find(|&k|semantic(4,k)==semantic_id)
+            .expect("pinned EDG native type kind")
+    }
+
+    /// Construct 48 one-element dimensions. Each type is independently
+    /// source-owned with a native array relation and bound, not a fabricated
+    /// larger flattened byte array.
+    fn nested_arrays(dimensions:u32)->(Il,crate::TypeId) {
+        let mut il=Il::default();
+        il.types.push(crate::TypeDef {
+            id:crate::TypeId(1),kind:native_kind(1),
+            related_role:None,related:None,
+        });
+        il.c_integer_types.push(crate::CIntegerType {
+            id:crate::TypeId(1),bits:32,signed:true,is_bool:false,
+        });
+        let mut child=crate::TypeId(1);
+        for n in 0..dimensions {
+            let array=crate::TypeId(n+2);
+            il.types.push(crate::TypeDef {
+                id:array,kind:native_kind(6),
+                related_role:Some(2),related:Some(child),
+            });
+            il.array_bounds.push(crate::ArrayBound {
+                array,elements:1,
+            });
+            child=array;
+        }
+        (il,child)
+    }
+
+    #[test]
+    fn iterative_layout_bitfield_and_copy_support_deep_native_array_chains() {
+        for count in [0_u32,31,32,33,40,48,60] {
+            let (il,outer)=nested_arrays(count);
+            assert_eq!(byte_size(&il,outer).unwrap(),4,
+                "valid 4-byte array layout at {count} dimensions");
+            assert!(!has_native_bitfield(&il,outer,0).unwrap());
+            let fields=flattened_copy_fields(&il,outer).unwrap();
+            assert_eq!(fields.len(),1);
+            assert_eq!(fields[0].1,0);
+            assert_eq!(fields[0].0.bits,32);
+        }
+
+        // Nested arrays still produce every leaf in source order.
+        let (mut il,outer)=nested_arrays(40);
+        il.array_bounds.last_mut().unwrap().elements=3;
+        assert_eq!(byte_size(&il,outer).unwrap(),12);
+        let fields=flattened_copy_fields(&il,outer).unwrap();
+        assert_eq!(fields.iter().map(|(_,offset)|*offset).collect::<Vec<_>>(),
+                   vec![0,4,8]);
+    }
+
+    #[test]
+    fn iterative_array_walkers_reject_cycles_malformed_edges_and_oversize() {
+        let (il,outer)=nested_arrays(40);
+        let mut cyclic=il.clone();
+        cyclic.types.last_mut().unwrap().related=Some(outer);
+        assert!(byte_size(&cyclic,outer).is_err());
+        assert!(has_native_bitfield(&cyclic,outer,0).is_err());
+        assert!(flattened_copy_fields(&cyclic,outer).is_err());
+
+        let mut malformed=il.clone();
+        malformed.types.last_mut().unwrap().related_role=Some(1);
+        assert!(byte_size(&malformed,outer).is_err());
+        assert!(has_native_bitfield(&malformed,outer,0).is_err());
+        assert!(flattened_copy_fields(&malformed,outer).is_err());
+
+        let mut missing=il.clone();
+        missing.array_bounds.pop();
+        assert!(byte_size(&missing,outer).is_err());
+        assert!(flattened_copy_fields(&missing,outer).is_err());
+
+        for count in [0,crate::limits::MAX_NATIVE_OBJECT_BYTES] {
+            let mut oversized=il.clone();
+            oversized.array_bounds.last_mut().unwrap().elements=count;
+            assert!(byte_size(&oversized,outer).is_err());
+            assert!(flattened_copy_fields(&oversized,outer).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod audit_integer_width_tests {
     use super::*;
 
