@@ -446,6 +446,15 @@ pub struct GlobalMaterialization {
     pub used: bool,
     pub address_taken: bool,
     pub is_class_member: bool,
+    /// EDG's *applied* GNU weak flag; storage class alone is not a binding proof.
+    pub is_weak: bool,
+    /// Weak alias declaration, not an ordinary weak object definition.
+    pub is_weakref: bool,
+    /// GNU alias declaration, requiring a separately verified alias target.
+    pub is_gnu_alias: bool,
+    /// An explicit GNU/MS data section is present. Its full section name is
+    /// not yet exported, so this flag MUST NOT authorize ELF emission.
+    pub has_explicit_section: bool,
 }
 
 /// Whether EDG's separately scheduled file-scope initialization list is available.
@@ -1884,7 +1893,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         100 => {
             let (Some(symbol),Some(flags))=(n(0),n(1)) else {return;};
-            if symbol==0 || flags>127 || !seen.globals.contains(&SymbolId(symbol)) ||
+            if symbol==0 || flags>2047 || !seen.globals.contains(&SymbolId(symbol)) ||
                 output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
                 return;
             }
@@ -1897,6 +1906,10 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 used: flags&16!=0,
                 address_taken: flags&32!=0,
                 is_class_member: flags&64!=0,
+                is_weak: flags&128!=0,
+                is_weakref: flags&256!=0,
+                is_gnu_alias: flags&512!=0,
+                has_explicit_section: flags&1024!=0,
             });
         }
         47 => {
@@ -6095,6 +6108,41 @@ mod audit_wire_identity_index_tests {
         let fields=[number(id),text(b"_Z1fv"),number(1)];
         unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
     }
+    #[test]
+    fn native_global_attribute_flags_preserve_weak_alias_and_section_presence() {
+        // The existing mandatory per-global record 100 owns these facts.
+        // Neither linker binding nor section text is inferred from linkage=3.
+        for (flags, weak, weakref, alias, section) in [
+            (0_u64, false, false, false, false),
+            (128, true, false, false, false),
+            (128 | 256, true, true, false, false),
+            (512, false, false, true, false),
+            (1024, false, false, false, true),
+            (128 | 1024, true, false, false, true),
+        ] {
+            let mut state = Collector::default();
+            send(&mut state, 47, [2, 3, 1, 0, 0]);
+            send(&mut state, 100, [2, flags]);
+            assert!(!state.malformed, "unexpected flag rejection: {flags}");
+            assert_eq!(state.il.global_materializations.len(), 1);
+            let m = &state.il.global_materializations[0];
+            assert_eq!((m.is_weak, m.is_weakref, m.is_gnu_alias,
+                        m.has_explicit_section), (weak, weakref, alias, section));
+            assert!(validate_native_global_materialization_coverage(&state.il).is_ok());
+            send(&mut state, 100, [2, flags]);
+            assert!(state.malformed, "duplicate attribute provenance admitted");
+        }
+        for flags in [2048_u64, 4095, u64::MAX] {
+            let mut state = Collector::default();
+            send(&mut state, 47, [2, 3, 1, 0, 0]);
+            send(&mut state, 100, [2, flags]);
+            assert!(state.malformed, "unknown source attribute bits admitted");
+        }
+        let mut missing = Collector::default();
+        send(&mut missing, 47, [2, 3, 1, 0, 0]);
+        assert!(validate_native_global_materialization_coverage(&missing.il).is_err());
+    }
+
     #[test]
     fn accepts_only_source_owned_global_data_link_names() {
         let mut state=Collector::default();

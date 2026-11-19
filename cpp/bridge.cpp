@@ -2810,6 +2810,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // whether a C++ template/prototype declaration can represent a
       // runtime object; they do not prove there is no startup effect.
       // This is an ordinary back_end() IL snapshot, not an EDG source hook.
+      // Record 100 is mandatory for each exported global. Its high bits
+      // preserve native EDG's applied GNU data attributes, independently of
+      // sc_extern/sc_static classification (which C weak does not change).
+      // Neither the presence nor the absence of these attributes grants
+      // native codegen admission until the section name and ELF contract are
+      // independently complete.
+      unsigned attribute_flags = 0;
+#if GNU_EXTENSIONS_ALLOWED
+      attribute_flags |= (v->is_weak ? 128u : 0u) |
+                         (v->is_weakref ? 256u : 0u) |
+                         (v->is_gnu_alias ? 512u : 0u);
+#endif
+#if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
+      attribute_flags |= (v->section != nullptr ? 1024u : 0u);
+#endif
       const unsigned materialization_flags =
           (v->is_nonreal ? 1u : 0u) |
           (v->is_prototype_instantiation ? 2u : 0u) |
@@ -2817,7 +2832,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           (v->compiler_generated ? 8u : 0u) |
           (v->used ? 16u : 0u) |
           (v->address_taken ? 32u : 0u) |
-          (v->source_corresp.is_class_member ? 64u : 0u);
+          (v->source_corresp.is_class_member ? 64u : 0u) |
+          attribute_flags;
       emit_record(RECORD_NATIVE_GLOBAL_MATERIALIZATION,
                   {num(symbol_id), num(materialization_flags)});
       if ((v->storage_class == sc_static || v->is_thread_local) &&
