@@ -6109,6 +6109,41 @@ mod audit_wire_identity_index_tests {
         unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
     }
     #[test]
+    fn native_global_attribute_flags_preserve_weak_alias_and_section_presence() {
+        // The existing mandatory per-global record 100 owns these facts.
+        // Neither linker binding nor section text is inferred from linkage=3.
+        for (flags, weak, weakref, alias, section) in [
+            (0_u64, false, false, false, false),
+            (128, true, false, false, false),
+            (128 | 256, true, true, false, false),
+            (512, false, false, true, false),
+            (1024, false, false, false, true),
+            (128 | 1024, true, false, false, true),
+        ] {
+            let mut state = Collector::default();
+            send(&mut state, 47, [2, 3, 1, 0, 0]);
+            send(&mut state, 100, [2, flags]);
+            assert!(!state.malformed, "unexpected flag rejection: {flags}");
+            assert_eq!(state.il.global_materializations.len(), 1);
+            let m = &state.il.global_materializations[0];
+            assert_eq!((m.is_weak, m.is_weakref, m.is_gnu_alias,
+                        m.has_explicit_section), (weak, weakref, alias, section));
+            assert!(validate_native_global_materialization_coverage(&state.il).is_ok());
+            send(&mut state, 100, [2, flags]);
+            assert!(state.malformed, "duplicate attribute provenance admitted");
+        }
+        for flags in [2048_u64, 4095, u64::MAX] {
+            let mut state = Collector::default();
+            send(&mut state, 47, [2, 3, 1, 0, 0]);
+            send(&mut state, 100, [2, flags]);
+            assert!(state.malformed, "unknown source attribute bits admitted");
+        }
+        let mut missing = Collector::default();
+        send(&mut missing, 47, [2, 3, 1, 0, 0]);
+        assert!(validate_native_global_materialization_coverage(&missing.il).is_err());
+    }
+
+    #[test]
     fn accepts_only_source_owned_global_data_link_names() {
         let mut state=Collector::default();
         let fields=[number(17),number(2),text(b"std::cout")];
