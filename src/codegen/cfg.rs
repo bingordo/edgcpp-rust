@@ -6593,3 +6593,121 @@ mod audit_implicit_pointer_cast_qualification_tests {
             "cyclic typeref chain cannot bypass validation");
     }
 }
+
+#[cfg(test)]
+mod audit_deep_singleton_record_layout_tests {
+    use super::*;
+
+    fn native_kind(semantic_id:u32)->u32 {
+        (0..4096).find(|&k|semantic(4,k)==semantic_id).unwrap()
+    }
+
+    /// Real EDG supplies distinct record and field IDs; simulate their
+    /// structural relations and exact target-owned layouts independently
+    /// of the existing array-chain fixtures.
+    fn singleton_records(count:u32)->(Il,crate::TypeId) {
+        let mut il=Il::default();
+        il.types.push(crate::TypeDef {
+            id:crate::TypeId(1),kind:native_kind(1),
+            related_role:None,related:None,
+        });
+        il.c_integer_types.push(crate::CIntegerType {
+            id:crate::TypeId(1),bits:32,signed:true,is_bool:false,
+        });
+        let mut child=crate::TypeId(1);
+        for n in 0..count {
+            let record=crate::TypeId(n+2);
+            il.types.push(crate::TypeDef {
+                id:record,kind:native_kind(7),
+                related_role:None,related:None,
+            });
+            il.type_object_sizes.push(crate::TypeObjectSize {
+                owner:record,bytes:4,alignment:4,
+            });
+            il.record_fields.push(crate::RecordField {
+                owner:record,position:0,ty:child,
+                symbol:crate::SymbolId(n+1000),
+                name:"inner".into(),byte_offset:0,
+                bit_offset:0,bit_width:0,
+            });
+            child=record;
+        }
+        (il,child)
+    }
+
+    #[test]
+    fn deeply_nested_single_member_records_keep_exact_layout_and_copy() {
+        for count in [1_u32,31,32,33,40,60,128] {
+            let (il,outer)=singleton_records(count);
+            assert_eq!(byte_size(&il,outer).unwrap(),4,
+                       "valid native {count}-record chain");
+            assert_eq!(checked_record_fields(&il,outer).unwrap().len(),1);
+            assert!(!has_native_bitfield(&il,outer,0).unwrap());
+            let copies=flattened_copy_fields(&il,outer).unwrap();
+            assert_eq!(copies.len(),1);
+            assert_eq!((copies[0].0.bits,copies[0].1),(32,0));
+        }
+    }
+
+    #[test]
+    fn singleton_record_leaf_offset_preserves_native_padding() {
+        let (mut il,outer)=singleton_records(40);
+        il.type_object_sizes.last_mut().unwrap().bytes=8;
+        il.record_fields.last_mut().unwrap().byte_offset=4;
+        assert_eq!(byte_size(&il,outer).unwrap(),8);
+        let copies=flattened_copy_fields(&il,outer).unwrap();
+        assert_eq!(copies.len(),1);
+        assert_eq!(copies[0].1,4);
+    }
+
+    #[test]
+    fn singleton_record_spines_fail_closed_on_cycles_and_bad_layouts() {
+        let (il,outer)=singleton_records(40);
+        let mut cycle=il.clone();
+        cycle.record_fields.last_mut().unwrap().ty=outer;
+        assert!(byte_size(&cycle,outer).is_err());
+        assert!(has_native_bitfield(&cycle,outer,0).is_err());
+        assert!(flattened_copy_fields(&cycle,outer).is_err());
+
+        let mut bad_offset=il.clone();
+        bad_offset.record_fields.last_mut().unwrap().byte_offset=u64::MAX;
+        assert!(byte_size(&bad_offset,outer).is_err());
+        assert!(flattened_copy_fields(&bad_offset,outer).is_err());
+
+        let mut bad_align=il.clone();
+        bad_align.type_object_sizes.last_mut().unwrap().alignment=3;
+        assert!(byte_size(&bad_align,outer).is_err());
+
+        let mut missing=il.clone();
+        missing.record_fields.last_mut().unwrap().ty=crate::TypeId(99999);
+        assert!(byte_size(&missing,outer).is_err());
+
+        let mut missing_layout=il.clone();
+        missing_layout.type_object_sizes.pop();
+        assert!(byte_size(&missing_layout,outer).is_err());
+    }
+
+    #[test]
+    fn branching_records_keep_independent_depth_limit() {
+        // Make every record have TWO valid scalar-or-record members.
+        // This cannot take the singleton shortcut, and depth 33 still
+        // fails closed rather than changing the branching-layout budget.
+        let (mut il,outer)=singleton_records(40);
+        for n in 0..40_u32 {
+            let record=crate::TypeId(n+2);
+            let child_size=4*(u64::from(n)+1);
+            let layout=il.type_object_sizes.iter_mut()
+                .find(|x|x.owner==record).unwrap();
+            layout.bytes=child_size+4;
+            il.record_fields.push(crate::RecordField {
+                owner:record,position:1,ty:crate::TypeId(1),
+                symbol:crate::SymbolId(n+9000),
+                name:"other".into(),byte_offset:child_size,
+                bit_offset:0,bit_width:0,
+            });
+        }
+        assert!(byte_size(&il,outer).is_err());
+        assert!(has_native_bitfield(&il,outer,0).is_err());
+        assert!(flattened_copy_fields(&il,outer).is_err());
+    }
+}
