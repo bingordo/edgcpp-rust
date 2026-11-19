@@ -101,6 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  mat.symbol.0,symbol.map(|s|s.name.as_str()),
                  mat.is_weak,mat.is_weakref,mat.is_gnu_alias,
                  mat.has_explicit_section);
+        println!("EDG_NATIVE_GLOBAL_ELF id={} name={:?} section={:?} visibility={:?} diagnostic_only=true",
+                 mat.symbol.0,symbol.map(|s|s.name.as_str()),
+                 mat.section,mat.elf_visibility);
     }
     println!("EDG_CXX5_SCOPE_ASM count={} diagnostic_only=true",
              result.il.native_scope_asm.len());

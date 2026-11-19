@@ -436,7 +436,7 @@ pub struct GlobalVariable {
 
 /// The source EDG variable properties that distinguish template metadata from
 /// real executable storage; none of these bits alone is a startup/ABI proof.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalMaterialization {
     pub symbol: SymbolId,
     pub is_nonreal: bool,
@@ -455,6 +455,11 @@ pub struct GlobalMaterialization {
     /// An explicit GNU/MS data section is present. Its full section name is
     /// not yet exported, so this flag MUST NOT authorize ELF emission.
     pub has_explicit_section: bool,
+    /// Exact native EDG data section name (not an inferred ELF section).
+    pub section: Option<String>,
+    /// Native EDG an_ELF_visibility_kind: unspecified=0, hidden=1,
+    /// protected=2, internal=3, default=4. None means unavailable.
+    pub elf_visibility: Option<u32>,
 }
 
 /// Whether EDG's separately scheduled file-scope initialization list is available.
@@ -1893,7 +1898,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         100 => {
             let (Some(symbol),Some(flags))=(n(0),n(1)) else {return;};
-            if symbol==0 || flags>2047 || !seen.globals.contains(&SymbolId(symbol)) ||
+            let section=t(2);
+            let visibility=n(3);
+            if symbol==0 || flags>2047 ||
+                (section.is_some() != (flags&1024!=0)) ||
+                section.as_ref().is_some_and(|s|s.is_empty() || s.contains('\0')) ||
+                visibility.is_some_and(|v|v>4) ||
+                !seen.globals.contains(&SymbolId(symbol)) ||
                 output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
                 return;
             }
@@ -1910,6 +1921,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 is_weakref: flags&256!=0,
                 is_gnu_alias: flags&512!=0,
                 has_explicit_section: flags&1024!=0,
+                section,
+                elf_visibility: visibility,
             });
         }
         47 => {
@@ -6108,6 +6121,19 @@ mod audit_wire_identity_index_tests {
         let fields=[number(id),text(b"_Z1fv"),number(1)];
         unsafe {collect((state as *mut Collector).cast(),61,fields.as_ptr(),3,0);}
     }
+    fn send_global_materialization(state:&mut Collector, symbol:u64, flags:u64,
+                                   section:Option<&'static [u8]>, visibility:Option<u64>) {
+        let absent=WireField {
+            data:std::ptr::null(),length:0,value:0,tag:wire_tags::ABSENT,
+        };
+        let fields=[
+            number(symbol),number(flags),
+            section.map(text).unwrap_or(absent),
+            visibility.map(number).unwrap_or(absent),
+        ];
+        unsafe { collect((state as *mut Collector).cast(),100,
+                          fields.as_ptr(),fields.len(),0); }
+    }
     #[test]
     fn native_global_attribute_flags_preserve_weak_alias_and_section_presence() {
         // The existing mandatory per-global record 100 owns these facts.
@@ -6122,21 +6148,47 @@ mod audit_wire_identity_index_tests {
         ] {
             let mut state = Collector::default();
             send(&mut state, 47, [2, 3, 1, 0, 0]);
-            send(&mut state, 100, [2, flags]);
+            send_global_materialization(&mut state,2,flags,
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(!state.malformed, "unexpected flag rejection: {flags}");
             assert_eq!(state.il.global_materializations.len(), 1);
             let m = &state.il.global_materializations[0];
             assert_eq!((m.is_weak, m.is_weakref, m.is_gnu_alias,
                         m.has_explicit_section), (weak, weakref, alias, section));
+            assert_eq!(m.section.as_deref(),
+                       section.then_some(".data.edg_probe"));
+            assert_eq!(m.elf_visibility,Some(0));
             assert!(validate_native_global_materialization_coverage(&state.il).is_ok());
-            send(&mut state, 100, [2, flags]);
+            send_global_materialization(&mut state,2,flags,
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(state.malformed, "duplicate attribute provenance admitted");
         }
         for flags in [2048_u64, 4095, u64::MAX] {
             let mut state = Collector::default();
             send(&mut state, 47, [2, 3, 1, 0, 0]);
-            send(&mut state, 100, [2, flags]);
+            send_global_materialization(&mut state,2,flags,
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(state.malformed, "unknown source attribute bits admitted");
+        }
+        // Presence must agree with the actual section string, and visibility
+        // must be a native EDG enum, never a silently invented default.
+        for (flags, section, visibility) in [
+            (0_u64, Some(b".data.edg_probe".as_slice()), Some(3_u64)),
+            (1024, None, Some(3)),
+            (1024, Some(b"".as_slice()), Some(3)),
+            (0, None, Some(5)),
+        ] {
+            let mut state=Collector::default();
+            send(&mut state,47,[2,3,1,0,0]);
+            send_global_materialization(&mut state,2,flags,section,visibility);
+            assert!(state.malformed,"bad global section/visibility admitted: {flags}");
+        }
+        {
+            let mut state=Collector::default();
+            send(&mut state,47,[2,3,1,0,0]);
+            send_global_materialization(&mut state,2,0,None,None);
+            assert!(!state.malformed);
+            assert_eq!(state.il.global_materializations[0].elf_visibility,None);
         }
         let mut missing = Collector::default();
         send(&mut missing, 47, [2, 3, 1, 0, 0]);

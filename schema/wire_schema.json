@@ -143,7 +143,7 @@
     "97": 3,
     "98": 3,
     "99": 3,
-    "100": 2,
+    "100": 4,
     "101": 4
   },
   "record_field_tags": {
@@ -735,7 +735,9 @@
     ],
     "100": [
       "UNSIGNED",
-      "UNSIGNED"
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|UNSIGNED"
     ],
     "101": [
       "TEXT",
