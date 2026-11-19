@@ -455,6 +455,11 @@ pub struct GlobalMaterialization {
     /// An explicit GNU/MS data section is present. Its full section name is
     /// not yet exported, so this flag MUST NOT authorize ELF emission.
     pub has_explicit_section: bool,
+    /// Exact native EDG data section name (not an inferred ELF section).
+    pub section: Option<String>,
+    /// Native EDG an_ELF_visibility_kind: hidden=0, protected=1,
+    /// internal=2, default=3. None means unavailable, never default.
+    pub elf_visibility: Option<u32>,
 }
 
 /// Whether EDG's separately scheduled file-scope initialization list is available.
@@ -1893,7 +1898,13 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         100 => {
             let (Some(symbol),Some(flags))=(n(0),n(1)) else {return;};
-            if symbol==0 || flags>2047 || !seen.globals.contains(&SymbolId(symbol)) ||
+            let section=t(2);
+            let visibility=n(3);
+            if symbol==0 || flags>2047 ||
+                (section.is_some() != (flags&1024!=0)) ||
+                section.as_ref().is_some_and(|s|s.is_empty() || s.contains('\0')) ||
+                visibility.is_some_and(|v|v>3) ||
+                !seen.globals.contains(&SymbolId(symbol)) ||
                 output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
                 return;
             }
@@ -1910,6 +1921,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 is_weakref: flags&256!=0,
                 is_gnu_alias: flags&512!=0,
                 has_explicit_section: flags&1024!=0,
+                section,
+                elf_visibility: visibility,
             });
         }
         47 => {
