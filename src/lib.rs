@@ -436,7 +436,7 @@ pub struct GlobalVariable {
 
 /// The source EDG variable properties that distinguish template metadata from
 /// real executable storage; none of these bits alone is a startup/ABI proof.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalMaterialization {
     pub symbol: SymbolId,
     pub is_nonreal: bool,
