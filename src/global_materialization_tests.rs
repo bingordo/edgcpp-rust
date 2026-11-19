@@ -10,11 +10,25 @@ fn send<const N:usize>(state:&mut Collector,kind:u32,values:[u64;N]){
     unsafe {collect((state as *mut Collector).cast(),kind,fields.as_ptr(),N,0);}
 }
 
+// Event 100 now has four mandatory wire fields: owner, flags, optional
+// exact section text and optional ELF visibility. Synthetic flag-only
+// witnesses must explicitly send ABSENT for the last two fields.
+fn send_global_flags(state:&mut Collector,owner:u64,flags:u64) {
+    let number=|value:u64|WireField {
+        data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+    };
+    let absent=WireField {
+        data:std::ptr::null(),length:0,value:0,tag:wire_tags::ABSENT,
+    };
+    let fields=[number(owner),number(flags),absent,absent];
+    unsafe {collect((state as *mut Collector).cast(),100,fields.as_ptr(),4,0);}
+}
+
 #[test]
 fn native_global_flags_preserve_each_source_owned_property() {
     let mut state=Collector::default();
     send(&mut state,47,[91,2,1,0,0]);
-    send(&mut state,100,[91,127]);
+    send_global_flags(&mut state,91,127);
     assert!(!state.malformed);
     assert!(!state.panicked);
     assert_eq!(state.il.global_materializations.len(),1);
@@ -33,7 +47,7 @@ fn native_global_flags_preserve_each_source_owned_property() {
 fn concrete_variable_is_distinct_from_uninstantiated_template() {
     let mut state=Collector::default();
     send(&mut state,47,[91,3,0,0,0]);
-    send(&mut state,100,[91,0]);
+    send_global_flags(&mut state,91,0);
     assert!(!state.malformed);
     let m=&state.il.global_materializations[0];
     assert!(!m.is_nonreal && !m.is_template_variable &&
@@ -47,17 +61,17 @@ fn orphan_duplicate_and_unknown_native_property_bits_fail_closed() {
     for bad in [0u64,2048u64] {
         let mut state=Collector::default();
         send(&mut state,47,[91,3,0,0,0]);
-        send(&mut state,100,[91,bad]);
+        send_global_flags(&mut state,91,bad);
         if bad==0 {
             assert!(!state.malformed);
-            send(&mut state,100,[91,0]);
+            send_global_flags(&mut state,91,0);
             assert!(state.malformed,"duplicate flag event accepted");
         } else {
             assert!(state.malformed,"unknown high bit accepted");
         }
     }
     let mut orphan=Collector::default();
-    send(&mut orphan,100,[91,1]);
+    send_global_flags(&mut orphan,91,1);
     assert!(orphan.malformed,"missing global owner accepted");
 }
 
@@ -67,9 +81,9 @@ fn complete_native_snapshot_requires_one_materialization_per_global() {
         "an empty translation unit has no file-scope owners");
     let mut state=Collector::default();
     send(&mut state,47,[91,3,0,0,0]);
-    send(&mut state,100,[91,1]);
+    send_global_flags(&mut state,91,1);
     send(&mut state,47,[92,1,0,0,0]);
-    send(&mut state,100,[92,0]);
+    send_global_flags(&mut state,92,0);
     assert!(!state.malformed);
     let complete=state.il;
     validate_native_global_materialization_coverage(&complete)
