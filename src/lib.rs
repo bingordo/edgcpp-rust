@@ -457,8 +457,8 @@ pub struct GlobalMaterialization {
     pub has_explicit_section: bool,
     /// Exact native EDG data section name (not an inferred ELF section).
     pub section: Option<String>,
-    /// Native EDG an_ELF_visibility_kind: hidden=0, protected=1,
-    /// internal=2, default=3. None means unavailable, never default.
+    /// Native EDG an_ELF_visibility_kind: unspecified=0, hidden=1,
+    /// protected=2, internal=3, default=4. None means unavailable.
     pub elf_visibility: Option<u32>,
 }
 
@@ -1903,7 +1903,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if symbol==0 || flags>2047 ||
                 (section.is_some() != (flags&1024!=0)) ||
                 section.as_ref().is_some_and(|s|s.is_empty() || s.contains('\0')) ||
-                visibility.is_some_and(|v|v>3) ||
+                visibility.is_some_and(|v|v>4) ||
                 !seen.globals.contains(&SymbolId(symbol)) ||
                 output.global_materializations.iter().any(|m|m.symbol==SymbolId(symbol)) {
                 return;
@@ -6149,7 +6149,7 @@ mod audit_wire_identity_index_tests {
             let mut state = Collector::default();
             send(&mut state, 47, [2, 3, 1, 0, 0]);
             send_global_materialization(&mut state,2,flags,
-                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(3));
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(!state.malformed, "unexpected flag rejection: {flags}");
             assert_eq!(state.il.global_materializations.len(), 1);
             let m = &state.il.global_materializations[0];
@@ -6157,17 +6157,17 @@ mod audit_wire_identity_index_tests {
                         m.has_explicit_section), (weak, weakref, alias, section));
             assert_eq!(m.section.as_deref(),
                        section.then_some(".data.edg_probe"));
-            assert_eq!(m.elf_visibility,Some(3));
+            assert_eq!(m.elf_visibility,Some(0));
             assert!(validate_native_global_materialization_coverage(&state.il).is_ok());
             send_global_materialization(&mut state,2,flags,
-                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(3));
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(state.malformed, "duplicate attribute provenance admitted");
         }
         for flags in [2048_u64, 4095, u64::MAX] {
             let mut state = Collector::default();
             send(&mut state, 47, [2, 3, 1, 0, 0]);
             send_global_materialization(&mut state,2,flags,
-                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(3));
+                if flags&1024!=0 {Some(b".data.edg_probe")} else {None},Some(0));
             assert!(state.malformed, "unknown source attribute bits admitted");
         }
         // Presence must agree with the actual section string, and visibility
@@ -6176,7 +6176,7 @@ mod audit_wire_identity_index_tests {
             (0_u64, Some(b".data.edg_probe".as_slice()), Some(3_u64)),
             (1024, None, Some(3)),
             (1024, Some(b"".as_slice()), Some(3)),
-            (0, None, Some(4)),
+            (0, None, Some(5)),
         ] {
             let mut state=Collector::default();
             send(&mut state,47,[2,3,1,0,0]);
