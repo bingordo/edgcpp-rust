@@ -6387,7 +6387,12 @@ mod audit_complete_wire_field_tags_tests {
                 total+=1;
             }
         }
-        assert_eq!(total,394);
+        // Compare against the generated schema rather than a manually
+        // maintained total that becomes stale when records gain fields.
+        let schema_fields:usize=(1..=101_u32)
+            .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
+        assert_eq!(expected_wire_field_count(100),Some(4));
+        assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
         assert!(expected_wire_field_tag_masks(102).is_none());
