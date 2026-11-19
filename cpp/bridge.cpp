@@ -2834,8 +2834,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           (v->address_taken ? 32u : 0u) |
           (v->source_corresp.is_class_member ? 64u : 0u) |
           attribute_flags;
+      // The complete native section name and the EDG ELF visibility kind
+      // belong to the SAME mandatory per-global record as the attribute bits.
+      // An absent section is distinct from an empty or truncated name.
+      // Missing visibility under non-ELF configurations is explicitly unknown.
+      edgcpp_field native_section = absent();
+#if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
+      if (v->section != nullptr) native_section = txt(v->section);
+#endif
+      edgcpp_field native_visibility = absent();
+#if GNU_EXTENSIONS_ALLOWED && GNU_VISIBILITY_ATTRIBUTE_ALLOWED
+      native_visibility = num(static_cast<unsigned>(v->ELF_visibility));
+#endif
       emit_record(RECORD_NATIVE_GLOBAL_MATERIALIZATION,
-                  {num(symbol_id), num(materialization_flags)});
+                  {num(symbol_id), num(materialization_flags),
+                   native_section, native_visibility});
       if ((v->storage_class == sc_static || v->is_thread_local) &&
           v->source_corresp.is_local_to_function) {
         if (v->source_corresp.enclosing_routine != nullptr &&
