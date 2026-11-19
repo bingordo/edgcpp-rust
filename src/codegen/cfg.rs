@@ -1194,44 +1194,54 @@ fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
     byte_size_depth(il,ty,0)
 }
 fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,CodegenError> {
-    if depth > MAX_AGGREGATE_LAYOUT_DEPTH { return Err(invalid("nested aggregate layout exceeds depth limit")); }
-    let ty = canonical_abi_type(il,ty)?;
-    let def = il.types.iter().find(|t| t.id == ty)
-        .ok_or_else(|| invalid("missing memory type"))?;
-    match semantic(4,def.kind) {
+    // Array dimensions form a potentially deep chain. Traverse it without
+    // consuming the recursive *record* layout budget or the Rust call stack.
+    // EDG can emit more than 32 valid one-element array dimensions.
+    let mut current=ty;
+    let mut elements=1u64;
+    let mut seen_arrays=HashSet::new();
+    let current=loop {
+        let canonical=canonical_abi_type(il,current)?;
+        let def=il.types.iter().find(|t|t.id==canonical)
+            .ok_or_else(||invalid("missing memory type"))?;
+        if semantic(4,def.kind)!=6 {break canonical;}
+        if !seen_arrays.insert(canonical) {
+            return Err(invalid("cyclic native aggregate array type"));
+        }
+        let count=il.array_bounds.iter().find(|b|b.array==canonical)
+            .ok_or_else(||invalid("array has no fixed bound"))?.elements;
+        elements=bounded_array_bytes(elements,count)
+            .ok_or_else(||invalid("array object too large"))?;
+        current=checked_native_pointer_element(il,canonical)?;
+    };
+    if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
+        return Err(invalid("nested aggregate record layout exceeds depth limit"));
+    }
+    let def=il.types.iter().find(|t|t.id==current)
+        .ok_or_else(||invalid("missing memory type"))?;
+    let base=match semantic(4,def.kind) {
         1 => {
-            let info = il.c_integer_types.iter().find(|t| t.id == ty)
-                .ok_or_else(|| invalid("unsupported integer memory layout"))?;
-            if info.bits == 0 || info.bits % 8 != 0 {
+            let info=il.c_integer_types.iter().find(|t|t.id==current)
+                .ok_or_else(||invalid("unsupported integer memory layout"))?;
+            if info.bits==0 || info.bits%8!=0 {
                 return Err(invalid("integer memory layout must be nonzero and byte-aligned"));
             }
-            Ok(u64::from(info.bits / 8))
+            u64::from(info.bits/8)
         }
         5 => {
-            // An invalid native pointer type cannot acquire a plausible
-            // eight-byte object layout merely from its semantic kind.
-            checked_pointer_element_type(il,ty)?;
-            Ok(8)
-        },
-        6 => {
-            let element=checked_native_pointer_element(il,ty)?;
-            let count = il.array_bounds.iter().find(|b| b.array == ty)
-                .ok_or_else(|| invalid("array has no fixed bound"))?.elements;
-            let n = byte_size_depth(il,element,depth+1)?;
-            bounded_array_bytes(n,count)
-                .ok_or_else(|| invalid("array object too large"))
+            // Native pointer structure must still be valid after unwrapping.
+            checked_pointer_element_type(il,current)?;
+            8
         }
-        // Native EDG size includes the record's internal and trailing padding.
-        // Recursive validation rejects unsupported nested layouts, cycles and
-        // overlapping/union fields before the allocation is accepted.
-        7 | 9 if il.record_fields.iter().any(|f| f.owner == ty) => {
-            checked_record_fields_depth(il, ty, depth+1)?;
-            let layout = il.type_object_sizes.iter().find(|entry| entry.owner == ty)
-                .ok_or_else(|| invalid("record missing native object layout"))?;
-            Ok(layout.bytes)
+        7|9 if il.record_fields.iter().any(|f|f.owner==current) => {
+            checked_record_fields_depth(il,current,depth+1)?;
+            il.type_object_sizes.iter().find(|entry|entry.owner==current)
+                .ok_or_else(||invalid("record missing native object layout"))?.bytes
         }
-        _ => Err(invalid("unsupported aggregate/element size")),
-    }
+        _=>return Err(invalid("unsupported aggregate/element size")),
+    };
+    bounded_array_bytes(base,elements)
+        .ok_or_else(||invalid("array object too large"))
 }
 /// Resolve an object's native EDG alignment before exposing its address to
 /// Cranelift or the ELF linker. Under-aligned storage is not a valid C object.
