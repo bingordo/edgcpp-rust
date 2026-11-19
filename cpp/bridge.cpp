@@ -2838,9 +2838,15 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // belong to the SAME mandatory per-global record as the attribute bits.
       // An absent section is distinct from an empty or truncated name.
       // Missing visibility under non-ELF configurations is explicitly unknown.
+      std::string native_section_text;
       edgcpp_field native_section = absent();
 #if GNU_EXTENSIONS_ALLOWED || MICROSOFT_EXTENSIONS_ALLOWED
-      if (v->section != nullptr) native_section = txt(v->section);
+      if (v->section != nullptr) {
+        // txt() borrows string storage: keep it alive through emit_record.
+        // txt(v->section) would borrow a temporary and dangle here.
+        native_section_text = v->section;
+        native_section = txt(native_section_text);
+      }
 #endif
       edgcpp_field native_visibility = absent();
 #if GNU_EXTENSIONS_ALLOWED && GNU_VISIBILITY_ATTRIBUTE_ALLOWED
