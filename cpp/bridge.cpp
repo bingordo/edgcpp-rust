@@ -2252,6 +2252,40 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
             emit_record(54, {txt(function), txt(path), num(id)});
           }
         }
+        // EDG folds 'float *p = &global' into a dik_constant stmk_init,
+        // not an expression snapshot. Reuse the existing source-owned
+        // ck_address/abk_variable wire record 48 at the reserved initializer
+        // expression path "0"; record 34 already owns the initialized local
+        // SymbolId at this statement. No guessed data name or C pointer bits.
+        // The consumer must still check the target symbol's complete native
+        // source data proof, source pointee type and byte offset.
+        if (stmt->kind == stmk_init && variable_symbol != 0 &&
+            init->variable != nullptr && init->variable->type != nullptr &&
+            init->variable->type->kind == tk_pointer &&
+            init->variable->type->size == 8 &&
+            init->kind == dik_constant &&
+            init->variant.constant.ptr != nullptr &&
+            init->variant.constant.ptr->kind == ck_address) {
+          const auto &address = init->variant.constant.ptr->variant.address;
+          if (address.kind == abk_variable &&
+              address.variant.variable != nullptr &&
+              !address.one_past_the_end && !address.is_object_reflection &&
+              address.subobject_path == nullptr) {
+            const auto delta = address.offset;
+            if (delta >= static_cast<decltype(delta)>(
+                             std::numeric_limits<int64_t>::min()) &&
+                delta <= static_cast<decltype(delta)>(
+                             std::numeric_limits<int64_t>::max())) {
+              a_variable_ptr target = address.variant.variable;
+              const uint32_t target_symbol=emit_symbol(target,2,
+                  declaration_name(target->source_corresp,false));
+              emit_variable_type(target);
+              emit_record(48, {txt(function),txt(path),txt("0"),
+                               num(target_symbol),
+                               signed_num(static_cast<int64_t>(delta))});
+            }
+          }
+        }
         // Preserve exact constant aggregate values with their native type,
         // even for partially initialized or designated subobjects.
         if (variable_symbol != 0 && init->variable != nullptr &&
