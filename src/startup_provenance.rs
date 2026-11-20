@@ -276,6 +276,13 @@ pub fn trace_startup_calls(
         .map(|attr| attr.routine).collect();
     let routine_symbols: HashSet<SymbolId> = il.symbols.iter()
         .filter(|sym| sym.kind == 1).map(|sym| sym.id).collect();
+    // A routine attribute's 'defined' flag is not itself proof that EDG
+    // emitted a callable body. Event 1 independently records the body.
+    let defined_body_functions: HashSet<&str> = il.entities.iter()
+        .filter_map(|entity| match entity {
+            crate::Entity::Routine { name, has_definition: true } => Some(name.as_str()),
+            _ => None,
+        }).collect();
     // Build a single index over all native calls and their independent
     // target-evidence events. Do not repeatedly scan large <iostream> IL.
     let mut sites: HashMap<&str,Vec<&crate::CallSite>> = HashMap::new();
@@ -297,7 +304,8 @@ pub fn trace_startup_calls(
         if !seen_roots.insert(root.routine) { continue; }
         if by_symbol.get(&root.routine) != Some(&root.function.as_str()) ||
            !defined.contains(&root.routine) ||
-           !routine_symbols.contains(&root.routine) {
+           !routine_symbols.contains(&root.routine) ||
+           !defined_body_functions.contains(root.function.as_str()) {
             return Err(StartupEvidenceError::MissingDefinition(root.routine));
         }
         let mut queue = VecDeque::from([root.routine]);
@@ -339,7 +347,8 @@ pub fn trace_startup_calls(
                 let local_body = direct && target.callee_symbol.is_some_and(|id|
                     defined.contains(&id) &&
                     routine_symbols.contains(&id) &&
-                    by_symbol.contains_key(&id));
+                    by_symbol.get(&id).is_some_and(|function|
+                        defined_body_functions.contains(*function)));
                 if local_body {
                     queue.push_back(target.callee_symbol.expect("checked above"));
                 } else if !direct || target.callee_symbol.is_none() {
@@ -434,6 +443,43 @@ mod tests {
         assert!(trace.edges.iter().any(|edge| edge.caller==SymbolId(43) &&
             edge.callee_symbol==Some(SymbolId(44))));
         assert!(trace.edges.iter().all(|e|e.root==SymbolId(42)));
+    }
+
+    #[test]
+    fn trace_does_not_invent_a_local_body_from_routine_attributes() {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        generated(&mut il,43,"helper",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        add_call(&mut il,"startup","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        add_call(&mut il,"helper","0",CallTargetForm::DirectRoutine,Some(SymbolId(99)));
+        // The routine declaration still claims 'defined', but the independent
+        // native event-1 body witness says no function body was emitted.
+        if let Entity::Routine { has_definition, .. } = &mut il.entities[1] {
+            *has_definition = false;
+        }
+        let proof=collect_startup_evidence(&il).unwrap();
+        let trace=trace_startup_calls(&il,&proof).unwrap();
+        assert_eq!(trace.edges.len(),1);
+        assert_eq!(trace.external_calls,1);
+        assert_eq!(trace.unresolved_indirect,0);
+        assert!(!trace.edges[0].local_body);
+        assert_eq!(trace.edges[0].callee_symbol,Some(SymbolId(43)));
+    }
+
+    #[test]
+    fn trace_rejects_root_missing_its_native_body_witness() {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        let proof=collect_startup_evidence(&il).unwrap();
+        if let Entity::Routine { has_definition, .. } = &mut il.entities[0] {
+            *has_definition = false;
+        }
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::MissingDefinition(SymbolId(42))));
     }
 
     #[test]
