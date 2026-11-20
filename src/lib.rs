@@ -518,7 +518,11 @@ pub struct NativeScopeAsm {
     pub flags: u32,
 }
 
-/// Address-valued constant in an expression snapshot.
+/// Source-owned EDG ck_address/abk_variable target. Expression snapshots
+/// use the exact (function, statement_path, expression_path) identity;
+/// for a folded dik_constant pointer stmk_init with no expression tree,
+/// path "0" belongs to the native statement-initializer owner (event 34).
+/// Never interpret the pointer's runtime bits as a data-symbol identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstantAddress {
     pub function: String,
