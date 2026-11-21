@@ -420,6 +420,21 @@ pub struct CleanupRegistrationWitness {
     pub dso_handle: SymbolId,
 }
 
+/// Source-owned direct `__cxa_atexit` operand identities at one call site.
+/// This is only a call-local candidate. It deliberately carries NO native
+/// scope initializer ordinal, completeness claim, runtime execution proof,
+/// destruction ABI proof, or executable startup admission.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CleanupCallCandidate {
+    pub root: SymbolId,
+    pub function: String,
+    pub statement_path: String,
+    pub expression_path: String,
+    pub destructor: SymbolId,
+    pub object: SymbolId,
+    pub dso_handle: SymbolId,
+}
+
 /// Walk only the exact expression children owned by one original EDG
 /// argument. Independent event-55/48 target IDs are resolved separately.
 fn cleanup_argument_nodes<'a>(
@@ -448,18 +463,17 @@ fn cleanup_argument_nodes<'a>(
     Ok(result)
 }
 
-/// Narrow, source-verified diagnostic for direct calls to EDG's native
-/// __cxa_atexit routine in *immediate* startup-root bodies. It is not
-/// executable C++ calling ABI permission or a complete startup schedule.
-///
-/// Three independent native witnesses must agree: event 55 (the destructor
-/// function address), event 48 (zero-offset object address), and event 68
-/// (the same exact SymbolId pair in a source-owned scope initializer).
-/// The third argument must independently reference the native __dso_handle.
-/// A missing event means UNKNOWN rather than no lifecycle side effect.
-pub fn collect_cleanup_registration_witnesses(
+/// Source-checked, *call-local* address diagnostic for immediate native
+/// startup-root calls to __cxa_atexit. Unlike the strict scoped registration
+/// join, this does not require the post-lowering event-68 list, which EDG may
+/// drain. Event 55 certifies the destructor address, event 48 the zero-offset
+/// object address, and the native expression identifies __dso_handle.
+/// Missing or contradictory operand evidence always fails closed.
+/// This NEVER proves executed registration, a full cleanup roster, ABI,
+/// ordering, or linker .init_array/.fini_array support.
+pub fn collect_cleanup_call_candidates(
     il:&Il,
-) -> Result<Vec<CleanupRegistrationWitness>,StartupEvidenceError> {
+) -> Result<Vec<CleanupCallCandidate>,StartupEvidenceError> {
     let proof=collect_startup_evidence(il)?;
     // All indexes are compilation-local; avoid full-IL scans per call.
     let mut kinds=HashMap::new();
@@ -507,21 +521,7 @@ pub fn collect_cleanup_registration_witnesses(
             return Err(StartupEvidenceError::AmbiguousCleanupWitness);
         }
     }
-    let mut scoped=HashMap::new();
-    for init in &il.scope_dynamic_initializers {
-        if let (Some(dtor),Some(object))=(init.destructor,init.variable) {
-            let previous=scoped.insert((dtor,object),init);
-            if previous.is_some() {
-                return Err(StartupEvidenceError::AmbiguousCleanupWitness);
-            }
-        }
-    }
-
     let mut result=Vec::new();
-    // Multiple call sites may separately *look* like a valid registration
-    // for the same source-owned initializer. Do not silently report duplicate
-    // registrations as two distinct, complete global-lifetime witnesses.
-    let mut registered_scope_entries=HashSet::new();
     for call in &proof.immediate_calls {
         let Some(callee)=call.callee_symbol else {continue;};
         if links.get(&callee)!=Some(&"__cxa_atexit") {continue;}
@@ -538,6 +538,18 @@ pub fn collect_cleanup_registration_witnesses(
         if site.first_argument!=1 ||
            expressions.contains_key(&(function,stmt,format!("{path}.4").as_str())) {
             return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        // The call-target record and the independently emitted original EDG
+        // callee expression must identify the same native routine. This API
+        // also accepts hand-built Il snapshots, not just validated compile().
+        let callee_path=format!("{path}.0");
+        let Some(callee_node)=expressions.get(&(function,stmt,callee_path.as_str())) else {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
+        };
+        if callee_node.parent.as_deref()!=Some(path) ||
+           callee_node.kind!=3 || callee_node.symbol_id!=Some(callee) ||
+           callee_node.type_id!=call.callee_type {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
         }
         let args=[format!("{path}.1"),format!("{path}.2"),format!("{path}.3")];
         let mut witnesses=[None,None];
@@ -617,21 +629,51 @@ pub fn collect_cleanup_registration_witnesses(
                 }
             }
         }
-        let (Some(dso),Some(init))=(dso,scoped.get(&(dtor,object))) else {
+        let Some(dso)=dso else {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
-        // Distinct globals may share one destructor routine. It is the
-        // source-owned (scope,ordinal) initializer entry that must be unique.
-        // This cannot establish completeness for entries without a call.
+        result.push(CleanupCallCandidate {
+            root:call.root,function:call.function.clone(),
+            statement_path:call.statement_path.clone(),
+            expression_path:call.expression_path.clone(),
+            destructor:dtor,object,dso_handle:dso,
+        });
+    }
+    Ok(result)
+}
+
+/// Strict source-owned scope *association* diagnostic, not a complete C++
+/// cleanup registration schedule or permission to execute any runtime ABI.
+/// Post-lowering EDG event 68 is non-exhaustive; missing pairs are UNKNOWN,
+/// and two calls must not consume the same native scope initializer entry.
+pub fn collect_cleanup_registration_witnesses(
+    il:&Il,
+) -> Result<Vec<CleanupRegistrationWitness>,StartupEvidenceError> {
+    let candidates=collect_cleanup_call_candidates(il)?;
+    let mut scoped=HashMap::new();
+    for init in &il.scope_dynamic_initializers {
+        if let (Some(dtor),Some(object))=(init.destructor,init.variable) {
+            if scoped.insert((dtor,object),init).is_some() {
+                return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+            }
+        }
+    }
+    let mut registered_scope_entries=HashSet::new();
+    let mut result=Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Some(init)=scoped.get(&(candidate.destructor,candidate.object)) else {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
+        };
         if !registered_scope_entries.insert((init.scope.as_str(),init.position)) {
             return Err(StartupEvidenceError::AmbiguousCleanupWitness);
         }
         result.push(CleanupRegistrationWitness {
-            root:call.root,function:call.function.clone(),
-            statement_path:call.statement_path.clone(),
-            expression_path:call.expression_path.clone(),
+            root:candidate.root,function:candidate.function,
+            statement_path:candidate.statement_path,
+            expression_path:candidate.expression_path,
             scope:init.scope.clone(),scope_position:init.position,
-            destructor:dtor,object,dso_handle:dso,
+            destructor:candidate.destructor,object:candidate.object,
+            dso_handle:candidate.dso_handle,
         });
     }
     Ok(result)
@@ -756,6 +798,34 @@ mod tests {
         assert_eq!(witnesses[255].scope_position,255);
         assert_eq!(witnesses[255].destructor,SymbolId(2255));
         assert_eq!(witnesses[255].object,SymbolId(1255));
+    }
+
+    #[test]
+    fn drained_native_scope_roster_still_has_exact_call_local_candidates() {
+        let mut il=cleanup_test_fixture(2);
+        // Real native EDG lowers two cleanup calls but can drain one scope
+        // initializer event 68. Do not invent its scope ordinal.
+        il.scope_dynamic_initializers.pop();
+        let candidates=collect_cleanup_call_candidates(&il).unwrap();
+        assert_eq!(candidates.len(),2);
+        assert_eq!(candidates[0].object,SymbolId(1000));
+        assert_eq!(candidates[1].object,SymbolId(1001));
+        assert_ne!(candidates[0].expression_path,candidates[1].statement_path);
+        assert_eq!(collect_cleanup_registration_witnesses(&il),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+    }
+
+    #[test]
+    fn call_local_candidate_rejects_contradictory_source_callee() {
+        let il=cleanup_test_fixture(1);
+        let mut wrong=il.clone();
+        wrong.expressions[1].symbol_id=Some(SymbolId(2000));
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.expressions[1].parent=Some("0.1".into());
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
     }
 
     #[test]
