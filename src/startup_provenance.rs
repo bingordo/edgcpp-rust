@@ -65,6 +65,10 @@ pub enum StartupEvidenceError {
     OrphanedCallTarget,
     /// A native routine symbol must have one unique function-body identity.
     DuplicateRoutineIdentity(SymbolId),
+    /// Two event-22 attribute witnesses for one native routine conflict.
+    DuplicateRoutineAttributes(SymbolId),
+    /// A trace may only consume evidence from this exact current IL snapshot.
+    MismatchedEvidence,
     /// Different native routine symbols cannot share one body key when
     /// attributing startup calls: this would silently select one root.
     AmbiguousRootFunction(String),
@@ -84,15 +88,18 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
     let mut roots = Vec::new();
     // All four source-owned lookup tables are compilation-local. Index once
     // rather than scanning the entire IL for every generated startup root.
-    // Preserve the old first-attribute-wins behavior for hand-built Il; the
-    // normal native compile boundary rejects duplicate routine attributes.
+    // Reject duplicate routine attributes here as well as at the native
+    // compile boundary: the tracer must not union contradictory 'defined'
+    // flags and invent a locally callable body.
     let routine_symbols: HashSet<SymbolId> = il.symbols.iter()
         .filter(|s| s.kind == 1).map(|s| s.id).collect();
     let variable_symbols: HashSet<SymbolId> = il.symbols.iter()
         .filter(|s| s.kind == 2).map(|s| s.id).collect();
     let mut attributes_by_routine = HashMap::new();
     for attr in &il.routine_attributes {
-        attributes_by_routine.entry(attr.routine).or_insert(attr);
+        if attributes_by_routine.insert(attr.routine,attr).is_some() {
+            return Err(StartupEvidenceError::DuplicateRoutineAttributes(attr.routine));
+        }
     }
     let defined_functions: HashSet<&str> = il.entities.iter()
         .filter_map(|entity| match entity {
@@ -272,6 +279,11 @@ const MAX_TRACE_EDGES: usize = 100_000;
 pub fn trace_startup_calls(
     il: &Il, proof: &StartupEvidence,
 ) -> Result<StartupCallTrace, StartupEvidenceError> {
+    // A proof can outlive its source snapshot or be built by a caller. Do not
+    // trace an invented root or stale call target as if EDG attested to it.
+    if collect_startup_evidence(il)? != *proof {
+        return Err(StartupEvidenceError::MismatchedEvidence);
+    }
     let mut by_symbol = HashMap::new();
     let mut by_function: HashMap<&str, Option<SymbolId>> = HashMap::new();
     for id in &il.routine_identities {
@@ -474,6 +486,49 @@ mod tests {
         missing.symbols.retain(|sym|sym.id!=SymbolId(14_096));
         assert_eq!(collect_startup_evidence(&missing),
                    Err(StartupEvidenceError::MissingLinkVariable(SymbolId(14_096))));
+    }
+
+    #[test]
+    fn duplicate_routine_attributes_fail_closed_even_in_public_diagnostics() {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        let proof=collect_startup_evidence(&il).unwrap();
+        let mut contradictory=il.routine_attributes[0].clone();
+        contradictory.defined=false;
+        il.routine_attributes.push(contradictory);
+        assert_eq!(collect_startup_evidence(&il),
+                   Err(StartupEvidenceError::DuplicateRoutineAttributes(SymbolId(42))));
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::DuplicateRoutineAttributes(SymbolId(42))));
+    }
+
+    #[test]
+    fn trace_rejects_foreign_or_stale_startup_evidence() {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        generated(&mut il,43,"helper",false);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        add_call(&mut il,"startup","0",CallTargetForm::DirectRoutine,Some(SymbolId(43)));
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(trace_startup_calls(&il,&proof).unwrap().edges.len(),1);
+
+        let mut forged=proof.clone();
+        forged.roots[0].priority=Some(99);
+        assert_eq!(trace_startup_calls(&il,&forged),
+                   Err(StartupEvidenceError::MismatchedEvidence));
+        let mut forged=proof.clone();
+        forged.immediate_calls.clear();
+        assert_eq!(trace_startup_calls(&il,&forged),
+                   Err(StartupEvidenceError::MismatchedEvidence));
+
+        // A new target witness must invalidate the old source-owned proof,
+        // even if the trace could otherwise traverse the same routine body.
+        il.call_targets[0].callee_symbol=Some(SymbolId(44));
+        assert_eq!(trace_startup_calls(&il,&proof),
+                   Err(StartupEvidenceError::MismatchedEvidence));
     }
 
     #[test]
