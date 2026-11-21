@@ -810,9 +810,23 @@ mod tests {
         assert_eq!(candidates.len(),2);
         assert_eq!(candidates[0].object,SymbolId(1000));
         assert_eq!(candidates[1].object,SymbolId(1001));
-        assert_ne!(candidates[0].expression_path,candidates[1].statement_path);
+        assert_ne!(candidates[0].statement_path,candidates[1].statement_path);
         assert_eq!(collect_cleanup_registration_witnesses(&il),
                    Err(StartupEvidenceError::MissingCleanupWitness));
+    }
+
+    #[test]
+    fn duplicate_cleanup_calls_remain_visible_but_not_scoped_proofs() {
+        let mut il=cleanup_test_fixture(2);
+        // Source-owned distinct call sites may name one original object.
+        // Preserve both diagnostic occurrences; reject duplicate ownership.
+        il.constant_routine_addresses[1].symbol=SymbolId(2000);
+        il.constant_addresses[1].symbol=SymbolId(1000);
+        let candidates=collect_cleanup_call_candidates(&il).unwrap();
+        assert_eq!(candidates.len(),2);
+        assert_eq!(candidates[0].object,candidates[1].object);
+        assert_eq!(collect_cleanup_registration_witnesses(&il),
+                   Err(StartupEvidenceError::AmbiguousCleanupWitness));
     }
 
     #[test]
