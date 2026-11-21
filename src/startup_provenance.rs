@@ -538,9 +538,29 @@ pub fn collect_cleanup_registration_witnesses(
         let args=[format!("{path}.1"),format!("{path}.2"),format!("{path}.3")];
         let mut witnesses=[None,None];
         for index in 0..2 {
-            for node in cleanup_argument_nodes(
+            let nodes=cleanup_argument_nodes(
                 function,stmt,&args[index],&expressions,&children,
-            )? {
+            )?;
+            // Source address events are not proof that an arbitrary
+            // expression *evaluates* to the source address. Admit only the
+            // observed direct constant or single EDG cast wrapper for the
+            // routine, and the bare object constant. Other operators might
+            // compute a different address and remain unsupported.
+            if index==0 {
+                let bare=nodes.len()==1 && nodes[0].kind==2 &&
+                    nodes[0].constant_kind==Some(7);
+                let cast=nodes.len()==2 && nodes[0].kind==1 &&
+                    nodes[0].operator==Some(5) &&
+                    nodes[1].parent.as_deref()==Some(args[0].as_str()) &&
+                    nodes[1].kind==2 && nodes[1].constant_kind==Some(7);
+                if !bare && !cast {
+                    return Err(StartupEvidenceError::UnsupportedCleanupCall);
+                }
+            } else if nodes.len()!=1 || nodes[0].kind!=2 ||
+                      nodes[0].constant_kind!=Some(7) {
+                return Err(StartupEvidenceError::UnsupportedCleanupCall);
+            }
+            for node in nodes {
                 let key=(function,stmt,node.path.as_str());
                 let native=if index==0 {
                     // ck_address has EDG native constant-kind 7 on the
@@ -573,6 +593,15 @@ pub fn collect_cleanup_registration_witnesses(
         let dso_nodes=cleanup_argument_nodes(
             function,stmt,&args[2],&expressions,&children,
         )?;
+        // A random nested reference to __dso_handle is not sufficient.
+        // The observed source expression is an address-of wrapper with one
+        // direct EDG variable child. No arbitrary pointer arithmetic.
+        if dso_nodes.len()!=2 || dso_nodes[0].kind!=1 ||
+           dso_nodes[0].operator!=Some(0) ||
+           dso_nodes[1].parent.as_deref()!=Some(args[2].as_str()) ||
+           dso_nodes[1].kind!=3 {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
         let mut dso=None;
         for node in dso_nodes {
             if let Some(id)=node.symbol_id {
@@ -771,6 +800,19 @@ mod tests {
                    Err(StartupEvidenceError::AmbiguousCleanupWitness));
         let mut wrong=il.clone();
         wrong.calls[0].first_argument=2;
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        wrong.expressions[2].operator=Some(99);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        wrong.expressions[5].operator=Some(99);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        emit_cleanup_test_expr(&mut wrong,"0.block.0","0.1.1",Some("0.1"),
+            2,None,Some(7),None);
         assert_eq!(collect_cleanup_registration_witnesses(&wrong),
                    Err(StartupEvidenceError::UnsupportedCleanupCall));
         let mut wrong=il;
