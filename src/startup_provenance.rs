@@ -518,6 +518,10 @@ pub fn collect_cleanup_registration_witnesses(
     }
 
     let mut result=Vec::new();
+    // Multiple call sites may separately *look* like a valid registration
+    // for the same source-owned initializer. Do not silently report duplicate
+    // registrations as two distinct, complete global-lifetime witnesses.
+    let mut registered_scope_entries=HashSet::new();
     for call in &proof.immediate_calls {
         let Some(callee)=call.callee_symbol else {continue;};
         if links.get(&callee)!=Some(&"__cxa_atexit") {continue;}
@@ -616,6 +620,12 @@ pub fn collect_cleanup_registration_witnesses(
         let (Some(dso),Some(init))=(dso,scoped.get(&(dtor,object))) else {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
+        // Distinct globals may share one destructor routine. It is the
+        // source-owned (scope,ordinal) initializer entry that must be unique.
+        // This cannot establish completeness for entries without a call.
+        if !registered_scope_entries.insert((init.scope.as_str(),init.position)) {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
         result.push(CleanupRegistrationWitness {
             root:call.root,function:call.function.clone(),
             statement_path:call.statement_path.clone(),
@@ -746,6 +756,32 @@ mod tests {
         assert_eq!(witnesses[255].scope_position,255);
         assert_eq!(witnesses[255].destructor,SymbolId(2255));
         assert_eq!(witnesses[255].object,SymbolId(1255));
+    }
+
+    #[test]
+    fn multiple_globals_may_share_one_native_destructor_routine() {
+        let mut il=cleanup_test_fixture(2);
+        // EDG emits distinct global objects with a common class D1 body.
+        il.scope_dynamic_initializers[1].destructor=Some(SymbolId(2000));
+        il.constant_routine_addresses[1].symbol=SymbolId(2000);
+        let witnesses=collect_cleanup_registration_witnesses(&il).unwrap();
+        assert_eq!(witnesses.len(),2);
+        assert_eq!(witnesses[0].destructor,witnesses[1].destructor);
+        assert_ne!(witnesses[0].object,witnesses[1].object);
+        assert_eq!(witnesses[0].scope_position,0);
+        assert_eq!(witnesses[1].scope_position,1);
+    }
+
+    #[test]
+    fn duplicate_native_registration_for_one_scope_initializer_is_ambiguous() {
+        let mut il=cleanup_test_fixture(2);
+        // A separate original call site reuses the first EDG source-owned
+        // destructor/object pair rather than owning the second initializer.
+        // The old API emitted TWO positive witnesses for the SAME owner.
+        il.constant_routine_addresses[1].symbol=SymbolId(2000);
+        il.constant_addresses[1].symbol=SymbolId(1000);
+        assert_eq!(collect_cleanup_registration_witnesses(&il),
+                   Err(StartupEvidenceError::AmbiguousCleanupWitness));
     }
 
     #[test]
