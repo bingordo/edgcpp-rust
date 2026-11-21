@@ -92,9 +92,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
         }
     }
-    // The typed checked join is *still diagnostic only*. It never claims
-    // that a destructor registration executes, or that all globals have been
-    // enumerated or their ELF init/shutdown order is known.
+    // Call-local exact source identities remain useful when post-lowering
+    // EDG drains the scope initializer list (native event 68). These calls
+    // do NOT prove source schedule completeness or executable C++ ABI.
+    match edgcpp::startup_provenance::collect_cleanup_call_candidates(&result.il) {
+        Ok(candidates) => {
+            println!("EDG_CXX5_CLEANUP_CALL_LOCAL candidates={} complete_lifecycle_proven=false",
+                     candidates.len());
+            for candidate in candidates.iter().take(64) {
+                println!("EDG_CXX5_CLEANUP_CALL_LOCAL_CANDIDATE root={} function={:?} statement={:?} call_path={:?} destructor={} object={} dso_handle={} scope_owner_proven=false lifecycle_abi_proven=false",
+                         candidate.root.0,candidate.function,candidate.statement_path,
+                         candidate.expression_path,candidate.destructor.0,
+                         candidate.object.0,candidate.dso_handle.0);
+            }
+            if candidates.len()>64 {
+                println!("EDG_CXX5_CLEANUP_CALL_LOCAL_TRUNCATED output_only_count={}",
+                         candidates.len()-64);
+            }
+        }
+        Err(reason) => {
+            println!("EDG_CXX5_CLEANUP_CALL_LOCAL incomplete={reason:?} complete_lifecycle_proven=false");
+        }
+    }
+    // The stricter typed event-68 join is *also* diagnostic only.
     match edgcpp::startup_provenance::collect_cleanup_registration_witnesses(&result.il) {
         Ok(witnesses) => {
             println!("EDG_CXX5_CLEANUP_TYPED witnesses={} complete_lifecycle_proven=false",
