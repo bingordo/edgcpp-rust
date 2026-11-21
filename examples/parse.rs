@@ -116,9 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for init in &result.il.scope_dynamic_initializers {
         let variable=result.il.symbols.iter().find(|s|Some(s.id)==init.variable);
         let destructor=result.il.symbols.iter().find(|s|Some(s.id)==init.destructor);
-        println!("scope dynamic init scope={:?} position={} variable={:?} destructor={:?} kind={}",
-                 init.scope,init.position,variable.map(|s|s.name.as_str()),
-                 destructor.map(|s|s.name.as_str()),init.kind);
+        let destructor_link=init.destructor.and_then(|id|result.il.symbol_link_names
+            .iter().find(|name|name.symbol==id));
+        println!("scope dynamic init scope={:?} position={} variable_id={:?} variable={:?} destructor_id={:?} destructor={:?} destructor_link={:?} kind={} shutdown_registration_proven=false",
+                 init.scope,init.position,init.variable.map(|id|id.0),
+                 variable.map(|s|s.name.as_str()),init.destructor.map(|id|id.0),
+                 destructor.map(|s|s.name.as_str()),
+                 destructor_link.map(|name|name.link_name.as_str()),init.kind);
     }
     for attr in &result.il.routine_attributes {
         if attr.compiler_generated {
