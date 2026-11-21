@@ -273,12 +273,10 @@ fn lower(
             }
             if let Some(id) = node.expression {
                 if let Some(size)=target::ABI.classify_aggregate(il,expression_type_id(graph,id)?)? {
-                    let expression=graph.expression(id)
-                        .ok_or_else(||invalid("missing returned aggregate expression"))?;
-                    let direct_call=graph.calls.iter().any(|site|
-                        site.function==expression.data.function &&
-                        site.statement_path==expression.data.statement_path &&
-                        site.path==expression.data.path);
+                    // Graph::from_il already validated the exact call-site
+                    // identity and indexed it by ExpressionId. Do not scan all
+                    // native calls once for each returned aggregate expression.
+                    let direct_call=graph.call_at(id).is_some();
                     if direct_call {
                         // A small aggregate call yields an INTEGER scalar;
                         // a two-eightbyte call yields a temporary object
