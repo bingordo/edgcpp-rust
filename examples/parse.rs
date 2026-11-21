@@ -309,6 +309,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                          linked.map(|name|name.link_name.as_str()),
                          node.data.reference,node.data.constant_kind,
                          node.data.constant_integer);
+                // Independently exported EDG address target events use the
+                // same (function,statement,path) as the source expression.
+                // A ck_address constant's own event-6 symbol_id is absent.
+                // The event-55/48 proof is separate, and it is unsafe to
+                // reconstruct an ABI target from the constant's display text.
+                for witness in result.il.constant_routine_addresses.iter().filter(|a|
+                    a.function==target.function &&
+                    a.statement_path==target.statement_path &&
+                    a.path==node.data.path) {
+                    let owner=result.il.symbols.iter().find(|s|s.id==witness.symbol);
+                    let link=result.il.symbol_link_names.iter()
+                        .find(|a|a.symbol==witness.symbol);
+                    let scope_matches=result.il.scope_dynamic_initializers.iter()
+                        .filter(|init|init.destructor==Some(witness.symbol)).count();
+                    println!("EDG_CXX5_CLEANUP_ADDRESS position={} path={:?} source=event55 kind=routine target={} name={:?} link={:?} scope_destructor_symbol_matches={} lifecycle_abi_proven=false",
+                             position,node.data.path,witness.symbol.0,
+                             owner.map(|s|s.name.as_str()),
+                             link.map(|s|s.link_name.as_str()),scope_matches);
+                }
+                for witness in result.il.constant_addresses.iter().filter(|a|
+                    a.function==target.function &&
+                    a.statement_path==target.statement_path &&
+                    a.path==node.data.path) {
+                    let owner=result.il.symbols.iter().find(|s|s.id==witness.symbol);
+                    let link=result.il.symbol_link_names.iter()
+                        .find(|a|a.symbol==witness.symbol);
+                    let scope_matches=result.il.scope_dynamic_initializers.iter()
+                        .filter(|init|init.variable==Some(witness.symbol)).count();
+                    println!("EDG_CXX5_CLEANUP_ADDRESS position={} path={:?} source=event48 kind=variable target={} name={:?} link={:?} byte_offset={} scope_variable_symbol_matches={} lifecycle_abi_proven=false",
+                             position,node.data.path,witness.symbol.0,
+                             owner.map(|s|s.name.as_str()),
+                             link.map(|s|s.link_name.as_str()),
+                             witness.byte_offset,scope_matches);
+                }
                 stack.extend(node.operands.iter().rev().copied());
             }
         }
