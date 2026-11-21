@@ -2693,6 +2693,23 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     if il.call_targets.len()!=il.calls.len() {
         return Err("native calls lack complete callee provenance");
     }
+    // All these native IL records belong to one immutable compilation.
+    // Index once: a distinct native call must not rescan the full call,
+    // expression, type, or symbol roster for every source call target.
+    let call_sites: HashSet<_> = il.calls.iter().map(|site| (
+        site.function.as_str(),site.statement_path.as_str(),site.path.as_str(),
+    )).collect();
+    let routine_symbols: HashSet<_> = il.symbols.iter()
+        .filter(|sym| sym.kind==1).map(|sym|sym.id).collect();
+    let known_types: HashSet<_> = il.types.iter().map(|ty|ty.id).collect();
+    // Preserve the old first-matching expression behavior. The later graph
+    // completeness check independently rejects duplicate expression keys.
+    let mut expressions=HashMap::with_capacity(il.expressions.len());
+    for expression in &il.expressions {
+        expressions.entry((expression.function.as_str(),
+            expression.statement_path.as_str(),expression.path.as_str()))
+            .or_insert(expression);
+    }
     // Event 55 is emitted independently from the original ck_address /
     // abk_routine callee expression, not inferred from call event 77.
     // A purported constant routine target must agree with that source proof.
@@ -2709,28 +2726,24 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
     for proof in &il.call_targets {
         let key=(proof.function.as_str(),proof.statement_path.as_str(),
                  proof.path.as_str());
-        if !unique.insert(key) ||
-            !il.calls.iter().any(|site|
-                site.function==proof.function &&
-                site.statement_path==proof.statement_path &&
-                site.path==proof.path) {
+        if !unique.insert(key) || !call_sites.contains(&key) {
             return Err("native callee provenance is ambiguous or orphaned");
         }
         if let Some(symbol)=proof.callee_symbol {
-            if !il.symbols.iter().any(|s|s.id==symbol && s.kind==1) {
+            if !routine_symbols.contains(&symbol) {
                 return Err("native callee's direct routine identity is missing");
             }
         }
         if let Some(ty)=proof.callee_type {
-            if !il.types.iter().any(|t|t.id==ty) {
+            if !known_types.contains(&ty) {
                 return Err("native callee's source type is missing");
             }
         }
         let callee_path=format!("{}.0",proof.path);
-        let expression=il.expressions.iter().find(|e|
-            e.function==proof.function &&
-            e.statement_path==proof.statement_path && e.path==callee_path)
-            .ok_or("native callee lacks original expression node")?;
+        let expression=expressions.get(&(
+            proof.function.as_str(),proof.statement_path.as_str(),
+            callee_path.as_str(),
+        )).ok_or("native callee lacks original expression node")?;
         if expression.type_id!=proof.callee_type {
             return Err("native callee type disagrees with its EDG expression");
         }
@@ -2739,13 +2752,16 @@ fn validate_native_call_target_coverage(il:&Il)->Result<(),&'static str> {
             callee_path.as_str())).copied();
         match proof.form {
             CallTargetForm::DirectRoutine => {
-                if expression.symbol_id!=proof.callee_symbol ||
+                if proof.callee_symbol.is_none() ||
+                   expression.symbol_id!=proof.callee_symbol ||
                    source_address.is_some() {
                     return Err("native direct callee disagrees with EDG expression");
                 }
             }
             CallTargetForm::ConstantRoutineAddress => {
-                if source_address!=proof.callee_symbol {
+                // None==None is not a positive EDG source-address witness.
+                if proof.callee_symbol.is_none() ||
+                   source_address!=proof.callee_symbol {
                     return Err("native constant callee lacks matching EDG address proof");
                 }
             }
@@ -7027,6 +7043,48 @@ mod cxx5_call_target_wire_tests {
         assert!(validate_native_call_target_coverage(&wrong).is_err(),
             "the native direct-routine form cannot claim a constant address");
     }
+    #[test]
+    fn native_direct_and_constant_callees_require_positive_symbol_witnesses() {
+        let mut il=source();
+        il.call_targets[0].callee_symbol=None;
+        il.expressions[0].symbol_id=None;
+        assert!(validate_native_call_target_coverage(&il).is_err(),
+            "a missing direct symbol is not a valid source routine witness");
+        il.call_targets[0].form=CallTargetForm::ConstantRoutineAddress;
+        assert!(validate_native_call_target_coverage(&il).is_err(),
+            "two absent values cannot certify a constant routine address");
+    }
+
+    #[test]
+    fn many_native_callee_records_keep_exact_one_to_one_coverage() {
+        let sample=source();
+        let mut il=sample.clone();
+        il.calls.clear();
+        il.call_targets.clear();
+        il.expressions.clear();
+        for index in 0..4096 {
+            let statement=format!("0.block.{index}");
+            let mut site=sample.calls[0].clone();
+            site.statement_path=statement.clone();
+            il.calls.push(site);
+            let mut target=sample.call_targets[0].clone();
+            target.statement_path=statement.clone();
+            il.call_targets.push(target);
+            let mut expression=sample.expressions[0].clone();
+            expression.statement_path=statement;
+            il.expressions.push(expression);
+        }
+        validate_native_call_target_coverage(&il)
+            .expect("4096 matching calls and source callee expressions");
+        let mut wrong=il.clone();
+        wrong.call_targets[2048].callee_symbol=Some(SymbolId(999));
+        assert!(validate_native_call_target_coverage(&wrong).is_err(),
+            "an inconsistent callee cannot borrow another site's identity");
+        il.expressions.pop();
+        assert!(validate_native_call_target_coverage(&il).is_err(),
+            "missing final source expression must reject the snapshot");
+    }
+
     #[test]
     fn successful_snapshot_needs_exact_one_to_one_call_callee_identity() {
         let mut il=source();
