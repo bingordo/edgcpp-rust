@@ -82,6 +82,23 @@ pub enum StartupEvidenceError {
 /// native IL identities. Does not authorize object construction or codegen.
 pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvidenceError> {
     let mut roots = Vec::new();
+    // All four source-owned lookup tables are compilation-local. Index once
+    // rather than scanning the entire IL for every generated startup root.
+    // Preserve the old first-attribute-wins behavior for hand-built Il; the
+    // normal native compile boundary rejects duplicate routine attributes.
+    let routine_symbols: HashSet<SymbolId> = il.symbols.iter()
+        .filter(|s| s.kind == 1).map(|s| s.id).collect();
+    let variable_symbols: HashSet<SymbolId> = il.symbols.iter()
+        .filter(|s| s.kind == 2).map(|s| s.id).collect();
+    let mut attributes_by_routine = HashMap::new();
+    for attr in &il.routine_attributes {
+        attributes_by_routine.entry(attr.routine).or_insert(attr);
+    }
+    let defined_functions: HashSet<&str> = il.entities.iter()
+        .filter_map(|entity| match entity {
+            crate::Entity::Routine { name, has_definition:true } => Some(name.as_str()),
+            _ => None,
+        }).collect();
     if !il.file_scope_init_routines.is_empty() {
         match il.file_scope_init_schedule {
             None => return Err(StartupEvidenceError::MissingScheduler),
@@ -105,7 +122,7 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
         });
     }
     for entry in &il.file_scope_runtime_links {
-        if !il.symbols.iter().any(|s| s.id == entry.link_variable && s.kind == 2) {
+        if !variable_symbols.contains(&entry.link_variable) {
             return Err(StartupEvidenceError::MissingLinkVariable(entry.link_variable));
         }
         roots.push(StartupRootEvidence {
@@ -134,21 +151,16 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
         }
     }
     for root in &mut roots {
-        if !il.symbols.iter().any(|s| s.id == root.routine && s.kind == 1) {
+        if !routine_symbols.contains(&root.routine) {
             return Err(StartupEvidenceError::MissingRoutine(root.routine));
         }
         let Some(function) = by_id.get(&root.routine) else {
             return Err(StartupEvidenceError::MissingRoutine(root.routine));
         };
-        let Some(attributes) = il.routine_attributes.iter()
-            .find(|r| r.routine == root.routine) else {
+        let Some(attributes) = attributes_by_routine.get(&root.routine) else {
                 return Err(StartupEvidenceError::MissingDefinition(root.routine));
             };
-        if !attributes.defined ||
-            !il.entities.iter().any(|e| matches!(e, crate::Entity::Routine {
-                name, has_definition:true,
-            } if name.as_str() == *function))
-        {
+        if !attributes.defined || !defined_functions.contains(*function) {
             return Err(StartupEvidenceError::MissingDefinition(root.routine));
         }
         if root.source == StartupRootSource::LoweredGenerated && !attributes.compiler_generated {
@@ -410,6 +422,58 @@ mod tests {
             function:function.into(),statement_path:statement.into(),
             path:"0".into(),form,callee_symbol:callee,callee_type:None,
         });
+    }
+
+    #[test]
+    fn many_native_startup_roots_keep_source_order_and_failure_modes() {
+        let mut il=Il::default();
+        for id in 1..=4096 {
+            generated(&mut il,id,&format!("generated_startup_{id}"),true);
+            il.file_scope_lowered_startup_routines.push(
+                FileScopeLoweredStartupRoutine {
+                    routine:SymbolId(id),priority:id % 200,
+                });
+        }
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(proof.roots.len(),4096);
+        assert_eq!(proof.roots[0].routine,SymbolId(1));
+        assert_eq!(proof.roots[0].function,"generated_startup_1");
+        assert_eq!(proof.roots[4095].routine,SymbolId(4096));
+        assert_eq!(proof.roots[4095].function,"generated_startup_4096");
+        assert!(proof.immediate_calls.is_empty());
+
+        let mut missing=il.clone();
+        missing.routine_attributes.pop();
+        assert_eq!(collect_startup_evidence(&missing),
+                   Err(StartupEvidenceError::MissingDefinition(SymbolId(4096))));
+        let mut missing=il.clone();
+        missing.symbols.retain(|sym|sym.id!=SymbolId(2048));
+        assert_eq!(collect_startup_evidence(&missing),
+                   Err(StartupEvidenceError::MissingRoutine(SymbolId(2048))));
+    }
+
+    #[test]
+    fn many_runtime_link_roots_keep_source_order_and_missing_link_fails() {
+        let mut il=Il::default();
+        for id in 1..=4096 {
+            generated(&mut il,id,&format!("link_target_{id}"),false);
+            il.symbols.push(Symbol {
+                id:SymbolId(id+10_000),kind:2,name:format!("link_{id}"),
+            });
+            il.file_scope_runtime_links.push(FileScopeRuntimeLink {
+                link_variable:SymbolId(id+10_000),startup_routine:SymbolId(id),
+            });
+        }
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(proof.roots.len(),4096);
+        assert_eq!(proof.roots[0].source,StartupRootSource::RuntimeLink);
+        assert_eq!(proof.roots[0].link_variable,Some(SymbolId(10_001)));
+        assert_eq!(proof.roots[4095].routine,SymbolId(4096));
+        assert_eq!(proof.roots[4095].link_variable,Some(SymbolId(14_096)));
+        let mut missing=il.clone();
+        missing.symbols.retain(|sym|sym.id!=SymbolId(14_096));
+        assert_eq!(collect_startup_evidence(&missing),
+                   Err(StartupEvidenceError::MissingLinkVariable(SymbolId(14_096))));
     }
 
     #[test]
