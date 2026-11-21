@@ -3348,6 +3348,12 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
     // Memory/lvalue operators share stable semantic IDs; do not bake EDG
     // private enum discriminants into Rust.
     if (value == static_cast<unsigned>(eok_reference_to)) return 56;
+    // Stable native classification for EDG's implicit lvalue adjustment.
+    // It can adjust cv *or* substantially alter class object types.
+    // Downstream acceptance MUST separately prove exact scalar identity,
+    // qualifier/access and absence of class/base adjustment. This record
+    // does not license dropping a general lvalue cast.
+    if (value == static_cast<unsigned>(eok_lvalue_adjust)) return 57;
     if (value == static_cast<unsigned>(eok_address_of)) return 43;
     if (value == static_cast<unsigned>(eok_indirect)) return 44;
     if (value == static_cast<unsigned>(eok_subscript)) return 45;
