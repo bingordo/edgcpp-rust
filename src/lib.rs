@@ -2686,6 +2686,94 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     }
 }
 
+/// Event 68 describes EDG's source-owned *scope-local* dynamic initializer
+/// and optional destructor association. This is not registration with
+/// __cxa_atexit or a portable process-shutdown execution schedule.
+/// Independently check the successfully decoded snapshot too: the public Il
+/// can be constructed or altered after callback wire validation.
+fn validate_native_scope_dynamic_initializer_coverage(il:&Il)->Result<(),&'static str> {
+    let variable_symbols:HashSet<_>=il.symbols.iter()
+        .filter(|symbol|symbol.kind==2).map(|symbol|symbol.id).collect();
+    let routine_symbols:HashSet<_>=il.symbols.iter()
+        .filter(|symbol|symbol.kind==1).map(|symbol|symbol.id).collect();
+    let mut next_position:HashMap<&str,u32>=HashMap::new();
+    for init in &il.scope_dynamic_initializers {
+        if init.scope.is_empty() || init.scope.len()>1024 {
+            return Err("native dynamic initializer lacks valid scope identity");
+        }
+        let expected=next_position.entry(init.scope.as_str()).or_insert(0);
+        if init.position!=*expected {
+            return Err("native dynamic initializer has missing or duplicate scope ordinal");
+        }
+        *expected=expected.checked_add(1)
+            .ok_or("native dynamic initializer scope ordinal overflow")?;
+        if init.variable.is_some_and(|id|!variable_symbols.contains(&id)) {
+            return Err("native dynamic initializer has no source variable identity");
+        }
+        if init.destructor.is_some_and(|id|!routine_symbols.contains(&id)) {
+            return Err("native dynamic initializer has no source destructor identity");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_scope_dynamic_initializer_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_destructor_owners_require_exact_native_symbol_kinds() {
+        let mut il=Il::default();
+        il.symbols.extend([
+            Symbol{id:SymbolId(10),kind:2,name:"global".into()},
+            Symbol{id:SymbolId(20),kind:1,name:"destructor".into()},
+        ]);
+        il.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+            scope:"1:".into(),position:0,variable:Some(SymbolId(10)),
+            destructor:Some(SymbolId(20)),kind:1,
+        });
+        assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_ok());
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[0].variable=Some(SymbolId(20));
+        assert!(validate_native_scope_dynamic_initializer_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[0].destructor=Some(SymbolId(10));
+        assert!(validate_native_scope_dynamic_initializer_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[0].destructor=Some(SymbolId(999));
+        assert!(validate_native_scope_dynamic_initializer_coverage(&wrong).is_err());
+        // An absent EDG destructor association remains unknown, not proof
+        // of no shutdown effects.
+        il.scope_dynamic_initializers[0].destructor=None;
+        assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_ok());
+    }
+
+    #[test]
+    fn large_interleaved_scope_initializers_require_independent_gapless_order() {
+        let mut il=Il::default();
+        il.symbols.extend([
+            Symbol{id:SymbolId(10),kind:2,name:"global".into()},
+            Symbol{id:SymbolId(20),kind:1,name:"destructor".into()},
+        ]);
+        for position in 0..2048 {
+            for scope in ["1:","2:ns::"] {
+                il.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+                    scope:scope.into(),position,variable:Some(SymbolId(10)),
+                    destructor:Some(SymbolId(20)),kind:1,
+                });
+            }
+        }
+        assert_eq!(il.scope_dynamic_initializers.len(),4096);
+        assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_ok());
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[2048].position=2047;
+        assert!(validate_native_scope_dynamic_initializer_coverage(&wrong).is_err());
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[4095].scope.clear();
+        assert!(validate_native_scope_dynamic_initializer_coverage(&wrong).is_err());
+    }
+}
+
 /// The native bridge exports a separate callee classification for every
 /// source-owned call. A dropped, duplicated or cross-site record must not
 /// silently convert an unresolved pointer/vtable call into a direct call.
@@ -3766,6 +3854,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        graph::Graph::validate_native_record_shape_coverage(il).is_err() ||
        graph::Graph::validate_native_type_layout_coverage(il).is_err() ||
        graph::Graph::validate_native_scalar_metadata_coverage(il).is_err() ||
+       validate_native_scope_dynamic_initializer_coverage(il).is_err() ||
        validate_native_call_target_coverage(il).is_err() ||
        validate_native_call_dispatch_coverage(il).is_err() ||
        validate_native_virtual_member_coverage(il).is_err() ||
