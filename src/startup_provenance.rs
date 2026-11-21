@@ -78,6 +78,12 @@ pub enum StartupEvidenceError {
     InvalidSchedulerOrder(u32),
     /// A reachable function body cannot be attributed to two native routines.
     AmbiguousReachableFunction(String),
+    /// Missing or invalid original EDG evidence for one cleanup operand.
+    MissingCleanupWitness,
+    /// Two different paths/owners claim one source-owned cleanup operand.
+    AmbiguousCleanupWitness,
+    /// A runtime call has an unsupported argument shape; never guess an ABI.
+    UnsupportedCleanupCall,
     /// The diagnostic has a finite analysis budget; never silently truncate.
     ReachabilityLimit,
 }
@@ -398,6 +404,229 @@ pub fn trace_startup_calls(
     })
 }
 
+/// A checked association of native source-owned address identities in a
+/// generated startup call, NOT proof of registration execution or C++ ABI.
+/// Even a nonempty result does not prove a complete ctor/dtor lifecycle.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CleanupRegistrationWitness {
+    pub root: SymbolId,
+    pub function: String,
+    pub statement_path: String,
+    pub expression_path: String,
+    pub scope: String,
+    pub scope_position: u32,
+    pub destructor: SymbolId,
+    pub object: SymbolId,
+    pub dso_handle: SymbolId,
+}
+
+/// Walk only the exact expression children owned by one original EDG
+/// argument. Independent event-55/48 target IDs are resolved separately.
+fn cleanup_argument_nodes<'a>(
+    function:&str,statement:&str,path:&str,
+    expressions:&HashMap<(&'a str,&'a str,&'a str),&'a crate::Expression>,
+    children:&HashMap<(&'a str,&'a str,&'a str),Vec<&'a crate::Expression>>,
+) -> Result<Vec<&'a crate::Expression>,StartupEvidenceError> {
+    let Some(&root)=expressions.get(&(function,statement,path)) else {
+        return Err(StartupEvidenceError::MissingCleanupWitness);
+    };
+    let mut stack=vec![root];
+    let mut seen=HashSet::new();
+    let mut result=Vec::new();
+    while let Some(node)=stack.pop() {
+        if !seen.insert(node.path.as_str()) {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+        if seen.len()>64 {
+            return Err(StartupEvidenceError::ReachabilityLimit);
+        }
+        result.push(node);
+        if let Some(nested)=children.get(&(function,statement,node.path.as_str())) {
+            stack.extend(nested.iter().copied());
+        }
+    }
+    Ok(result)
+}
+
+/// Narrow, source-verified diagnostic for direct calls to EDG's native
+/// __cxa_atexit routine in *immediate* startup-root bodies. It is not
+/// executable C++ calling ABI permission or a complete startup schedule.
+///
+/// Three independent native witnesses must agree: event 55 (the destructor
+/// function address), event 48 (zero-offset object address), and event 68
+/// (the same exact SymbolId pair in a source-owned scope initializer).
+/// The third argument must independently reference the native __dso_handle.
+/// A missing event means UNKNOWN rather than no lifecycle side effect.
+pub fn collect_cleanup_registration_witnesses(
+    il:&Il,
+) -> Result<Vec<CleanupRegistrationWitness>,StartupEvidenceError> {
+    let proof=collect_startup_evidence(il)?;
+    // All indexes are compilation-local; avoid full-IL scans per call.
+    let mut kinds=HashMap::new();
+    for symbol in &il.symbols {
+        if kinds.insert(symbol.id,symbol.kind).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+    }
+    let mut links=HashMap::new();
+    for link in &il.symbol_link_names {
+        if links.insert(link.symbol,link.link_name.as_str()).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+    }
+    let mut sites=HashMap::new();
+    for site in &il.calls {
+        let key=(site.function.as_str(),site.statement_path.as_str(),site.path.as_str());
+        if sites.insert(key,site).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+    }
+    let mut expressions=HashMap::new();
+    let mut children:HashMap<(&str,&str,&str),Vec<&crate::Expression>>=HashMap::new();
+    for expr in &il.expressions {
+        let key=(expr.function.as_str(),expr.statement_path.as_str(),expr.path.as_str());
+        if expressions.insert(key,expr).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+        if let Some(parent)=expr.parent.as_deref() {
+            children.entry((expr.function.as_str(),expr.statement_path.as_str(),parent))
+                .or_default().push(expr);
+        }
+    }
+    let mut routines=HashMap::new();
+    for event in &il.constant_routine_addresses {
+        let key=(event.function.as_str(),event.statement_path.as_str(),event.path.as_str());
+        if routines.insert(key,event.symbol).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+    }
+    let mut variables=HashMap::new();
+    for event in &il.constant_addresses {
+        let key=(event.function.as_str(),event.statement_path.as_str(),event.path.as_str());
+        if variables.insert(key,(event.symbol,event.byte_offset)).is_some() {
+            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+        }
+    }
+    let mut scoped=HashMap::new();
+    for init in &il.scope_dynamic_initializers {
+        if let (Some(dtor),Some(object))=(init.destructor,init.variable) {
+            let previous=scoped.insert((dtor,object),init);
+            if previous.is_some() {
+                return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+            }
+        }
+    }
+
+    let mut result=Vec::new();
+    for call in &proof.immediate_calls {
+        let Some(callee)=call.callee_symbol else {continue;};
+        if links.get(&callee)!=Some(&"__cxa_atexit") {continue;}
+        if call.form!=CallTargetForm::DirectRoutine ||
+           kinds.get(&callee)!=Some(&1) {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        let function=call.function.as_str();
+        let stmt=call.statement_path.as_str();
+        let path=call.expression_path.as_str();
+        let Some(site)=sites.get(&(function,stmt,path)) else {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
+        };
+        if site.first_argument!=1 ||
+           expressions.contains_key(&(function,stmt,format!("{path}.4").as_str())) {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        let args=[format!("{path}.1"),format!("{path}.2"),format!("{path}.3")];
+        let mut witnesses=[None,None];
+        for index in 0..2 {
+            let nodes=cleanup_argument_nodes(
+                function,stmt,&args[index],&expressions,&children,
+            )?;
+            // Source address events are not proof that an arbitrary
+            // expression *evaluates* to the source address. Admit only the
+            // observed direct constant or single EDG cast wrapper for the
+            // routine, and the bare object constant. Other operators might
+            // compute a different address and remain unsupported.
+            if index==0 {
+                let bare=nodes.len()==1 && nodes[0].kind==2 &&
+                    nodes[0].constant_kind==Some(7);
+                let cast=nodes.len()==2 && nodes[0].kind==1 &&
+                    nodes[0].operator==Some(5) &&
+                    nodes[1].parent.as_deref()==Some(args[0].as_str()) &&
+                    nodes[1].kind==2 && nodes[1].constant_kind==Some(7);
+                if !bare && !cast {
+                    return Err(StartupEvidenceError::UnsupportedCleanupCall);
+                }
+            } else if nodes.len()!=1 || nodes[0].kind!=2 ||
+                      nodes[0].constant_kind!=Some(7) {
+                return Err(StartupEvidenceError::UnsupportedCleanupCall);
+            }
+            for node in nodes {
+                let key=(function,stmt,node.path.as_str());
+                let native=if index==0 {
+                    // ck_address has EDG native constant-kind 7 on the
+                    // pinned C++ frontend; event 55 is independent proof.
+                    if variables.contains_key(&key) {
+                        return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+                    }
+                    routines.get(&key).copied().map(|sym|(sym,0))
+                } else {
+                    if routines.contains_key(&key) {
+                        return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+                    }
+                    variables.get(&key).copied()
+                };
+                if let Some((symbol,offset))=native {
+                    if node.kind!=2 || node.constant_kind!=Some(7) ||
+                       offset!=0 ||
+                       kinds.get(&symbol)!=Some(&(if index==0 {1} else {2})) {
+                        return Err(StartupEvidenceError::MissingCleanupWitness);
+                    }
+                    if witnesses[index].replace(symbol).is_some() {
+                        return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+                    }
+                }
+            }
+        }
+        let (Some(dtor),Some(object))=(witnesses[0],witnesses[1]) else {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
+        };
+        let dso_nodes=cleanup_argument_nodes(
+            function,stmt,&args[2],&expressions,&children,
+        )?;
+        // A random nested reference to __dso_handle is not sufficient.
+        // The observed source expression is an address-of wrapper with one
+        // direct EDG variable child. No arbitrary pointer arithmetic.
+        if dso_nodes.len()!=2 || dso_nodes[0].kind!=1 ||
+           dso_nodes[0].operator!=Some(0) ||
+           dso_nodes[1].parent.as_deref()!=Some(args[2].as_str()) ||
+           dso_nodes[1].kind!=3 {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        let mut dso=None;
+        for node in dso_nodes {
+            if let Some(id)=node.symbol_id {
+                if kinds.get(&id)==Some(&2) &&
+                   links.get(&id)==Some(&"__dso_handle") &&
+                   node.kind==3 &&
+                   dso.replace(id).is_some() {
+                    return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+                }
+            }
+        }
+        let (Some(dso),Some(init))=(dso,scoped.get(&(dtor,object))) else {
+            return Err(StartupEvidenceError::MissingCleanupWitness);
+        };
+        result.push(CleanupRegistrationWitness {
+            root:call.root,function:call.function.clone(),
+            statement_path:call.statement_path.clone(),
+            expression_path:call.expression_path.clone(),
+            scope:init.scope.clone(),scope_position:init.position,
+            destructor:dtor,object,dso_handle:dso,
+        });
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +663,163 @@ mod tests {
             function:function.into(),statement_path:statement.into(),
             path:"0".into(),form,callee_symbol:callee,callee_type:None,
         });
+    }
+
+    fn emit_cleanup_test_expr(
+        il:&mut Il,statement:&str,path:&str,parent:Option<&str>,
+        kind:u32,operator:Option<u32>,constant_kind:Option<u32>,
+        symbol_id:Option<SymbolId>,
+    ) {
+        il.expressions.push(crate::Expression {
+            function:"startup".into(),statement_path:statement.into(),
+            path:path.into(),parent:parent.map(str::to_owned),
+            kind,operator,type_kind:None,reference:None,
+            type_size:None,type_alignment:None,constant_kind,
+            constant_integer:None,related_type_role:None,related_type_kind:None,
+            type_id:None,symbol_id,
+        });
+    }
+
+    fn cleanup_test_fixture(count:u32) -> Il {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        il.symbols.extend([
+            Symbol{id:SymbolId(3000),kind:2,name:"__dso_handle".into()},
+            Symbol{id:SymbolId(3001),kind:1,name:"__cxa_atexit".into()},
+        ]);
+        il.symbol_link_names.extend([
+            crate::SymbolLinkName{symbol:SymbolId(3000),
+                link_name:"__dso_handle".into(),edg_mangled:false},
+            crate::SymbolLinkName{symbol:SymbolId(3001),
+                link_name:"__cxa_atexit".into(),edg_mangled:false},
+        ]);
+        for i in 0..count {
+            let object=SymbolId(1000+i);
+            let dtor=SymbolId(2000+i);
+            let statement=format!("0.block.{i}");
+            il.symbols.extend([
+                Symbol{id:object,kind:2,name:format!("global_{i}")},
+                Symbol{id:dtor,kind:1,name:format!("dtor_{i}")},
+            ]);
+            il.scope_dynamic_initializers.push(crate::ScopeDynamicInitializer {
+                scope:"1:".into(),position:i,variable:Some(object),
+                destructor:Some(dtor),kind:0,
+            });
+            add_call(&mut il,"startup",&statement,
+                     CallTargetForm::DirectRoutine,Some(SymbolId(3001)));
+            emit_cleanup_test_expr(&mut il,&statement,"0",None,1,Some(3),None,None);
+            emit_cleanup_test_expr(&mut il,&statement,"0.0",Some("0"),
+                3,None,None,Some(SymbolId(3001)));
+            emit_cleanup_test_expr(&mut il,&statement,"0.1",Some("0"),
+                1,Some(5),None,None);
+            emit_cleanup_test_expr(&mut il,&statement,"0.1.0",Some("0.1"),
+                2,None,Some(7),None);
+            emit_cleanup_test_expr(&mut il,&statement,"0.2",Some("0"),
+                2,None,Some(7),None);
+            emit_cleanup_test_expr(&mut il,&statement,"0.3",Some("0"),
+                1,Some(0),None,None);
+            emit_cleanup_test_expr(&mut il,&statement,"0.3.0",Some("0.3"),
+                3,None,None,Some(SymbolId(3000)));
+            il.constant_routine_addresses.push(crate::ConstantRoutineAddress{
+                function:"startup".into(),statement_path:statement.clone(),
+                path:"0.1.0".into(),symbol:dtor,
+            });
+            il.constant_addresses.push(crate::ConstantAddress{
+                function:"startup".into(),statement_path:statement,
+                path:"0.2".into(),symbol:object,byte_offset:0,
+            });
+        }
+        il
+    }
+
+    #[test]
+    fn exact_cleanup_address_witnesses_scale_across_many_globals() {
+        let il=cleanup_test_fixture(256);
+        let witnesses=collect_cleanup_registration_witnesses(&il).unwrap();
+        assert_eq!(witnesses.len(),256);
+        assert_eq!(witnesses[0].root,SymbolId(42));
+        assert_eq!(witnesses[0].destructor,SymbolId(2000));
+        assert_eq!(witnesses[0].object,SymbolId(1000));
+        assert_eq!(witnesses[0].dso_handle,SymbolId(3000));
+        assert_eq!(witnesses[255].scope_position,255);
+        assert_eq!(witnesses[255].destructor,SymbolId(2255));
+        assert_eq!(witnesses[255].object,SymbolId(1255));
+    }
+
+    #[test]
+    fn incomplete_cleanup_operand_witnesses_fail_closed() {
+        let il=cleanup_test_fixture(1);
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses.clear();
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.constant_addresses[0].byte_offset=1;
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.constant_addresses[0].symbol=SymbolId(3000);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses[0].path="0.1.1".into();
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.scope_dynamic_initializers[0].destructor=Some(SymbolId(42));
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.symbol_link_names[0].link_name="other_context".into();
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.expressions.last_mut().unwrap().symbol_id=None;
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.expressions[3].constant_kind=Some(1);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+    }
+
+    #[test]
+    fn ambiguous_or_unsupported_cleanup_edges_do_not_claim_complete_abi() {
+        let il=cleanup_test_fixture(1);
+        let mut wrong=il.clone();
+        wrong.constant_routine_addresses.push(wrong.constant_routine_addresses[0].clone());
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::AmbiguousCleanupWitness));
+        let mut wrong=il.clone();
+        let mut duplicate=wrong.scope_dynamic_initializers[0].clone();
+        duplicate.scope="2:".into();
+        wrong.scope_dynamic_initializers.push(duplicate);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::AmbiguousCleanupWitness));
+        let mut wrong=il.clone();
+        wrong.calls[0].first_argument=2;
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        wrong.expressions[2].operator=Some(99);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        wrong.expressions[5].operator=Some(99);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il.clone();
+        emit_cleanup_test_expr(&mut wrong,"0.block.0","0.1.1",Some("0.1"),
+            2,None,Some(7),None);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        let mut wrong=il;
+        emit_cleanup_test_expr(&mut wrong,"0.block.0","0.4",Some("0"),
+            2,None,Some(7),None);
+        assert_eq!(collect_cleanup_registration_witnesses(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
     }
 
     #[test]

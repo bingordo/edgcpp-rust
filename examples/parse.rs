@@ -92,6 +92,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("EDG_CXX5_STARTUP_EVIDENCE incomplete={error:?} executable_schedule_proven=false");
         }
     }
+    // The typed checked join is *still diagnostic only*. It never claims
+    // that a destructor registration executes, or that all globals have been
+    // enumerated or their ELF init/shutdown order is known.
+    match edgcpp::startup_provenance::collect_cleanup_registration_witnesses(&result.il) {
+        Ok(witnesses) => {
+            println!("EDG_CXX5_CLEANUP_TYPED witnesses={} complete_lifecycle_proven=false",
+                     witnesses.len());
+            for witness in witnesses.iter().take(64) {
+                println!("EDG_CXX5_CLEANUP_TYPED_WITNESS root={} function={:?} statement={:?} call_path={:?} scope={:?} ordinal={} destructor={} object={} dso_handle={} lifecycle_abi_proven=false",
+                         witness.root.0,witness.function,witness.statement_path,
+                         witness.expression_path,witness.scope,witness.scope_position,
+                         witness.destructor.0,witness.object.0,witness.dso_handle.0);
+            }
+            if witnesses.len()>64 {
+                println!("EDG_CXX5_CLEANUP_TYPED_TRUNCATED output_only_count={}",
+                         witnesses.len()-64);
+            }
+        }
+        Err(reason) => {
+            println!("EDG_CXX5_CLEANUP_TYPED incomplete={reason:?} complete_lifecycle_proven=false");
+        }
+    }
     // Mandatory native event 100 preserves applied weak/alias/section flags.
     // This is diagnostic only: section bytes and target ELF visibility are
     // not yet exported, so no native object admission follows from it.
