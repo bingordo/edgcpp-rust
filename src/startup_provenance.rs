@@ -782,7 +782,7 @@ mod tests {
         let mut wrong=il.clone();
         wrong.expressions[3].constant_kind=Some(1);
         assert_eq!(collect_cleanup_registration_witnesses(&wrong),
-                   Err(StartupEvidenceError::MissingCleanupWitness));
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
     }
 
     #[test]
