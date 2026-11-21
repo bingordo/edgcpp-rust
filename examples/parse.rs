@@ -270,6 +270,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Invalid EDG IL graph: {e:?}"))?;
     println!("indexed IL statements={} expressions={}",
              graph.statements.len(), graph.expressions.len());
+    // Observe the original native operand trees for a direct call to the
+    // Itanium runtime symbol. A matching linker name is not a verified ABI
+    // registration, and even three arguments do not establish that a
+    // destructor, object, and DSO handle were correctly associated.
+    for target in &result.il.call_targets {
+        if target.form!=edgcpp::CallTargetForm::DirectRoutine {continue;}
+        let Some(callee)=target.callee_symbol else {continue;};
+        if !result.il.symbol_link_names.iter().any(|name|
+            name.symbol==callee && name.link_name=="__cxa_atexit") {continue;}
+        let Some(call)=graph.calls.iter().find(|site|
+            site.function==target.function &&
+            site.statement_path==target.statement_path &&
+            site.path==target.path) else {continue;};
+        let Some(args)=graph.call_arguments(call) else {continue;};
+        println!("EDG_CXX5_CLEANUP_REGISTRATION_CANDIDATE caller={:?} statement={:?} path={:?} callee={} observed_args={} registered_destructor_proven=false",
+                 target.function,target.statement_path,target.path,callee.0,args.len());
+        for (position,&root) in args.iter().take(8).enumerate() {
+            let mut stack=vec![root];
+            let mut seen=std::collections::HashSet::new();
+            while let Some(id)=stack.pop() {
+                if !seen.insert(id.0) {continue;}
+                if seen.len()>64 {
+                    println!("EDG_CXX5_CLEANUP_ARGUMENT_TRUNCATED position={} nodes={} diagnostic_only=true",
+                             position,seen.len());
+                    break;
+                }
+                let Some(node)=graph.expression(id) else {break;};
+                let symbol=node.data.symbol_id;
+                let linked=symbol.and_then(|id|result.il.symbol_link_names
+                    .iter().find(|name|name.symbol==id));
+                let named=symbol.and_then(|id|result.il.symbols
+                    .iter().find(|sym|sym.id==id));
+                println!("EDG_CXX5_CLEANUP_ARGUMENT position={} root={} path={:?} kind={} op={:?} type={:?} symbol={:?} name={:?} link={:?} reference={:?} constant_kind={:?} integer={:?} diagnostic_only=true",
+                         position,id.0,node.data.path,node.data.kind,node.data.operator,
+                         node.data.type_id.map(|id|id.0),symbol.map(|id|id.0),
+                         named.map(|s|s.name.as_str()),
+                         linked.map(|name|name.link_name.as_str()),
+                         node.data.reference,node.data.constant_kind,
+                         node.data.constant_integer);
+                stack.extend(node.operands.iter().rev().copied());
+            }
+        }
+        if args.len()>8 {
+            println!("EDG_CXX5_CLEANUP_ARGUMENT_TRUNCATED remaining={} diagnostic_only=true",
+                     args.len()-8);
+        }
+    }
     for source in &graph.statement_sources {
         println!("statement source {} path={} file={} line={} column={} seq={}",
                  source.function, source.path, source.location.file,
