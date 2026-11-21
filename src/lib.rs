@@ -1451,6 +1451,10 @@ struct WireSeen {
     /// Next source-owned dynamic initializer ordinal per exact native scope.
     /// Repeated callbacks must not rescan the full translation-unit roster.
     scope_dynamic_initializer_next: HashMap<String, u32>,
+    /// Event 72: each native runtime link variable has exactly one startup target.
+    file_scope_runtime_link_variables: HashSet<SymbolId>,
+    /// Event 73: each native lowered startup routine has exactly one priority.
+    file_scope_lowered_startup_routines: HashSet<SymbolId>,
 }
 #[derive(Default)]
 struct Collector {
@@ -1738,8 +1742,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         72 => {
             let (Some(link_variable),Some(startup_routine))=(n(0),n(1)) else {return;};
             if link_variable==0 || startup_routine==0 ||
-               output.file_scope_runtime_links.iter().any(|r|
-                   r.link_variable==SymbolId(link_variable)) {return;}
+               !seen.file_scope_runtime_link_variables.insert(SymbolId(link_variable)) {return;}
             output.file_scope_runtime_links.push(FileScopeRuntimeLink {
                 link_variable:SymbolId(link_variable),
                 startup_routine:SymbolId(startup_routine),
@@ -1747,8 +1750,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         73 => {
             let (Some(routine),Some(priority))=(n(0),n(1)) else {return;};
-            if routine==0 || output.file_scope_lowered_startup_routines.iter().any(|r|
-                r.routine==SymbolId(routine)) {return;}
+            if routine==0 ||
+               !seen.file_scope_lowered_startup_routines.insert(SymbolId(routine)) {return;}
             output.file_scope_lowered_startup_routines.push(FileScopeLoweredStartupRoutine {
                 routine:SymbolId(routine),priority,
             });
@@ -6568,6 +6571,21 @@ mod file_scope_lowered_startup_wire_tests {
         assert!(state.malformed,"duplicate startup definition accepted");
     }
     #[test]
+    fn many_startup_routine_witnesses_keep_stable_order_and_reject_duplicates() {
+        let mut state=Collector::default();
+        for routine in 1..=4096 {
+            send(&mut state,routine,routine % 256);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.file_scope_lowered_startup_routines.len(),4096);
+        assert_eq!(state.seen.file_scope_lowered_startup_routines.len(),4096);
+        assert_eq!(state.il.file_scope_lowered_startup_routines[0].routine,SymbolId(1));
+        assert_eq!(state.il.file_scope_lowered_startup_routines[4095].routine,SymbolId(4096));
+        send(&mut state,2048,9);
+        assert!(state.malformed,"duplicate within a large roster was accepted");
+        assert_eq!(state.il.file_scope_lowered_startup_routines.len(),4096);
+    }
+    #[test]
     fn rejects_missing_startup_routine_identity() {
         let mut state=Collector::default();
         send(&mut state,0,0);
@@ -6600,6 +6618,21 @@ mod file_scope_runtime_link_wire_tests {
         assert!(state.il.scope_dynamic_initializers.is_empty());
         send(&mut state, 25, 43);
         assert!(state.malformed, "duplicate link object was silently accepted");
+    }
+    #[test]
+    fn many_runtime_links_keep_stable_order_and_reject_duplicates() {
+        let mut state=Collector::default();
+        for variable in 1..=4096 {
+            send(&mut state,variable,variable + 10_000);
+        }
+        assert!(!state.malformed);
+        assert_eq!(state.il.file_scope_runtime_links.len(),4096);
+        assert_eq!(state.seen.file_scope_runtime_link_variables.len(),4096);
+        assert_eq!(state.il.file_scope_runtime_links[0].link_variable,SymbolId(1));
+        assert_eq!(state.il.file_scope_runtime_links[4095].link_variable,SymbolId(4096));
+        send(&mut state,2048,99);
+        assert!(state.malformed,"duplicate link within a large roster was accepted");
+        assert_eq!(state.il.file_scope_runtime_links.len(),4096);
     }
     #[test]
     fn missing_native_identity_is_rejected() {
