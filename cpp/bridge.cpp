@@ -41,6 +41,13 @@ thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 // Original EDG constant pointer identity, used only as an in-memory lookup
 // key. Stable per-snapshot IDs, never native pointer values, cross the wire.
 thread_local std::unordered_map<const void *, uint32_t> static_literal_ids;
+// Optional, source-free diagnostics of incomplete native static images.
+// No addresses, names, constant values or source locations are recorded.
+struct NumericStaticImageDiag {
+  uint32_t images_ok=0,images_failed=0,invalid_address=0;
+  uint32_t invalid_literal=0,nonzero_or_overflow_pointer=0,other_leaf=0;
+};
+thread_local NumericStaticImageDiag static_image_diag;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
@@ -1115,8 +1122,10 @@ static bool constant_initializer_image(
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
         address.is_object_reflection || address.one_past_the_end ||
-        address.subobject_path != nullptr)
+        address.subobject_path != nullptr) {
+      ++static_image_diag.invalid_address;
       return false;
+    }
     a_variable_ptr variable=nullptr;
     a_constant_ptr literal=nullptr;
     if (address.kind==abk_variable) {
@@ -1125,8 +1134,12 @@ static bool constant_initializer_image(
     } else if (address.kind==abk_constant && address.offset==0) {
       literal=address.variant.constant;
       std::string witness;
-      if (!native_static_literal_image(literal,witness)) return false;
+      if (!native_static_literal_image(literal,witness)) {
+        ++static_image_diag.invalid_literal;
+        return false;
+      }
     } else {
+      ++static_image_diag.invalid_address;
       return false;
     }
     // The 4 KiB image bound and disjoint eight-byte slots already limit
@@ -1160,7 +1173,10 @@ static bool constant_initializer_image(
     const bool is_zero=int_constant_is_signed(value)
         ? value_of_integer_constant(value,&overflow)==0
         : unsigned_value_of_integer_constant(value,&overflow)==0;
-    if (overflow || !is_zero) return false;
+    if (overflow || !is_zero) {
+      ++static_image_diag.nonzero_or_overflow_pointer;
+      return false;
+    }
     if (relocations!=nullptr) {
       for (const auto &prior:*relocations) {
         if (prior.byte_offset>bytes.size() ||
@@ -1198,7 +1214,10 @@ static bool constant_initializer_image(
     std::memcpy(bytes.data() + offset, value->variant.string.value, n);
     return true;
   }
-  if (value->kind != ck_aggregate) return false;
+  if (value->kind != ck_aggregate) {
+    ++static_image_diag.other_leaf;
+    return false;
+  }
   a_constant_ptr current = value->variant.aggregate.first_constant;
   if (type->kind == tk_array) {
     if (type->variant.array.is_variable_size_array ||
@@ -1294,10 +1313,16 @@ static bool aggregate_initializer_image(
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
-      type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES) return false;
+      type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
+    ++static_image_diag.images_failed;
+    return false;
+  }
   std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
   if (!constant_initializer_image(root, type, 0, bytes, 0,
-                                  relocations)) return false;
+                                  relocations)) {
+    ++static_image_diag.images_failed;
+    return false;
+  }
   static constexpr char digits[] = "0123456789abcdef";
   encoded.clear();
   encoded.reserve(bytes.size() * 2);
@@ -1305,6 +1330,7 @@ static bool aggregate_initializer_image(
     encoded.push_back(digits[b >> 4]);
     encoded.push_back(digits[b & 15]);
   }
+  ++static_image_diag.images_ok;
   return true;
 }
 
@@ -3377,6 +3403,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  static_image_diag = {};
   visited_scopes.clear();
   emitted_symbol_types.clear();
   current_lifetime_ids.clear();
@@ -3394,6 +3421,17 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   // EDG is built with -fno-exceptions; its callable path returns a status.
   // Do not introduce an exception handler compiled with incompatible flags.
   int status = edg::edg_main(argc, argv);
+  // The opt-in diagnostic reports only bounded counts for one original
+  // source translation unit. It does not emit EDG pointers or C source.
+  const char *aggregate_diag = std::getenv("EDGCPP_STATIC_LITERAL_NUMERIC_DIAG");
+  if (aggregate_diag != nullptr && aggregate_diag[0] == '1' &&
+      aggregate_diag[1] == '\0') {
+    const auto &d = static_image_diag;
+    std::fprintf(stderr,
+        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u\n",
+        d.images_ok,d.images_failed,d.invalid_address,d.invalid_literal,
+        d.nonzero_or_overflow_pointer,d.other_leaf);
+  }
   current_callback = nullptr;
   current_user_data = nullptr;
   type_ids.clear();
