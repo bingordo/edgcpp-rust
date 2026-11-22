@@ -23,6 +23,11 @@ fn c_records_never_claim_cpp_class_or_lifetime_proofs() {
     );
     assert_eq!(result.il.cpp_language, Some(false));
     assert!(!result.il.types.is_empty(), "C aggregate types must still be exported");
+    assert!(!result.il.cxx_record_admissions.is_empty(),
+            "the C record proof checks must be exercised");
+    assert!(result.il.symbol_link_names.iter()
+            .any(|name| name.link_name == "external_counter" && !name.edg_mangled),
+            "C external objects must keep their unmangled symbol spelling");
     assert!(
         result.il.cxx_record_admissions.iter().all(|r| !r.plain_object),
         "C records must not be certified as C++ POD/trivial classes"
@@ -45,4 +50,13 @@ fn cpp_records_still_parse_with_cpp_language_provenance() {
     );
     assert_eq!(result.il.cpp_language, Some(true));
     assert!(!result.il.types.is_empty());
+    assert!(result.il.cxx_record_admissions.iter().any(|r| r.plain_object),
+            "a trivial C++ record must retain its POD/triviality proof");
+    let external=result.il.symbols.iter()
+        .find(|symbol| symbol.name == "cpp_external")
+        .expect("C++ external variable must be exported").id;
+    assert!(result.il.symbol_link_names.iter()
+        .any(|name| name.symbol == external &&
+                     name.link_name.starts_with("_Z") && name.edg_mangled),
+        "C++ external data must retain its native Itanium mangled name");
 }
