@@ -76,6 +76,9 @@ static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint
 static edgcpp_field absent() { return {nullptr, 0, 0, WIRE_ABSENT}; }
 static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
+  // The embeddable C ABI may be called directly by clients other than the
+  // Rust wrapper. Never dereference an absent snapshot callback.
+  if (current_callback == nullptr) return;
   if (!wire_record_field_tags_valid(kind, fields)) {
     // Report a malformed snapshot instead of sending a mis-tagged record
     // that might be misinterpreted by a different native/managed version.
@@ -269,7 +272,9 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
     // This API is read-only and does not change source_corresp.name.
     bool emitted_native_link = false;
 #if TEMPLATE_LOOKUP_NEEDED || MODULE_ID_NEEDED
-    if (kind == 2) {
+    // The target C++ data-name mangler requires C++ symbol provenance.
+    // An ordinary C external variable must keep its literal C linker name.
+    if (!C_mode() && kind == 2) {
       const auto *variable = reinterpret_cast<const a_variable *>(ptr);
       if (variable->storage_class == sc_extern &&
           !variable->has_explicit_initializer &&
@@ -321,6 +326,9 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
 // treating an unsupported template as ordinary/POD or dereferencing a
 // missing supplement in the compiler's foreign-language bridge.
 static bool supported_concrete_class_proof_root(a_type_ptr type) {
+  // C records do not have EDG C++ class symbols/supplements, even when
+  // they use tk_struct; never inspect them through the C++ witness API.
+  if (C_mode()) return false;
   if (type == nullptr ||
       (type->kind != tk_class && type->kind != tk_struct) ||
       type->incomplete ||
@@ -339,6 +347,10 @@ static bool supported_concrete_class_proof_root(a_type_ptr type) {
 // ABI certificate, and the Rust lowering MUST verify every actual operation,
 // automatic source owner, and nested target field layout separately.
 static bool tagless_cpp_storage_only(a_type_ptr type) {
+  // C records have no C++ object-lifetime or template-class semantics.
+  // In particular, EDG's class supplements are not safe to inspect as
+  // C++ class witnesses for a plain C struct.
+  if (C_mode()) return false;
   if (type == nullptr ||
       (type->kind != tk_struct && type->kind != tk_class) ||
       type->incomplete || type->size == 0 || type->alignment == 0 ||
@@ -390,6 +402,10 @@ static bool tagless_cpp_storage_only(a_type_ptr type) {
 }
 
 static bool plain_cpp_record(a_type_ptr type) {
+  // This calls EDG C++ semantic predicates (POD/trivial/destructor).
+  // An ordinary C struct may have a tag but no valid C++ class supplement;
+  // treating it as a C++ class crashes during a source-owned C snapshot.
+  if (C_mode()) return false;
   if (!supported_concrete_class_proof_root(type)) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
   if (extra == nullptr || extra->assoc_scope == nullptr ||
@@ -452,6 +468,8 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  // Never infer C++ construction/destruction certificates in C mode.
+  if (C_mode()) return false;
   // Candidate only: the downstream TypeId verifier still proves each
   // ctor/D1 body and global-startup/teardown operation. Restrict layout
   // to exactly one native word (I32 or I64), no aggregate/padding inference.
@@ -530,10 +548,17 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (type->kind == tk_class || type->kind == tk_struct) {
     // 0: nontrivial/unsupported class; 1: EDG-certified POD/trivial class;
     // 2: tagless, no-supplement structural *storage only* (NOT a POD claim).
-    const unsigned record_proof = plain_cpp_record(type) ? 1u :
-        (tagless_cpp_storage_only(type) ? 2u : 0u);
+    // C has native aggregate layouts, not C++ POD/constructor semantics.
+    // Skip the C++ predicates at the call site as well as inside their
+    // implementations; still emit explicit zero certificates so the wire
+    // snapshot preserves complete and countable record metadata.
+    const bool cxx_mode = !C_mode();
+    const unsigned record_proof = !cxx_mode ? 0u :
+        (plain_cpp_record(type) ? 1u :
+         (tagless_cpp_storage_only(type) ? 2u : 0u));
     emit_record(63, {num(id), num(record_proof)});
-    emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
+    emit_record(65, {num(id), num(cxx_mode &&
+        bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
   // An alignment of zero is not a usable layout.
@@ -547,7 +572,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     // Source authority is the EDG type; this is not an admission rule.
     // Limit both scope and emitted fields, independently of user names.
     if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
-        type->size >= 128 && type->size <= 256 &&
+        !C_mode() && type->size >= 128 && type->size <= 256 &&
         (type->kind == tk_class || type->kind == tk_struct)) {
       a_symbol_ptr tag=symbol_for(type);
       const auto *extra=type->variant.class_struct_union.extra_info;
@@ -617,7 +642,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
          field != nullptr && within_native_list_limit(field_count);
          field = field->next, ++field_count) {}
     uint32_t direct_base_count = 0;
-    if ((type->kind == tk_class || type->kind == tk_struct) &&
+    if (!C_mode() && (type->kind == tk_class || type->kind == tk_struct) &&
         type->variant.class_struct_union.extra_info != nullptr) {
       for (a_base_class_ptr base =
                type->variant.class_struct_union.extra_info->direct_base_classes;
@@ -643,7 +668,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   // Direct base classes are linked in source declaration order, unlike
   // the transitive postorder base_classes list.
-  if ((type->kind == tk_class || type->kind == tk_struct) &&
+  if (!C_mode() && (type->kind == tk_class || type->kind == tk_struct) &&
       type->variant.class_struct_union.extra_info != nullptr) {
     unsigned position = 0;
     for (a_base_class_ptr base =
@@ -1869,7 +1894,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       // from a symbol spelling, memory address, or a generic scope list.
       // The ordinary wire and C++ admission checks are unchanged.
       if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
-          raw_name == nullptr && var->type != nullptr &&
+          !C_mode() && raw_name == nullptr && var->type != nullptr &&
           (var->type->kind == tk_class || var->type->kind == tk_struct) &&
           var->type->size >= 128) {
         ResolvedSource source_position{};
@@ -2664,15 +2689,16 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // method's this_class is an additional fallback after lowering.
       a_type_ptr owning_class = nullptr;
       a_scope_ptr declared_in = r->source_corresp.parent_scope;
-      if (r->source_corresp.is_class_member && declared_in != nullptr &&
+      if (!C_mode() && r->source_corresp.is_class_member && declared_in != nullptr &&
           (declared_in->kind == sck_class_struct_union ||
            declared_in->kind == sck_class_reactivation)) {
         owning_class = declared_in->variant.assoc_type;
       }
-      if (owning_class == nullptr && scope->kind == sck_class_struct_union) {
+      if (!C_mode() && owning_class == nullptr &&
+          scope->kind == sck_class_struct_union) {
         owning_class = scope->variant.assoc_type;
       }
-      if (owning_class == nullptr && r->type != nullptr &&
+      if (!C_mode() && owning_class == nullptr && r->type != nullptr &&
           r->type->kind == tk_routine &&
           r->type->variant.routine.extra_info != nullptr) {
         owning_class = r->type->variant.routine.extra_info->this_class;
@@ -2686,7 +2712,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       }
       // Out-of-line definitions may be visible through multiple IL scope
       // lists. Export their body and entity only once per routine pointer.
-      if (owning_class == nullptr) {
+      if (!C_mode() && owning_class == nullptr) {
         // Static member functions have no this_class. Resolve these from
         // the class declaration names after collecting all nested scopes.
         unresolved_members.push_back({r, routine_symbol, name});
@@ -2787,10 +2813,15 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
+          // Constructor/member initialization is C++ only. C function scopes
+          // still get the mandatory zero-count witness, but their C++-only
+          // constructor list is never traversed.
+          a_constructor_init_ptr constructors = C_mode() ? nullptr :
+              body->variant.routine.constructor_inits;
           // Count EDG-owned initializer entries independently from the
           // record-20 emission loop. Even zero entries have a witness.
           uint32_t native_initializer_count = 0;
-          for (a_constructor_init_ptr entry = body->variant.routine.constructor_inits;
+          for (a_constructor_init_ptr entry = constructors;
                entry != nullptr && within_native_list_limit(native_initializer_count);
                entry = entry->next, ++native_initializer_count) {}
           emit_record(RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT,
@@ -2798,7 +2829,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           // The function scope owns constructor/destructor subobject
           // initialization entries, ordered by actual execution order.
           unsigned init_position = 0;
-          for (a_constructor_init_ptr init = body->variant.routine.constructor_inits;
+          for (a_constructor_init_ptr init = constructors;
                init != nullptr && within_native_list_limit(init_position);
                init = init->next, ++init_position) {
             uint32_t target_type = 0;
@@ -2963,7 +2994,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 #if DO_IL_LOWERING && USE_PATCH_INIT_STARTUP
       if (!C_mode() && v->lowering_generated &&
           v->storage_class == sc_static &&
-          std::string(source_name(v->source_corresp)) == "__link") {
+          source_name(v->source_corresp) != nullptr &&
+          std::strcmp(source_name(v->source_corresp), "__link") == 0) {
         a_constant_ptr aggregate = v->init_kind == initk_static ?
                                    v->initializer.constant : nullptr;
         if (aggregate == nullptr || aggregate->kind != ck_aggregate ||
@@ -3071,12 +3103,15 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       const uint32_t named_type_id = emit_type(t, 0);
-      if ((t->kind == tk_class || t->kind == tk_struct ||
+      if (!C_mode() && (t->kind == tk_class || t->kind == tk_struct ||
            t->kind == tk_union) && named_type_id != 0) {
         named_class_types.emplace(name, named_type_id);
       }
       emit_record(3, {txt(name)}, 0);
-      if ((t->kind == tk_class || t->kind == tk_struct ||
+      // C tags have no C++ class member scope; field_list is already
+      // exported above by emit_type. Do not traverse a class supplement
+      // or nested member scope in C mode.
+      if (!C_mode() && (t->kind == tk_class || t->kind == tk_struct ||
            t->kind == tk_union) &&
           t->variant.class_struct_union.extra_info != nullptr) {
         a_scope_ptr members = t->variant.class_struct_union.extra_info->assoc_scope;
@@ -3097,6 +3132,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 
 void back_end(void)
 {
+  if (current_callback == nullptr) return;
 #if IL_SHOULD_BE_WRITTEN_TO_FILE
   // Keep the same in-memory/serialized-IL contract as EDG c_gen_be.c.
   primary_source_file_name = nullptr;
@@ -3225,6 +3261,8 @@ void back_end(void)
 extern "C" int edgcpp_compile(int argc, char **argv,
                                edgcpp_il_callback callback, void *user_data)
 {
+  if (callback == nullptr || argc <= 0 || argv == nullptr)
+    return -1; // Missing required C ABI arguments, never crash.
   if (current_callback != nullptr) {
     return -1; // Recursive invocation not supported.
   }
