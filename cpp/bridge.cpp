@@ -46,8 +46,16 @@ thread_local std::unordered_map<const void *, uint32_t> static_literal_ids;
 struct NumericStaticImageDiag {
   uint32_t images_ok=0,images_failed=0,invalid_address=0;
   uint32_t invalid_literal=0,nonzero_or_overflow_pointer=0,other_leaf=0;
+  uint32_t union32_ok=0,union32_failed=0,union32_failure_mask=0;
 };
 thread_local NumericStaticImageDiag static_image_diag;
+// Bit positions classify only structural rejection paths, never source data.
+// Reset on entry to each original native aggregate image.
+thread_local uint32_t static_image_failure_mask=0;
+static bool rejected_static_aggregate(unsigned category) {
+  if (category<32) static_image_failure_mask |= uint32_t(1)<<category;
+  return false;
+}
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
@@ -1077,7 +1085,8 @@ static bool constant_initializer_image(
   a_type_ptr type = object_initializer_type(original_type);
   if (value == nullptr || type == nullptr || type->incomplete ||
       type->size == 0 || depth > 32 || offset > bytes.size() ||
-      type->size > bytes.size() - offset) return false;
+      type->size > bytes.size() - offset)
+    return rejected_static_aggregate(1);
   // A chain of singleton aggregate images does not require a C++ call
   // frame per nested native record or one-element array. Consume only the
   // unambiguous case: exactly one initialized member and exactly one
@@ -1221,9 +1230,11 @@ static bool constant_initializer_image(
   a_constant_ptr current = value->variant.aggregate.first_constant;
   if (type->kind == tk_array) {
     if (type->variant.array.is_variable_size_array ||
-        type->variant.array.is_template_dependent_size_array) return false;
+        type->variant.array.is_template_dependent_size_array)
+      return rejected_static_aggregate(2);
     a_type_ptr element = type->variant.array.element_type;
-    if (element == nullptr || element->size == 0) return false;
+    if (element == nullptr || element->size == 0)
+      return rejected_static_aggregate(3);
     uint64_t index = 0;
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
@@ -1234,14 +1245,16 @@ static bool constant_initializer_image(
         const auto &repeat=current->variant.init_repeat;
         if (repeat.count==0 || repeat.count>count-index ||
             repeat.multidimensional_aggr_tail_not_repeated ||
-            repeat.constant==nullptr) return false;
+            repeat.constant==nullptr)
+          return rejected_static_aggregate(4);
         for (uint64_t r=0; r<repeat.count; ++r) {
           const uint64_t element_index=index+r;
           if (element_index >= count ||
               element_index > (bytes.size()-offset)/element->size) return false;
           if (!constant_initializer_image(repeat.constant,element,
                  offset+static_cast<size_t>(element_index*element->size),
-                 bytes,depth+1,relocations)) return false;
+                 bytes,depth+1,relocations))
+            return rejected_static_aggregate(5);
         }
         index+=repeat.count;
         current=current->next;
@@ -1253,17 +1266,20 @@ static bool constant_initializer_image(
         index = current->variant.designator.variant.array_element;
         if (index >= count) return false;
         if (!constant_designated_value(current, type, offset, bytes,
-                                       depth + 1, relocations)) return false;
+                                       depth + 1, relocations))
+          return rejected_static_aggregate(7);
       } else {
         if (index >= count || index > (bytes.size() - offset) / element->size)
           return false;
         if (!constant_designated_value(current, element,
                          offset + static_cast<size_t>(index * element->size),
-                         bytes, depth + 1, relocations)) return false;
+                         bytes, depth + 1, relocations))
+          return rejected_static_aggregate(6);
       }
       ++index;
     }
-    return current == nullptr;
+    if (current != nullptr) return rejected_static_aggregate(8);
+    return true;
   }
   if (type->kind == tk_struct || type->kind == tk_union) {
     a_field_ptr field = type->variant.class_struct_union.field_list;
@@ -1292,35 +1308,48 @@ static bool constant_initializer_image(
               !constant_designated_value(current, field->type,
                                          offset + static_cast<size_t>(field->offset),
                                          bytes, depth + 1, relocations))
-            return false;
+            return rejected_static_aggregate(9);
         }
       }
       if (type->kind == tk_union) {
         // One active member, except explicit designators with their own
         // native subobject identity. Do not infer union member overlap.
-        if (current != nullptr && current->kind != ck_designator) return false;
+        if (current != nullptr && current->kind != ck_designator)
+          return rejected_static_aggregate(10);
       }
       field = field != nullptr ? field->next : nullptr;
     }
-    return current == nullptr;
+    if (current != nullptr) return rejected_static_aggregate(11);
+    return true;
   }
-  return false;
+  return rejected_static_aggregate(12);
 }
 static bool aggregate_initializer_image(
     a_constant_ptr root, a_type_ptr type, std::string &encoded,
     std::vector<NativeAggregateReloc> *relocations = nullptr) {
   type = object_initializer_type(type);
+  const bool union32=type!=nullptr && type->kind==tk_union &&
+                     type->size==32;
+  static_image_failure_mask=0;
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
       type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
     ++static_image_diag.images_failed;
+    if (union32) {
+      ++static_image_diag.union32_failed;
+      static_image_diag.union32_failure_mask |= 1u;
+    }
     return false;
   }
   std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
   if (!constant_initializer_image(root, type, 0, bytes, 0,
                                   relocations)) {
     ++static_image_diag.images_failed;
+    if (union32) {
+      ++static_image_diag.union32_failed;
+      static_image_diag.union32_failure_mask |= static_image_failure_mask;
+    }
     return false;
   }
   static constexpr char digits[] = "0123456789abcdef";
@@ -1331,6 +1360,7 @@ static bool aggregate_initializer_image(
     encoded.push_back(digits[b & 15]);
   }
   ++static_image_diag.images_ok;
+  if (union32) ++static_image_diag.union32_ok;
   return true;
 }
 
@@ -3428,9 +3458,10 @@ extern "C" int edgcpp_compile(int argc, char **argv,
       aggregate_diag[1] == '\0') {
     const auto &d = static_image_diag;
     std::fprintf(stderr,
-        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u\n",
+        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u\n",
         d.images_ok,d.images_failed,d.invalid_address,d.invalid_literal,
-        d.nonzero_or_overflow_pointer,d.other_leaf);
+        d.nonzero_or_overflow_pointer,d.other_leaf,
+        d.union32_ok,d.union32_failed,d.union32_failure_mask);
   }
   current_callback = nullptr;
   current_user_data = nullptr;
