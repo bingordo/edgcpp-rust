@@ -8110,7 +8110,7 @@ mod bootstrap_literal_global_wire_tests {
         // constant objects. Equal identity is retained by the same pool ID.
         global_image(&mut state,7,&[0;24]);
         send(&mut state,102,&[number(1),number(44),text(b"486900")]);
-        send(&mut state,102,&[number(2),number(45),text(b"4265796500")]);
+        send(&mut state,102,&[number(2),number(45),text(b"42796500")]);
         send(&mut state,103,&[number(7),number(0),number(1),signed(0)]);
         send(&mut state,103,&[number(7),number(8),number(2),signed(0)]);
         send(&mut state,103,&[number(7),number(16),number(1),signed(0)]);
