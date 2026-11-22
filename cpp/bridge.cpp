@@ -339,6 +339,10 @@ static bool supported_concrete_class_proof_root(a_type_ptr type) {
 // ABI certificate, and the Rust lowering MUST verify every actual operation,
 // automatic source owner, and nested target field layout separately.
 static bool tagless_cpp_storage_only(a_type_ptr type) {
+  // C records have no C++ object-lifetime or template-class semantics.
+  // In particular, EDG's class supplements are not safe to inspect as
+  // C++ class witnesses for a plain C struct.
+  if (C_mode()) return false;
   if (type == nullptr ||
       (type->kind != tk_struct && type->kind != tk_class) ||
       type->incomplete || type->size == 0 || type->alignment == 0 ||
@@ -390,6 +394,10 @@ static bool tagless_cpp_storage_only(a_type_ptr type) {
 }
 
 static bool plain_cpp_record(a_type_ptr type) {
+  // This calls EDG C++ semantic predicates (POD/trivial/destructor).
+  // An ordinary C struct may have a tag but no valid C++ class supplement;
+  // treating it as a C++ class crashes during a source-owned C snapshot.
+  if (C_mode()) return false;
   if (!supported_concrete_class_proof_root(type)) return false;
   const auto *extra = type->variant.class_struct_union.extra_info;
   if (extra == nullptr || extra->assoc_scope == nullptr ||
@@ -452,6 +460,8 @@ static bool plain_cpp_record(a_type_ptr type) {
 // plain_cpp_record gate. This only certifies a narrow candidate for a
 // later path-sensitive native lifetime verifier, NOT executable admission.
 static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
+  // Never infer C++ construction/destruction certificates in C mode.
+  if (C_mode()) return false;
   // Candidate only: the downstream TypeId verifier still proves each
   // ctor/D1 body and global-startup/teardown operation. Restrict layout
   // to exactly one native word (I32 or I64), no aggregate/padding inference.
