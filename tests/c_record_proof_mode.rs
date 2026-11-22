@@ -53,7 +53,7 @@ fn cpp_records_still_parse_with_cpp_language_provenance() {
     assert!(result.il.cxx_record_admissions.iter().any(|r| r.plain_object),
             "a trivial C++ record must retain its POD/triviality proof");
     let external=result.il.symbols.iter()
-        .find(|symbol| symbol.name == "cpp_external")
+        .find(|symbol| symbol.name == "audit_names::external_count")
         .expect("C++ external variable must be exported").id;
     assert!(result.il.symbol_link_names.iter()
         .any(|name| name.symbol == external &&
