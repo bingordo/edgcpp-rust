@@ -41,7 +41,9 @@
     "RECORD_NATIVE_SCOPE_LOCAL_COUNT": 98,
     "RECORD_NATIVE_FUNCTION_PARAMETER_COUNT": 99,
     "RECORD_NATIVE_GLOBAL_MATERIALIZATION": 100,
-    "RECORD_NATIVE_SCOPE_ASM": 101
+    "RECORD_NATIVE_SCOPE_ASM": 101,
+    "RECORD_STATIC_LITERAL_OBJECT": 102,
+    "RECORD_STATIC_LITERAL_RELOCATION": 103
   },
   "record_arities": {
     "1": 1,
@@ -144,7 +146,9 @@
     "98": 3,
     "99": 3,
     "100": 4,
-    "101": 4
+    "101": 4,
+    "102": 3,
+    "103": 4
   },
   "record_field_tags": {
     "1": [
@@ -744,6 +748,17 @@
       "UNSIGNED",
       "TEXT",
       "UNSIGNED"
+    ],
+    "102": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "TEXT"
+    ],
+    "103": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "SIGNED"
     ]
   }
 }
