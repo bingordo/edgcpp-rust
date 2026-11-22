@@ -644,13 +644,25 @@ pub fn collect_cleanup_call_candidates(
     Ok(result)
 }
 
-/// Strict source-owned scope *association* diagnostic, not a complete C++
-/// cleanup registration schedule or permission to execute any runtime ABI.
-/// Post-lowering EDG event 68 is non-exhaustive; missing pairs are UNKNOWN,
-/// and two calls must not consume the same native scope initializer entry.
-pub fn collect_cleanup_registration_witnesses(
+/// One independently source-certified call, optionally joined to one
+/// retained native scope initializer. Missing post-lowering event 68 means
+/// UNKNOWN ownership, NOT an absent global or an absent destructor.
+/// Neither a successful join nor the collection proves a complete roster.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CleanupScopeAssociation {
+    pub call: CleanupCallCandidate,
+    pub scope: Option<String>,
+    pub scope_position: Option<u32>,
+}
+
+/// A lossless *partial* association diagnostic. Unlike the strict API this
+/// retains source-certified native calls whose event-68 scope owner was
+/// drained by EDG. Never infer the missing ordinal from call order.
+/// Duplicate native scope pairs or two calls claiming the same ordinal
+/// remain contradictory and fail closed.
+pub fn collect_partial_cleanup_associations(
     il:&Il,
-) -> Result<Vec<CleanupRegistrationWitness>,StartupEvidenceError> {
+) -> Result<Vec<CleanupScopeAssociation>,StartupEvidenceError> {
     let candidates=collect_cleanup_call_candidates(il)?;
     let mut scoped=HashMap::new();
     for init in &il.scope_dynamic_initializers {
@@ -660,22 +672,46 @@ pub fn collect_cleanup_registration_witnesses(
             }
         }
     }
-    let mut registered_scope_entries=HashSet::new();
+    let mut consumed=HashSet::new();
     let mut result=Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let Some(init)=scoped.get(&(candidate.destructor,candidate.object)) else {
+    for call in candidates {
+        let entry=scoped.get(&(call.destructor,call.object));
+        if let Some(init)=entry {
+            if !consumed.insert((init.scope.as_str(),init.position)) {
+                return Err(StartupEvidenceError::AmbiguousCleanupWitness);
+            }
+        }
+        result.push(CleanupScopeAssociation {
+            scope:entry.map(|init|init.scope.clone()),
+            scope_position:entry.map(|init|init.position),
+            call,
+        });
+    }
+    Ok(result)
+}
+
+/// Strict source-owned scope *association* diagnostic, not a complete C++
+/// cleanup registration schedule or permission to execute any runtime ABI.
+/// Post-lowering EDG event 68 is non-exhaustive; missing pairs are UNKNOWN,
+/// and two calls must not consume the same native scope initializer entry.
+pub fn collect_cleanup_registration_witnesses(
+    il:&Il,
+) -> Result<Vec<CleanupRegistrationWitness>,StartupEvidenceError> {
+    let associations=collect_partial_cleanup_associations(il)?;
+    let mut result=Vec::with_capacity(associations.len());
+    for association in associations {
+        let (Some(scope),Some(scope_position))=
+            (association.scope,association.scope_position) else {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
-        if !registered_scope_entries.insert((init.scope.as_str(),init.position)) {
-            return Err(StartupEvidenceError::AmbiguousCleanupWitness);
-        }
+        let call=association.call;
         result.push(CleanupRegistrationWitness {
-            root:candidate.root,function:candidate.function,
-            statement_path:candidate.statement_path,
-            expression_path:candidate.expression_path,
-            scope:init.scope.clone(),scope_position:init.position,
-            destructor:candidate.destructor,object:candidate.object,
-            dso_handle:candidate.dso_handle,
+            root:call.root,function:call.function,
+            statement_path:call.statement_path,
+            expression_path:call.expression_path,
+            scope,scope_position,
+            destructor:call.destructor,object:call.object,
+            dso_handle:call.dso_handle,
         });
     }
     Ok(result)
@@ -815,6 +851,42 @@ mod tests {
         assert_ne!(candidates[0].statement_path,candidates[1].statement_path);
         assert_eq!(collect_cleanup_registration_witnesses(&il),
                    Err(StartupEvidenceError::MissingCleanupWitness));
+    }
+
+    #[test]
+    fn partial_cleanup_association_preserves_drained_native_entries() {
+        let mut il=cleanup_test_fixture(2);
+        il.scope_dynamic_initializers.pop();
+        let associations=collect_partial_cleanup_associations(&il).unwrap();
+        assert_eq!(associations.len(),2);
+        assert_eq!(associations[0].call.object,SymbolId(1000));
+        assert_eq!(associations[0].scope.as_deref(),Some("1:"));
+        assert_eq!(associations[0].scope_position,Some(0));
+        assert_eq!(associations[1].call.object,SymbolId(1001));
+        assert_eq!(associations[1].scope,None);
+        assert_eq!(associations[1].scope_position,None);
+        assert_eq!(collect_cleanup_registration_witnesses(&il),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+    }
+
+    #[test]
+    fn partial_association_rejects_duplicate_native_scope_owners() {
+        let mut il=cleanup_test_fixture(2);
+        // A duplicated source-owned pair cannot choose a scope ordinal.
+        il.scope_dynamic_initializers[1].variable=Some(SymbolId(1000));
+        il.scope_dynamic_initializers[1].destructor=Some(SymbolId(2000));
+        assert_eq!(collect_partial_cleanup_associations(&il),
+                   Err(StartupEvidenceError::AmbiguousCleanupWitness));
+    }
+
+    #[test]
+    fn partial_association_does_not_claim_complete_empty_roster() {
+        let mut il=cleanup_test_fixture(2);
+        il.scope_dynamic_initializers.clear();
+        let associations=collect_partial_cleanup_associations(&il).unwrap();
+        assert_eq!(associations.len(),2);
+        assert!(associations.iter().all(|association|
+            association.scope.is_none() && association.scope_position.is_none()));
     }
 
     #[test]
