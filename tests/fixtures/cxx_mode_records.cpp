@@ -9,9 +9,11 @@ struct HasDestructor {
 };
 
 Plain plain{41};
-extern int cpp_external;
+namespace audit_names {
+extern int external_count;
+}
 
-int cpp_external_read() { return cpp_external; }
+int cpp_external_read() { return audit_names::external_count; }
 
 int cpp_record_read() {
     HasDestructor object{1};
