@@ -56,7 +56,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     if null_refs.len()!=1 || null_refs[0].offset!=0 ||
         null_refs[0].addend!=0 ||
         targets.get(&null_refs[0].literal_id)
-            .is_none_or(|literal|literal.bytes.as_slice()!=b"nullable\\0") {
+            .is_none_or(|literal|literal.bytes.as_slice()!=b"nullable\0") {
         return Err("C null-pointer union has wrong symbolic literal slot".into());
     }
     println!("EDG_STATIC_LITERAL_C11_OBJECTS={} SLOTS=5 TWO_UNIONS_BYTES=64",
