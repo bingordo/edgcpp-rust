@@ -1861,10 +1861,22 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
                 else {return;};
+            // Event 51 is emitted before source-owned relocation events.
+            // Reject forged, dangling, out-of-bounds, nonzero, or duplicated
+            // slots before a later consumer could turn them into linker data.
+            let owner=SymbolId(symbol);
+            let Some(image)=output.global_aggregate_initializers.iter()
+                .find(|g|g.symbol==owner) else {return;};
+            let Ok(start)=usize::try_from(offset) else {return;};
             if symbol==0 || literal_id==0 || literal_id>256 ||
+                !output.global_literal_objects.iter().any(|v|v.id==literal_id) ||
                 offset%8!=0 || output.global_literal_relocations.len()>=4096 ||
+                start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
+                image.bytes[start..start+8].iter().any(|&b|b!=0) ||
                 output.global_literal_relocations.iter().any(|p|
-                    p.symbol==SymbolId(symbol) && p.offset==offset) {
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) {
                 return;
             }
             output.global_literal_relocations.push(GlobalLiteralRelocation {
@@ -1875,7 +1887,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(symbol),Some(offset),Some(target),Some(addend)) =
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
                 else {return;};
-            if symbol==0 || target==0 {return;}
+            if symbol==0 || target==0 ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==SymbolId(symbol) && p.offset==offset) {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
             });
@@ -8085,11 +8099,16 @@ mod bootstrap_literal_global_wire_tests {
         unsafe{collect((state as *mut Collector).cast(),
                        kind,fields.as_ptr(),fields.len(),0);}
     }
+    fn global_image(state:&mut Collector,symbol:u64,bytes:&[u8]) {
+        let hex: String=bytes.iter().map(|b|format!("{b:02x}")).collect();
+        send(state,51,&[number(symbol),number(60),text(hex.as_bytes())]);
+    }
     #[test]
     fn decodes_complete_source_literal_and_distinct_relocatable_global_slots() {
         let mut state=Collector::default();
         // Source C: a static union containing pointers into original
         // constant objects. Equal identity is retained by the same pool ID.
+        global_image(&mut state,7,&[0;24]);
         send(&mut state,102,&[number(1),number(44),text(b"486900")]);
         send(&mut state,102,&[number(2),number(45),text(b"4265796500")]);
         send(&mut state,103,&[number(7),number(0),number(1),signed(0)]);
@@ -8121,11 +8140,55 @@ mod bootstrap_literal_global_wire_tests {
         send(&mut state,102,&[number(1),number(44),text(b"6200")]);
         assert!(state.malformed && !state.panicked);
         let mut state=Collector::default();
+        global_image(&mut state,7,&[0;24]);
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
         send(&mut state,103,&[number(7),number(4),number(1),signed(0)]);
         assert!(state.malformed);
         let mut state=Collector::default();
+        global_image(&mut state,7,&[0;24]);
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
         send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
         send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
         assert!(state.malformed && !state.panicked);
+    #[test]
+    fn literal_relocation_must_own_existing_zeroed_aggregate_slot() {
+        for scenario in 0..5 {
+            let mut state=Collector::default();
+            if scenario!=0 {
+                let mut bytes=[0u8;16];
+                if scenario==3 {bytes[8]=1;}
+                global_image(&mut state,7,&bytes);
+            }
+            if scenario!=1 {
+                send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+            }
+            let (owner,offset)=match scenario {
+                2 => (7,16), // beyond source image
+                4 => (9,8), // no source-owned aggregate for this symbol
+                _ => (7,8),
+            };
+            send(&mut state,103,&[
+                number(owner),number(offset),number(1),signed(0)]);
+            assert!(state.malformed && !state.panicked,"scenario {scenario}");
+        }
+    }
+    #[test]
+    fn literal_and_variable_relocations_cannot_share_one_slot() {
+        for literal_first in [false,true] {
+            let mut state=Collector::default();
+            global_image(&mut state,7,&[0;16]);
+            send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+            let literal=[number(7),number(8),number(1),signed(0)];
+            let variable=[number(7),number(8),number(8),signed(0)];
+            if literal_first {
+                send(&mut state,103,&literal);
+                send(&mut state,52,&variable);
+            } else {
+                send(&mut state,52,&variable);
+                send(&mut state,103,&literal);
+            }
+            assert!(state.malformed && !state.panicked);
+        }
+    }
     }
 }
