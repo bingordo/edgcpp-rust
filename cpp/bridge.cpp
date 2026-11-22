@@ -3216,7 +3216,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                   selected_type!=nullptr ? static_cast<unsigned long>(selected_type->size) : 0ul,
                   selected_type!=nullptr ? static_cast<unsigned long>(selected_type->alignment) : 0ul,
                   selected!=nullptr ? static_cast<unsigned long>(selected->offset) : 0ul,
-                  selected_type!=nullptr && selected_type->kind==tk_array
+                  selected_type!=nullptr && selected_type->kind==tk_array &&
+                  !selected_type->incomplete &&
+                  !selected_type->variant.array.is_variable_size_array &&
+                  !selected_type->variant.array.is_template_dependent_size_array
                       ? static_cast<unsigned long>(
                           selected_type->variant.array.variant.number_of_elements) : 0ul,
                   nested_count,
