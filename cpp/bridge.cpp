@@ -3088,7 +3088,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                   "EDG_C_UNION_ROOT_DIAG raw_type_kind=%u normalized_type_kind=%u "
                   "init_kind=%u explicit=%u constant_present=%u "
                   "constant_kind=%u raw_size=%lu normalized_size=%lu "
-                  "normalized_align=%lu\\n",
+                  "normalized_align=%lu\n",
                   static_cast<unsigned>(v->type->kind),
                   static_cast<unsigned>(underlying->kind),
                   static_cast<unsigned>(v->init_kind),
