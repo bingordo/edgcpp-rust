@@ -112,6 +112,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(reason) => {
             println!("EDG_CXX5_CLEANUP_CALL_LOCAL incomplete={reason:?} complete_lifecycle_proven=false");
+            // Diagnostic only: expose original native expression ownership on
+            // a failed source join. This is NOT an alternative acceptance path.
+            if let Ok(proof)=edgcpp::startup_provenance::collect_startup_evidence(&result.il) {
+                for call in proof.immediate_calls.iter().filter(|call| {
+                    call.callee_symbol.is_some_and(|id| result.il.symbol_link_names.iter()
+                        .any(|name| name.symbol==id && name.link_name=="__cxa_atexit"))
+                }).take(8) {
+                    println!("EDG_CXX5_CLEANUP_SOURCE_CALL function={:?} statement={:?} path={:?} callee={:?} type={:?}",
+                             call.function,call.statement_path,call.expression_path,
+                             call.callee_symbol.map(|id|id.0),call.callee_type.map(|id|id.0));
+                    for expr in result.il.expressions.iter().filter(|expr|
+                        expr.function==call.function &&
+                        expr.statement_path==call.statement_path &&
+                        (expr.path==call.expression_path ||
+                         expr.path.starts_with(&format!("{}.",call.expression_path)))
+                    ).take(24) {
+                        println!("EDG_CXX5_CLEANUP_SOURCE_EXPR path={:?} parent={:?} kind={} operator={:?} constant={:?} symbol={:?} type={:?}",
+                                 expr.path,expr.parent,expr.kind,expr.operator,expr.constant_kind,
+                                 expr.symbol_id.map(|id|id.0),expr.type_id.map(|id|id.0));
+                    }
+                }
+            }
         }
     }
     // The stricter typed event-68 join is *also* diagnostic only.
