@@ -272,7 +272,9 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
     // This API is read-only and does not change source_corresp.name.
     bool emitted_native_link = false;
 #if TEMPLATE_LOOKUP_NEEDED || MODULE_ID_NEEDED
-    if (kind == 2) {
+    // The target C++ data-name mangler requires C++ symbol provenance.
+    // An ordinary C external variable must keep its literal C linker name.
+    if (!C_mode() && kind == 2) {
       const auto *variable = reinterpret_cast<const a_variable *>(ptr);
       if (variable->storage_class == sc_extern &&
           !variable->has_explicit_initializer &&
