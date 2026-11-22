@@ -3142,7 +3142,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             v->type->kind == tk_union && v->type->size == 32 &&
             std::getenv("EDGCPP_DIAG_C_AGGREGATE_FAILURE") != nullptr) {
           static unsigned reported = 0;
-          if (reported++ < 4) {
+          if (reported++ < 64) {
             const a_constant_ptr root=v->initializer.constant;
             const a_constant_ptr first=root->kind==ck_aggregate
                 ? root->variant.aggregate.first_constant : nullptr;
@@ -3160,10 +3160,11 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                 ? std::fopen(diagnostic_file,"a") : nullptr;
             if (out!=nullptr) {
               std::fprintf(out,
-                "EDG_C_UNION_IMAGE_DIAG type_size=%lu type_align=%lu "
+                "EDG_C_UNION_IMAGE_DIAG owner=%u type_size=%lu type_align=%lu "
                 "root_kind=%u first_kind=%u second_kind=%u third_kind=%u "
                 "first_child_kind=%u child_count_bounded=%u "
                 "root_dynamic=%u first_address_kind=%u first_designator=%u\n",
+                symbol_id,
                 static_cast<unsigned long>(v->type->size),
                 static_cast<unsigned long>(v->type->alignment),
                 static_cast<unsigned>(root->kind),
