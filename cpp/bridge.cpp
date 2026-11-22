@@ -3066,6 +3066,43 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                            num(width), num(bits)});
         }
       }
+      // Diagnostic only: inspect the source-owned union BEFORE the nullable
+      // constant-image gate. A static C initializer need not be represented
+      // by initializer.constant; absence is not proof of zero bytes.
+      // The report is bounded, numeric-only and opt-in on the CI runner.
+      if (C_mode() && v->has_explicit_initializer && v->type != nullptr &&
+          std::getenv("EDGCPP_DIAG_C_AGGREGATE_FAILURE") != nullptr) {
+        a_type_ptr underlying = object_initializer_type(v->type);
+        if (underlying != nullptr && underlying->kind == tk_union &&
+            underlying->size == 32 && underlying->alignment == 8) {
+          static unsigned union_root_reports = 0;
+          if (union_root_reports++ < 4) {
+            const char *diagnostic_file = std::getenv(
+                "EDGCPP_DIAG_C_AGGREGATE_FAILURE_FILE");
+            std::FILE *out = diagnostic_file != nullptr
+                ? std::fopen(diagnostic_file, "a") : nullptr;
+            if (out != nullptr) {
+              const a_constant_ptr root = v->init_kind == initk_static
+                  ? v->initializer.constant : nullptr;
+              std::fprintf(out,
+                  "EDG_C_UNION_ROOT_DIAG raw_type_kind=%u normalized_type_kind=%u "
+                  "init_kind=%u explicit=%u constant_present=%u "
+                  "constant_kind=%u raw_size=%lu normalized_size=%lu "
+                  "normalized_align=%lu\\n",
+                  static_cast<unsigned>(v->type->kind),
+                  static_cast<unsigned>(underlying->kind),
+                  static_cast<unsigned>(v->init_kind),
+                  v->has_explicit_initializer ? 1u : 0u,
+                  root != nullptr ? 1u : 0u,
+                  root != nullptr ? static_cast<unsigned>(root->kind) : 999u,
+                  static_cast<unsigned long>(v->type->size),
+                  static_cast<unsigned long>(underlying->size),
+                  static_cast<unsigned long>(underlying->alignment));
+              std::fclose(out);
+            }
+          }
+        }
+      }
       if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
         std::string hex;
         std::vector<NativeAggregateReloc> relocations;
