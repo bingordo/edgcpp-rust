@@ -8150,6 +8150,7 @@ mod bootstrap_literal_global_wire_tests {
         send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
         send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
         assert!(state.malformed && !state.panicked);
+    }
     #[test]
     fn literal_relocation_must_own_existing_zeroed_aggregate_slot() {
         for scenario in 0..5 {
@@ -8189,6 +8190,5 @@ mod bootstrap_literal_global_wire_tests {
             }
             assert!(state.malformed && !state.panicked);
         }
-    }
     }
 }
