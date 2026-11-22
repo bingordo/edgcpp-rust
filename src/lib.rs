@@ -3754,6 +3754,15 @@ fn validate_native_c_language_separation(il: &Il) -> Result<(), Error> {
         || il.cxx_scalar_lifetime_admissions.iter().any(|proof| proof.candidate)
         || il.native_record_shapes.iter().any(|shape| shape.direct_base_count != 0)
         || !il.base_classes.is_empty()
+        || !il.base_subobject_offsets.is_empty()
+        || !il.base_class_access.is_empty()
+        || !il.member_functions.is_empty()
+        || !il.native_virtual_members.is_empty()
+        || !il.constructor_initializers.is_empty()
+        || !il.constructor_initializer_expressions.is_empty()
+        || !il.native_constructor_root_admissions.is_empty()
+        || !il.native_constructor_child_counts.is_empty()
+        || il.native_constructor_initializer_counts.iter().any(|proof| proof.count != 0)
     {
         return Err(Error::MalformedCallback);
     }
@@ -3877,6 +3886,22 @@ mod tests {
         il.cxx_tagless_storage_proofs.push(TypeId(1));
         assert!(validate_native_c_language_separation(&il).is_err());
         il.cxx_tagless_storage_proofs.clear();
+        il.native_record_shapes.push(NativeRecordShape {
+            owner:TypeId(1),field_count:0,direct_base_count:1,
+        });
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.native_record_shapes[0].direct_base_count=0;
+        il.member_functions.push(MemberFunction{
+            owner:TypeId(1),routine:SymbolId(2),
+        });
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.member_functions.clear();
+        il.native_constructor_initializer_counts.push(
+            NativeConstructorInitializerCount{routine:SymbolId(2),count:1});
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.native_constructor_initializer_counts[0].count=0;
+        validate_native_c_language_separation(&il)
+            .expect("zero constructor list witnesses are valid in C");
         // The exact same native class certificates remain eligible in C++.
         il.cpp_language=Some(true);
         il.cxx_record_admissions[0].plain_object=true;
