@@ -3087,7 +3087,15 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             unsigned child_count=0;
             for (a_constant_ptr p=first;
                  p!=nullptr && child_count<8; p=p->next,++child_count) {}
-            std::fprintf(stderr,
+            // EDG can redirect its standard diagnostics during parsing.
+            // Use the explicitly opted-in CI file, never a source path or
+            // output chosen from a user C translation unit.
+            const char *diagnostic_file=std::getenv(
+                "EDGCPP_DIAG_C_AGGREGATE_FAILURE_FILE");
+            FILE *out=diagnostic_file!=nullptr
+                ? std::fopen(diagnostic_file,"a") : nullptr;
+            if (out!=nullptr) {
+              std::fprintf(out,
                 "EDG_C_UNION_IMAGE_DIAG type_size=%lu type_align=%lu "
                 "root_kind=%u first_kind=%u second_kind=%u third_kind=%u "
                 "first_child_kind=%u child_count_bounded=%u "
@@ -3107,6 +3115,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                 first!=nullptr && first->kind==ck_address
                   ? static_cast<unsigned>(first->variant.address.kind) : 999u,
                 first!=nullptr && first->kind==ck_designator ? 1u : 0u);
+              std::fclose(out);
+            }
           }
         }
         if (image_ok) {
