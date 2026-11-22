@@ -76,6 +76,9 @@ static edgcpp_field signed_num(int64_t n) { return {nullptr, 0, static_cast<uint
 static edgcpp_field absent() { return {nullptr, 0, 0, WIRE_ABSENT}; }
 static void emit_record(uint32_t kind, std::initializer_list<edgcpp_field> fields, uint32_t aux = 0)
 {
+  // The embeddable C ABI may be called directly by clients other than the
+  // Rust wrapper. Never dereference an absent snapshot callback.
+  if (current_callback == nullptr) return;
   if (!wire_record_field_tags_valid(kind, fields)) {
     // Report a malformed snapshot instead of sending a mis-tagged record
     // that might be misinterpreted by a different native/managed version.
@@ -3127,6 +3130,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 
 void back_end(void)
 {
+  if (current_callback == nullptr) return;
 #if IL_SHOULD_BE_WRITTEN_TO_FILE
   // Keep the same in-memory/serialized-IL contract as EDG c_gen_be.c.
   primary_source_file_name = nullptr;
@@ -3255,6 +3259,8 @@ void back_end(void)
 extern "C" int edgcpp_compile(int argc, char **argv,
                                edgcpp_il_callback callback, void *user_data)
 {
+  if (callback == nullptr || argc <= 0 || argv == nullptr)
+    return -1; // Missing required C ABI arguments, never crash.
   if (current_callback != nullptr) {
     return -1; // Recursive invocation not supported.
   }
