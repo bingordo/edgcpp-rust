@@ -3740,8 +3740,29 @@ fn validate_native_global_materialization_coverage(il:&Il)->Result<(),&'static s
     Ok(())
 }
 
+// The C/C++ language mode is an explicit native EDG fact (event 64).
+// A C struct has ordinary field/layout records, but no C++ POD, tagless
+// class-storage, constructor/destructor, or inheritance certificate.
+// Reject a mismatched callback even if the rest of the record graph is
+// structurally complete. C++ inputs retain the existing proof semantics.
+fn validate_native_c_language_separation(il: &Il) -> Result<(), Error> {
+    if il.cpp_language != Some(false) {
+        return Ok(());
+    }
+    if il.cxx_record_admissions.iter().any(|proof| proof.plain_object)
+        || !il.cxx_tagless_storage_proofs.is_empty()
+        || il.cxx_scalar_lifetime_admissions.iter().any(|proof| proof.candidate)
+        || il.native_record_shapes.iter().any(|shape| shape.direct_base_count != 0)
+        || !il.base_classes.is_empty()
+    {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
+       validate_native_c_language_separation(il).is_err() ||
        validate_native_global_materialization_coverage(il).is_err() ||
        graph::Graph::validate_native_type_detail_coverage(il).is_err() ||
        graph::Graph::validate_native_type_edge_coverage(il).is_err() ||
@@ -3832,6 +3853,36 @@ mod tests {
         assert!(matches!(validate_complete_native_snapshot(&il),
             Err(Error::MalformedCallback)),
             "unrelated records do not replace a language mode event");
+    }
+
+    #[test]
+    fn c_mode_never_accepts_cpp_object_or_inheritance_certificates() {
+        let mut il=Il { cpp_language:Some(false), ..Il::default() };
+        validate_native_c_language_separation(&il)
+            .expect("ordinary C aggregates need no C++ class proof");
+        il.cxx_record_admissions.push(CxxRecordAdmission {
+            owner:TypeId(1),plain_object:false,
+        });
+        il.cxx_scalar_lifetime_admissions.push(CxxScalarLifetimeAdmission {
+            owner:TypeId(1),candidate:false,
+        });
+        validate_native_c_language_separation(&il)
+            .expect("explicit zero certificates are legitimate in C");
+        il.cxx_record_admissions[0].plain_object=true;
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.cxx_record_admissions[0].plain_object=false;
+        il.cxx_scalar_lifetime_admissions[0].candidate=true;
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.cxx_scalar_lifetime_admissions[0].candidate=false;
+        il.cxx_tagless_storage_proofs.push(TypeId(1));
+        assert!(validate_native_c_language_separation(&il).is_err());
+        il.cxx_tagless_storage_proofs.clear();
+        // The exact same native class certificates remain eligible in C++.
+        il.cpp_language=Some(true);
+        il.cxx_record_admissions[0].plain_object=true;
+        il.cxx_scalar_lifetime_admissions[0].candidate=true;
+        validate_native_c_language_separation(&il)
+            .expect("C++ admission is checked by the existing full validators");
     }
 
     #[test]
