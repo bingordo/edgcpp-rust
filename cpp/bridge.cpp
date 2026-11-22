@@ -1150,6 +1150,28 @@ static bool constant_initializer_image(
                             static_cast<int64_t>(delta)});
     return true;
   }
+  // EDG represents a C null pointer constant in static aggregate data as
+  // ck_integer with the final pointer type. Write only a *proven zero* for
+  // x86-64; an arbitrary integer-to-pointer value is not a linker address.
+  // This is separate from symbolic abk_constant and abk_variable addresses.
+  if (value->kind==ck_integer && type->kind==tk_pointer &&
+      type->size==8) {
+    a_boolean overflow=FALSE;
+    const bool is_zero=int_constant_is_signed(value)
+        ? value_of_integer_constant(value,&overflow)==0
+        : unsigned_value_of_integer_constant(value,&overflow)==0;
+    if (overflow || !is_zero) return false;
+    if (relocations!=nullptr) {
+      for (const auto &prior:*relocations) {
+        if (prior.byte_offset>bytes.size() ||
+            8>bytes.size()-prior.byte_offset ||
+            (offset<prior.byte_offset+8 && prior.byte_offset<offset+8))
+          return false;
+      }
+    }
+    std::memset(bytes.data()+offset,0,8);
+    return true;
+  }
   if (value->kind == ck_integer &&
       type->kind == tk_integer && type->size <= 8) {
     a_boolean overflow = FALSE;
