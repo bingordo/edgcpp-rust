@@ -3844,6 +3844,24 @@ pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
 mod tests {
     use super::*;
     #[test]
+    fn native_entry_rejects_null_callback_and_argument_vector() {
+        let valid=std::ffi::CString::new("edgcpfe").unwrap();
+        let mut argv=[valid.as_ptr() as *mut c_char,std::ptr::null_mut()];
+        let rejected_callback=unsafe {
+            edgcpp_compile(1,argv.as_mut_ptr(),None,std::ptr::null_mut())
+        };
+        assert_eq!(rejected_callback,-1,"a null callback must not SIGSEGV");
+        let rejected_argv=unsafe {
+            edgcpp_compile(1,std::ptr::null_mut(),Some(collect),std::ptr::null_mut())
+        };
+        assert_eq!(rejected_argv,-1,"missing argv must not reach EDG");
+        let rejected_argc=unsafe {
+            edgcpp_compile(0,argv.as_mut_ptr(),Some(collect),std::ptr::null_mut())
+        };
+        assert_eq!(rejected_argc,-1,"empty argv must not reach EDG");
+    }
+
+    #[test]
     fn native_success_requires_language_mode_provenance() {
         let mut il=Il::default();
         assert!(matches!(validate_complete_native_snapshot(&il),
