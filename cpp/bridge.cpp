@@ -2707,7 +2707,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       }
       // Out-of-line definitions may be visible through multiple IL scope
       // lists. Export their body and entity only once per routine pointer.
-      if (owning_class == nullptr) {
+      if (!C_mode() && owning_class == nullptr) {
         // Static member functions have no this_class. Resolve these from
         // the class declaration names after collecting all nested scopes.
         unresolved_members.push_back({r, routine_symbol, name});
@@ -2808,10 +2808,15 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
+          // Constructor/member initialization is C++ only. C function scopes
+          // still get the mandatory zero-count witness, but their C++-only
+          // constructor list is never traversed.
+          a_constructor_init_ptr constructors = C_mode() ? nullptr :
+              body->variant.routine.constructor_inits;
           // Count EDG-owned initializer entries independently from the
           // record-20 emission loop. Even zero entries have a witness.
           uint32_t native_initializer_count = 0;
-          for (a_constructor_init_ptr entry = body->variant.routine.constructor_inits;
+          for (a_constructor_init_ptr entry = constructors;
                entry != nullptr && within_native_list_limit(native_initializer_count);
                entry = entry->next, ++native_initializer_count) {}
           emit_record(RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT,
@@ -2819,7 +2824,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           // The function scope owns constructor/destructor subobject
           // initialization entries, ordered by actual execution order.
           unsigned init_position = 0;
-          for (a_constructor_init_ptr init = body->variant.routine.constructor_inits;
+          for (a_constructor_init_ptr init = constructors;
                init != nullptr && within_native_list_limit(init_position);
                init = init->next, ++init_position) {
             uint32_t target_type = 0;
@@ -2984,7 +2989,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
 #if DO_IL_LOWERING && USE_PATCH_INIT_STARTUP
       if (!C_mode() && v->lowering_generated &&
           v->storage_class == sc_static &&
-          std::string(source_name(v->source_corresp)) == "__link") {
+          source_name(v->source_corresp) != nullptr &&
+          std::strcmp(source_name(v->source_corresp), "__link") == 0) {
         a_constant_ptr aggregate = v->init_kind == initk_static ?
                                    v->initializer.constant : nullptr;
         if (aggregate == nullptr || aggregate->kind != ck_aggregate ||
@@ -3092,7 +3098,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       const uint32_t named_type_id = emit_type(t, 0);
-      if ((t->kind == tk_class || t->kind == tk_struct ||
+      if (!C_mode() && (t->kind == tk_class || t->kind == tk_struct ||
            t->kind == tk_union) && named_type_id != 0) {
         named_class_types.emplace(name, named_type_id);
       }
