@@ -42,7 +42,24 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
             return Err("literal byte image differs from independent C source".into());
         }
     }
-    println!("EDG_STATIC_LITERAL_C11_OBJECTS={} SLOTS=4 IMAGE_BYTES=32",
+    let null_global=il.symbols.iter()
+        .find(|s|s.name=="bootstrap_literal_union_null")
+        .ok_or("missing null-pointer union source identity")?.id;
+    let null_images:Vec<_>=il.global_aggregate_initializers.iter()
+        .filter(|v|v.symbol==null_global).collect();
+    if null_images.len()!=1 || null_images[0].bytes.len()!=32 ||
+        null_images[0].bytes.iter().any(|byte|*byte!=0) {
+        return Err("exact null-pointer union image not exported".into());
+    }
+    let null_refs:Vec<_>=il.global_literal_relocations.iter()
+        .filter(|v|v.symbol==null_global).collect();
+    if null_refs.len()!=1 || null_refs[0].offset!=0 ||
+        null_refs[0].addend!=0 ||
+        targets.get(&null_refs[0].literal_id)
+            .is_none_or(|literal|literal.bytes.as_slice()!=b"nullable\\0") {
+        return Err("C null-pointer union has wrong symbolic literal slot".into());
+    }
+    println!("EDG_STATIC_LITERAL_C11_OBJECTS={} SLOTS=5 TWO_UNIONS_BYTES=64",
              il.global_literal_objects.len());
     Ok(())
 }
