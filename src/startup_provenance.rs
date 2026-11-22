@@ -539,6 +539,8 @@ pub fn collect_cleanup_call_candidates(
            expressions.contains_key(&(function,stmt,format!("{path}.4").as_str())) {
             return Err(StartupEvidenceError::UnsupportedCleanupCall);
         }
+        // The original callee is native EDG enk_routine (21), not
+        // enk_variable (3). Confirmed on real two-global C++17 startup IL.
         // The call-target record and the independently emitted original EDG
         // callee expression must identify the same native routine. This API
         // also accepts hand-built Il snapshots, not just validated compile().
@@ -547,7 +549,7 @@ pub fn collect_cleanup_call_candidates(
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
         if callee_node.parent.as_deref()!=Some(path) ||
-           callee_node.kind!=3 || callee_node.symbol_id!=Some(callee) ||
+           callee_node.kind!=21 || callee_node.symbol_id!=Some(callee) ||
            callee_node.type_id!=call.callee_type {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         }
@@ -763,7 +765,7 @@ mod tests {
                      CallTargetForm::DirectRoutine,Some(SymbolId(3001)));
             emit_cleanup_test_expr(&mut il,&statement,"0",None,1,Some(3),None,None);
             emit_cleanup_test_expr(&mut il,&statement,"0.0",Some("0"),
-                3,None,None,Some(SymbolId(3001)));
+                21,None,None,Some(SymbolId(3001)));
             emit_cleanup_test_expr(&mut il,&statement,"0.1",Some("0"),
                 1,Some(5),None,None);
             emit_cleanup_test_expr(&mut il,&statement,"0.1.0",Some("0.1"),
@@ -834,6 +836,12 @@ mod tests {
         let il=cleanup_test_fixture(1);
         let mut wrong=il.clone();
         wrong.expressions[1].symbol_id=Some(SymbolId(2000));
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut wrong=il.clone();
+        // An enk_variable (3) cannot stand in for EDG enk_routine (21),
+        // even if its symbol and type fields are manually forged.
+        wrong.expressions[1].kind=3;
         assert_eq!(collect_cleanup_call_candidates(&wrong),
                    Err(StartupEvidenceError::MissingCleanupWitness));
         let mut wrong=il.clone();
