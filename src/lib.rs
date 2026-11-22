@@ -125,6 +125,11 @@ pub struct Il {
     pub global_aggregate_initializers: Vec<GlobalAggregateInitializer>,
     /// Relocatable global data pointers embedded in native aggregate images.
     pub global_aggregate_relocations: Vec<GlobalAggregateRelocation>,
+    /// Source-identity-preserving EDG constant objects referenced by static
+    /// global pointer initializers. Never treat bytes as a guessed address.
+    pub global_literal_objects: Vec<GlobalLiteralObject>,
+    /// Pointer-sized linker slots referring to the above immutable objects.
+    pub global_literal_relocations: Vec<GlobalLiteralRelocation>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
@@ -923,6 +928,24 @@ pub struct GlobalAggregateRelocation {
     pub addend: i64,
 }
 
+/// A complete immutable native EDG string-object image. The 1-based ID is
+/// unique in this translation unit, not a pointer value or a text hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalLiteralObject {
+    pub id: u32,
+    pub ty: TypeId,
+    pub bytes: Vec<u8>,
+}
+
+/// A symbolic pointer in a source-owned file-scope global initializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalLiteralRelocation {
+    pub symbol: SymbolId,
+    pub offset: u64,
+    pub literal_id: u32,
+    pub addend: i64,
+}
+
 /// Physical/diagnostic source location resolved from EDG's sequence table.
 /// Sequence and column are compilation-local; file and line reflect
 /// EDG's #line/include mapping. Generated locations are omitted.
@@ -1601,6 +1624,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
+        102 => Some(il.global_literal_objects.len()),
+        103 => Some(il.global_literal_relocations.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1817,11 +1842,54 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 function,statement_path,status,value:fields[3].signed(),
             });
         }
+        102 => {
+            let (Some(id),Some(ty),Some(hex))=(n(0),n(1),t(2)) else {return;};
+            // The bridge assigns IDs by first observed original EDG constant
+            // identity, starting at one. Incomplete or duplicate pools fail.
+            if id==0 || id>256 || ty==0 ||
+                id as usize!=output.global_literal_objects.len()+1 {
+                return;
+            }
+            let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            if bytes.is_empty() || bytes.len()>MAX_NATIVE_AGGREGATE_IMAGE_BYTES ||
+                bytes.last()!=Some(&0) {return;}
+            output.global_literal_objects.push(GlobalLiteralObject {
+                id,ty:TypeId(ty),bytes,
+            });
+        }
+        103 => {
+            let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
+                (n(0),fields[1].unsigned(),n(2),fields[3].signed())
+                else {return;};
+            // Event 51 is emitted before source-owned relocation events.
+            // Reject forged, dangling, out-of-bounds, nonzero, or duplicated
+            // slots before a later consumer could turn them into linker data.
+            let owner=SymbolId(symbol);
+            let Some(image)=output.global_aggregate_initializers.iter()
+                .find(|g|g.symbol==owner) else {return;};
+            let Ok(start)=usize::try_from(offset) else {return;};
+            if symbol==0 || literal_id==0 || literal_id>256 ||
+                !output.global_literal_objects.iter().any(|v|v.id==literal_id) ||
+                offset%8!=0 || output.global_literal_relocations.len()>=4096 ||
+                start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
+                image.bytes[start..start+8].iter().any(|&b|b!=0) ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) {
+                return;
+            }
+            output.global_literal_relocations.push(GlobalLiteralRelocation {
+                symbol:SymbolId(symbol),offset,literal_id,addend,
+            });
+        }
         52 => {
             let (Some(symbol),Some(offset),Some(target),Some(addend)) =
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
                 else {return;};
-            if symbol==0 || target==0 {return;}
+            if symbol==0 || target==0 ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==SymbolId(symbol) && p.offset==offset) {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
             });
@@ -6566,7 +6634,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=101_u32 {
+        for kind in 1..=103_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6595,13 +6663,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=101_u32)
+        let schema_fields:usize=(1..=103_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(102).is_none());
+        assert!(expected_wire_field_tag_masks(104).is_none());
     }
 
     #[test]
@@ -8014,3 +8082,113 @@ mod retired_source_hook_wire_tests {
 #[cfg(test)]
 #[path="global_materialization_tests.rs"]
 mod global_materialization_tests;
+
+#[cfg(test)]
+mod bootstrap_literal_global_wire_tests {
+    use super::*;
+    fn number(n:u64)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED}
+    }
+    fn signed(n:i64)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:n as u64,tag:wire_tags::SIGNED}
+    }
+    fn text(bytes:&[u8])->WireField {
+        WireField{data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]) {
+        unsafe{collect((state as *mut Collector).cast(),
+                       kind,fields.as_ptr(),fields.len(),0);}
+    }
+    fn global_image(state:&mut Collector,symbol:u64,bytes:&[u8]) {
+        let hex: String=bytes.iter().map(|b|format!("{b:02x}")).collect();
+        send(state,51,&[number(symbol),number(60),text(hex.as_bytes())]);
+    }
+    #[test]
+    fn decodes_complete_source_literal_and_distinct_relocatable_global_slots() {
+        let mut state=Collector::default();
+        // Source C: a static union containing pointers into original
+        // constant objects. Equal identity is retained by the same pool ID.
+        global_image(&mut state,7,&[0;24]);
+        send(&mut state,102,&[number(1),number(44),text(b"486900")]);
+        send(&mut state,102,&[number(2),number(45),text(b"42796500")]);
+        send(&mut state,103,&[number(7),number(0),number(1),signed(0)]);
+        send(&mut state,103,&[number(7),number(8),number(2),signed(0)]);
+        send(&mut state,103,&[number(7),number(16),number(1),signed(0)]);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_literal_objects[0],GlobalLiteralObject {
+            id:1,ty:TypeId(44),bytes:b"Hi\0".to_vec(),
+        });
+        assert_eq!(state.il.global_literal_objects[1].bytes.as_slice(),b"Bye\0");
+        assert_eq!(state.il.global_literal_relocations.len(),3);
+        assert_eq!(state.il.global_literal_relocations[0],GlobalLiteralRelocation {
+            symbol:SymbolId(7),offset:0,literal_id:1,addend:0,
+        });
+        assert_eq!(state.il.global_literal_relocations[2].literal_id,1);
+    }
+    #[test]
+    fn duplicate_missing_or_malformed_source_literal_rejects_without_panic() {
+        for image in [b"abcd".as_slice(),b"0".as_slice(),b"gg00".as_slice()] {
+            let mut state=Collector::default();
+            send(&mut state,102,&[number(1),number(44),text(image)]);
+            assert!(state.malformed && !state.panicked);
+        }
+        let mut state=Collector::default();
+        send(&mut state,102,&[number(2),number(44),text(b"6100")]);
+        assert!(state.malformed);
+        let mut state=Collector::default();
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+        send(&mut state,102,&[number(1),number(44),text(b"6200")]);
+        assert!(state.malformed && !state.panicked);
+        let mut state=Collector::default();
+        global_image(&mut state,7,&[0;24]);
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+        send(&mut state,103,&[number(7),number(4),number(1),signed(0)]);
+        assert!(state.malformed);
+        let mut state=Collector::default();
+        global_image(&mut state,7,&[0;24]);
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+        send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
+        send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+    #[test]
+    fn literal_relocation_must_own_existing_zeroed_aggregate_slot() {
+        for scenario in 0..5 {
+            let mut state=Collector::default();
+            if scenario!=0 {
+                let mut bytes=[0u8;16];
+                if scenario==3 {bytes[8]=1;}
+                global_image(&mut state,7,&bytes);
+            }
+            if scenario!=1 {
+                send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+            }
+            let (owner,offset)=match scenario {
+                2 => (7,16), // beyond source image
+                4 => (9,8), // no source-owned aggregate for this symbol
+                _ => (7,8),
+            };
+            send(&mut state,103,&[
+                number(owner),number(offset),number(1),signed(0)]);
+            assert!(state.malformed && !state.panicked,"scenario {scenario}");
+        }
+    }
+    #[test]
+    fn literal_and_variable_relocations_cannot_share_one_slot() {
+        for literal_first in [false,true] {
+            let mut state=Collector::default();
+            global_image(&mut state,7,&[0;16]);
+            send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+            let literal=[number(7),number(8),number(1),signed(0)];
+            let variable=[number(7),number(8),number(8),signed(0)];
+            if literal_first {
+                send(&mut state,103,&literal);
+                send(&mut state,52,&variable);
+            } else {
+                send(&mut state,52,&variable);
+                send(&mut state,103,&literal);
+            }
+            assert!(state.malformed && !state.panicked);
+        }
+    }
+}

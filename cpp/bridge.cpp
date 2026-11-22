@@ -38,6 +38,9 @@ thread_local edgcpp_il_callback current_callback = nullptr;
 thread_local void *current_user_data = nullptr;
 thread_local std::unordered_map<const void *, uint32_t> type_ids;
 thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
+// Original EDG constant pointer identity, used only as an in-memory lookup
+// key. Stable per-snapshot IDs, never native pointer values, cross the wire.
+thread_local std::unordered_map<const void *, uint32_t> static_literal_ids;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
@@ -900,8 +903,43 @@ static a_type_ptr object_initializer_type(a_type_ptr type) {
 struct NativeAggregateReloc {
   size_t byte_offset;
   a_variable_ptr target;
+  a_constant_ptr literal;
   int64_t addend;
 };
+
+// Exact target-machine byte image of EDG's own addressable string constant.
+// This is shared by the static aggregate image verifier and literal emitter.
+// Padding comes only from EDG's complete array extent, never source tokens.
+static bool native_static_literal_image(a_constant_ptr literal,
+                                        std::string &encoded) {
+  if (literal == nullptr || literal->kind != ck_string ||
+      literal->variant.string.value == nullptr) return false;
+  a_type_ptr type=object_initializer_type(literal->type);
+  if (type == nullptr || type->kind != tk_array || type->incomplete ||
+      type->variant.array.is_variable_size_array ||
+      type->variant.array.is_template_dependent_size_array ||
+      type->size == 0 || type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES)
+    return false;
+  a_type_ptr element=object_initializer_type(type->variant.array.element_type);
+  if (element == nullptr || element->kind != tk_integer ||
+      element->size != 1 ||
+      type->variant.array.variant.number_of_elements != type->size)
+    return false;
+  const size_t bytes=static_cast<size_t>(type->size);
+  const size_t n=static_cast<size_t>(literal->variant.string.length);
+  if (n > bytes) return false;
+  std::vector<uint8_t> image(bytes,0);
+  std::memcpy(image.data(),literal->variant.string.value,n);
+  if (image.back()!=0) return false;
+  static constexpr char digits[]="0123456789abcdef";
+  encoded.clear();
+  encoded.reserve(image.size()*2);
+  for (const uint8_t value:image) {
+    encoded.push_back(digits[value>>4]);
+    encoded.push_back(digits[value&15]);
+  }
+  return true;
+}
 static bool constant_initializer_image(
     a_constant_ptr value, a_type_ptr original_type, size_t offset,
     std::vector<uint8_t> &bytes, unsigned depth,
@@ -1076,9 +1114,21 @@ static bool constant_initializer_image(
   if (value->kind == ck_address && type->kind == tk_pointer) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
-        address.kind != abk_variable || address.variant.variable == nullptr ||
-        address.is_object_reflection)
+        address.is_object_reflection || address.one_past_the_end ||
+        address.subobject_path != nullptr)
       return false;
+    a_variable_ptr variable=nullptr;
+    a_constant_ptr literal=nullptr;
+    if (address.kind==abk_variable) {
+      variable=address.variant.variable;
+      if (variable==nullptr) return false;
+    } else if (address.kind==abk_constant && address.offset==0) {
+      literal=address.variant.constant;
+      std::string witness;
+      if (!native_static_literal_image(literal,witness)) return false;
+    } else {
+      return false;
+    }
     // The 4 KiB image bound and disjoint eight-byte slots already limit
     // relocations to 512; an independent 256-entry cap rejected valid data.
     static_assert(MAX_NATIVE_AGGREGATE_IMAGE_BYTES / 8 == 512);
@@ -1096,8 +1146,30 @@ static bool constant_initializer_image(
       if (offset < prior.byte_offset + 8 && prior.byte_offset < offset + 8)
         return false;
     }
-    relocations->push_back({offset, address.variant.variable,
+    relocations->push_back({offset, variable, literal,
                             static_cast<int64_t>(delta)});
+    return true;
+  }
+  // EDG represents a C null pointer constant in static aggregate data as
+  // ck_integer with the final pointer type. Write only a *proven zero* for
+  // x86-64; an arbitrary integer-to-pointer value is not a linker address.
+  // This is separate from symbolic abk_constant and abk_variable addresses.
+  if (value->kind==ck_integer && type->kind==tk_pointer &&
+      type->size==8) {
+    a_boolean overflow=FALSE;
+    const bool is_zero=int_constant_is_signed(value)
+        ? value_of_integer_constant(value,&overflow)==0
+        : unsigned_value_of_integer_constant(value,&overflow)==0;
+    if (overflow || !is_zero) return false;
+    if (relocations!=nullptr) {
+      for (const auto &prior:*relocations) {
+        if (prior.byte_offset>bytes.size() ||
+            8>bytes.size()-prior.byte_offset ||
+            (offset<prior.byte_offset+8 && prior.byte_offset<offset+8))
+          return false;
+      }
+    }
+    std::memset(bytes.data()+offset,0,8);
     return true;
   }
   if (value->kind == ck_integer &&
@@ -3073,14 +3145,50 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                                         hex, &relocations)) {
           emit_record(51, {num(symbol_id), num(emit_type(v->type, 0)), txt(hex)});
           for (const auto &reloc : relocations) {
-            if (reloc.byte_offset > std::numeric_limits<uint32_t>::max())
+            if (reloc.byte_offset > std::numeric_limits<uint32_t>::max()) {
+              report_incomplete_snapshot();
+              break;
+            }
+            if (reloc.literal != nullptr) {
+              auto found=static_literal_ids.find(reloc.literal);
+              uint32_t id=0;
+              if (found==static_literal_ids.end()) {
+                if (static_literal_ids.size()>=256) {
+                  report_incomplete_snapshot();
+                  break;
+                }
+                std::string image;
+                if (!native_static_literal_image(reloc.literal,image)) {
+                  report_incomplete_snapshot();
+                  break;
+                }
+                const uint32_t ty=emit_type(reloc.literal->type,0);
+                if (ty==0) {
+                  report_incomplete_snapshot();
+                  break;
+                }
+                id=static_cast<uint32_t>(static_literal_ids.size()+1);
+                static_literal_ids.emplace(reloc.literal,id);
+                emit_record(RECORD_STATIC_LITERAL_OBJECT,
+                            {num(id),num(ty),txt(image)});
+              } else {
+                id=found->second;
+              }
+              emit_record(RECORD_STATIC_LITERAL_RELOCATION,
+                          {num(symbol_id),num(reloc.byte_offset),num(id),
+                           signed_num(reloc.addend)});
               continue;
-            const auto target = emit_symbol(
-                reloc.target, 2,
-                declaration_name(reloc.target->source_corresp, false));
+            }
+            if (reloc.target==nullptr) {
+              report_incomplete_snapshot();
+              break;
+            }
+            const auto target=emit_symbol(
+                reloc.target,2,
+                declaration_name(reloc.target->source_corresp,false));
             emit_variable_type(reloc.target);
-            emit_record(52, {num(symbol_id), num(reloc.byte_offset),
-                             num(target), signed_num(reloc.addend)});
+            emit_record(52,{num(symbol_id),num(reloc.byte_offset),
+                            num(target),signed_num(reloc.addend)});
           }
         }
       }
@@ -3268,6 +3376,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   }
   type_ids.clear();
   symbol_ids.clear();
+  static_literal_ids.clear();
   visited_scopes.clear();
   emitted_symbol_types.clear();
   current_lifetime_ids.clear();
@@ -3289,6 +3398,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   current_user_data = nullptr;
   type_ids.clear();
   symbol_ids.clear();
+  static_literal_ids.clear();
   visited_scopes.clear();
   emitted_symbol_types.clear();
   current_lifetime_ids.clear();
