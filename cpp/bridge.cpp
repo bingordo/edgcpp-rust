@@ -663,7 +663,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   }
   // Direct base classes are linked in source declaration order, unlike
   // the transitive postorder base_classes list.
-  if ((type->kind == tk_class || type->kind == tk_struct) &&
+  if (!C_mode() && (type->kind == tk_class || type->kind == tk_struct) &&
       type->variant.class_struct_union.extra_info != nullptr) {
     unsigned position = 0;
     for (a_base_class_ptr base =
