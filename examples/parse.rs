@@ -136,6 +136,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Keep every exact call even when EDG has drained its native scope
+    // initializer list. UNKNOWN owners are explicit, not guessed ordinals.
+    match edgcpp::startup_provenance::collect_partial_cleanup_associations(&result.il) {
+        Ok(associations) => {
+            let matched=associations.iter().filter(|item|item.scope.is_some()).count();
+            println!("EDG_CXX5_CLEANUP_PARTIAL calls={} scoped={} unscoped={} complete_lifecycle_proven=false",
+                     associations.len(),matched,associations.len()-matched);
+            for item in associations.iter().take(64) {
+                println!("EDG_CXX5_CLEANUP_PARTIAL_ENTRY object={} destructor={} scope={:?} ordinal={:?} complete_lifecycle_proven=false",
+                         item.call.object.0,item.call.destructor.0,
+                         item.scope,item.scope_position);
+            }
+        }
+        Err(error) => {
+            println!("EDG_CXX5_CLEANUP_PARTIAL incomplete={error:?} complete_lifecycle_proven=false");
+        }
+    }
     // The stricter typed event-68 join is *also* diagnostic only.
     match edgcpp::startup_provenance::collect_cleanup_registration_witnesses(&result.il) {
         Ok(witnesses) => {
