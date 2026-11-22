@@ -3092,7 +3092,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             // output chosen from a user C translation unit.
             const char *diagnostic_file=std::getenv(
                 "EDGCPP_DIAG_C_AGGREGATE_FAILURE_FILE");
-            FILE *out=diagnostic_file!=nullptr
+            std::FILE *out=diagnostic_file!=nullptr
                 ? std::fopen(diagnostic_file,"a") : nullptr;
             if (out!=nullptr) {
               std::fprintf(out,
