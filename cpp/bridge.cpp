@@ -914,6 +914,26 @@ static a_type_ptr object_initializer_type(a_type_ptr type) {
   }
   return type;
 }
+// An EDG tk_typeref may carry a zero raw size while its canonical element
+// has an exact native layout (notably C typedef-qualified pointer arrays).
+// Use the *same* proven stride for both indexed and sequential array
+// initializers. No inferred default size, ABI assumption or synthetic
+// padding: the original array's complete object size must agree with the
+// canonical EDG element size times its original element count.
+static a_type_ptr checked_native_array_element(a_type_ptr array) {
+  if (array == nullptr || array->kind != tk_array || array->incomplete ||
+      array->variant.array.is_variable_size_array ||
+      array->variant.array.is_template_dependent_size_array) return nullptr;
+  a_type_ptr element =
+      object_initializer_type(array->variant.array.element_type);
+  const uint64_t count=array->variant.array.variant.number_of_elements;
+  if (element == nullptr || element->kind == tk_typeref ||
+      element->incomplete || element->size == 0 || array->size == 0 ||
+      count == 0 || count > array->size / element->size ||
+      count * element->size != array->size)
+    return nullptr;
+  return element;
+}
 // Store linker references separately from integer object bytes.
 struct NativeAggregateReloc {
   size_t byte_offset;
@@ -1061,8 +1081,8 @@ static bool constant_designated_value(
           type->variant.array.is_template_dependent_size_array) return false;
       const uint64_t index = current->variant.designator.variant.array_element;
       if (index >= type->variant.array.variant.number_of_elements) return false;
-      element = type->variant.array.element_type;
-      if (element == nullptr || element->size == 0 ||
+      element = checked_native_array_element(type);
+      if (element == nullptr ||
           index > (bytes.size() - offset) / element->size) return false;
       child_offset += static_cast<size_t>(index * element->size);
     }
@@ -1232,9 +1252,8 @@ static bool constant_initializer_image(
     if (type->variant.array.is_variable_size_array ||
         type->variant.array.is_template_dependent_size_array)
       return rejected_static_aggregate(2);
-    a_type_ptr element = type->variant.array.element_type;
-    if (element == nullptr || element->size == 0)
-      return rejected_static_aggregate(3);
+    a_type_ptr element = checked_native_array_element(type);
+    if (element == nullptr) return rejected_static_aggregate(3);
     uint64_t index = 0;
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
