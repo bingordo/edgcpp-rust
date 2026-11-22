@@ -3231,6 +3231,46 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                   nested!=nullptr && nested->kind==ck_init_repeat
                       ? static_cast<unsigned long>(nested->variant.init_repeat.count) : 0ul,
                   nested!=nullptr && nested->kind==ck_designator ? 1u : 0u);
+              // Source-verified constant-address referent only; numeric
+              // diagnostics never expose literal text, source or addresses.
+              const bool is_const_address=nested!=nullptr &&
+                  nested->kind==ck_address &&
+                  nested->variant.address.kind==abk_constant;
+              a_constant_ptr referent=is_const_address
+                  ? nested->variant.address.variant.constant : nullptr;
+              a_type_ptr referent_type=referent!=nullptr
+                  ? object_initializer_type(referent->type) : nullptr;
+              const bool string_referent=referent!=nullptr &&
+                  referent->kind==ck_string;
+              // The following address fields are read only under is_const_address.
+              std::fprintf(out,
+                  "EDG_C_UNION_REFERENT_DIAG owner=%u is_const_address=%u "
+                  "referent_present=%u referent_kind=%u type_kind=%u "
+                  "type_bytes=%lu type_align=%lu string_length=%lu "
+                  "string_bytes_present=%u offset_zero=%u one_past=%u "
+                  "object_reflection=%u alias_repeat_count=%u\n",
+                  symbol_id,is_const_address ? 1u : 0u,
+                  referent!=nullptr ? 1u : 0u,
+                  referent!=nullptr ? static_cast<unsigned>(referent->kind) : 999u,
+                  referent_type!=nullptr ? static_cast<unsigned>(referent_type->kind) : 999u,
+                  referent_type!=nullptr ? static_cast<unsigned long>(referent_type->size) : 0ul,
+                  referent_type!=nullptr ? static_cast<unsigned long>(referent_type->alignment) : 0ul,
+                  string_referent ? static_cast<unsigned long>(referent->variant.string.length) : 0ul,
+                  string_referent && referent->variant.string.value!=nullptr ? 1u : 0u,
+                  is_const_address && nested->variant.address.offset==0 ? 1u : 0u,
+                  is_const_address && nested->variant.address.one_past_the_end ? 1u : 0u,
+                  is_const_address && nested->variant.address.is_object_reflection ? 1u : 0u,
+                  [&]() {
+                    unsigned repeated=0;
+                    if (is_const_address && referent!=nullptr) {
+                      for (a_constant_ptr item=nested;item!=nullptr && repeated<8;item=item->next) {
+                        if (item->kind==ck_address &&
+                            item->variant.address.kind==abk_constant &&
+                            item->variant.address.variant.constant==referent) ++repeated;
+                      }
+                    }
+                    return repeated;
+                  }());
               std::fclose(out);
             }
           }
