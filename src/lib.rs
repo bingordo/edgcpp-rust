@@ -125,6 +125,11 @@ pub struct Il {
     pub global_aggregate_initializers: Vec<GlobalAggregateInitializer>,
     /// Relocatable global data pointers embedded in native aggregate images.
     pub global_aggregate_relocations: Vec<GlobalAggregateRelocation>,
+    /// Source-identity-preserving EDG constant objects referenced by static
+    /// global pointer initializers. Never treat bytes as a guessed address.
+    pub global_literal_objects: Vec<GlobalLiteralObject>,
+    /// Pointer-sized linker slots referring to the above immutable objects.
+    pub global_literal_relocations: Vec<GlobalLiteralRelocation>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
@@ -923,6 +928,24 @@ pub struct GlobalAggregateRelocation {
     pub addend: i64,
 }
 
+/// A complete immutable native EDG string-object image. The 1-based ID is
+/// unique in this translation unit, not a pointer value or a text hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalLiteralObject {
+    pub id: u32,
+    pub ty: TypeId,
+    pub bytes: Vec<u8>,
+}
+
+/// A symbolic pointer in a source-owned file-scope global initializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalLiteralRelocation {
+    pub symbol: SymbolId,
+    pub offset: u64,
+    pub literal_id: u32,
+    pub addend: i64,
+}
+
 /// Physical/diagnostic source location resolved from EDG's sequence table.
 /// Sequence and column are compilation-local; file and line reflect
 /// EDG's #line/include mapping. Generated locations are omitted.
@@ -1601,6 +1624,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         50 => Some(il.statement_aggregate_initializers.len()),
         51 => Some(il.global_aggregate_initializers.len()),
         52 => Some(il.global_aggregate_relocations.len()),
+        102 => Some(il.global_literal_objects.len()),
+        103 => Some(il.global_literal_relocations.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1815,6 +1840,35 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             }
             output.statement_switch_cases.push(StatementSwitchCase {
                 function,statement_path,status,value:fields[3].signed(),
+            });
+        }
+        102 => {
+            let (Some(id),Some(ty),Some(hex))=(n(0),n(1),t(2)) else {return;};
+            // The bridge assigns IDs by first observed original EDG constant
+            // identity, starting at one. Incomplete or duplicate pools fail.
+            if id==0 || id>256 || ty==0 ||
+                id as usize!=output.global_literal_objects.len()+1 {
+                return;
+            }
+            let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            if bytes.is_empty() || bytes.len()>MAX_NATIVE_AGGREGATE_IMAGE_BYTES ||
+                bytes.last()!=Some(&0) {return;}
+            output.global_literal_objects.push(GlobalLiteralObject {
+                id,ty:TypeId(ty),bytes,
+            });
+        }
+        103 => {
+            let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
+                (n(0),fields[1].unsigned(),n(2),fields[3].signed())
+                else {return;};
+            if symbol==0 || literal_id==0 || literal_id>256 ||
+                offset%8!=0 || output.global_literal_relocations.len()>=4096 ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==SymbolId(symbol) && p.offset==offset) {
+                return;
+            }
+            output.global_literal_relocations.push(GlobalLiteralRelocation {
+                symbol:SymbolId(symbol),offset,literal_id,addend,
             });
         }
         52 => {
@@ -6566,7 +6620,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=101_u32 {
+        for kind in 1..=103_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6595,13 +6649,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=101_u32)
+        let schema_fields:usize=(1..=103_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(102).is_none());
+        assert!(expected_wire_field_tag_masks(104).is_none());
     }
 
     #[test]
