@@ -8099,7 +8099,7 @@ mod bootstrap_literal_global_wire_tests {
         assert_eq!(state.il.global_literal_objects[0],GlobalLiteralObject {
             id:1,ty:TypeId(44),bytes:b"Hi\0".to_vec(),
         });
-        assert_eq!(state.il.global_literal_objects[1].bytes,b"Bye\0");
+        assert_eq!(state.il.global_literal_objects[1].bytes.as_slice(),b"Bye\0");
         assert_eq!(state.il.global_literal_relocations.len(),3);
         assert_eq!(state.il.global_literal_relocations[0],GlobalLiteralRelocation {
             symbol:SymbolId(7),offset:0,literal_id:1,addend:0,
