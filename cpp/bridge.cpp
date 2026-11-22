@@ -3108,6 +3108,33 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         std::vector<NativeAggregateReloc> relocations;
         const bool image_ok=aggregate_initializer_image(
             v->initializer.constant, v->type, hex, &relocations);
+        // Join the original source object's bridge image outcome with the
+        // downstream TypeId rejection INSIDE the private CI runner. The owner
+        // index is never emitted in the public step summary. This detects
+        // dropped event-51 images without guessing union initializer bytes.
+        if (C_mode() && v->has_explicit_initializer &&
+            std::getenv("EDGCPP_DIAG_C_AGGREGATE_FAILURE") != nullptr) {
+          a_type_ptr underlying=object_initializer_type(v->type);
+          if (underlying != nullptr && underlying->kind == tk_union &&
+              underlying->size == 32 && underlying->alignment == 8) {
+            static unsigned outcome_reports=0;
+            if (outcome_reports++ < 64) {
+              const char *diagnostic_file=std::getenv(
+                  "EDGCPP_DIAG_C_AGGREGATE_FAILURE_FILE");
+              std::FILE *out=diagnostic_file!=nullptr
+                  ? std::fopen(diagnostic_file,"a") : nullptr;
+              if (out!=nullptr) {
+                std::fprintf(out,
+                    "EDG_C_UNION_IMAGE_OUTCOME owner=%u image_ok=%u "
+                    "byte_count=%lu relocation_count=%lu\n",
+                    symbol_id, image_ok ? 1u : 0u,
+                    static_cast<unsigned long>(image_ok ? hex.size()/2 : 0),
+                    static_cast<unsigned long>(relocations.size()));
+                std::fclose(out);
+              }
+            }
+          }
+        }
         // Strictly diagnostic: the generated C source, names and native
         // pointers are never included. Report at most four failing small
         // C-union image shapes in the opt-in CI run.
