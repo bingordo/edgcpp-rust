@@ -47,11 +47,35 @@ struct NumericStaticImageDiag {
   uint32_t images_ok=0,images_failed=0,invalid_address=0;
   uint32_t invalid_literal=0,nonzero_or_overflow_pointer=0,other_leaf=0;
   uint32_t union32_ok=0,union32_failed=0,union32_failure_mask=0;
+  uint32_t union32_leaf_kind_mask=0,union32_leaf_type_mask=0;
 };
 thread_local NumericStaticImageDiag static_image_diag;
 // Bit positions classify only structural rejection paths, never source data.
 // Reset on entry to each original native aggregate image.
 thread_local uint32_t static_image_failure_mask=0;
+thread_local uint32_t static_image_leaf_kind_mask=0;
+thread_local uint32_t static_image_leaf_type_mask=0;
+// These are closed, source-independent EDG enum category masks. No raw
+// constant bytes, symbol IDs, addresses, names or source snippets escape.
+static unsigned static_literal_leaf_category(a_constant_ptr value) {
+  if (value->kind==ck_address) return 0;
+  if (value->kind==ck_integer) return 1;
+  if (value->kind==ck_string) return 2;
+  if (value->kind==ck_float) return 3;
+  if (value->kind==ck_designator) return 4;
+  if (value->kind==ck_init_repeat) return 5;
+  return 6;
+}
+static unsigned static_literal_type_category(a_type_ptr type) {
+  if (type->kind==tk_pointer) return 0;
+  if (type->kind==tk_integer) return 1;
+  if (type->kind==tk_array) return 2;
+  if (type->kind==tk_struct) return 3;
+  if (type->kind==tk_union) return 4;
+  if (type->kind==tk_float) return 5;
+  if (type->kind==tk_typeref) return 6;
+  return 7;
+}
 static bool rejected_static_aggregate(unsigned category) {
   if (category<32) static_image_failure_mask |= uint32_t(1)<<category;
   return false;
@@ -1245,6 +1269,10 @@ static bool constant_initializer_image(
   }
   if (value->kind != ck_aggregate) {
     ++static_image_diag.other_leaf;
+    static_image_leaf_kind_mask |=
+        uint32_t(1) << static_literal_leaf_category(value);
+    static_image_leaf_type_mask |=
+        uint32_t(1) << static_literal_type_category(type);
     return false;
   }
   a_constant_ptr current = value->variant.aggregate.first_constant;
@@ -1350,6 +1378,8 @@ static bool aggregate_initializer_image(
   const bool union32=type!=nullptr && type->kind==tk_union &&
                      type->size==32;
   static_image_failure_mask=0;
+  static_image_leaf_kind_mask=0;
+  static_image_leaf_type_mask=0;
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
@@ -1368,6 +1398,8 @@ static bool aggregate_initializer_image(
     if (union32) {
       ++static_image_diag.union32_failed;
       static_image_diag.union32_failure_mask |= static_image_failure_mask;
+      static_image_diag.union32_leaf_kind_mask |= static_image_leaf_kind_mask;
+      static_image_diag.union32_leaf_type_mask |= static_image_leaf_type_mask;
     }
     return false;
   }
@@ -3477,10 +3509,11 @@ extern "C" int edgcpp_compile(int argc, char **argv,
       aggregate_diag[1] == '\0') {
     const auto &d = static_image_diag;
     std::fprintf(stderr,
-        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u\n",
+        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u union32_leaf_kind_mask=%u union32_leaf_type_mask=%u\n",
         d.images_ok,d.images_failed,d.invalid_address,d.invalid_literal,
         d.nonzero_or_overflow_pointer,d.other_leaf,
-        d.union32_ok,d.union32_failed,d.union32_failure_mask);
+        d.union32_ok,d.union32_failed,d.union32_failure_mask,
+        d.union32_leaf_kind_mask,d.union32_leaf_type_mask);
   }
   current_callback = nullptr;
   current_user_data = nullptr;
