@@ -3069,8 +3069,47 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
         std::string hex;
         std::vector<NativeAggregateReloc> relocations;
-        if (aggregate_initializer_image(v->initializer.constant, v->type,
-                                        hex, &relocations)) {
+        const bool image_ok=aggregate_initializer_image(
+            v->initializer.constant, v->type, hex, &relocations);
+        // Strictly diagnostic: the generated C source, names and native
+        // pointers are never included. Report at most four failing small
+        // C-union image shapes in the opt-in CI run.
+        if (!image_ok && C_mode() && v->type != nullptr &&
+            v->type->kind == tk_union && v->type->size == 32 &&
+            std::getenv("EDGCPP_DIAG_C_AGGREGATE_FAILURE") != nullptr) {
+          static unsigned reported = 0;
+          if (reported++ < 4) {
+            const a_constant_ptr root=v->initializer.constant;
+            const a_constant_ptr first=root->kind==ck_aggregate
+                ? root->variant.aggregate.first_constant : nullptr;
+            const a_constant_ptr second=first!=nullptr ? first->next : nullptr;
+            const a_constant_ptr third=second!=nullptr ? second->next : nullptr;
+            unsigned child_count=0;
+            for (a_constant_ptr p=first;
+                 p!=nullptr && child_count<8; p=p->next,++child_count) {}
+            std::fprintf(stderr,
+                "EDG_C_UNION_IMAGE_DIAG type_size=%lu type_align=%lu "
+                "root_kind=%u first_kind=%u second_kind=%u third_kind=%u "
+                "first_child_kind=%u child_count_bounded=%u "
+                "root_dynamic=%u first_address_kind=%u first_designator=%u\\n",
+                static_cast<unsigned long>(v->type->size),
+                static_cast<unsigned long>(v->type->alignment),
+                static_cast<unsigned>(root->kind),
+                first!=nullptr ? static_cast<unsigned>(first->kind) : 999u,
+                second!=nullptr ? static_cast<unsigned>(second->kind) : 999u,
+                third!=nullptr ? static_cast<unsigned>(third->kind) : 999u,
+                first!=nullptr && first->kind==ck_aggregate &&
+                    first->variant.aggregate.first_constant!=nullptr
+                    ? static_cast<unsigned>(first->variant.aggregate.first_constant->kind) : 999u,
+                child_count,
+                root->kind==ck_aggregate &&
+                  root->variant.aggregate.has_dynamic_init_component ? 1u : 0u,
+                first!=nullptr && first->kind==ck_address
+                  ? static_cast<unsigned>(first->variant.address.kind) : 999u,
+                first!=nullptr && first->kind==ck_designator ? 1u : 0u);
+          }
+        }
+        if (image_ok) {
           emit_record(51, {num(symbol_id), num(emit_type(v->type, 0)), txt(hex)});
           for (const auto &reloc : relocations) {
             if (reloc.byte_offset > std::numeric_limits<uint32_t>::max())
