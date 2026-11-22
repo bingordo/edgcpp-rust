@@ -8068,3 +8068,64 @@ mod retired_source_hook_wire_tests {
 #[cfg(test)]
 #[path="global_materialization_tests.rs"]
 mod global_materialization_tests;
+
+#[cfg(test)]
+mod bootstrap_literal_global_wire_tests {
+    use super::*;
+    fn number(n:u64)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED}
+    }
+    fn signed(n:i64)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:n as u64,tag:wire_tags::SIGNED}
+    }
+    fn text(bytes:&[u8])->WireField {
+        WireField{data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]) {
+        unsafe{collect((state as *mut Collector).cast(),
+                       kind,fields.as_ptr(),fields.len(),0);}
+    }
+    #[test]
+    fn decodes_complete_source_literal_and_distinct_relocatable_global_slots() {
+        let mut state=Collector::default();
+        // Source C: a static union containing pointers into original
+        // constant objects. Equal identity is retained by the same pool ID.
+        send(&mut state,102,&[number(1),number(44),text(b"486900")]);
+        send(&mut state,102,&[number(2),number(45),text(b"4265796500")]);
+        send(&mut state,103,&[number(7),number(0),number(1),signed(0)]);
+        send(&mut state,103,&[number(7),number(8),number(2),signed(0)]);
+        send(&mut state,103,&[number(7),number(16),number(1),signed(0)]);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_literal_objects[0],GlobalLiteralObject {
+            id:1,ty:TypeId(44),bytes:b"Hi\0".to_vec(),
+        });
+        assert_eq!(state.il.global_literal_objects[1].bytes,b"Bye\0");
+        assert_eq!(state.il.global_literal_relocations.len(),3);
+        assert_eq!(state.il.global_literal_relocations[0],GlobalLiteralRelocation {
+            symbol:SymbolId(7),offset:0,literal_id:1,addend:0,
+        });
+        assert_eq!(state.il.global_literal_relocations[2].literal_id,1);
+    }
+    #[test]
+    fn duplicate_missing_or_malformed_source_literal_rejects_without_panic() {
+        for image in [b"abcd".as_slice(),b"0".as_slice(),b"gg00".as_slice()] {
+            let mut state=Collector::default();
+            send(&mut state,102,&[number(1),number(44),text(image)]);
+            assert!(state.malformed && !state.panicked);
+        }
+        let mut state=Collector::default();
+        send(&mut state,102,&[number(2),number(44),text(b"6100")]);
+        assert!(state.malformed);
+        let mut state=Collector::default();
+        send(&mut state,102,&[number(1),number(44),text(b"6100")]);
+        send(&mut state,102,&[number(1),number(44),text(b"6200")]);
+        assert!(state.malformed && !state.panicked);
+        let mut state=Collector::default();
+        send(&mut state,103,&[number(7),number(4),number(1),signed(0)]);
+        assert!(state.malformed);
+        let mut state=Collector::default();
+        send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
+        send(&mut state,103,&[number(7),number(8),number(1),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+}
