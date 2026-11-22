@@ -637,7 +637,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
          field != nullptr && within_native_list_limit(field_count);
          field = field->next, ++field_count) {}
     uint32_t direct_base_count = 0;
-    if ((type->kind == tk_class || type->kind == tk_struct) &&
+    if (!C_mode() && (type->kind == tk_class || type->kind == tk_struct) &&
         type->variant.class_struct_union.extra_info != nullptr) {
       for (a_base_class_ptr base =
                type->variant.class_struct_union.extra_info->direct_base_classes;
@@ -2684,15 +2684,16 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       // method's this_class is an additional fallback after lowering.
       a_type_ptr owning_class = nullptr;
       a_scope_ptr declared_in = r->source_corresp.parent_scope;
-      if (r->source_corresp.is_class_member && declared_in != nullptr &&
+      if (!C_mode() && r->source_corresp.is_class_member && declared_in != nullptr &&
           (declared_in->kind == sck_class_struct_union ||
            declared_in->kind == sck_class_reactivation)) {
         owning_class = declared_in->variant.assoc_type;
       }
-      if (owning_class == nullptr && scope->kind == sck_class_struct_union) {
+      if (!C_mode() && owning_class == nullptr &&
+          scope->kind == sck_class_struct_union) {
         owning_class = scope->variant.assoc_type;
       }
-      if (owning_class == nullptr && r->type != nullptr &&
+      if (!C_mode() && owning_class == nullptr && r->type != nullptr &&
           r->type->kind == tk_routine &&
           r->type->variant.routine.extra_info != nullptr) {
         owning_class = r->type->variant.routine.extra_info->this_class;
@@ -3096,7 +3097,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         named_class_types.emplace(name, named_type_id);
       }
       emit_record(3, {txt(name)}, 0);
-      if ((t->kind == tk_class || t->kind == tk_struct ||
+      // C tags have no C++ class member scope; field_list is already
+      // exported above by emit_type. Do not traverse a class supplement
+      // or nested member scope in C mode.
+      if (!C_mode() && (t->kind == tk_class || t->kind == tk_struct ||
            t->kind == tk_union) &&
           t->variant.class_struct_union.extra_info != nullptr) {
         a_scope_ptr members = t->variant.class_struct_union.extra_info->assoc_scope;
