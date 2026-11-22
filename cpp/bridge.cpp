@@ -321,6 +321,9 @@ static uint32_t emit_symbol(const void *ptr, unsigned kind,
 // treating an unsupported template as ordinary/POD or dereferencing a
 // missing supplement in the compiler's foreign-language bridge.
 static bool supported_concrete_class_proof_root(a_type_ptr type) {
+  // C records do not have EDG C++ class symbols/supplements, even when
+  // they use tk_struct; never inspect them through the C++ witness API.
+  if (C_mode()) return false;
   if (type == nullptr ||
       (type->kind != tk_class && type->kind != tk_struct) ||
       type->incomplete ||
@@ -540,10 +543,17 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   if (type->kind == tk_class || type->kind == tk_struct) {
     // 0: nontrivial/unsupported class; 1: EDG-certified POD/trivial class;
     // 2: tagless, no-supplement structural *storage only* (NOT a POD claim).
-    const unsigned record_proof = plain_cpp_record(type) ? 1u :
-        (tagless_cpp_storage_only(type) ? 2u : 0u);
+    // C has native aggregate layouts, not C++ POD/constructor semantics.
+    // Skip the C++ predicates at the call site as well as inside their
+    // implementations; still emit explicit zero certificates so the wire
+    // snapshot preserves complete and countable record metadata.
+    const bool cxx_mode = !C_mode();
+    const unsigned record_proof = !cxx_mode ? 0u :
+        (plain_cpp_record(type) ? 1u :
+         (tagless_cpp_storage_only(type) ? 2u : 0u));
     emit_record(63, {num(id), num(record_proof)});
-    emit_record(65, {num(id), num(bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
+    emit_record(65, {num(id), num(cxx_mode &&
+        bounded_cpp_scalar_lifetime(type) ? 1 : 0)});
   }
   // Native EDG object layout, never reconstructed from field order.
   // An alignment of zero is not a usable layout.
@@ -557,7 +567,7 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     // Source authority is the EDG type; this is not an admission rule.
     // Limit both scope and emitted fields, independently of user names.
     if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
-        type->size >= 128 && type->size <= 256 &&
+        !C_mode() && type->size >= 128 && type->size <= 256 &&
         (type->kind == tk_class || type->kind == tk_struct)) {
       a_symbol_ptr tag=symbol_for(type);
       const auto *extra=type->variant.class_struct_union.extra_info;
@@ -1879,7 +1889,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
       // from a symbol spelling, memory address, or a generic scope list.
       // The ordinary wire and C++ admission checks are unchanged.
       if (std::getenv("EDGCPP_DIAG_SOURCE_LOCALS") != nullptr &&
-          raw_name == nullptr && var->type != nullptr &&
+          !C_mode() && raw_name == nullptr && var->type != nullptr &&
           (var->type->kind == tk_class || var->type->kind == tk_struct) &&
           var->type->size >= 128) {
         ResolvedSource source_position{};
