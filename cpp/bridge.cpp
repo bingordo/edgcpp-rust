@@ -3091,7 +3091,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                 "EDG_C_UNION_IMAGE_DIAG type_size=%lu type_align=%lu "
                 "root_kind=%u first_kind=%u second_kind=%u third_kind=%u "
                 "first_child_kind=%u child_count_bounded=%u "
-                "root_dynamic=%u first_address_kind=%u first_designator=%u\\n",
+                "root_dynamic=%u first_address_kind=%u first_designator=%u\n",
                 static_cast<unsigned long>(v->type->size),
                 static_cast<unsigned long>(v->type->alignment),
                 static_cast<unsigned>(root->kind),
