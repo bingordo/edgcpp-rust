@@ -7,7 +7,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let mut args=vec![String::from("edgcpfe")];
     args.extend(std::env::args().skip(1));
     if args.len()<3 {return Err("expected original C fixture path".into());}
-    let unit=compile(&args)?;
+    let unit=compile(&args).map_err(|error|format!("EDG compilation: {error:?}"))?;
     if unit.status!=0 {return Err("EDG did not accept public fixture".into());}
     let il=&unit.il;
     let global=il.symbols.iter()
