@@ -3180,6 +3180,54 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                 first!=nullptr && first->kind==ck_address
                   ? static_cast<unsigned>(first->variant.address.kind) : 999u,
                 first!=nullptr && first->kind==ck_designator ? 1u : 0u);
+              // Second level of the exact source-owned designated union
+              // image. Never dereference an unverified designator field.
+              a_field_ptr selected=nullptr;
+              if (first!=nullptr && first->kind==ck_designator &&
+                  !first->variant.designator.is_generic &&
+                  first->variant.designator.is_field_designator) {
+                a_field_ptr claimed=first->variant.designator.variant.field;
+                unsigned checked=0;
+                for (a_field_ptr field=v->type->variant.class_struct_union.field_list;
+                     field!=nullptr && checked++<16; field=field->next) {
+                  if (field==claimed) { selected=field; break; }
+                }
+              }
+              a_type_ptr selected_type=selected!=nullptr
+                  ? object_initializer_type(selected->type) : nullptr;
+              a_constant_ptr nested=second!=nullptr && second->kind==ck_aggregate
+                  ? second->variant.aggregate.first_constant : nullptr;
+              a_constant_ptr nested_next=nested!=nullptr ? nested->next : nullptr;
+              a_constant_ptr deep=nested!=nullptr && nested->kind==ck_aggregate
+                  ? nested->variant.aggregate.first_constant : nullptr;
+              unsigned nested_count=0;
+              for (a_constant_ptr item=nested;
+                   item!=nullptr && nested_count<8;
+                   item=item->next,++nested_count) {}
+              std::fprintf(out,
+                  "EDG_C_UNION_NESTED_DIAG owner=%u selected=%u "
+                  "member_kind=%u member_bytes=%lu member_align=%lu "
+                  "member_offset=%lu array_count=%lu "
+                  "nested_count=%u nested_first=%u nested_second=%u "
+                  "nested_first_child=%u nested_address_kind=%u "
+                  "nested_repeat_count=%lu nested_designator=%u\n",
+                  symbol_id, selected!=nullptr ? 1u : 0u,
+                  selected_type!=nullptr ? static_cast<unsigned>(selected_type->kind) : 999u,
+                  selected_type!=nullptr ? static_cast<unsigned long>(selected_type->size) : 0ul,
+                  selected_type!=nullptr ? static_cast<unsigned long>(selected_type->alignment) : 0ul,
+                  selected!=nullptr ? static_cast<unsigned long>(selected->offset) : 0ul,
+                  selected_type!=nullptr && selected_type->kind==tk_array
+                      ? static_cast<unsigned long>(
+                          selected_type->variant.array.variant.number_of_elements) : 0ul,
+                  nested_count,
+                  nested!=nullptr ? static_cast<unsigned>(nested->kind) : 999u,
+                  nested_next!=nullptr ? static_cast<unsigned>(nested_next->kind) : 999u,
+                  deep!=nullptr ? static_cast<unsigned>(deep->kind) : 999u,
+                  nested!=nullptr && nested->kind==ck_address
+                      ? static_cast<unsigned>(nested->variant.address.kind) : 999u,
+                  nested!=nullptr && nested->kind==ck_init_repeat
+                      ? static_cast<unsigned long>(nested->variant.init_repeat.count) : 0ul,
+                  nested!=nullptr && nested->kind==ck_designator ? 1u : 0u);
               std::fclose(out);
             }
           }
