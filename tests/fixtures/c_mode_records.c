@@ -16,6 +16,12 @@ static struct Outer object = {
     { .number = 3 }
 };
 
+extern int external_counter;
+
 int c_record_read(void) {
     return object.node.value + object.pair.a + object.payload.number;
+}
+
+int c_external_read(void) {
+    return external_counter;
 }
