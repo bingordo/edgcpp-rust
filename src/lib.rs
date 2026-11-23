@@ -1652,6 +1652,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         52 => Some(il.global_aggregate_relocations.len()),
         102 => Some(il.global_literal_objects.len()),
         103 => Some(il.global_literal_relocations.len()),
+        105 => Some(il.global_routine_relocations.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
