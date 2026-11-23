@@ -130,6 +130,8 @@ pub struct Il {
     pub global_literal_objects: Vec<GlobalLiteralObject>,
     /// Pointer-sized linker slots referring to the above immutable objects.
     pub global_literal_relocations: Vec<GlobalLiteralRelocation>,
+    /// Source-owned routine function address slots in static C objects.
+    pub global_routine_relocations: Vec<GlobalRoutineRelocation>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
@@ -959,6 +961,15 @@ pub struct GlobalLiteralRelocation {
     pub addend: i64,
 }
 
+/// One exact source routine target and absolute 64-bit static pointer slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalRoutineRelocation {
+    pub symbol: SymbolId,
+    pub offset: u64,
+    pub routine: SymbolId,
+    pub addend: i64,
+}
+
 /// Physical/diagnostic source location resolved from EDG's sequence table.
 /// Sequence and column are compilation-local; file and line reflect
 /// EDG's #line/include mapping. Generated locations are omitted.
@@ -1641,6 +1652,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         52 => Some(il.global_aggregate_relocations.len()),
         102 => Some(il.global_literal_objects.len()),
         103 => Some(il.global_literal_relocations.len()),
+        105 => Some(il.global_routine_relocations.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1884,6 +1896,32 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 id,ty:TypeId(ty),bytes,
             });
         }
+        105 => {
+            let (Some(symbol),Some(offset),Some(routine),Some(addend))=
+                (n(0),fields[1].unsigned(),n(2),fields[3].signed())
+                else {return;};
+            let owner=SymbolId(symbol);
+            let target=SymbolId(routine);
+            let Some(image)=output.global_aggregate_initializers.iter()
+                .find(|g|g.symbol==owner) else {return;};
+            let Ok(start)=usize::try_from(offset) else {return;};
+            if symbol==0 || routine==0 || offset%8!=0 || addend!=0 ||
+                !output.symbols.iter().any(|s|s.id==target && s.kind==1) ||
+                output.global_routine_relocations.len()>=4096 ||
+                start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
+                image.bytes[start..start+8].iter().any(|&b|b!=0) ||
+                output.global_routine_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) {
+                return;
+            }
+            output.global_routine_relocations.push(GlobalRoutineRelocation {
+                symbol:owner,offset,routine:target,addend,
+            });
+        }
         103 => {
             let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
@@ -1903,6 +1941,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 output.global_literal_relocations.iter().any(|p|
                     p.symbol==owner && p.offset==offset) ||
                 output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_routine_relocations.iter().any(|p|
                     p.symbol==owner && p.offset==offset) {
                 return;
             }
@@ -1916,6 +1956,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if symbol==0 || target==0 ||
                 output.global_literal_relocations.iter().any(|p|
+                    p.symbol==SymbolId(symbol) && p.offset==offset) ||
+                output.global_routine_relocations.iter().any(|p|
                     p.symbol==SymbolId(symbol) && p.offset==offset) {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
@@ -6661,7 +6703,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=104_u32 {
+        for kind in 1..=105_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6690,13 +6732,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=104_u32)
+        let schema_fields:usize=(1..=105_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(105).is_none());
+        assert!(expected_wire_field_tag_masks(106).is_none());
     }
 
     #[test]
@@ -8252,6 +8294,69 @@ mod bootstrap_literal_global_wire_tests {
                 send(&mut state,103,&literal);
             }
             assert!(state.malformed && !state.panicked);
+        }
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_static_routine_relocation_wire_tests {
+    use super::*;
+    fn n(n:u64)->WireField {
+        WireField {data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED}
+    }
+    fn signed(v:i64)->WireField {
+        WireField {data:std::ptr::null(),length:0,value:v as u64,tag:wire_tags::SIGNED}
+    }
+    fn t(v:&[u8])->WireField {
+        WireField {data:v.as_ptr(),length:v.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]){
+        unsafe {collect((state as *mut Collector).cast(),
+                        kind,fields.as_ptr(),fields.len(),0);}
+    }
+    fn setup()->Collector {
+        let mut state=Collector::default();
+        send(&mut state,13,&[n(9),n(1),t(b"bootstrap_routine_target")]);
+        let hex=vec![b'0';64];
+        send(&mut state,51,&[n(7),n(70),t(&hex)]);
+        assert!(!state.malformed && !state.panicked);
+        state
+    }
+    #[test]
+    fn source_routine_relocation_preserves_target_identity_and_zeroed_slot() {
+        let mut state=setup();
+        send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_routine_relocations,
+                   vec![GlobalRoutineRelocation {
+                       symbol:SymbolId(7),offset:0,
+                       routine:SymbolId(9),addend:0,
+                   }]);
+    }
+    #[test]
+    fn unknown_duplicate_unaligned_nonzero_and_conflicting_slots_reject() {
+        for scenario in 0..6 {
+            let mut state=setup();
+            match scenario {
+                0=>send(&mut state,105,&[n(7),n(0),n(111),signed(0)]),
+                1=>send(&mut state,105,&[n(7),n(1),n(9),signed(0)]),
+                2=>send(&mut state,105,&[n(7),n(32),n(9),signed(0)]),
+                3=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                },
+                4=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,52,&[n(7),n(0),n(12),signed(0)]);
+                },
+                5=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,103,&[n(7),n(0),n(1),signed(0)]);
+                },
+                _=>unreachable!(),
+            }
+            assert!(state.malformed && !state.panicked,
+                    "source function relocation scenario {scenario} must reject");
         }
     }
 }
