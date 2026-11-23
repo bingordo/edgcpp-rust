@@ -8296,3 +8296,66 @@ mod bootstrap_literal_global_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bootstrap_static_routine_relocation_wire_tests {
+    use super::*;
+    fn n(n:u64)->WireField {
+        WireField {data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED}
+    }
+    fn signed(v:i64)->WireField {
+        WireField {data:std::ptr::null(),length:0,value:v as u64,tag:wire_tags::SIGNED}
+    }
+    fn t(v:&[u8])->WireField {
+        WireField {data:v.as_ptr(),length:v.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn send(state:&mut Collector,kind:u32,fields:&[WireField]){
+        unsafe {collect((state as *mut Collector).cast(),
+                        kind,fields.as_ptr(),fields.len(),0);}
+    }
+    fn setup()->Collector {
+        let mut state=Collector::default();
+        send(&mut state,13,&[n(9),n(1),t(b"bootstrap_routine_target")]);
+        let hex=vec![b'0';64];
+        send(&mut state,51,&[n(7),n(70),t(&hex)]);
+        assert!(!state.malformed && !state.panicked);
+        state
+    }
+    #[test]
+    fn source_routine_relocation_preserves_target_identity_and_zeroed_slot() {
+        let mut state=setup();
+        send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_routine_relocations,
+                   vec![GlobalRoutineRelocation {
+                       symbol:SymbolId(7),offset:0,
+                       routine:SymbolId(9),addend:0,
+                   }]);
+    }
+    #[test]
+    fn unknown_duplicate_unaligned_nonzero_and_conflicting_slots_reject() {
+        for scenario in 0..6 {
+            let mut state=setup();
+            match scenario {
+                0=>send(&mut state,105,&[n(7),n(0),n(111),signed(0)]),
+                1=>send(&mut state,105,&[n(7),n(1),n(9),signed(0)]),
+                2=>send(&mut state,105,&[n(7),n(32),n(9),signed(0)]),
+                3=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                },
+                4=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,52,&[n(7),n(0),n(12),signed(0)]);
+                },
+                5=>{
+                    send(&mut state,105,&[n(7),n(0),n(9),signed(0)]);
+                    send(&mut state,103,&[n(7),n(0),n(1),signed(0)]);
+                },
+                _=>unreachable!(),
+            }
+            assert!(state.malformed && !state.panicked,
+                    "source function relocation scenario {scenario} must reject");
+        }
+    }
+}
