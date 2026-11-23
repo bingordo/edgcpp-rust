@@ -1423,9 +1423,89 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
        ((inner->variant.address.kind==abk_constant ||
          inner->variant.address.kind==abk_temporary) &&
         inner->variant.address.variant.constant!=nullptr));
+  // This diagnosis recomputes one source-owned leaf and its complete
+  // designated array into temporary in-memory buffers. Only booleans,
+  // structural kinds and counts leave the native bridge; no bytes or
+  // target identity escape, and normal emission stays unchanged.
+  const a_routine_ptr source_routine=
+      first_address_leaf && inner->variant.address.kind==abk_routine ?
+      inner->variant.address.variant.routine : nullptr;
+  const a_type_ptr source_routine_type=source_routine!=nullptr ?
+      object_initializer_type(source_routine->type) : nullptr;
+  bool isolated_leaf_ok=false;
+  bool isolated_array_ok=false;
+  size_t isolated_leaf_relocs=0;
+  size_t isolated_array_relocs=0;
+  unsigned array_items=0;
+  unsigned array_kind_mask=0;
+  unsigned array_leaf_ok_count=0;
+  unsigned array_first_bad_index=0;
+  unsigned array_first_bad_kind=0;
+  unsigned array_first_bad_address_class=0;
+  unsigned array_first_bad_integer_signed=0;
+  unsigned array_first_bad_integer_overflow=0;
+  unsigned array_first_bad_integer_fits=0;
+  unsigned array_first_bad_integer_zero=0;
+  unsigned array_first_bad_integer_host_bytes=0;
+  if (inner!=nullptr && array_element!=nullptr &&
+      array_element->size>0 &&
+      array_element->size<=MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
+    std::vector<uint8_t> isolated(static_cast<size_t>(array_element->size),0);
+    std::vector<NativeAggregateReloc> relocations;
+    isolated_leaf_ok=constant_initializer_image(
+        inner,array_element,0,isolated,0,&relocations);
+    isolated_leaf_relocs=relocations.size();
+  }
+  if (field_type!=nullptr && field_type->kind==tk_array &&
+      second!=nullptr && second->kind==ck_aggregate) {
+    std::string encoded;
+    std::vector<NativeAggregateReloc> relocations;
+    isolated_array_ok=aggregate_initializer_image(
+        second,field_type,encoded,&relocations);
+    isolated_array_relocs=relocations.size();
+    a_constant_ptr node=second->variant.aggregate.first_constant;
+    for(;node!=nullptr && array_items<32;node=node->next) {
+      const unsigned kind=static_cast<unsigned>(node->kind);
+      if(kind<32) array_kind_mask|=1u<<kind;
+      ++array_items;
+      if(array_element==nullptr || array_element->size==0 ||
+         array_element->size>MAX_NATIVE_AGGREGATE_IMAGE_BYTES) continue;
+      std::vector<uint8_t> bytes(static_cast<size_t>(array_element->size),0);
+      std::vector<NativeAggregateReloc> slots;
+      if(constant_initializer_image(node,array_element,0,bytes,0,&slots)){
+        ++array_leaf_ok_count;
+        continue;
+      }
+      if(array_first_bad_index!=0) continue;
+      array_first_bad_index=array_items;
+      array_first_bad_kind=kind;
+      array_first_bad_address_class=address_base_class(node);
+      if(node->kind==ck_integer) {
+        const bool signed_number=int_constant_is_signed(node);
+        array_first_bad_integer_signed=signed_number ? 1u : 0u;
+        a_boolean overflow=FALSE;
+        if(signed_number) {
+          const a_host_large_integer n=value_of_integer_constant(node,&overflow);
+          array_first_bad_integer_fits=!overflow &&
+              n>=static_cast<a_host_large_integer>(std::numeric_limits<int64_t>::min()) &&
+              n<=static_cast<a_host_large_integer>(std::numeric_limits<int64_t>::max());
+          array_first_bad_integer_zero=!overflow && n==0;
+          array_first_bad_integer_host_bytes=sizeof(n);
+        } else {
+          const a_host_large_unsigned n=
+              unsigned_value_of_integer_constant(node,&overflow);
+          array_first_bad_integer_fits=!overflow &&
+              n<=static_cast<a_host_large_unsigned>(std::numeric_limits<uint64_t>::max());
+          array_first_bad_integer_zero=!overflow && n==0;
+          array_first_bad_integer_host_bytes=sizeof(n);
+        }
+        array_first_bad_integer_overflow=overflow ? 1u : 0u;
+      }
+    }
+  }
   ++weak_image_diagnostic_count;
   std::fprintf(stderr,
-      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u field_designator=%u generic_designator=%u chosen_type_class=%u chosen_bytes=%llu chosen_align=%llu chosen_bitfield=%u selected_first_kind=%u selected_second_kind=%u selected_dynamic=%u selected_value_class=%u array_elem_class=%u array_elem_bytes=%llu array_count=%llu leaf_type_class=%u leaf_original_class=%u leaf_implicit_cast=%u leaf_explicit_cast=%u address_base_class=%u address_zero_offset=%u address_one_past=%u address_subobject=%u address_reflection=%u address_target_present=%u\n",
+      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u field_designator=%u generic_designator=%u chosen_type_class=%u chosen_bytes=%llu chosen_align=%llu chosen_bitfield=%u selected_first_kind=%u selected_second_kind=%u selected_dynamic=%u selected_value_class=%u array_elem_class=%u array_elem_bytes=%llu array_count=%llu leaf_type_class=%u leaf_original_class=%u leaf_implicit_cast=%u leaf_explicit_cast=%u address_base_class=%u address_zero_offset=%u address_one_past=%u address_subobject=%u address_reflection=%u address_target_present=%u word_type_identity=%u routine_type_class=%u routine_generated=%u isolated_leaf_ok=%u isolated_leaf_relocs=%u isolated_array_ok=%u isolated_array_relocs=%u array_items=%u array_kind_mask=%u array_leaf_ok_count=%u array_first_bad_index=%u array_first_bad_kind=%u array_first_bad_address_class=%u array_first_bad_integer_signed=%u array_first_bad_integer_overflow=%u array_first_bad_integer_fits=%u array_first_bad_integer_zero=%u array_first_bad_integer_host_bytes=%u\n",
       type_class(ty),
       static_cast<unsigned long long>(ty!=nullptr ? ty->size : 0),
       static_cast<unsigned long long>(ty!=nullptr ? ty->alignment : 0),
@@ -1463,7 +1543,25 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
       first_address_leaf && inner->variant.address.one_past_the_end ? 1u : 0u,
       first_address_leaf && inner->variant.address.subobject_path!=nullptr ? 1u : 0u,
       first_address_leaf && inner->variant.address.is_object_reflection ? 1u : 0u,
-      target_present ? 1u : 0u);
+      target_present ? 1u : 0u,
+      array_element!=nullptr && leaf_type==array_element ? 1u : 0u,
+      type_class(source_routine_type),
+      source_routine!=nullptr && source_routine->compiler_generated ? 1u : 0u,
+      isolated_leaf_ok ? 1u : 0u,
+      static_cast<unsigned>(isolated_leaf_relocs),
+      isolated_array_ok ? 1u : 0u,
+      static_cast<unsigned>(isolated_array_relocs),
+      array_items,
+      array_kind_mask,
+      array_leaf_ok_count,
+      array_first_bad_index,
+      array_first_bad_kind,
+      array_first_bad_address_class,
+      array_first_bad_integer_signed,
+      array_first_bad_integer_overflow,
+      array_first_bad_integer_fits,
+      array_first_bad_integer_zero,
+      array_first_bad_integer_host_bytes);
 }
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
