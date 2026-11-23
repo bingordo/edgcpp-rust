@@ -1127,10 +1127,28 @@ static bool constant_initializer_image(
         offset > bytes.size() || type->size > bytes.size() - offset)
       return false;
   }
-  // Resolve data variable addresses only through ELF relocations.
-  if (value->kind == ck_address && type->kind == tk_pointer) {
+  // A GNU C explicit cast from a source pointer into a native 64-bit
+  // integer is still a symbolic address relocation, never host pointer bits.
+  // EDG must independently retain the original pointer type and prove the
+  // cast as explicit. A raw integer width match alone cannot authorize it.
+  const a_type_ptr native_type=value->type==nullptr ? nullptr :
+      object_initializer_type(value->type);
+  const a_type_ptr orig_type=value->orig_type==nullptr ? nullptr :
+      object_initializer_type(value->orig_type);
+  const bool explicit_pointer_to_word=
+      value->kind==ck_address &&
+      type->kind==tk_integer && type->size==8 &&
+      native_type==type && orig_type!=nullptr &&
+      orig_type->kind==tk_pointer && orig_type->size==8 &&
+      value->implicit_cast && value->explicit_cast_applied;
+  // Allow existing pointer images unchanged. Integer-slot images require
+  // an *original* addressable immutable literal, never an arbitrary
+  // function, variable, label, temporary or numeric conversion.
+  if (value->kind == ck_address &&
+      (type->kind == tk_pointer || explicit_pointer_to_word)) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
+        (explicit_pointer_to_word && address.kind!=abk_constant) ||
         address.is_object_reflection || address.one_past_the_end ||
         address.subobject_path != nullptr)
       return false;
