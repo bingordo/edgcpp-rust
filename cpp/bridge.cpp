@@ -1396,9 +1396,36 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
     if(t->kind==tk_union) return 9;
     return 99;
   };
+  // Classify the actual first address leaf of the original designated
+  // array without exposing its pointer or native symbol identity. The
+  // source-preserving symbolic relocation checker is unchanged.
+  const bool first_address_leaf=inner!=nullptr && inner->kind==ck_address;
+  const a_type_ptr array_element=field_type!=nullptr && field_type->kind==tk_array ?
+      checked_native_array_element(field_type) : nullptr;
+  const a_type_ptr leaf_type=inner!=nullptr && inner->type!=nullptr ?
+      object_initializer_type(inner->type) : nullptr;
+  const a_type_ptr leaf_original_type=inner!=nullptr && inner->orig_type!=nullptr ?
+      object_initializer_type(inner->orig_type) : nullptr;
+  const auto address_base_class=[](a_constant_ptr value)->unsigned {
+    if(value==nullptr || value->kind!=ck_address) return 0;
+    const auto &address=value->variant.address;
+    if(address.kind==abk_variable) return 1;
+    if(address.kind==abk_routine) return 2;
+    if(address.kind==abk_constant) return 3;
+    if(address.kind==abk_temporary) return 4;
+    return 99;
+  };
+  const bool target_present=first_address_leaf &&
+      ((inner->variant.address.kind==abk_variable &&
+        inner->variant.address.variant.variable!=nullptr) ||
+       (inner->variant.address.kind==abk_routine &&
+        inner->variant.address.variant.routine!=nullptr) ||
+       ((inner->variant.address.kind==abk_constant ||
+         inner->variant.address.kind==abk_temporary) &&
+        inner->variant.address.variant.constant!=nullptr));
   ++weak_image_diagnostic_count;
   std::fprintf(stderr,
-      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u field_designator=%u generic_designator=%u chosen_type_class=%u chosen_bytes=%llu chosen_align=%llu chosen_bitfield=%u selected_first_kind=%u selected_second_kind=%u selected_dynamic=%u selected_value_class=%u\n",
+      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u field_designator=%u generic_designator=%u chosen_type_class=%u chosen_bytes=%llu chosen_align=%llu chosen_bitfield=%u selected_first_kind=%u selected_second_kind=%u selected_dynamic=%u selected_value_class=%u array_elem_class=%u array_elem_bytes=%llu array_count=%llu leaf_type_class=%u leaf_original_class=%u leaf_implicit_cast=%u leaf_explicit_cast=%u address_base_class=%u address_zero_offset=%u address_one_past=%u address_subobject=%u address_reflection=%u address_target_present=%u\n",
       type_class(ty),
       static_cast<unsigned long long>(ty!=nullptr ? ty->size : 0),
       static_cast<unsigned long long>(ty!=nullptr ? ty->alignment : 0),
@@ -1422,7 +1449,21 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
       second!=nullptr && second->kind==ck_aggregate &&
           second->variant.aggregate.has_dynamic_init_component ? 1u : 0u,
       type_class(second!=nullptr && second->type!=nullptr ?
-          object_initializer_type(second->type):nullptr));
+          object_initializer_type(second->type):nullptr),
+      type_class(array_element),
+      static_cast<unsigned long long>(array_element!=nullptr?array_element->size:0),
+      static_cast<unsigned long long>(field_type!=nullptr && field_type->kind==tk_array ?
+          field_type->variant.array.variant.number_of_elements:0),
+      type_class(leaf_type),
+      type_class(leaf_original_type),
+      inner!=nullptr && inner->implicit_cast ? 1u : 0u,
+      inner!=nullptr && inner->explicit_cast_applied ? 1u : 0u,
+      address_base_class(inner),
+      first_address_leaf && inner->variant.address.offset==0 ? 1u : 0u,
+      first_address_leaf && inner->variant.address.one_past_the_end ? 1u : 0u,
+      first_address_leaf && inner->variant.address.subobject_path!=nullptr ? 1u : 0u,
+      first_address_leaf && inner->variant.address.is_object_reflection ? 1u : 0u,
+      target_present ? 1u : 0u);
 }
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
