@@ -48,6 +48,8 @@ struct NumericStaticImageDiag {
   uint32_t invalid_literal=0,nonzero_or_overflow_pointer=0,other_leaf=0;
   uint32_t union32_ok=0,union32_failed=0,union32_failure_mask=0;
   uint32_t union32_leaf_kind_mask=0,union32_leaf_type_mask=0;
+  uint32_t union32_constant_type_mask=0,union32_original_type_mask=0;
+  uint32_t union32_cast_flags_mask=0;
 };
 thread_local NumericStaticImageDiag static_image_diag;
 // Bit positions classify only structural rejection paths, never source data.
@@ -55,6 +57,9 @@ thread_local NumericStaticImageDiag static_image_diag;
 thread_local uint32_t static_image_failure_mask=0;
 thread_local uint32_t static_image_leaf_kind_mask=0;
 thread_local uint32_t static_image_leaf_type_mask=0;
+thread_local uint32_t static_image_constant_type_mask=0;
+thread_local uint32_t static_image_original_type_mask=0;
+thread_local uint32_t static_image_cast_flags_mask=0;
 // These are closed, source-independent EDG enum category masks. No raw
 // constant bytes, symbol IDs, addresses, names or source snippets escape.
 static unsigned static_literal_leaf_category(edg::a_constant_ptr value) {
@@ -67,6 +72,7 @@ static unsigned static_literal_leaf_category(edg::a_constant_ptr value) {
   return 6;
 }
 static unsigned static_literal_type_category(edg::a_type_ptr type) {
+  if (type==nullptr) return 8;
   if (type->kind==edg::tk_pointer) return 0;
   if (type->kind==edg::tk_integer) return 1;
   if (type->kind==edg::tk_array) return 2;
@@ -1273,6 +1279,14 @@ static bool constant_initializer_image(
         uint32_t(1) << static_literal_leaf_category(value);
     static_image_leaf_type_mask |=
         uint32_t(1) << static_literal_type_category(type);
+    static_image_constant_type_mask |=
+        uint32_t(1) << static_literal_type_category(value->type);
+    static_image_original_type_mask |=
+        uint32_t(1) << static_literal_type_category(value->orig_type);
+    static_image_cast_flags_mask |=
+        uint32_t(value->implicit_cast ? 1u : 0u) |
+        uint32_t(value->explicit_cast_applied ? 2u : 0u) |
+        uint32_t(value->orig_type != nullptr ? 4u : 0u);
     return false;
   }
   a_constant_ptr current = value->variant.aggregate.first_constant;
@@ -1380,6 +1394,9 @@ static bool aggregate_initializer_image(
   static_image_failure_mask=0;
   static_image_leaf_kind_mask=0;
   static_image_leaf_type_mask=0;
+  static_image_constant_type_mask=0;
+  static_image_original_type_mask=0;
+  static_image_cast_flags_mask=0;
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
@@ -1400,6 +1417,9 @@ static bool aggregate_initializer_image(
       static_image_diag.union32_failure_mask |= static_image_failure_mask;
       static_image_diag.union32_leaf_kind_mask |= static_image_leaf_kind_mask;
       static_image_diag.union32_leaf_type_mask |= static_image_leaf_type_mask;
+      static_image_diag.union32_constant_type_mask |= static_image_constant_type_mask;
+      static_image_diag.union32_original_type_mask |= static_image_original_type_mask;
+      static_image_diag.union32_cast_flags_mask |= static_image_cast_flags_mask;
     }
     return false;
   }
@@ -3509,11 +3529,13 @@ extern "C" int edgcpp_compile(int argc, char **argv,
       aggregate_diag[1] == '\0') {
     const auto &d = static_image_diag;
     std::fprintf(stderr,
-        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u union32_leaf_kind_mask=%u union32_leaf_type_mask=%u\n",
+        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u union32_leaf_kind_mask=%u union32_leaf_type_mask=%u union32_constant_type_mask=%u union32_original_type_mask=%u union32_cast_flags_mask=%u\n",
         d.images_ok,d.images_failed,d.invalid_address,d.invalid_literal,
         d.nonzero_or_overflow_pointer,d.other_leaf,
         d.union32_ok,d.union32_failed,d.union32_failure_mask,
-        d.union32_leaf_kind_mask,d.union32_leaf_type_mask);
+        d.union32_leaf_kind_mask,d.union32_leaf_type_mask,
+        d.union32_constant_type_mask,d.union32_original_type_mask,
+        d.union32_cast_flags_mask);
   }
   current_callback = nullptr;
   current_user_data = nullptr;
