@@ -1143,15 +1143,17 @@ static bool constant_initializer_image(
       native_type==type && orig_type!=nullptr &&
       orig_type->kind==tk_pointer && orig_type->size==8 &&
       value->implicit_cast && value->explicit_cast_applied;
-  // Keep real symbolic addresses, not linker bits. An explicitly
-  // cast 64-bit word may refer to an immutable EDG literal OR a native
-  // routine. Temporaries, label values and arithmetic still fail closed.
+  // Keep real symbolic addresses, not linker bits. A source-proven
+  // explicit pointer-to-64-bit-word cast may refer to an immutable EDG
+  // literal, a routine, or an exact named file-scope C data object.
+  // Local/TLS/nonreal/temporary/alias addresses never gain this admission.
   if (value->kind == ck_address &&
       (type->kind == tk_pointer || explicit_pointer_to_word)) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
         (explicit_pointer_to_word &&
-         address.kind!=abk_constant && address.kind!=abk_routine) ||
+         address.kind!=abk_constant && address.kind!=abk_routine &&
+         address.kind!=abk_variable) ||
         address.is_object_reflection || address.one_past_the_end ||
         address.subobject_path != nullptr)
       return false;
@@ -1161,6 +1163,23 @@ static bool constant_initializer_image(
     if (address.kind==abk_variable) {
       variable=address.variant.variable;
       if (variable==nullptr) return false;
+      if (explicit_pointer_to_word) {
+        // Unlike an ordinary pointer-typed initializer, a pointer
+        // converted into integer storage must still prove the original
+        // file-scope object and exact pointee. A matching width alone,
+        // an anonymous/temporary base, or a local/TLS address is not proof.
+        const a_type_ptr pointee=object_initializer_type(
+            orig_type->variant.pointer.type);
+        const a_type_ptr declared=object_initializer_type(variable->type);
+        if (!C_mode() || address.offset!=0 ||
+            pointee==nullptr || declared==nullptr || pointee!=declared ||
+            variable->source_corresp.is_local_to_function ||
+            source_name(variable->source_corresp)==nullptr ||
+            variable->is_thread_local || variable->is_nonreal ||
+            variable->compiler_generated || variable->is_weakref ||
+            variable->is_gnu_alias)
+          return false;
+      }
     } else if (address.kind==abk_constant && address.offset==0) {
       literal=address.variant.constant;
       std::string witness;
