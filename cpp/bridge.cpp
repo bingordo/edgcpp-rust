@@ -921,6 +921,7 @@ struct NativeAggregateReloc {
   size_t byte_offset;
   a_variable_ptr target;
   a_constant_ptr literal;
+  a_routine_ptr routine;
   int64_t addend;
 };
 
@@ -1141,19 +1142,21 @@ static bool constant_initializer_image(
       native_type==type && orig_type!=nullptr &&
       orig_type->kind==tk_pointer && orig_type->size==8 &&
       value->implicit_cast && value->explicit_cast_applied;
-  // Allow existing pointer images unchanged. Integer-slot images require
-  // an *original* addressable immutable literal, never an arbitrary
-  // function, variable, label, temporary or numeric conversion.
+  // Keep real symbolic addresses, not linker bits. An explicitly
+  // cast 64-bit word may refer to an immutable EDG literal OR a native
+  // routine. Temporaries, label values and arithmetic still fail closed.
   if (value->kind == ck_address &&
       (type->kind == tk_pointer || explicit_pointer_to_word)) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
-        (explicit_pointer_to_word && address.kind!=abk_constant) ||
+        (explicit_pointer_to_word &&
+         address.kind!=abk_constant && address.kind!=abk_routine) ||
         address.is_object_reflection || address.one_past_the_end ||
         address.subobject_path != nullptr)
       return false;
     a_variable_ptr variable=nullptr;
     a_constant_ptr literal=nullptr;
+    a_routine_ptr routine=nullptr;
     if (address.kind==abk_variable) {
       variable=address.variant.variable;
       if (variable==nullptr) return false;
@@ -1161,6 +1164,14 @@ static bool constant_initializer_image(
       literal=address.variant.constant;
       std::string witness;
       if (!native_static_literal_image(literal,witness)) return false;
+    } else if (address.kind==abk_routine && address.offset==0) {
+      routine=address.variant.routine;
+      // Retain exactly the EDG function identity and its routine type.
+      // Do not guess symbol spellings from C text or a void-pointer cast.
+      if (routine==nullptr || routine->type==nullptr ||
+          routine->type->kind!=tk_routine || routine->is_nonreal ||
+          routine->compiler_generated)
+        return false;
     } else {
       return false;
     }
@@ -1181,7 +1192,7 @@ static bool constant_initializer_image(
       if (offset < prior.byte_offset + 8 && prior.byte_offset < offset + 8)
         return false;
     }
-    relocations->push_back({offset, variable, literal,
+    relocations->push_back({offset, variable, literal, routine,
                             static_cast<int64_t>(delta)});
     return true;
   }
@@ -3233,6 +3244,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
               emit_record(RECORD_STATIC_LITERAL_RELOCATION,
                           {num(symbol_id),num(reloc.byte_offset),num(id),
                            signed_num(reloc.addend)});
+              continue;
+            }
+            if (reloc.routine!=nullptr) {
+              // Source routine metadata remains the sole source of the
+              // actual linker identity; event 105 is not an inferred name.
+              const auto rid=emit_symbol(reloc.routine,1,
+                  declaration_name(reloc.routine->source_corresp,true,true));
+              emit_routine_type(reloc.routine);
+              if (rid==0) {
+                report_incomplete_snapshot();
+                break;
+              }
+              emit_record(RECORD_STATIC_ROUTINE_RELOCATION,
+                          {num(symbol_id),num(reloc.byte_offset),
+                           num(rid),signed_num(reloc.addend)});
               continue;
             }
             if (reloc.target==nullptr) {
