@@ -41,6 +41,7 @@ thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 // Original EDG constant pointer identity, used only as an in-memory lookup
 // key. Stable per-snapshot IDs, never native pointer values, cross the wire.
 thread_local std::unordered_map<const void *, uint32_t> static_literal_ids;
+thread_local unsigned weak_image_diagnostic_count = 0;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
@@ -1355,6 +1356,44 @@ static bool aggregate_initializer_image(
   return true;
 }
 
+// Source-independent diagnostic of a *failed*, explicitly initialized
+// weak C static image. The original native constant tree is still live
+// here; never guess image bytes, linker addresses or a source name. The
+// environment opt-in is for private bootstrap CI only, with bounded output.
+static void diagnose_weak_static_image(a_variable_ptr v) {
+  if (v == nullptr || !C_mode() || !v->is_weak ||
+      v->init_kind != initk_static || !v->has_explicit_initializer ||
+      v->initializer.constant == nullptr || weak_image_diagnostic_count >= 16)
+    return;
+  const char *enabled=std::getenv("EDGCPP_BOOTSTRAP_WEAK_IMAGE_DIAG");
+  if (enabled == nullptr || std::strcmp(enabled, "1") != 0) return;
+  const a_type_ptr ty=object_initializer_type(v->type);
+  const a_constant_ptr root=v->initializer.constant;
+  const a_constant_ptr first=root->kind==ck_aggregate ?
+      root->variant.aggregate.first_constant : nullptr;
+  const a_constant_ptr second=first!=nullptr ? first->next : nullptr;
+  const a_constant_ptr nested=first!=nullptr && first->kind==ck_aggregate ?
+      first->variant.aggregate.first_constant : nullptr;
+  const unsigned type_class=ty==nullptr ? 0 :
+      ty->kind==tk_union ? 9 :
+      ty->kind==tk_struct ? 7 :
+      ty->kind==tk_array ? 6 : 0;
+  ++weak_image_diagnostic_count;
+  std::fprintf(stderr,
+      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u\n",
+      type_class,
+      static_cast<unsigned long long>(ty!=nullptr ? ty->size : 0),
+      static_cast<unsigned long long>(ty!=nullptr ? ty->alignment : 0),
+      static_cast<unsigned>(root->kind),
+      first!=nullptr ? static_cast<unsigned>(first->kind) : 0u,
+      second!=nullptr ? static_cast<unsigned>(second->kind) : 0u,
+      nested!=nullptr ? static_cast<unsigned>(nested->kind) : 0u,
+      root->kind==ck_aggregate && root->variant.aggregate.has_dynamic_init_component ? 1u : 0u,
+      first!=nullptr && first->kind==ck_designator ? 1u : 0u,
+      first!=nullptr && first->kind==ck_init_repeat ? 1u : 0u,
+      first!=nullptr && first->kind==ck_address ? 1u : 0u,
+      first!=nullptr && first->kind==ck_aggregate ? 1u : 0u);
+}
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
 static uint32_t emit_variable_type(a_variable_ptr var);
@@ -3273,6 +3312,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
             emit_record(52,{num(symbol_id),num(reloc.byte_offset),
                             num(target),signed_num(reloc.addend)});
           }
+        } else {
+          diagnose_weak_static_image(v);
         }
       }
       if (v->init_kind == initk_dynamic && v->initializer.dynamic != nullptr) {
@@ -3460,6 +3501,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  weak_image_diagnostic_count = 0;
   visited_scopes.clear();
   emitted_symbol_types.clear();
   current_lifetime_ids.clear();
@@ -3482,6 +3524,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  weak_image_diagnostic_count = 0;
   visited_scopes.clear();
   emitted_symbol_types.clear();
   current_lifetime_ids.clear();
