@@ -535,9 +535,23 @@ pub fn collect_cleanup_call_candidates(
         let Some(site)=sites.get(&(function,stmt,path)) else {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
-        if site.first_argument!=1 ||
-           expressions.contains_key(&(function,stmt,format!("{path}.4").as_str())) {
+        if site.first_argument!=1 {
             return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        // The original eok_call has exactly a callee child and three
+        // argument children. Looking up numbered paths alone is insufficient:
+        // a detached argument or an extra child at .5 (with no .4) could
+        // otherwise yield a positive diagnostic from a malformed Il.
+        let direct=children.get(&(function,stmt,path))
+            .ok_or(StartupEvidenceError::MissingCleanupWitness)?;
+        if direct.len()!=4 {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        for position in 0..4 {
+            let expected=format!("{path}.{position}");
+            if !direct.iter().any(|node| node.path==expected) {
+                return Err(StartupEvidenceError::UnsupportedCleanupCall);
+            }
         }
         // The original callee is native EDG enk_routine (21), not
         // enk_variable (3). Confirmed on real two-global C++17 startup IL.
@@ -920,6 +934,32 @@ mod tests {
         wrong.expressions[1].parent=Some("0.1".into());
         assert_eq!(collect_cleanup_call_candidates(&wrong),
                    Err(StartupEvidenceError::MissingCleanupWitness));
+    }
+
+    #[test]
+    fn cleanup_call_requires_exact_direct_child_list() {
+        let fixture=cleanup_test_fixture(1);
+        // A child path is not evidence of call ownership when the native
+        // parent link disagrees with that path.
+        let mut wrong=fixture.clone();
+        let arg=wrong.expressions.iter_mut()
+            .find(|expr|expr.path=="0.2").unwrap();
+        arg.parent=Some("0.1".into());
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        // The old ".4 absent" check silently accepted a fifth child at .5.
+        let mut wrong=fixture.clone();
+        emit_cleanup_test_expr(&mut wrong,"0.block.0","0.5",Some("0"),
+                               2,None,Some(7),None);
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+        // Merely renumbering one required direct child is also invalid.
+        let mut wrong=fixture;
+        let arg=wrong.expressions.iter_mut()
+            .find(|expr|expr.path=="0.3").unwrap();
+        arg.path="0.5".into();
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
     }
 
     #[test]
