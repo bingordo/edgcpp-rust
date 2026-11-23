@@ -86,6 +86,21 @@ pub enum StartupEvidenceError {
     UnsupportedCleanupCall,
     /// The diagnostic has a finite analysis budget; never silently truncate.
     ReachabilityLimit,
+    /// EDG marked its optional native scheduler traversal incomplete.
+    IncompleteScheduler,
+    /// One native scheduled routine appears more than once.
+    DuplicateScheduledInitializer(SymbolId),
+    /// Event 104 refers to an object without a supported source file-scope
+    /// variable declaration, or a local/TLS object.
+    InvalidInitializerVariable(SymbolId),
+    /// Event 104 names a routine absent from the native ordered schedule.
+    UnscheduledInitializerOwner(SymbolId),
+    /// Two event-104 owner records claim the same variable.
+    DuplicateInitializerVariable(SymbolId),
+    /// Two native globals claim the same scheduled routine.
+    DuplicateInitializerRoutine(SymbolId),
+    /// The native scheduler has a routine with no exact event-104 owner.
+    MissingInitializerOwner(SymbolId),
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -240,6 +255,98 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
     })
 }
 
+
+/// Exact file/namespace source-owned object mapped to its EDG separate-mode
+/// initializer routine. The ordinal comes ONLY from native event 67; it is
+/// not inferred from declarations or statement/call ordering.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateInitializer {
+    pub variable: SymbolId,
+    pub routine: SymbolId,
+    pub function: String,
+    pub scheduler_position: u32,
+}
+
+/// An internally consistent subset of the EDG *separate-mode* initializer
+/// scheduler. Even when event 66 says complete, that is only completeness of
+/// EDG's own scheduler list. It does NOT establish the complete C++ lifecycle,
+/// effects of imported helpers, a destructor/atexit schedule, inter-TU order,
+/// or executable ELF `.init_array` admission.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateInitializerSchedule {
+    pub entries: Vec<CheckedSeparateInitializer>,
+}
+
+/// Join native event-104 variable→routine pointers to ordered event-67
+/// routine identities, requiring a bijection among the represented entries.
+/// This deliberately fails closed for missing entries, unscheduled ownership,
+/// duplicate identities, TLS/local/non-file-scope variables, and unknown
+/// function bodies. It NEVER authorizes emitting executable initialization.
+pub fn collect_checked_separate_initializer_schedule(
+    il:&Il,
+) -> Result<CheckedSeparateInitializerSchedule,StartupEvidenceError> {
+    let Some(schedule)=il.file_scope_init_schedule else {
+        return Err(StartupEvidenceError::MissingScheduler);
+    };
+    if !schedule.available {
+        return Err(StartupEvidenceError::ContradictoryScheduler);
+    }
+    if !schedule.complete {
+        return Err(StartupEvidenceError::IncompleteScheduler);
+    }
+    // This independently checks source-owned routine symbols, body identity,
+    // definition status and dense native scheduler order.
+    let proof=collect_startup_evidence(il)?;
+    let roots:Vec<_>=proof.roots.iter().filter(|root|
+        root.source==StartupRootSource::SeparateNativeScheduler).collect();
+
+    let mut scheduled=HashSet::with_capacity(roots.len());
+    for root in &roots {
+        if !scheduled.insert(root.routine) {
+            return Err(StartupEvidenceError::DuplicateScheduledInitializer(root.routine));
+        }
+    }
+
+    let variables:HashSet<_>=il.symbols.iter().filter(|s|s.kind==2)
+        .map(|s|s.id).collect();
+    let mut global=HashMap::with_capacity(il.global_variables.len());
+    for entry in &il.global_variables {
+        if global.insert(entry.symbol,entry).is_some() {
+            return Err(StartupEvidenceError::DuplicateInitializerVariable(entry.symbol));
+        }
+    }
+    let mut seen_variables=HashSet::with_capacity(il.file_scope_dynamic_init_owners.len());
+    let mut by_routine=HashMap::with_capacity(il.file_scope_dynamic_init_owners.len());
+    for owner in &il.file_scope_dynamic_init_owners {
+        if !seen_variables.insert(owner.variable) {
+            return Err(StartupEvidenceError::DuplicateInitializerVariable(owner.variable));
+        }
+        let Some(variable)=global.get(&owner.variable) else {
+            return Err(StartupEvidenceError::InvalidInitializerVariable(owner.variable));
+        };
+        if !variables.contains(&owner.variable) ||
+           variable.thread_local || variable.local_to_function {
+            return Err(StartupEvidenceError::InvalidInitializerVariable(owner.variable));
+        }
+        if !scheduled.contains(&owner.routine) {
+            return Err(StartupEvidenceError::UnscheduledInitializerOwner(owner.routine));
+        }
+        if by_routine.insert(owner.routine,owner.variable).is_some() {
+            return Err(StartupEvidenceError::DuplicateInitializerRoutine(owner.routine));
+        }
+    }
+    let mut entries=Vec::with_capacity(roots.len());
+    for root in roots {
+        let Some(&variable)=by_routine.get(&root.routine) else {
+            return Err(StartupEvidenceError::MissingInitializerOwner(root.routine));
+        };
+        entries.push(CheckedSeparateInitializer {
+            variable,routine:root.routine,function:root.function.clone(),
+            scheduler_position:root.ordinal.expect("native scheduler root carries ordinal"),
+        });
+    }
+    Ok(CheckedSeparateInitializerSchedule{entries})
+}
 
 /// A single EDG-owned call occurrence reached from a source-identified
 /// startup root through locally defined routine bodies. The same occurrence
@@ -768,6 +875,119 @@ mod tests {
             constant_integer:None,related_type_role:None,related_type_kind:None,
             type_id:None,symbol_id,
         });
+    }
+
+    fn separate_init_fixture(count:u32) -> Il {
+        let mut il=Il::default();
+        il.file_scope_init_schedule=Some(FileScopeInitSchedule{
+            available:true,complete:true,
+        });
+        for position in 0..count {
+            let routine=SymbolId(position+10);
+            let variable=SymbolId(position+1000);
+            generated(&mut il,routine.0,&format!("init_{position}"),true);
+            il.symbols.push(Symbol {
+                id:variable,kind:2,name:format!("global_{position}"),
+            });
+            il.global_variables.push(crate::GlobalVariable {
+                symbol:variable,linkage:2,explicit_initializer:false,
+                thread_local:false,local_to_function:false,
+            });
+            il.file_scope_init_routines.push(FileScopeInitRoutine{
+                position,routine,
+            });
+            il.file_scope_dynamic_init_owners.push(
+                crate::FileScopeDynamicInitOwner{variable,routine});
+        }
+        il
+    }
+
+    #[test]
+    fn checked_separate_scheduler_scales_with_exact_global_owners() {
+        let il=separate_init_fixture(512);
+        let plan=collect_checked_separate_initializer_schedule(&il).unwrap();
+        assert_eq!(plan.entries.len(),512);
+        assert_eq!(plan.entries[0].variable,SymbolId(1000));
+        assert_eq!(plan.entries[0].routine,SymbolId(10));
+        assert_eq!(plan.entries[0].scheduler_position,0);
+        assert_eq!(plan.entries[511].variable,SymbolId(1511));
+        assert_eq!(plan.entries[511].routine,SymbolId(521));
+        assert_eq!(plan.entries[511].scheduler_position,511);
+        // An empty native scheduler must not be presented as a complete
+        // C++ runtime lifecycle, even though the source-owned roster joins.
+        let empty=separate_init_fixture(0);
+        assert!(collect_checked_separate_initializer_schedule(&empty)
+            .unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn checked_separate_scheduler_rejects_missing_or_contradictory_roster() {
+        let il=separate_init_fixture(2);
+        let mut wrong=il.clone();
+        wrong.file_scope_dynamic_init_owners.pop();
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::MissingInitializerOwner(SymbolId(11))));
+        let mut wrong=il.clone();
+        wrong.file_scope_dynamic_init_owners[1].routine=SymbolId(999);
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::UnscheduledInitializerOwner(SymbolId(999))));
+        let mut wrong=il.clone();
+        wrong.file_scope_dynamic_init_owners[1].routine=SymbolId(10);
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::DuplicateInitializerRoutine(SymbolId(10))));
+        let mut wrong=il.clone();
+        wrong.file_scope_dynamic_init_owners[1].variable=SymbolId(1000);
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::DuplicateInitializerVariable(SymbolId(1000))));
+        let mut wrong=il.clone();
+        wrong.file_scope_init_routines[1].routine=SymbolId(10);
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::DuplicateScheduledInitializer(SymbolId(10))));
+        let mut wrong=il.clone();
+        wrong.file_scope_init_routines[1].position=9;
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::InvalidSchedulerOrder(9)));
+    }
+
+    #[test]
+    fn checked_separate_scheduler_rejects_unproven_global_or_incomplete_mode() {
+        let il=separate_init_fixture(2);
+        let mut wrong=il.clone();
+        wrong.global_variables[0].thread_local=true;
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::InvalidInitializerVariable(SymbolId(1000))));
+        let mut wrong=il.clone();
+        wrong.global_variables[0].local_to_function=true;
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::InvalidInitializerVariable(SymbolId(1000))));
+        let mut wrong=il.clone();
+        wrong.global_variables.remove(0);
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::InvalidInitializerVariable(SymbolId(1000))));
+        let mut wrong=il.clone();
+        wrong.symbols.retain(|s|s.id!=SymbolId(1000));
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::InvalidInitializerVariable(SymbolId(1000))));
+        let mut wrong=il.clone();
+        wrong.file_scope_init_schedule=Some(FileScopeInitSchedule{
+            available:true,complete:false,
+        });
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::IncompleteScheduler));
+        let mut wrong=il.clone();
+        wrong.file_scope_init_schedule=Some(FileScopeInitSchedule{
+            available:false,complete:false,
+        });
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::ContradictoryScheduler));
+        let mut wrong=il.clone();
+        wrong.file_scope_init_schedule=None;
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::MissingScheduler));
+        let mut wrong=il;
+        wrong.routine_attributes[0].defined=false;
+        assert_eq!(collect_checked_separate_initializer_schedule(&wrong),
+                   Err(StartupEvidenceError::MissingDefinition(SymbolId(10))));
     }
 
     fn cleanup_test_fixture(count:u32) -> Il {

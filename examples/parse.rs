@@ -38,6 +38,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      scheduled.map(|entry|entry.position));
         }
     }
+    // Validate the native event-104 variable→routine roster against
+    // event-67's exact EDG scheduler order. A checked source roster is
+    // still NOT executable ctor/dtor/atexit/ELF admission.
+    if result.il.file_scope_init_schedule.is_some_and(|s|s.available) {
+        match edgcpp::startup_provenance::collect_checked_separate_initializer_schedule(&result.il) {
+            Ok(checked) => {
+                println!("EDG_CXX5_SEPARATE_CHECKED entries={} lifecycle_abi_proven=false",
+                         checked.entries.len());
+                for entry in checked.entries.iter().take(64) {
+                    println!("EDG_CXX5_SEPARATE_CHECKED_ENTRY ordinal={} variable={} routine={} lifecycle_abi_proven=false",
+                             entry.scheduler_position,entry.variable.0,entry.routine.0);
+                }
+            }
+            Err(error) => {
+                println!("EDG_CXX5_SEPARATE_CHECKED incomplete={error:?} lifecycle_abi_proven=false");
+            }
+        }
+    }
     for startup in &result.il.file_scope_lowered_startup_routines {
         let routine=result.il.symbols.iter().find(|s|s.id==startup.routine);
         println!("file scope lowered startup routine={} priority={} name={:?}",
