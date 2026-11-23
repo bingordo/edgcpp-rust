@@ -86,6 +86,21 @@ pub enum StartupEvidenceError {
     UnsupportedCleanupCall,
     /// The diagnostic has a finite analysis budget; never silently truncate.
     ReachabilityLimit,
+    /// EDG marked its optional native scheduler traversal incomplete.
+    IncompleteScheduler,
+    /// One native scheduled routine appears more than once.
+    DuplicateScheduledInitializer(SymbolId),
+    /// Event 104 refers to an object without a supported source file-scope
+    /// variable declaration, or a local/TLS object.
+    InvalidInitializerVariable(SymbolId),
+    /// Event 104 names a routine absent from the native ordered schedule.
+    UnscheduledInitializerOwner(SymbolId),
+    /// Two event-104 owner records claim the same variable.
+    DuplicateInitializerVariable(SymbolId),
+    /// Two native globals claim the same scheduled routine.
+    DuplicateInitializerRoutine(SymbolId),
+    /// The native scheduler has a routine with no exact event-104 owner.
+    MissingInitializerOwner(SymbolId),
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -240,6 +255,98 @@ pub fn collect_startup_evidence(il: &Il) -> Result<StartupEvidence, StartupEvide
     })
 }
 
+
+/// Exact file/namespace source-owned object mapped to its EDG separate-mode
+/// initializer routine. The ordinal comes ONLY from native event 67; it is
+/// not inferred from declarations or statement/call ordering.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateInitializer {
+    pub variable: SymbolId,
+    pub routine: SymbolId,
+    pub function: String,
+    pub scheduler_position: u32,
+}
+
+/// An internally consistent subset of the EDG *separate-mode* initializer
+/// scheduler. Even when event 66 says complete, that is only completeness of
+/// EDG's own scheduler list. It does NOT establish the complete C++ lifecycle,
+/// effects of imported helpers, a destructor/atexit schedule, inter-TU order,
+/// or executable ELF `.init_array` admission.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateInitializerSchedule {
+    pub entries: Vec<CheckedSeparateInitializer>,
+}
+
+/// Join native event-104 variable→routine pointers to ordered event-67
+/// routine identities, requiring a bijection among the represented entries.
+/// This deliberately fails closed for missing entries, unscheduled ownership,
+/// duplicate identities, TLS/local/non-file-scope variables, and unknown
+/// function bodies. It NEVER authorizes emitting executable initialization.
+pub fn collect_checked_separate_initializer_schedule(
+    il:&Il,
+) -> Result<CheckedSeparateInitializerSchedule,StartupEvidenceError> {
+    let Some(schedule)=il.file_scope_init_schedule else {
+        return Err(StartupEvidenceError::MissingScheduler);
+    };
+    if !schedule.available {
+        return Err(StartupEvidenceError::ContradictoryScheduler);
+    }
+    if !schedule.complete {
+        return Err(StartupEvidenceError::IncompleteScheduler);
+    }
+    // This independently checks source-owned routine symbols, body identity,
+    // definition status and dense native scheduler order.
+    let proof=collect_startup_evidence(il)?;
+    let roots:Vec<_>=proof.roots.iter().filter(|root|
+        root.source==StartupRootSource::SeparateNativeScheduler).collect();
+
+    let mut scheduled=HashSet::with_capacity(roots.len());
+    for root in &roots {
+        if !scheduled.insert(root.routine) {
+            return Err(StartupEvidenceError::DuplicateScheduledInitializer(root.routine));
+        }
+    }
+
+    let variables:HashSet<_>=il.symbols.iter().filter(|s|s.kind==2)
+        .map(|s|s.id).collect();
+    let mut global=HashMap::with_capacity(il.global_variables.len());
+    for entry in &il.global_variables {
+        if global.insert(entry.symbol,entry).is_some() {
+            return Err(StartupEvidenceError::DuplicateInitializerVariable(entry.symbol));
+        }
+    }
+    let mut seen_variables=HashSet::with_capacity(il.file_scope_dynamic_init_owners.len());
+    let mut by_routine=HashMap::with_capacity(il.file_scope_dynamic_init_owners.len());
+    for owner in &il.file_scope_dynamic_init_owners {
+        if !seen_variables.insert(owner.variable) {
+            return Err(StartupEvidenceError::DuplicateInitializerVariable(owner.variable));
+        }
+        let Some(variable)=global.get(&owner.variable) else {
+            return Err(StartupEvidenceError::InvalidInitializerVariable(owner.variable));
+        };
+        if !variables.contains(&owner.variable) ||
+           variable.thread_local || variable.local_to_function {
+            return Err(StartupEvidenceError::InvalidInitializerVariable(owner.variable));
+        }
+        if !scheduled.contains(&owner.routine) {
+            return Err(StartupEvidenceError::UnscheduledInitializerOwner(owner.routine));
+        }
+        if by_routine.insert(owner.routine,owner.variable).is_some() {
+            return Err(StartupEvidenceError::DuplicateInitializerRoutine(owner.routine));
+        }
+    }
+    let mut entries=Vec::with_capacity(roots.len());
+    for root in roots {
+        let Some(&variable)=by_routine.get(&root.routine) else {
+            return Err(StartupEvidenceError::MissingInitializerOwner(root.routine));
+        };
+        entries.push(CheckedSeparateInitializer {
+            variable,routine:root.routine,function:root.function.clone(),
+            scheduler_position:root.ordinal.expect("native scheduler root carries ordinal"),
+        });
+    }
+    Ok(CheckedSeparateInitializerSchedule{entries})
+}
 
 /// A single EDG-owned call occurrence reached from a source-identified
 /// startup root through locally defined routine bodies. The same occurrence
