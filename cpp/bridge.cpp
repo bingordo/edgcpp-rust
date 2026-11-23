@@ -57,23 +57,23 @@ thread_local uint32_t static_image_leaf_kind_mask=0;
 thread_local uint32_t static_image_leaf_type_mask=0;
 // These are closed, source-independent EDG enum category masks. No raw
 // constant bytes, symbol IDs, addresses, names or source snippets escape.
-static unsigned static_literal_leaf_category(a_constant_ptr value) {
-  if (value->kind==ck_address) return 0;
-  if (value->kind==ck_integer) return 1;
-  if (value->kind==ck_string) return 2;
-  if (value->kind==ck_float) return 3;
-  if (value->kind==ck_designator) return 4;
-  if (value->kind==ck_init_repeat) return 5;
+static unsigned static_literal_leaf_category(edg::a_constant_ptr value) {
+  if (value->kind==edg::ck_address) return 0;
+  if (value->kind==edg::ck_integer) return 1;
+  if (value->kind==edg::ck_string) return 2;
+  if (value->kind==edg::ck_float) return 3;
+  if (value->kind==edg::ck_designator) return 4;
+  if (value->kind==edg::ck_init_repeat) return 5;
   return 6;
 }
-static unsigned static_literal_type_category(a_type_ptr type) {
-  if (type->kind==tk_pointer) return 0;
-  if (type->kind==tk_integer) return 1;
-  if (type->kind==tk_array) return 2;
-  if (type->kind==tk_struct) return 3;
-  if (type->kind==tk_union) return 4;
-  if (type->kind==tk_float) return 5;
-  if (type->kind==tk_typeref) return 6;
+static unsigned static_literal_type_category(edg::a_type_ptr type) {
+  if (type->kind==edg::tk_pointer) return 0;
+  if (type->kind==edg::tk_integer) return 1;
+  if (type->kind==edg::tk_array) return 2;
+  if (type->kind==edg::tk_struct) return 3;
+  if (type->kind==edg::tk_union) return 4;
+  if (type->kind==edg::tk_float) return 5;
+  if (type->kind==edg::tk_typeref) return 6;
   return 7;
 }
 static bool rejected_static_aggregate(unsigned category) {
