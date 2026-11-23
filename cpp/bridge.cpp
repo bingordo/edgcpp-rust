@@ -899,6 +899,23 @@ static a_type_ptr object_initializer_type(a_type_ptr type) {
   }
   return type;
 }
+// Resolve each original EDG C typedef-qualified array element before
+// calculating its stride. Never trust zero raw tk_typeref size or infer a
+// default ABI element extent: source array bytes must match the full bound.
+static a_type_ptr checked_native_array_element(a_type_ptr array) {
+  if (array == nullptr || array->kind != tk_array || array->incomplete ||
+      array->variant.array.is_variable_size_array ||
+      array->variant.array.is_template_dependent_size_array) return nullptr;
+  a_type_ptr element =
+      object_initializer_type(array->variant.array.element_type);
+  const uint64_t count=array->variant.array.variant.number_of_elements;
+  if (element == nullptr || element->kind == tk_typeref ||
+      element->incomplete || element->size == 0 || array->size == 0 ||
+      count == 0 || count > array->size / element->size ||
+      count * element->size != array->size)
+    return nullptr;
+  return element;
+}
 // Store linker references separately from integer object bytes.
 struct NativeAggregateReloc {
   size_t byte_offset;
@@ -1046,8 +1063,8 @@ static bool constant_designated_value(
           type->variant.array.is_template_dependent_size_array) return false;
       const uint64_t index = current->variant.designator.variant.array_element;
       if (index >= type->variant.array.variant.number_of_elements) return false;
-      element = type->variant.array.element_type;
-      if (element == nullptr || element->size == 0 ||
+      element = checked_native_array_element(type);
+      if (element == nullptr ||
           index > (bytes.size() - offset) / element->size) return false;
       child_offset += static_cast<size_t>(index * element->size);
     }
@@ -1097,7 +1114,7 @@ static bool constant_initializer_image(
                !type->variant.array.is_variable_size_array &&
                !type->variant.array.is_template_dependent_size_array &&
                type->variant.array.variant.number_of_elements == 1) {
-      element = type->variant.array.element_type;
+      element = checked_native_array_element(type);
     } else {
       break;
     }
@@ -1203,8 +1220,8 @@ static bool constant_initializer_image(
   if (type->kind == tk_array) {
     if (type->variant.array.is_variable_size_array ||
         type->variant.array.is_template_dependent_size_array) return false;
-    a_type_ptr element = type->variant.array.element_type;
-    if (element == nullptr || element->size == 0) return false;
+    a_type_ptr element = checked_native_array_element(type);
+    if (element == nullptr) return false;
     uint64_t index = 0;
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
