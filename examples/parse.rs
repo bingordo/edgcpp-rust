@@ -24,6 +24,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      symbol.map(|s|s.name.as_str()));
         }
     }
+    // Event 104 is EDG's original a_variable::init_routine pointer in
+    // SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS mode. Do not confuse
+    // this source association with a complete lifecycle or executable ABI.
+    if !result.il.file_scope_dynamic_init_owners.is_empty() {
+        println!("EDG_CXX5_SEPARATE_INIT_OWNERS count={} lifecycle_abi_proven=false",
+                 result.il.file_scope_dynamic_init_owners.len());
+        for owner in result.il.file_scope_dynamic_init_owners.iter().take(64) {
+            let scheduled = result.il.file_scope_init_routines.iter()
+                .find(|entry|entry.routine==owner.routine);
+            println!("EDG_CXX5_SEPARATE_INIT_OWNER variable={} routine={} scheduled_position={:?} lifecycle_abi_proven=false",
+                     owner.variable.0,owner.routine.0,
+                     scheduled.map(|entry|entry.position));
+        }
+    }
     for startup in &result.il.file_scope_lowered_startup_routines {
         let routine=result.il.symbols.iter().find(|s|s.id==startup.routine);
         println!("file scope lowered startup routine={} priority={} name={:?}",

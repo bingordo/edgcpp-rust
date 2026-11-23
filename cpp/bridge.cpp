@@ -2991,6 +2991,27 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                        num(v->has_explicit_initializer ? 1u : 0u),
                        num(v->is_thread_local ? 1u : 0u),
                        num(is_local ? 1u : 0u)});
+      // EDG's separate-init configuration preserves a direct native pointer
+      // from each file/namespace variable to the routine lowering assigned.
+      // The normal configuration has no such IL field and MUST NOT invent it
+      // from generated startup-call order or a drained dynamic_inits list.
+#if SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
+      if (!v->is_thread_local && !is_local &&
+          (scope->kind == sck_file || scope->kind == sck_namespace) &&
+          v->init_routine.dynamic_init_routine != nullptr) {
+        a_routine_ptr init = v->init_routine.dynamic_init_routine;
+        const char *raw = source_name(init->source_corresp);
+        const uint32_t init_id = emit_symbol(init, 1, raw != nullptr ?
+            declaration_name(init->source_corresp, true, true) :
+            "<EDG-separate-dynamic-init-routine>");
+        if (init_id == 0 || symbol_id == 0) {
+          report_incomplete_snapshot();
+        } else {
+          emit_record(RECORD_FILE_SCOPE_DYNAMIC_INIT_OWNER,
+                      {num(symbol_id),num(init_id)});
+        }
+      }
+#endif
       // Source-owned materialization classification. These flags describe
       // whether a C++ template/prototype declaration can represent a
       // runtime object; they do not prove there is no startup effect.

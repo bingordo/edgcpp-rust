@@ -188,6 +188,10 @@ pub struct Il {
     pub file_scope_init_schedule: Option<FileScopeInitSchedule>,
     /// EDG's explicit file-scope init routine list in native order (if configured).
     pub file_scope_init_routines: Vec<FileScopeInitRoutine>,
+    /// Native EDG per-variable routine identity, available ONLY when the
+    /// callable frontend was built in separate file-scope-init mode.
+    /// This association does not prove constructor, cleanup, or ELF ABI.
+    pub file_scope_dynamic_init_owners: Vec<FileScopeDynamicInitOwner>,
     /// Exact routine-address link from EDG's lowering-generated __link object.
     /// A startup root alone does not prove cleanup order or an ELF init plan.
     pub file_scope_runtime_links: Vec<FileScopeRuntimeLink>,
@@ -480,6 +484,15 @@ pub struct FileScopeInitSchedule {
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub struct FileScopeInitRoutine {
     pub position: u32,
+    pub routine: SymbolId,
+}
+
+/// Native EDG a_variable::init_routine.dynamic_init_routine. No name or
+/// generated call-order reconstruction. This is a source-owned mapping
+/// from a file/namespace variable to its separate initialization routine.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub struct FileScopeDynamicInitOwner {
+    pub variable: SymbolId,
     pub routine: SymbolId,
 }
 
@@ -1476,6 +1489,7 @@ struct WireSeen {
     scope_dynamic_initializer_next: HashMap<String, u32>,
     /// Event 72: each native runtime link variable has exactly one startup target.
     file_scope_runtime_link_variables: HashSet<SymbolId>,
+    file_scope_dynamic_init_owner_variables: HashSet<SymbolId>,
     /// Event 73: each native lowered startup routine has exactly one priority.
     file_scope_lowered_startup_routines: HashSet<SymbolId>,
 }
@@ -1619,6 +1633,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         65 => Some(il.cxx_scalar_lifetime_admissions.len()),
         66 => Some(usize::from(il.file_scope_init_schedule.is_some())),
         67 => Some(il.file_scope_init_routines.len()),
+        104 => Some(il.file_scope_dynamic_init_owners.len()),
         68 => Some(il.scope_dynamic_initializers.len()),
         69 => Some(il.base_subobject_offsets.len()),
         50 => Some(il.statement_aggregate_initializers.len()),
@@ -1762,6 +1777,18 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
+            });
+        }
+        104 => {
+            let (Some(variable),Some(routine))=(n(0),n(1)) else {return;};
+            let variable=SymbolId(variable);
+            let routine=SymbolId(routine);
+            if variable.0==0 || routine.0==0 ||
+               !seen.file_scope_dynamic_init_owner_variables.insert(variable) {
+                return;
+            }
+            output.file_scope_dynamic_init_owners.push(FileScopeDynamicInitOwner {
+                variable,routine,
             });
         }
         72 => {
@@ -6634,7 +6661,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=103_u32 {
+        for kind in 1..=104_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6663,13 +6690,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=103_u32)
+        let schema_fields:usize=(1..=104_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(104).is_none());
+        assert!(expected_wire_field_tag_masks(105).is_none());
     }
 
     #[test]
@@ -8082,6 +8109,42 @@ mod retired_source_hook_wire_tests {
 #[cfg(test)]
 #[path="global_materialization_tests.rs"]
 mod global_materialization_tests;
+
+#[cfg(test)]
+mod separate_file_scope_initializer_owner_wire_tests {
+    use super::*;
+
+    fn number(n:u64)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:n,tag:wire_tags::UNSIGNED}
+    }
+    fn send(state:&mut Collector,fields:&[WireField]) {
+        unsafe{collect((state as *mut Collector).cast(),104,
+                       fields.as_ptr(),fields.len(),0);}
+    }
+    #[test]
+    fn native_owner_preserves_exact_variable_and_routine_ids() {
+        let mut state=Collector::default();
+        send(&mut state,&[number(1),number(50)]);
+        send(&mut state,&[number(6),number(51)]);
+        assert!(!state.panicked && !state.malformed);
+        assert_eq!(state.il.file_scope_dynamic_init_owners,vec![
+            FileScopeDynamicInitOwner{variable:SymbolId(1),routine:SymbolId(50)},
+            FileScopeDynamicInitOwner{variable:SymbolId(6),routine:SymbolId(51)},
+        ]);
+    }
+    #[test]
+    fn native_owner_rejects_null_or_duplicate_source_variable() {
+        for fields in [[0,5],[5,0],[0,0]] {
+            let mut state=Collector::default();
+            send(&mut state,&[number(fields[0]),number(fields[1])]);
+            assert!(state.malformed && !state.panicked);
+        }
+        let mut state=Collector::default();
+        send(&mut state,&[number(5),number(50)]);
+        send(&mut state,&[number(5),number(51)]);
+        assert!(state.malformed && !state.panicked);
+    }
+}
 
 #[cfg(test)]
 mod bootstrap_literal_global_wire_tests {
