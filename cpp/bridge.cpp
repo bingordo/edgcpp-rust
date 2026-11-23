@@ -51,6 +51,7 @@ struct NumericStaticImageDiag {
   uint32_t union32_constant_type_mask=0,union32_original_type_mask=0;
   uint32_t union32_cast_flags_mask=0;
   uint32_t union32_address_reason_mask=0,union32_address_kind_mask=0;
+  uint32_t union32_other_address_base_mask=0;
 };
 thread_local NumericStaticImageDiag static_image_diag;
 // Bit positions classify only structural rejection paths, never source data.
@@ -63,6 +64,7 @@ thread_local uint32_t static_image_original_type_mask=0;
 thread_local uint32_t static_image_cast_flags_mask=0;
 thread_local uint32_t static_image_address_reason_mask=0;
 thread_local uint32_t static_image_address_kind_mask=0;
+thread_local uint32_t static_image_other_address_base_mask=0;
 // These are closed, source-independent EDG enum category masks. No raw
 // constant bytes, symbol IDs, addresses, names or source snippets escape.
 static unsigned static_literal_leaf_category(edg::a_constant_ptr value) {
@@ -1220,6 +1222,12 @@ static bool constant_initializer_image(
       static_image_address_kind_mask |=
           address.kind==abk_constant ? 1u :
           address.kind==abk_variable ? 2u : 4u;
+      if (address.kind!=abk_constant && address.kind!=abk_variable) {
+        static_image_other_address_base_mask |=
+            address.kind==abk_routine ? 1u :
+            address.kind==abk_temporary ? 2u :
+            address.kind==abk_label ? 4u : 8u;
+      }
       return false;
     }
     a_variable_ptr variable=nullptr;
@@ -1245,6 +1253,12 @@ static bool constant_initializer_image(
       static_image_address_kind_mask |=
           address.kind==abk_constant ? 1u :
           address.kind==abk_variable ? 2u : 4u;
+      if (address.kind!=abk_constant && address.kind!=abk_variable) {
+        static_image_other_address_base_mask |=
+            address.kind==abk_routine ? 1u :
+            address.kind==abk_temporary ? 2u :
+            address.kind==abk_label ? 4u : 8u;
+      }
       return false;
     }
     // The 4 KiB image bound and disjoint eight-byte slots already limit
@@ -1445,6 +1459,7 @@ static bool aggregate_initializer_image(
   static_image_cast_flags_mask=0;
   static_image_address_reason_mask=0;
   static_image_address_kind_mask=0;
+  static_image_other_address_base_mask=0;
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
        type->kind != tk_union) || type->size == 0 ||
@@ -1470,6 +1485,7 @@ static bool aggregate_initializer_image(
       static_image_diag.union32_cast_flags_mask |= static_image_cast_flags_mask;
       static_image_diag.union32_address_reason_mask |= static_image_address_reason_mask;
       static_image_diag.union32_address_kind_mask |= static_image_address_kind_mask;
+      static_image_diag.union32_other_address_base_mask |= static_image_other_address_base_mask;
     }
     return false;
   }
@@ -3579,14 +3595,15 @@ extern "C" int edgcpp_compile(int argc, char **argv,
       aggregate_diag[1] == '\0') {
     const auto &d = static_image_diag;
     std::fprintf(stderr,
-        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u union32_leaf_kind_mask=%u union32_leaf_type_mask=%u union32_constant_type_mask=%u union32_original_type_mask=%u union32_cast_flags_mask=%u union32_address_reason_mask=%u union32_address_kind_mask=%u\n",
+        "EDG_STATIC_LITERAL_BRIDGE_DIAG images_ok=%u images_failed=%u invalid_address=%u invalid_literal=%u invalid_pointer_integer=%u other_leaf=%u union32_ok=%u union32_failed=%u union32_failure_mask=%u union32_leaf_kind_mask=%u union32_leaf_type_mask=%u union32_constant_type_mask=%u union32_original_type_mask=%u union32_cast_flags_mask=%u union32_address_reason_mask=%u union32_address_kind_mask=%u union32_other_address_base_mask=%u\n",
         d.images_ok,d.images_failed,d.invalid_address,d.invalid_literal,
         d.nonzero_or_overflow_pointer,d.other_leaf,
         d.union32_ok,d.union32_failed,d.union32_failure_mask,
         d.union32_leaf_kind_mask,d.union32_leaf_type_mask,
         d.union32_constant_type_mask,d.union32_original_type_mask,
         d.union32_cast_flags_mask,
-        d.union32_address_reason_mask,d.union32_address_kind_mask);
+        d.union32_address_reason_mask,d.union32_address_kind_mask,
+        d.union32_other_address_base_mask);
   }
   current_callback = nullptr;
   current_user_data = nullptr;
