@@ -1169,7 +1169,8 @@ static bool constant_initializer_image(
       // Retain exactly the EDG function identity and its routine type.
       // Do not guess symbol spellings from C text or a void-pointer cast.
       if (routine==nullptr || routine->type==nullptr ||
-          routine->type->kind!=tk_routine || routine->is_nonreal ||
+          object_initializer_type(routine->type)==nullptr ||
+          object_initializer_type(routine->type)->kind!=tk_routine ||
           routine->compiler_generated)
         return false;
     } else {
