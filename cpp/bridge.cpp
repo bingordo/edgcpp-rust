@@ -1374,14 +1374,32 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
   const a_constant_ptr second=first!=nullptr ? first->next : nullptr;
   const a_constant_ptr nested=first!=nullptr && first->kind==ck_aggregate ?
       first->variant.aggregate.first_constant : nullptr;
-  const unsigned type_class=ty==nullptr ? 0 :
-      ty->kind==tk_union ? 9 :
-      ty->kind==tk_struct ? 7 :
-      ty->kind==tk_array ? 6 : 0;
+  // The leading EDG field designator may select a nested array or
+  // record: distinguish a rejected selection from a rejected child image.
+  // All observed values remain source-independent numeric shape metadata.
+  const bool designated=first!=nullptr && first->kind==ck_designator;
+  const bool field_designator=designated &&
+      first->variant.designator.is_field_designator;
+  const a_field_ptr selected=field_designator ?
+      first->variant.designator.variant.field : nullptr;
+  const a_type_ptr field_type=selected!=nullptr ?
+      object_initializer_type(selected->type) : nullptr;
+  const a_constant_ptr inner=second!=nullptr && second->kind==ck_aggregate ?
+      second->variant.aggregate.first_constant : nullptr;
+  const a_constant_ptr next_inner=inner!=nullptr ? inner->next : nullptr;
+  const auto type_class=[](a_type_ptr t)->unsigned {
+    if(t==nullptr) return 0;
+    if(t->kind==tk_integer) return 1;
+    if(t->kind==tk_pointer) return 5;
+    if(t->kind==tk_array) return 6;
+    if(t->kind==tk_struct) return 7;
+    if(t->kind==tk_union) return 9;
+    return 99;
+  };
   ++weak_image_diagnostic_count;
   std::fprintf(stderr,
-      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u\n",
-      type_class,
+      "EDG_WEAK_STATIC_IMAGE_DIAG type_class=%u bytes=%llu align=%llu root_kind=%u first_kind=%u second_kind=%u nested_kind=%u root_dynamic=%u first_designator=%u first_repeat=%u first_address=%u first_nested=%u field_designator=%u generic_designator=%u chosen_type_class=%u chosen_bytes=%llu chosen_align=%llu chosen_bitfield=%u selected_first_kind=%u selected_second_kind=%u selected_dynamic=%u selected_value_class=%u\n",
+      type_class(ty),
       static_cast<unsigned long long>(ty!=nullptr ? ty->size : 0),
       static_cast<unsigned long long>(ty!=nullptr ? ty->alignment : 0),
       static_cast<unsigned>(root->kind),
@@ -1389,10 +1407,22 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
       second!=nullptr ? static_cast<unsigned>(second->kind) : 0u,
       nested!=nullptr ? static_cast<unsigned>(nested->kind) : 0u,
       root->kind==ck_aggregate && root->variant.aggregate.has_dynamic_init_component ? 1u : 0u,
-      first!=nullptr && first->kind==ck_designator ? 1u : 0u,
+      designated ? 1u : 0u,
       first!=nullptr && first->kind==ck_init_repeat ? 1u : 0u,
       first!=nullptr && first->kind==ck_address ? 1u : 0u,
-      first!=nullptr && first->kind==ck_aggregate ? 1u : 0u);
+      first!=nullptr && first->kind==ck_aggregate ? 1u : 0u,
+      field_designator ? 1u : 0u,
+      designated && first->variant.designator.is_generic ? 1u : 0u,
+      type_class(field_type),
+      static_cast<unsigned long long>(field_type!=nullptr?field_type->size:0),
+      static_cast<unsigned long long>(field_type!=nullptr?field_type->alignment:0),
+      selected!=nullptr && selected->is_bit_field ? 1u : 0u,
+      inner!=nullptr ? static_cast<unsigned>(inner->kind) : 0u,
+      next_inner!=nullptr ? static_cast<unsigned>(next_inner->kind) : 0u,
+      second!=nullptr && second->kind==ck_aggregate &&
+          second->variant.aggregate.has_dynamic_init_component ? 1u : 0u,
+      type_class(second!=nullptr && second->type!=nullptr ?
+          object_initializer_type(second->type):nullptr));
 }
 // Variable references need their declared type even if the symbol is
 // reached before the file-scope declaration list.
