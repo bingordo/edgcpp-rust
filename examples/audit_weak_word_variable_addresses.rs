@@ -15,7 +15,10 @@ fn verify_owner(il:&Il,name:&str,bytes:usize,data_offset:u64,
         .filter(|m|m.symbol==owner).collect();
     if mats.len()!=1 || !mats[0].is_weak ||
        mats[0].is_weakref || mats[0].is_gnu_alias ||
-       mats[0].is_nonreal || mats[0].thread_local {
+       mats[0].is_nonreal ||
+       !il.global_variables.iter().any(|g|
+           g.symbol==owner && !g.thread_local && !g.local_to_function &&
+           g.explicit_initializer) {
         return Err("weak union lacks original real file-scope storage".into());
     }
     let imgs:Vec<_>=il.global_aggregate_initializers.iter()
