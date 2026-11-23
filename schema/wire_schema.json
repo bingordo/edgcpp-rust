@@ -43,7 +43,8 @@
     "RECORD_NATIVE_GLOBAL_MATERIALIZATION": 100,
     "RECORD_NATIVE_SCOPE_ASM": 101,
     "RECORD_STATIC_LITERAL_OBJECT": 102,
-    "RECORD_STATIC_LITERAL_RELOCATION": 103
+    "RECORD_STATIC_LITERAL_RELOCATION": 103,
+    "RECORD_FILE_SCOPE_DYNAMIC_INIT_OWNER": 104
   },
   "record_arities": {
     "1": 1,
@@ -148,7 +149,8 @@
     "100": 4,
     "101": 4,
     "102": 3,
-    "103": 4
+    "103": 4,
+    "104": 2
   },
   "record_field_tags": {
     "1": [
@@ -759,6 +761,10 @@
       "UNSIGNED",
       "UNSIGNED",
       "SIGNED"
+    ],
+    "104": [
+      "UNSIGNED",
+      "UNSIGNED"
     ]
   }
 }
