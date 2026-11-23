@@ -130,6 +130,8 @@ pub struct Il {
     pub global_literal_objects: Vec<GlobalLiteralObject>,
     /// Pointer-sized linker slots referring to the above immutable objects.
     pub global_literal_relocations: Vec<GlobalLiteralRelocation>,
+    /// Source-owned routine function address slots in static C objects.
+    pub global_routine_relocations: Vec<GlobalRoutineRelocation>,
     pub statement_sources: Vec<StatementSource>,
     pub symbol_sources: Vec<SymbolSource>,
     pub expression_sources: Vec<ExpressionSource>,
@@ -956,6 +958,15 @@ pub struct GlobalLiteralRelocation {
     pub symbol: SymbolId,
     pub offset: u64,
     pub literal_id: u32,
+    pub addend: i64,
+}
+
+/// One exact source routine target and absolute 64-bit static pointer slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalRoutineRelocation {
+    pub symbol: SymbolId,
+    pub offset: u64,
+    pub routine: SymbolId,
     pub addend: i64,
 }
 
@@ -1884,6 +1895,32 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 id,ty:TypeId(ty),bytes,
             });
         }
+        105 => {
+            let (Some(symbol),Some(offset),Some(routine),Some(addend))=
+                (n(0),fields[1].unsigned(),n(2),fields[3].signed())
+                else {return;};
+            let owner=SymbolId(symbol);
+            let target=SymbolId(routine);
+            let Some(image)=output.global_aggregate_initializers.iter()
+                .find(|g|g.symbol==owner) else {return;};
+            let Ok(start)=usize::try_from(offset) else {return;};
+            if symbol==0 || routine==0 || offset%8!=0 || addend!=0 ||
+                !output.symbols.iter().any(|s|s.id==target && s.kind==1) ||
+                output.global_routine_relocations.len()>=4096 ||
+                start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
+                image.bytes[start..start+8].iter().any(|&b|b!=0) ||
+                output.global_routine_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_literal_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) {
+                return;
+            }
+            output.global_routine_relocations.push(GlobalRoutineRelocation {
+                symbol:owner,offset,routine:target,addend,
+            });
+        }
         103 => {
             let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
@@ -1903,6 +1940,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 output.global_literal_relocations.iter().any(|p|
                     p.symbol==owner && p.offset==offset) ||
                 output.global_aggregate_relocations.iter().any(|p|
+                    p.symbol==owner && p.offset==offset) ||
+                output.global_routine_relocations.iter().any(|p|
                     p.symbol==owner && p.offset==offset) {
                 return;
             }
@@ -1916,6 +1955,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if symbol==0 || target==0 ||
                 output.global_literal_relocations.iter().any(|p|
+                    p.symbol==SymbolId(symbol) && p.offset==offset) ||
+                output.global_routine_relocations.iter().any(|p|
                     p.symbol==SymbolId(symbol) && p.offset==offset) {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
@@ -6661,7 +6702,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=104_u32 {
+        for kind in 1..=105_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6690,13 +6731,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=104_u32)
+        let schema_fields:usize=(1..=105_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(105).is_none());
+        assert!(expected_wire_field_tag_masks(106).is_none());
     }
 
     #[test]
