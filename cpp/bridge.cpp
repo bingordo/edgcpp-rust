@@ -1176,10 +1176,34 @@ static bool constant_initializer_image(
         offset > bytes.size() || type->size > bytes.size() - offset)
       return false;
   }
-  // Resolve data variable addresses only through ELF relocations.
-  if (value->kind == ck_address && type->kind == tk_pointer) {
+  // EDG retains an explicit C pointer->integer constant cast as
+  // ck_address, with the *destination* tk_integer (often via a typedef)
+  // and the original pointer type in orig_type.  An x86-64 eight-byte
+  // relocation is still the only valid result: NEVER convert an actual
+  // pointer to a host integer in the compiler process.  This narrow proof
+  // excludes implicit conversions, integer-width coercions, casts with
+  // absent provenance, and arbitrary integer-valued address objects.
+  const a_type_ptr original_constant_type=
+      value->orig_type==nullptr ? nullptr :
+      object_initializer_type(value->orig_type);
+  const a_type_ptr native_constant_type=
+      value->type==nullptr ? nullptr : object_initializer_type(value->type);
+  const bool cast_pointer_to_word =
+      value->kind==ck_address &&
+      type->kind==tk_integer && type->size==8 &&
+      native_constant_type==type &&
+      original_constant_type!=nullptr &&
+      original_constant_type->kind==tk_pointer &&
+      original_constant_type->size==8 &&
+      value->implicit_cast && value->explicit_cast_applied;
+  // Resolve data addresses only through existing ELF relocations.  An
+  // integer destination is supported solely for a source-proven explicit
+  // pointer-sized cast of an addressable immutable literal.
+  if (value->kind == ck_address &&
+      (type->kind == tk_pointer || cast_pointer_to_word)) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
+        (cast_pointer_to_word && address.kind!=abk_constant) ||
         address.is_object_reflection || address.one_past_the_end ||
         address.subobject_path != nullptr) {
       ++static_image_diag.invalid_address;
