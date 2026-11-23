@@ -899,6 +899,23 @@ static a_type_ptr object_initializer_type(a_type_ptr type) {
   }
   return type;
 }
+// Resolve each original EDG C typedef-qualified array element before
+// calculating its stride. Never trust zero raw tk_typeref size or infer a
+// default ABI element extent: source array bytes must match the full bound.
+static a_type_ptr checked_native_array_element(a_type_ptr array) {
+  if (array == nullptr || array->kind != tk_array || array->incomplete ||
+      array->variant.array.is_variable_size_array ||
+      array->variant.array.is_template_dependent_size_array) return nullptr;
+  a_type_ptr element =
+      object_initializer_type(array->variant.array.element_type);
+  const uint64_t count=array->variant.array.variant.number_of_elements;
+  if (element == nullptr || element->kind == tk_typeref ||
+      element->incomplete || element->size == 0 || array->size == 0 ||
+      count == 0 || count > array->size / element->size ||
+      count * element->size != array->size)
+    return nullptr;
+  return element;
+}
 // Store linker references separately from integer object bytes.
 struct NativeAggregateReloc {
   size_t byte_offset;
@@ -1046,8 +1063,8 @@ static bool constant_designated_value(
           type->variant.array.is_template_dependent_size_array) return false;
       const uint64_t index = current->variant.designator.variant.array_element;
       if (index >= type->variant.array.variant.number_of_elements) return false;
-      element = type->variant.array.element_type;
-      if (element == nullptr || element->size == 0 ||
+      element = checked_native_array_element(type);
+      if (element == nullptr ||
           index > (bytes.size() - offset) / element->size) return false;
       child_offset += static_cast<size_t>(index * element->size);
     }
@@ -1097,7 +1114,7 @@ static bool constant_initializer_image(
                !type->variant.array.is_variable_size_array &&
                !type->variant.array.is_template_dependent_size_array &&
                type->variant.array.variant.number_of_elements == 1) {
-      element = type->variant.array.element_type;
+      element = checked_native_array_element(type);
     } else {
       break;
     }
@@ -1110,10 +1127,28 @@ static bool constant_initializer_image(
         offset > bytes.size() || type->size > bytes.size() - offset)
       return false;
   }
-  // Resolve data variable addresses only through ELF relocations.
-  if (value->kind == ck_address && type->kind == tk_pointer) {
+  // A GNU C explicit cast from a source pointer into a native 64-bit
+  // integer is still a symbolic address relocation, never host pointer bits.
+  // EDG must independently retain the original pointer type and prove the
+  // cast as explicit. A raw integer width match alone cannot authorize it.
+  const a_type_ptr native_type=value->type==nullptr ? nullptr :
+      object_initializer_type(value->type);
+  const a_type_ptr orig_type=value->orig_type==nullptr ? nullptr :
+      object_initializer_type(value->orig_type);
+  const bool explicit_pointer_to_word=
+      value->kind==ck_address &&
+      type->kind==tk_integer && type->size==8 &&
+      native_type==type && orig_type!=nullptr &&
+      orig_type->kind==tk_pointer && orig_type->size==8 &&
+      value->implicit_cast && value->explicit_cast_applied;
+  // Allow existing pointer images unchanged. Integer-slot images require
+  // an *original* addressable immutable literal, never an arbitrary
+  // function, variable, label, temporary or numeric conversion.
+  if (value->kind == ck_address &&
+      (type->kind == tk_pointer || explicit_pointer_to_word)) {
     const auto &address = value->variant.address;
     if (type->size != 8 || relocations == nullptr ||
+        (explicit_pointer_to_word && address.kind!=abk_constant) ||
         address.is_object_reflection || address.one_past_the_end ||
         address.subobject_path != nullptr)
       return false;
@@ -1203,8 +1238,8 @@ static bool constant_initializer_image(
   if (type->kind == tk_array) {
     if (type->variant.array.is_variable_size_array ||
         type->variant.array.is_template_dependent_size_array) return false;
-    a_type_ptr element = type->variant.array.element_type;
-    if (element == nullptr || element->size == 0) return false;
+    a_type_ptr element = checked_native_array_element(type);
+    if (element == nullptr) return false;
     uint64_t index = 0;
     const uint64_t count = type->variant.array.variant.number_of_elements;
     unsigned visits = 0;
