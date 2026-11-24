@@ -393,8 +393,9 @@ pub fn collect_checked_separate_cleanup_associations(
                 root:call.root,object:call.object,
             });
         }
-        if registrations.insert(call.root,call).is_some() {
-            return Err(StartupEvidenceError::DuplicateCleanupRegistration(call.root));
+        let root=call.root;
+        if registrations.insert(root,call).is_some() {
+            return Err(StartupEvidenceError::DuplicateCleanupRegistration(root));
         }
     }
     Ok(scheduled.entries.into_iter().map(|initializer| {
