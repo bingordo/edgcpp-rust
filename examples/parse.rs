@@ -56,6 +56,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Reconcile original native event-104 ownership with source-certified
+    // immediate __cxa_atexit call operands (events 48/55 and callee form).
+    // Missing direct calls remain UNKNOWN: transitive registrations may exist.
+    // A complete runtime lifecycle, ELF startup and atexit ABI are unproven.
+    if result.il.file_scope_init_schedule.is_some_and(|s|s.available) {
+        match edgcpp::startup_provenance::collect_checked_separate_cleanup_associations(&result.il) {
+            Ok(associations) => {
+                let matched=associations.iter().filter(|a|a.direct_registration.is_some()).count();
+                println!("EDG_CXX5_SEPARATE_CLEANUP entries={} direct={} unknown={} lifecycle_abi_proven=false",
+                         associations.len(),matched,associations.len()-matched);
+                for association in associations.iter().take(64) {
+                    println!("EDG_CXX5_SEPARATE_CLEANUP_ENTRY ordinal={} variable={} routine={} destructor={:?} dso={:?} lifecycle_abi_proven=false",
+                             association.initializer.scheduler_position,
+                             association.initializer.variable.0,
+                             association.initializer.routine.0,
+                             association.direct_registration.as_ref().map(|c|c.destructor.0),
+                             association.direct_registration.as_ref().map(|c|c.dso_handle.0));
+                }
+            }
+            Err(error) => {
+                println!("EDG_CXX5_SEPARATE_CLEANUP incomplete={error:?} lifecycle_abi_proven=false");
+            }
+        }
+    }
     for startup in &result.il.file_scope_lowered_startup_routines {
         let routine=result.il.symbols.iter().find(|s|s.id==startup.routine);
         println!("file scope lowered startup routine={} priority={} name={:?}",
