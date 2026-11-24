@@ -101,6 +101,17 @@ pub enum StartupEvidenceError {
     DuplicateInitializerRoutine(SymbolId),
     /// The native scheduler has a routine with no exact event-104 owner.
     MissingInitializerOwner(SymbolId),
+    /// An independently certified native atexit call was found under a
+    /// startup root that is not on the checked separate scheduler.
+    UnscheduledCleanupRoot(SymbolId),
+    /// A native atexit call under an initializer routine addresses a
+    /// different object than that routine's source-owned global.
+    MisownedCleanupRegistration { root: SymbolId, object: SymbolId },
+    /// Multiple certified atexit calls claim the same initializer root.
+    DuplicateCleanupRegistration(SymbolId),
+    /// The requested all-registered subset has no certified direct atexit
+    /// call for an initializer root. Does not mean no cleanup happens.
+    MissingDirectCleanupRegistration(SymbolId),
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -346,6 +357,67 @@ pub fn collect_checked_separate_initializer_schedule(
         });
     }
     Ok(CheckedSeparateInitializerSchedule{entries})
+}
+
+/// Exact per-scheduled-object match for native immediate `__cxa_atexit`
+/// operands. A None registration is UNKNOWN, not proof the object is trivial
+/// or that its destructor is never registered transitively.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateCleanupAssociation {
+    pub initializer: CheckedSeparateInitializer,
+    pub direct_registration: Option<CleanupCallCandidate>,
+}
+
+/// Retains all source-certified direct cleanup registrations and marks
+/// initializer roots without such an immediate call as explicitly unknown.
+/// No runtime invocation, constructor/destructor ABI, cross-TU ordering or
+/// linker startup section is established by this diagnostic.
+pub fn collect_checked_separate_cleanup_associations(
+    il:&Il,
+) -> Result<Vec<CheckedSeparateCleanupAssociation>,StartupEvidenceError> {
+    let scheduled=collect_checked_separate_initializer_schedule(il)?;
+    let candidates=collect_cleanup_call_candidates(il)?;
+    let mut by_root=HashMap::with_capacity(scheduled.entries.len());
+    for entry in &scheduled.entries {
+        if by_root.insert(entry.routine,entry.variable).is_some() {
+            return Err(StartupEvidenceError::DuplicateScheduledInitializer(entry.routine));
+        }
+    }
+    let mut registrations=HashMap::with_capacity(candidates.len());
+    for call in candidates {
+        let Some(&object)=by_root.get(&call.root) else {
+            return Err(StartupEvidenceError::UnscheduledCleanupRoot(call.root));
+        };
+        if object!=call.object {
+            return Err(StartupEvidenceError::MisownedCleanupRegistration {
+                root:call.root,object:call.object,
+            });
+        }
+        if registrations.insert(call.root,call).is_some() {
+            return Err(StartupEvidenceError::DuplicateCleanupRegistration(call.root));
+        }
+    }
+    Ok(scheduled.entries.into_iter().map(|initializer| {
+        let direct_registration=registrations.remove(&initializer.routine);
+        CheckedSeparateCleanupAssociation {initializer,direct_registration}
+    }).collect())
+}
+
+/// Stricter opt-in diagnostic for a caller that independently knows every
+/// checked initializer in THIS subset should register a destructor directly.
+/// Absence is an error; the result still does not certify a complete C++
+/// lifecycle or that any call actually executes.
+pub fn collect_checked_separate_direct_cleanup_registrations(
+    il:&Il,
+) -> Result<Vec<(CheckedSeparateInitializer,CleanupCallCandidate)>,
+            StartupEvidenceError> {
+    collect_checked_separate_cleanup_associations(il)?.into_iter()
+        .map(|association| {
+            let call=association.direct_registration.ok_or(
+                StartupEvidenceError::MissingDirectCleanupRegistration(
+                    association.initializer.routine))?;
+            Ok((association.initializer,call))
+        }).collect()
 }
 
 /// A single EDG-owned call occurrence reached from a source-identified
