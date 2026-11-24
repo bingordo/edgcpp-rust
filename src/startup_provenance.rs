@@ -101,6 +101,17 @@ pub enum StartupEvidenceError {
     DuplicateInitializerRoutine(SymbolId),
     /// The native scheduler has a routine with no exact event-104 owner.
     MissingInitializerOwner(SymbolId),
+    /// An independently certified native atexit call was found under a
+    /// startup root that is not on the checked separate scheduler.
+    UnscheduledCleanupRoot(SymbolId),
+    /// A native atexit call under an initializer routine addresses a
+    /// different object than that routine's source-owned global.
+    MisownedCleanupRegistration { root: SymbolId, object: SymbolId },
+    /// Multiple certified atexit calls claim the same initializer root.
+    DuplicateCleanupRegistration(SymbolId),
+    /// The requested all-registered subset has no certified direct atexit
+    /// call for an initializer root. Does not mean no cleanup happens.
+    MissingDirectCleanupRegistration(SymbolId),
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -346,6 +357,68 @@ pub fn collect_checked_separate_initializer_schedule(
         });
     }
     Ok(CheckedSeparateInitializerSchedule{entries})
+}
+
+/// Exact per-scheduled-object match for native immediate `__cxa_atexit`
+/// operands. A None registration is UNKNOWN, not proof the object is trivial
+/// or that its destructor is never registered transitively.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateCleanupAssociation {
+    pub initializer: CheckedSeparateInitializer,
+    pub direct_registration: Option<CleanupCallCandidate>,
+}
+
+/// Retains all source-certified direct cleanup registrations and marks
+/// initializer roots without such an immediate call as explicitly unknown.
+/// No runtime invocation, constructor/destructor ABI, cross-TU ordering or
+/// linker startup section is established by this diagnostic.
+pub fn collect_checked_separate_cleanup_associations(
+    il:&Il,
+) -> Result<Vec<CheckedSeparateCleanupAssociation>,StartupEvidenceError> {
+    let scheduled=collect_checked_separate_initializer_schedule(il)?;
+    let candidates=collect_cleanup_call_candidates(il)?;
+    let mut by_root=HashMap::with_capacity(scheduled.entries.len());
+    for entry in &scheduled.entries {
+        if by_root.insert(entry.routine,entry.variable).is_some() {
+            return Err(StartupEvidenceError::DuplicateScheduledInitializer(entry.routine));
+        }
+    }
+    let mut registrations=HashMap::with_capacity(candidates.len());
+    for call in candidates {
+        let Some(&object)=by_root.get(&call.root) else {
+            return Err(StartupEvidenceError::UnscheduledCleanupRoot(call.root));
+        };
+        if object!=call.object {
+            return Err(StartupEvidenceError::MisownedCleanupRegistration {
+                root:call.root,object:call.object,
+            });
+        }
+        let root=call.root;
+        if registrations.insert(root,call).is_some() {
+            return Err(StartupEvidenceError::DuplicateCleanupRegistration(root));
+        }
+    }
+    Ok(scheduled.entries.into_iter().map(|initializer| {
+        let direct_registration=registrations.remove(&initializer.routine);
+        CheckedSeparateCleanupAssociation {initializer,direct_registration}
+    }).collect())
+}
+
+/// Stricter opt-in diagnostic for a caller that independently knows every
+/// checked initializer in THIS subset should register a destructor directly.
+/// Absence is an error; the result still does not certify a complete C++
+/// lifecycle or that any call actually executes.
+pub fn collect_checked_separate_direct_cleanup_registrations(
+    il:&Il,
+) -> Result<Vec<(CheckedSeparateInitializer,CleanupCallCandidate)>,
+            StartupEvidenceError> {
+    collect_checked_separate_cleanup_associations(il)?.into_iter()
+        .map(|association| {
+            let call=association.direct_registration.ok_or(
+                StartupEvidenceError::MissingDirectCleanupRegistration(
+                    association.initializer.routine))?;
+            Ok((association.initializer,call))
+        }).collect()
 }
 
 /// A single EDG-owned call occurrence reached from a source-identified
@@ -900,6 +973,121 @@ mod tests {
                 crate::FileScopeDynamicInitOwner{variable,routine});
         }
         il
+    }
+
+    /// Scale the same original EDG direct cleanup operand layout across
+    /// separate native roots. Unlike a post-lowering scope join, event 68
+    /// is absent; the only ownership source is the checked event-104 map.
+    fn separate_cleanup_fixture(count:u32) -> Il {
+        let mut il=separate_init_fixture(count);
+        let mut calls=cleanup_test_fixture(count);
+        il.symbols.extend(calls.symbols.drain(..).filter(|s|s.id.0>=2000));
+        il.symbol_link_names.append(&mut calls.symbol_link_names);
+        let function=|statement:&str| {
+            format!("init_{}",statement.rsplit('.').next().expect("fixture index"))
+        };
+        for site in &mut calls.calls {
+            site.function=function(&site.statement_path);
+        }
+        for target in &mut calls.call_targets {
+            target.function=function(&target.statement_path);
+        }
+        for expression in &mut calls.expressions {
+            expression.function=function(&expression.statement_path);
+        }
+        for addr in &mut calls.constant_addresses {
+            addr.function=function(&addr.statement_path);
+        }
+        for addr in &mut calls.constant_routine_addresses {
+            addr.function=function(&addr.statement_path);
+        }
+        il.calls.append(&mut calls.calls);
+        il.call_targets.append(&mut calls.call_targets);
+        il.expressions.append(&mut calls.expressions);
+        il.constant_addresses.append(&mut calls.constant_addresses);
+        il.constant_routine_addresses.append(&mut calls.constant_routine_addresses);
+        il
+    }
+
+    #[test]
+    fn source_owned_direct_cleanup_association_preserves_order_and_scales() {
+        let il=separate_cleanup_fixture(128);
+        assert!(il.scope_dynamic_initializers.is_empty());
+        let pairs=collect_checked_separate_direct_cleanup_registrations(&il).unwrap();
+        assert_eq!(pairs.len(),128);
+        assert_eq!(pairs[0].0.scheduler_position,0);
+        assert_eq!(pairs[0].0.variable,SymbolId(1000));
+        assert_eq!(pairs[0].1.root,SymbolId(10));
+        assert_eq!(pairs[0].1.object,SymbolId(1000));
+        assert_eq!(pairs[0].1.destructor,SymbolId(2000));
+        assert_eq!(pairs[127].0.scheduler_position,127);
+        assert_eq!(pairs[127].1.root,SymbolId(137));
+        assert_eq!(pairs[127].1.object,SymbolId(1127));
+        let census=collect_checked_separate_cleanup_associations(&il).unwrap();
+        assert_eq!(census.len(),128);
+        assert!(census.iter().all(|a|a.direct_registration.is_some()));
+    }
+
+    #[test]
+    fn missing_direct_cleanup_is_unknown_unless_explicitly_required() {
+        let empty=separate_init_fixture(2);
+        let census=collect_checked_separate_cleanup_associations(&empty).unwrap();
+        assert_eq!(census.len(),2);
+        assert!(census.iter().all(|a|a.direct_registration.is_none()));
+        assert_eq!(collect_checked_separate_direct_cleanup_registrations(&empty),
+                   Err(StartupEvidenceError::MissingDirectCleanupRegistration(SymbolId(10))));
+        let mut partial=separate_cleanup_fixture(2);
+        partial.calls.pop();
+        partial.call_targets.pop();
+        let census=collect_checked_separate_cleanup_associations(&partial).unwrap();
+        assert!(census[0].direct_registration.is_some());
+        assert!(census[1].direct_registration.is_none());
+        assert_eq!(collect_checked_separate_direct_cleanup_registrations(&partial),
+                   Err(StartupEvidenceError::MissingDirectCleanupRegistration(SymbolId(11))));
+    }
+
+    #[test]
+    fn direct_cleanup_rejects_wrong_object_or_forged_operand() {
+        let mut il=separate_cleanup_fixture(2);
+        il.constant_addresses[1].symbol=SymbolId(1000);
+        assert_eq!(collect_checked_separate_cleanup_associations(&il),
+                   Err(StartupEvidenceError::MisownedCleanupRegistration{
+                       root:SymbolId(11),object:SymbolId(1000)}));
+        let mut il=separate_cleanup_fixture(2);
+        il.constant_routine_addresses.pop();
+        assert_eq!(collect_checked_separate_cleanup_associations(&il),
+                   Err(StartupEvidenceError::MissingCleanupWitness));
+        let mut il=separate_cleanup_fixture(2);
+        il.file_scope_dynamic_init_owners[1].routine=SymbolId(10);
+        assert_eq!(collect_checked_separate_cleanup_associations(&il),
+                   Err(StartupEvidenceError::DuplicateInitializerRoutine(SymbolId(10))));
+    }
+
+    #[test]
+    fn duplicate_exact_cleanup_registration_under_one_root_fails_closed() {
+        let mut il=separate_cleanup_fixture(2);
+        let from="0.block.0";
+        let to="0.block.9";
+        let mut copy=il.calls[0].clone();
+        copy.statement_path=to.into();
+        il.calls.push(copy);
+        let mut copy=il.call_targets[0].clone();
+        copy.statement_path=to.into();
+        il.call_targets.push(copy);
+        let originals:Vec<_>=il.expressions.iter()
+            .filter(|e|e.statement_path==from).cloned().collect();
+        for mut e in originals {
+            e.statement_path=to.into();
+            il.expressions.push(e);
+        }
+        let mut object=il.constant_addresses[0].clone();
+        object.statement_path=to.into();
+        il.constant_addresses.push(object);
+        let mut dtor=il.constant_routine_addresses[0].clone();
+        dtor.statement_path=to.into();
+        il.constant_routine_addresses.push(dtor);
+        assert_eq!(collect_checked_separate_cleanup_associations(&il),
+                   Err(StartupEvidenceError::DuplicateCleanupRegistration(SymbolId(10))));
     }
 
     #[test]
