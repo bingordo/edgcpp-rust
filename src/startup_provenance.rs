@@ -715,9 +715,23 @@ pub fn collect_cleanup_call_candidates(
         let Some(site)=sites.get(&(function,stmt,path)) else {
             return Err(StartupEvidenceError::MissingCleanupWitness);
         };
-        if site.first_argument!=1 ||
-           expressions.contains_key(&(function,stmt,format!("{path}.4").as_str())) {
+        if site.first_argument!=1 {
             return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        // Only four original EDG eok_call children are legal: one callee
+        // plus three arguments. Validate independent parent ownership as
+        // well as ordinal paths; a detached node or extra .5 can otherwise
+        // pass the old ".4 absent" check.
+        let direct=children.get(&(function,stmt,path))
+            .ok_or(StartupEvidenceError::MissingCleanupWitness)?;
+        if direct.len()!=4 {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
+        }
+        for position in 0..4 {
+            let expected=format!("{path}.{position}");
+            if !direct.iter().any(|node|node.path==expected) {
+                return Err(StartupEvidenceError::UnsupportedCleanupCall);
+            }
         }
         // The original callee is native EDG enk_routine (21), not
         // enk_variable (3). Confirmed on real two-global C++17 startup IL.
@@ -1326,8 +1340,37 @@ mod tests {
                    Err(StartupEvidenceError::MissingCleanupWitness));
         let mut wrong=il.clone();
         wrong.expressions[1].parent=Some("0.1".into());
+        // Once native direct-child ownership is checked first, a detached
+        // callee is classified as an unsupported malformed call shape.
         assert_eq!(collect_cleanup_call_candidates(&wrong),
-                   Err(StartupEvidenceError::MissingCleanupWitness));
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+    }
+
+    #[test]
+    fn cleanup_call_requires_exact_direct_child_list() {
+        let fixture=cleanup_test_fixture(1);
+        // A path resembling a direct argument cannot replace EDG parenthood.
+        let mut wrong=fixture.clone();
+        let arg=wrong.expressions.iter_mut()
+            .find(|expr|expr.path=="0.2").unwrap();
+        arg.parent=Some("0.1".into());
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+
+        // The old code only excluded extra .4; extra .5 was accepted.
+        let mut wrong=fixture.clone();
+        emit_cleanup_test_expr(&mut wrong,"0.block.0","0.5",Some("0"),
+                               2,None,Some(7),None);
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
+
+        // Missing one direct argument is not repaired by a renumbered child.
+        let mut wrong=fixture;
+        let arg=wrong.expressions.iter_mut()
+            .find(|expr|expr.path=="0.3").unwrap();
+        arg.path="0.5".into();
+        assert_eq!(collect_cleanup_call_candidates(&wrong),
+                   Err(StartupEvidenceError::UnsupportedCleanupCall));
     }
 
     #[test]
