@@ -1819,12 +1819,12 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             // expression event. Reject synthetic, mismatched or duplicate
             // action identities; preserve only the EDG-owned native enum.
             let source_present=if role==0 {
-                output.expressions.iter().any(|e|
+                output.expressions.last().is_some_and(|e|
                     e.function==function &&
                     e.statement_path==statement_path &&
                     e.path==path && e.kind==expression_kind)
             } else {
-                output.control_expressions.iter().any(|e|
+                output.control_expressions.last().is_some_and(|e|
                     e.function==function &&
                     e.statement_path==statement_path &&
                     e.role==role && e.path==path && e.kind==expression_kind)
