@@ -86,3 +86,15 @@ fn builtin_choose_expr_has_independent_native_arity_guard() {
     assert!(choose.find("report_incomplete_snapshot()").unwrap() <
             choose.find("variant = 2;").unwrap());
 }
+
+#[test]
+fn supplemental_statement_expression_cannot_silently_lose_its_block() {
+    let emitter=BRIDGE.split("static void emit_expression_variant(")
+        .nth(1).expect("native variant emitter")
+        .split("static void emit_expr(").next().unwrap();
+    assert!(emitter.contains("context != 0 && node->kind == enk_statement"));
+    assert!(emitter.contains("report_incomplete_snapshot();"));
+    assert!(emitter.contains("node->variant.c11_generic.result"));
+    assert!(emitter.contains("child == result"));
+    assert!(BRIDGE.contains("category == 9"));
+}
