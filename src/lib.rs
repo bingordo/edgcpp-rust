@@ -103,6 +103,10 @@ pub struct Il {
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
     pub control_expressions: Vec<ControlExpression>,
+    /// Original EDG enk_lowered_eh_construct subtype and exact expression
+    /// identity in the supported nonportable producer mode. Structural only:
+    /// nothing here authorizes Itanium unwind, atexit or ELF emission.
+    pub native_retained_eh_constructs: Vec<NativeRetainedEhConstruct>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
     /// EDG case/default metadata from native switch statements.
@@ -859,6 +863,20 @@ pub struct ControlExpression {
     pub symbol_id: Option<SymbolId>,
 }
 
+/// Original nonportable EDG exception action at an owned expression path
+/// (wire 106). A zero role refers to a normal expression, roles 1..=4
+/// to independent native control-expression trees. `subkind` is EDG's
+/// native leck_* enum, not a target-independent EH operation.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeRetainedEhConstruct {
+    pub function:String,
+    pub statement_path:String,
+    pub role:u32,
+    pub path:String,
+    pub expression_kind:u32,
+    pub subkind:u32,
+}
+
 /// A variable declared by a particular statement. More than one variable
 /// can share the same statement, in source-list order. The `is_vla` flag
 /// identifies a stmk_vla_decl allocation/declaration.
@@ -1501,6 +1519,7 @@ struct WireSeen {
     /// Event 72: each native runtime link variable has exactly one startup target.
     file_scope_runtime_link_variables: HashSet<SymbolId>,
     file_scope_dynamic_init_owner_variables: HashSet<SymbolId>,
+    native_retained_eh_construct_keys: HashSet<(String,String,u32,String)>,
     /// Event 73: each native lowered startup routine has exactly one priority.
     file_scope_lowered_startup_routines: HashSet<SymbolId>,
 }
@@ -1653,6 +1672,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         102 => Some(il.global_literal_objects.len()),
         103 => Some(il.global_literal_relocations.len()),
         105 => Some(il.global_routine_relocations.len()),
+        106 => Some(il.native_retained_eh_constructs.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1789,6 +1809,34 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
+            });
+        }
+        106 => {
+            let (Some(function),Some(statement_path),Some(role),
+                 Some(path),Some(expression_kind),Some(subkind))=
+                (t(0),t(1),n(2),t(3),n(4),n(5)) else {return;};
+            // This record is emitted immediately *after* the original
+            // expression event. Reject synthetic, mismatched or duplicate
+            // action identities; preserve only the EDG-owned native enum.
+            let source_present=if role==0 {
+                output.expressions.last().is_some_and(|e|
+                    e.function==function &&
+                    e.statement_path==statement_path &&
+                    e.path==path && e.kind==expression_kind)
+            } else {
+                output.control_expressions.last().is_some_and(|e|
+                    e.function==function &&
+                    e.statement_path==statement_path &&
+                    e.role==role && e.path==path && e.kind==expression_kind)
+            };
+            if role>4 || subkind>11 || path.is_empty() ||
+               !source_present ||
+               !seen.native_retained_eh_construct_keys.insert((
+                   function.clone(),statement_path.clone(),role,path.clone())) {
+                return;
+            }
+            output.native_retained_eh_constructs.push(NativeRetainedEhConstruct {
+                function,statement_path,role,path,expression_kind,subkind,
             });
         }
         104 => {
@@ -6703,7 +6751,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=105_u32 {
+        for kind in 1..=106_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6732,13 +6780,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=105_u32)
+        let schema_fields:usize=(1..=106_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(106).is_none());
+        assert!(expected_wire_field_tag_masks(107).is_none());
     }
 
     #[test]
@@ -8151,6 +8199,80 @@ mod retired_source_hook_wire_tests {
 #[cfg(test)]
 #[path="global_materialization_tests.rs"]
 mod global_materialization_tests;
+
+#[cfg(test)]
+mod retained_native_eh_wire_tests {
+    use super::*;
+    fn text_field(s:&str)->WireField {
+        WireField{data:s.as_ptr(),length:s.len(),value:0,tag:wire_tags::TEXT}
+    }
+    fn number(n:u32)->WireField {
+        WireField{data:std::ptr::null(),length:0,value:u64::from(n),tag:wire_tags::UNSIGNED}
+    }
+    fn send(state:&mut Collector,role:u32,kind:u32,subkind:u32) {
+        let fields=[
+            text_field("function"),text_field("stmt"),number(role),
+            text_field("0"),number(kind),number(subkind),
+        ];
+        unsafe {collect((state as *mut Collector).cast(),
+                        106,fields.as_ptr(),fields.len(),0);}
+    }
+    fn expression()->Expression {
+        Expression{
+            function:"function".into(),statement_path:"stmt".into(),
+            path:"0".into(),parent:None,kind:89,operator:None,
+            type_kind:None,reference:None,type_size:None,
+            type_alignment:None,constant_kind:None,
+            constant_integer:None,related_type_role:None,
+            related_type_kind:None,type_id:None,symbol_id:None,
+        }
+    }
+    #[test]
+    fn owned_nonportable_eh_action_preserves_native_subkind() {
+        let mut state=Collector::default();
+        state.il.expressions.push(expression());
+        send(&mut state,0,89,11);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.native_retained_eh_constructs,vec![
+            NativeRetainedEhConstruct{
+                function:"function".into(),statement_path:"stmt".into(),
+                role:0,path:"0".into(),expression_kind:89,subkind:11,
+            }
+        ]);
+        let mut control=Collector::default();
+        control.il.control_expressions.push(ControlExpression{
+            function:"function".into(),statement_path:"stmt".into(),
+            role:2,path:"0".into(),parent:None,kind:89,
+            operator:None,type_id:None,symbol_id:None,
+        });
+        send(&mut control,2,89,4);
+        assert_eq!(control.il.native_retained_eh_constructs.len(),1);
+        assert!(!control.malformed);
+    }
+    #[test]
+    fn synthetic_duplicate_and_unrecognized_eh_action_fail_closed() {
+        let mut missing=Collector::default();
+        send(&mut missing,0,89,11);
+        assert!(missing.malformed && !missing.panicked);
+        let mut wrong=Collector::default();
+        wrong.il.expressions.push(expression());
+        send(&mut wrong,0,88,11);
+        assert!(wrong.malformed && !wrong.panicked);
+        let mut wrong=Collector::default();
+        wrong.il.expressions.push(expression());
+        send(&mut wrong,0,89,12);
+        assert!(wrong.malformed && !wrong.panicked);
+        let mut wrong=Collector::default();
+        wrong.il.expressions.push(expression());
+        send(&mut wrong,5,89,1);
+        assert!(wrong.malformed && !wrong.panicked);
+        let mut duplicate=Collector::default();
+        duplicate.il.expressions.push(expression());
+        send(&mut duplicate,0,89,11);
+        send(&mut duplicate,0,89,11);
+        assert!(duplicate.malformed && !duplicate.panicked);
+    }
+}
 
 #[cfg(test)]
 mod separate_file_scope_initializer_owner_wire_tests {

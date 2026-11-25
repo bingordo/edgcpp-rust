@@ -13,6 +13,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if result.status != 0 {
         return Err(format!("EDG reported compilation failure: {}", result.status).into());
     }
+    // Nonportable EDG EH mode retains native `leck_*` actions rather than
+    // lowering them into the portable-C setjmp stack. These are original
+    // IL action identities, NOT permission to execute exception semantics.
+    println!("EDG_NATIVE_RETAINED_EH nodes={} itanium_abi_admitted=false",
+             result.il.native_retained_eh_constructs.len());
+    for node in result.il.native_retained_eh_constructs.iter().take(64) {
+        println!("EDG_NATIVE_RETAINED_EH_ENTRY function={:?} statement={:?} role={} path={:?} expression_kind={} subkind={} itanium_abi_admitted=false",
+                 node.function,node.statement_path,node.role,node.path,
+                 node.expression_kind,node.subkind);
+    }
     if let Some(schedule) = result.il.file_scope_init_schedule {
         println!("file scope init scheduler available={} complete={} roots={}",
                  schedule.available,schedule.complete,
