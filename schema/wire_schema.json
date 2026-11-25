@@ -46,7 +46,8 @@
     "RECORD_STATIC_LITERAL_RELOCATION": 103,
     "RECORD_FILE_SCOPE_DYNAMIC_INIT_OWNER": 104,
     "RECORD_STATIC_ROUTINE_RELOCATION": 105,
-    "RECORD_NATIVE_RETAINED_EH_CONSTRUCT": 106
+    "RECORD_NATIVE_RETAINED_EH_CONSTRUCT": 106,
+    "RECORD_NATIVE_EXPRESSION_VARIANT": 107
   },
   "record_arities": {
     "1": 1,
@@ -154,7 +155,8 @@
     "103": 4,
     "104": 2,
     "105": 4,
-    "106": 6
+    "106": 6,
+    "107": 9
   },
   "record_field_tags": {
     "1": [
@@ -783,6 +785,17 @@
       "TEXT",
       "UNSIGNED",
       "UNSIGNED"
+    ],
+    "107": [
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|TEXT",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED"
     ]
   }
 }
