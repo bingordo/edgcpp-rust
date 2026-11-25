@@ -3673,6 +3673,15 @@ void back_end(void)
 }
 } // namespace edg
 
+// EDG's cfe.c declares a custom (non-C/non-C++-generating) back_end()
+// in the GLOBAL namespace. In the ordinary C-generating configuration,
+// cfe.c calls edg::back_end() instead. Support the documented retained-EH
+// source configuration by forwarding to the same source-owned snapshot
+// collector, without changing production C-backend ABI or its symbol.
+#if !BACK_END_IS_C_GEN_BE && !BACK_END_IS_CP_GEN_BE
+void back_end(void) { edg::back_end(); }
+#endif
+
 extern "C" int edgcpp_compile(int argc, char **argv,
                                edgcpp_il_callback callback, void *user_data)
 {
