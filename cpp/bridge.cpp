@@ -3859,6 +3859,31 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
   } else if (category == 6) {
     // Native variable init-kind witness (record 14) proves record 16 exists.
     if (value == static_cast<unsigned>(initk_dynamic)) return 1;
+  } else if (category == 7) {
+    // EDG nonportable exception action semantic IDs; unlike native enum
+    // discriminants, these remain stable across conditional EH table modes.
+    // They are source-IL facts, NOT an executable Itanium EH ABI.
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+    if (value == static_cast<unsigned>(leck_caught_object_address)) return 1;
+    if (value == static_cast<unsigned>(leck_thrown_object_address)) return 2;
+    if (value == static_cast<unsigned>(leck_cleanup_state)) return 3;
+    if (value == static_cast<unsigned>(leck_unreachable_cleanup_state)) return 4;
+    if (value == static_cast<unsigned>(leck_function_prologue)) return 5;
+    if (value == static_cast<unsigned>(leck_function_epilogue)) return 6;
+    if (value == static_cast<unsigned>(leck_catch_epilogue)) return 7;
+    if (value == static_cast<unsigned>(leck_try_epilogue)) return 8;
+    if (value == static_cast<unsigned>(leck_exception_caught)) return 9;
+    if (value == static_cast<unsigned>(leck_exception_started)) return 10;
+#if !GENERATE_EH_TABLES
+    if (value == static_cast<unsigned>(leck_initialization_completed)) return 11;
+#endif
+    if (value == static_cast<unsigned>(leck_internal_try)) return 12;
+#endif
+  } else if (category == 8) {
+    // Distinguish an original retained-EH node from ordinary operations.
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+    if (value == static_cast<unsigned>(enk_lowered_eh_construct)) return 1;
+#endif
   }
   return 0;
 }
