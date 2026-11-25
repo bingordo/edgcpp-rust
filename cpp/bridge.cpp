@@ -1641,6 +1641,13 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
     const std::string &function, const std::string &statement,
     uint32_t owner, uint32_t position, const std::string &path)
 {
+  // Statement-expression blocks are only represented in the ordinary
+  // statement graph today. Do not certify a supplemental tree that lost
+  // its executable statement subtree.
+  if (context != 0 && node->kind == enk_statement) {
+    report_incomplete_snapshot();
+    return;
+  }
   uint32_t variant = 0;
   edgcpp_field payload = absent();
   switch (node->kind) {
@@ -1665,6 +1672,32 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
       break;
     }
 #endif
+    case enk_c11_generic: {
+      // il_def.h: result points into the original operand list, not to a
+      // copy and not to its controlling expression or a type operand.
+      const auto result = node->variant.c11_generic.result;
+      if (result == nullptr || result->kind == enk_type_operand) {
+        report_incomplete_snapshot();
+        return;
+      }
+      unsigned ordinal = 0;
+      unsigned selected = 0;
+      for (auto child = node->variant.c11_generic.operands;
+           child != nullptr; child = child->next, ++ordinal) {
+        if (!within_native_list_limit(ordinal)) return;
+        if (child == result) {
+          if (ordinal == 0 || selected != 0) {
+            report_incomplete_snapshot();
+            return;
+          }
+          selected = ordinal;
+        }
+      }
+      if (selected == 0) { report_incomplete_snapshot(); return; }
+      variant = 6;
+      payload = num(selected);
+      break;
+    }
     case enk_type_operand: {
       variant = 3;
       const uint32_t type = emit_type(node->variant.type_operand.type, 0);
@@ -3999,6 +4032,21 @@ extern "C" unsigned edgcpp_codegen_kind(unsigned category, unsigned value)
 #if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
     if (value == static_cast<unsigned>(enk_lowered_eh_construct)) return 1;
 #endif
+  } else if (category == 9) {
+    // Independent expected metadata family, keyed by the original native
+    // expression kind, not the presence of event 107.
+    if (value == static_cast<unsigned>(enk_builtin_operation)) return 1;
+#if BUILTIN_FUNCTIONS_ENABLED
+    if (value == static_cast<unsigned>(enk_builtin_choose_expr)) return 2;
+#endif
+    if (value == static_cast<unsigned>(enk_type_operand)) return 3;
+    if (value == static_cast<unsigned>(enk_sizeof) ||
+        value == static_cast<unsigned>(enk_datasizeof) ||
+        value == static_cast<unsigned>(enk_alignof)) return 4;
+    if (value == static_cast<unsigned>(enk_temp_init) ||
+        value == static_cast<unsigned>(enk_lambda) ||
+        value == static_cast<unsigned>(enk_initializer)) return 5;
+    if (value == static_cast<unsigned>(enk_c11_generic)) return 6;
   }
   return 0;
 }
