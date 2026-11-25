@@ -6786,7 +6786,7 @@ mod audit_complete_wire_field_tags_tests {
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(106).is_none());
+        assert!(expected_wire_field_tag_masks(107).is_none());
     }
 
     #[test]
