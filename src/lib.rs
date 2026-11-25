@@ -107,6 +107,8 @@ pub struct Il {
     /// identity in the supported nonportable producer mode. Structural only:
     /// nothing here authorizes Itanium unwind, atexit or ELF emission.
     pub native_retained_eh_constructs: Vec<NativeRetainedEhConstruct>,
+    /// Variant-owned payloads, separate from expression result TypeId and ordinary operators.
+    pub native_expression_variants: Vec<NativeExpressionVariant>,
     /// References and definitions of native goto labels.
     pub statement_labels: Vec<StatementLabel>,
     /// EDG case/default metadata from native switch statements.
@@ -877,6 +879,34 @@ pub struct NativeRetainedEhConstruct {
     pub subkind:u32,
 }
 
+/// Identity of a native expression tree. The same path may occur in
+/// multiple statement/control/initializer contexts; never conflate them.
+#[derive(Debug,Clone,PartialEq,Eq,Hash)]
+pub enum NativeExpressionOwner {
+    Statement { function:String, statement_path:String },
+    Control { function:String, statement_path:String, role:u32 },
+    Initializer { owner:SymbolId },
+    Constructor { routine:SymbolId, position:u32 },
+}
+
+/// EDG-owned variant payload, not an executable operation or result type.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub enum NativeExpressionPayload {
+    BuiltinOperation(u32),
+    BuiltinChooseFirst(bool),
+    TypeOperand(Option<TypeId>),
+    SizeOrAlignmentType(Option<TypeId>),
+}
+
+/// A variant-specific fact attached to exactly one original expression.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeExpressionVariant {
+    pub owner:NativeExpressionOwner,
+    pub path:String,
+    pub expression_kind:u32,
+    pub payload:NativeExpressionPayload,
+}
+
 /// A variable declared by a particular statement. More than one variable
 /// can share the same statement, in source-list order. The `is_vla` flag
 /// identifies a stmk_vla_decl allocation/declaration.
@@ -1520,6 +1550,7 @@ struct WireSeen {
     file_scope_runtime_link_variables: HashSet<SymbolId>,
     file_scope_dynamic_init_owner_variables: HashSet<SymbolId>,
     native_retained_eh_construct_keys: HashSet<(String,String,u32,String)>,
+    native_expression_variant_keys: HashSet<(NativeExpressionOwner,String)>,
     /// Event 73: each native lowered startup routine has exactly one priority.
     file_scope_lowered_startup_routines: HashSet<SymbolId>,
 }
@@ -1673,6 +1704,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         103 => Some(il.global_literal_relocations.len()),
         105 => Some(il.global_routine_relocations.len()),
         106 => Some(il.native_retained_eh_constructs.len()),
+        107 => Some(il.native_expression_variants.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1809,6 +1841,68 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                position as usize != output.file_scope_init_routines.len() {return;}
             output.file_scope_init_routines.push(FileScopeInitRoutine {
                 position,routine:SymbolId(routine)
+            });
+        }
+        107 => {
+            let (Some(context),Some(position),Some(path),Some(expression_kind),Some(variant))=
+                (n(0),n(4),t(5),n(6),n(7)) else {return;};
+            if path.is_empty() {return;}
+            let source_matches=|p:&str,k:u32| p==path && k==expression_kind;
+            let owner=match context {
+                0|1 if !fields[3].present()=>{
+                    let (Some(function),Some(statement_path))=(t(1),t(2)) else {return;};
+                    if function.is_empty() || statement_path.is_empty() {return;}
+                    if context==0 && position==0 &&
+                        output.expressions.last().is_some_and(|e|
+                            e.function==function && e.statement_path==statement_path &&
+                            source_matches(&e.path,e.kind)) {
+                        NativeExpressionOwner::Statement {function,statement_path}
+                    } else if context==1 && (1..=4).contains(&position) &&
+                        output.control_expressions.last().is_some_and(|e|
+                            e.function==function && e.statement_path==statement_path &&
+                            e.role==position && source_matches(&e.path,e.kind)) {
+                        NativeExpressionOwner::Control {function,statement_path,role:position}
+                    } else {return;}
+                }
+                2|3 if !fields[1].present() && !fields[2].present()=>{
+                    let Some(owner)=n(3).filter(|v|*v!=0).map(SymbolId) else {return;};
+                    if context==2 && position==0 &&
+                        output.initializer_expressions.last().is_some_and(|e|
+                            e.owner==owner && source_matches(&e.path,e.kind)) {
+                        NativeExpressionOwner::Initializer {owner}
+                    } else if context==3 &&
+                        output.constructor_initializer_expressions.last().is_some_and(|e|
+                            e.routine==owner && e.position==position &&
+                            source_matches(&e.path,e.kind)) {
+                        NativeExpressionOwner::Constructor {routine:owner,position}
+                    } else {return;}
+                }
+                _=>return,
+            };
+            let payload=match variant {
+                1=>{let Some(value)=n(8) else {return;};
+                    NativeExpressionPayload::BuiltinOperation(value)}
+                2=>match n(8) {
+                    Some(0)=>NativeExpressionPayload::BuiltinChooseFirst(false),
+                    Some(1)=>NativeExpressionPayload::BuiltinChooseFirst(true),
+                    _=>return,
+                },
+                3|4=>{
+                    let ty=if fields[8].present() {
+                        let Some(ty)=n(8).map(TypeId) else {return;};
+                        if ty.0==0 || !seen.types.contains(&ty) {return;}
+                        Some(ty)
+                    } else {None};
+                    if variant==3 {NativeExpressionPayload::TypeOperand(ty)}
+                    else {NativeExpressionPayload::SizeOrAlignmentType(ty)}
+                }
+                _=>return,
+            };
+            if !seen.native_expression_variant_keys.insert((owner.clone(),path.clone())) {
+                return;
+            }
+            output.native_expression_variants.push(NativeExpressionVariant {
+                owner,path,expression_kind,payload,
             });
         }
         106 => {
@@ -6751,7 +6845,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=106_u32 {
+        for kind in 1..=107_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -6780,13 +6874,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=106_u32)
+        let schema_fields:usize=(1..=107_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(107).is_none());
+        assert!(expected_wire_field_tag_masks(108).is_none());
     }
 
     #[test]
@@ -8482,3 +8576,7 @@ mod bootstrap_static_routine_relocation_wire_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path="native_expression_variant_tests.rs"]
+mod native_expression_variant_tests;

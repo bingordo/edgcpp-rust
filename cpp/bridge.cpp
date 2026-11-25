@@ -1611,6 +1611,52 @@ static void emit_retained_eh_construct(
 #endif
 }
 
+// Export native variant-specific information after its original node.
+// The context identifies the owning tree, without overloading ordinary
+// operation discriminants or substituting a type operand for its result type.
+static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
+    const std::string &function, const std::string &statement,
+    uint32_t owner, uint32_t position, const std::string &path)
+{
+  uint32_t variant = 0;
+  edgcpp_field payload = absent();
+  switch (node->kind) {
+    case enk_builtin_operation:
+      variant = 1;
+      payload = num(static_cast<unsigned>(node->variant.builtin_operation.kind));
+      break;
+#if BUILTIN_FUNCTIONS_ENABLED
+    case enk_builtin_choose_expr:
+      variant = 2;
+      payload = num(node->variant.builtin_choose_expr.choose_first ? 1 : 0);
+      break;
+#endif
+    case enk_type_operand: {
+      variant = 3;
+      const uint32_t type = emit_type(node->variant.type_operand.type, 0);
+      if (type != 0) payload = num(type);
+      break;
+    }
+    case enk_sizeof:
+    case enk_datasizeof:
+    case enk_alignof: {
+      variant = 4;
+      if (node->variant.sizeof_info.is_type) {
+        const uint32_t type = emit_type(node->variant.sizeof_info.variant.type, 0);
+        if (type == 0) { report_incomplete_snapshot(); return; }
+        payload = num(type);
+      }
+      break;
+    }
+    default: return;
+  }
+  emit_record(RECORD_NATIVE_EXPRESSION_VARIANT,
+      {num(context), context < 2 ? txt(function) : absent(),
+       context < 2 ? txt(statement) : absent(),
+       context >= 2 ? num(owner) : absent(), num(position), txt(path),
+       num(static_cast<unsigned>(node->kind)), num(variant), payload});
+}
+
 static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       const std::string &stmt_path, const std::string &path,
                       const std::string &parent, unsigned depth)
@@ -1822,6 +1868,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
+  emit_expression_variant(node,0,function,stmt_path,0,0,path);
   emit_retained_eh_construct(node,function,stmt_path,0,path);
   // EDG may wrap an illegal implicit C pointer conversion in eok_cast,
   // leaving only the converted result type visible to the call operand
@@ -1981,6 +2028,7 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
                        num(static_cast<unsigned>(node->variant.operation.kind)) : absent(),
                    type_id ? num(type_id) : absent(),
                    symbol ? num(symbol) : absent()});
+  emit_expression_variant(node,1,function,statement,0,role,path);
   emit_retained_eh_construct(node,function,statement,role,path);
   const auto children = children_of(node);
   uint32_t native_child_count = 0;
@@ -2900,6 +2948,8 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                      type_id ? num(type_id) : absent(),
                      symbol ? num(symbol) : absent()});
   }
+  emit_expression_variant(expr,constructor ? 3 : 2,"","",owner,
+                          constructor ? position : 0,path);
   const auto children = children_of(expr);
   uint32_t native_child_count = 0;
   for (an_expr_node_ptr child = children.first;
