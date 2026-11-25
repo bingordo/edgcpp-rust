@@ -867,6 +867,15 @@ static expression_children children_of(an_expr_node_ptr node)
     return {node->variant.c11_generic.operands, true};
   if (node->kind == enk_object_lifetime)
     return {node->variant.object_lifetime.expr, false};
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+  // EDG's retained internal-try owns exactly two *linked* branches:
+  // original normal expression followed by exceptional cleanup. Omitting
+  // this native edge would silently discard unwind effects in the snapshot.
+  if (node->kind == enk_lowered_eh_construct &&
+      node->variant.lowered_eh.kind == leck_internal_try)
+    return {node->variant.lowered_eh.variant.try_and_catch_expr, true};
+#endif
+
   if ((node->kind == enk_sizeof || node->kind == enk_alignof ||
        node->kind == enk_datasizeof) && !node->variant.sizeof_info.is_type)
     return {node->variant.sizeof_info.variant.expr, false};
@@ -1571,6 +1580,25 @@ static bool standard_float_image(a_constant_ptr c, a_type_ptr ty,
   }
   return false;
 }
+// Preserve the original EDG *nonportable* EH action kind and expression
+// identity. A native kind is an IL fact, not an Itanium execution ABI.
+// The full portable-C backend has no such discriminant and emits no event.
+static void emit_retained_eh_construct(
+    an_expr_node_ptr node, const std::string &function,
+    const std::string &statement, uint32_t role, const std::string &path)
+{
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+  if (node != nullptr && node->kind == enk_lowered_eh_construct) {
+    emit_record(RECORD_NATIVE_RETAINED_EH_CONSTRUCT,
+        {txt(function),txt(statement),num(role),txt(path),
+         num(static_cast<unsigned>(node->kind)),
+         num(static_cast<unsigned>(node->variant.lowered_eh.kind))});
+  }
+#else
+  (void)node; (void)function; (void)statement; (void)role; (void)path;
+#endif
+}
+
 static void emit_expr(an_expr_node_ptr node, const std::string &function,
                       const std::string &stmt_path, const std::string &path,
                       const std::string &parent, unsigned depth)
@@ -1782,6 +1810,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
                   type_id ? num(type_id) : absent(),
                   symbol ? num(symbol) : absent()},
               static_cast<uint32_t>(node->kind));
+  emit_retained_eh_construct(node,function,stmt_path,0,path);
   // EDG may wrap an illegal implicit C pointer conversion in eok_cast,
   // leaving only the converted result type visible to the call operand
   // validator (e.g. int** -> const int**). Preserve the original C pointer
@@ -1888,6 +1917,14 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
        operand != nullptr && within_native_list_limit(native_child_count);
        operand = children.linked_list ? operand->next : nullptr,
        ++native_child_count) {}
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+  if (node->kind == enk_lowered_eh_construct &&
+      node->variant.lowered_eh.kind == leck_internal_try &&
+      native_child_count != 2) {
+    report_incomplete_snapshot();
+    return;
+  }
+#endif
   emit_record(RECORD_NATIVE_EXPRESSION_CHILD_COUNT,
               {txt(function), txt(stmt_path), txt(path), num(native_child_count)});
   unsigned index = 0;
@@ -1932,12 +1969,21 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
                        num(static_cast<unsigned>(node->variant.operation.kind)) : absent(),
                    type_id ? num(type_id) : absent(),
                    symbol ? num(symbol) : absent()});
+  emit_retained_eh_construct(node,function,statement,role,path);
   const auto children = children_of(node);
   uint32_t native_child_count = 0;
   for (an_expr_node_ptr child = children.first;
        child != nullptr && within_native_list_limit(native_child_count);
        child = children.linked_list ? child->next : nullptr,
        ++native_child_count) {}
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+  if (node->kind == enk_lowered_eh_construct &&
+      node->variant.lowered_eh.kind == leck_internal_try &&
+      native_child_count != 2) {
+    report_incomplete_snapshot();
+    return;
+  }
+#endif
   emit_record(RECORD_NATIVE_CONTROL_CHILD_COUNT,
               {txt(function),txt(statement),num(role),txt(path),num(native_child_count)});
   unsigned index = 0;
