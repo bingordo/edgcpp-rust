@@ -898,6 +898,8 @@ pub enum NativeExpressionPayload {
     SizeOrAlignmentType(Option<TypeId>),
     /// Original dynamic-init kind and presence flags, not a lifetime proof.
     DynamicInitializer { kind:u32, flags:u32 },
+    /// Zero-based direct operand ordinal of the selected C11 generic arm.
+    GenericSelectedOperand(u32),
 }
 
 /// A variant-specific fact attached to exactly one original expression.
@@ -1906,6 +1908,10 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                     // discriminant; consumers must interpret it symbolically.
                     if flags & !127 != 0 {return;}
                     NativeExpressionPayload::DynamicInitializer {kind,flags}
+                }
+                6=>{
+                    let Some(ordinal)=n(8).filter(|v|*v>0 && *v<10000) else {return;};
+                    NativeExpressionPayload::GenericSelectedOperand(ordinal)
                 }
                 _=>return,
             };
@@ -4163,6 +4169,67 @@ fn validate_native_c_language_separation(il: &Il) -> Result<(), Error> {
     Ok(())
 }
 
+// Require one correctly typed variant record for each native node whose
+// original enum requires one, across all four expression-owner contexts.
+// A missing event cannot make itself optional by changing its own count.
+fn validate_native_expression_variant_coverage(il:&Il)->Result<(),Error> {
+    use std::collections::HashMap;
+    let mut nodes=HashMap::new();
+    macro_rules! add {
+        ($items:expr,$owner:expr) => {
+            for e in $items {
+                let owner=$owner(e);
+                if nodes.insert((owner,e.path.clone()),(e.kind,e.parent.as_deref())).is_some() {
+                    return Err(Error::MalformedCallback);
+                }
+            }
+        }
+    }
+    add!(&il.expressions,|e:&Expression| NativeExpressionOwner::Statement {
+        function:e.function.clone(),statement_path:e.statement_path.clone()
+    });
+    add!(&il.control_expressions,|e:&ControlExpression| NativeExpressionOwner::Control {
+        function:e.function.clone(),statement_path:e.statement_path.clone(),role:e.role
+    });
+    add!(&il.initializer_expressions,|e:&InitializerExpression| NativeExpressionOwner::Initializer {
+        owner:e.owner
+    });
+    add!(&il.constructor_initializer_expressions,|e:&ConstructorInitializerExpression|
+        NativeExpressionOwner::Constructor {routine:e.routine,position:e.position});
+    let mut remaining=nodes.iter().filter_map(|(key,(kind,_))| {
+        let family=graph::native_expression_variant_family(*kind);
+        (family!=0).then_some((key.clone(),family))
+    }).collect::<HashMap<_,_>>();
+    for record in &il.native_expression_variants {
+        let key=(record.owner.clone(),record.path.clone());
+        let Some((kind,_))=nodes.get(&key) else {return Err(Error::MalformedCallback);};
+        let family=match record.payload {
+            NativeExpressionPayload::BuiltinOperation(_)=>1,
+            NativeExpressionPayload::BuiltinChooseFirst(_)=>2,
+            NativeExpressionPayload::TypeOperand(_)=>3,
+            NativeExpressionPayload::SizeOrAlignmentType(_)=>4,
+            NativeExpressionPayload::DynamicInitializer{..}=>5,
+            NativeExpressionPayload::GenericSelectedOperand(ordinal)=>{
+                if ordinal==0 || ordinal>=10000 {return Err(Error::MalformedCallback);}
+                let child=(record.owner.clone(),format!("{}.{}",record.path,ordinal));
+                let Some((child_kind,parent))=nodes.get(&child) else {
+                    return Err(Error::MalformedCallback);
+                };
+                if *parent!=Some(record.path.as_str()) ||
+                   graph::native_expression_variant_family(*child_kind)==3 {
+                    return Err(Error::MalformedCallback);
+                }
+                6
+            }
+        };
+        if *kind!=record.expression_kind || remaining.remove(&key)!=Some(family) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if !remaining.is_empty() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4185,6 +4252,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_statement_attribute_coverage(il).is_err() ||
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
+       validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
