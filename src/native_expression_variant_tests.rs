@@ -81,7 +81,9 @@ fn malformed_or_duplicate_variant_metadata_rejects() {
         statement_fields(2,num(2)),
         statement_fields(3,num(99)),
         statement_fields(1,absent()),
-        statement_fields(5,num(0)),
+        statement_fields(6,num(0)),
+        statement_fields(5,num(128 << 8)),
+        statement_fields(5,absent()),
     ] {
         let mut state=statement();
         send(&mut state,fields);
@@ -99,4 +101,13 @@ fn malformed_or_duplicate_variant_metadata_rejects() {
     let mut state=Collector::default();
     send(&mut state,statement_fields(1,num(0)));
     assert!(state.malformed);
+}
+
+#[test]
+fn dynamic_initializer_kind_and_presence_are_not_object_lifetime_proof() {
+    let mut state=statement();
+    send(&mut state,statement_fields(5,num(3 | (19 << 8))));
+    assert!(!state.malformed);
+    assert_eq!(state.il.native_expression_variants[0].payload,
+        NativeExpressionPayload::DynamicInitializer {kind:3,flags:19});
 }
