@@ -896,6 +896,8 @@ pub enum NativeExpressionPayload {
     BuiltinChooseFirst(bool),
     TypeOperand(Option<TypeId>),
     SizeOrAlignmentType(Option<TypeId>),
+    /// Original dynamic-init kind and presence flags, not a lifetime proof.
+    DynamicInitializer { kind:u32, flags:u32 },
 }
 
 /// A variant-specific fact attached to exactly one original expression.
@@ -1895,6 +1897,15 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                     } else {None};
                     if variant==3 {NativeExpressionPayload::TypeOperand(ty)}
                     else {NativeExpressionPayload::SizeOrAlignmentType(ty)}
+                }
+                5=>{
+                    let Some(value)=n(8) else {return;};
+                    let kind=value & 255;
+                    let flags=value >> 8;
+                    // EDG's native kind is an a_byte. Keep the original
+                    // discriminant; consumers must interpret it symbolically.
+                    if flags & !127 != 0 {return;}
+                    NativeExpressionPayload::DynamicInitializer {kind,flags}
                 }
                 _=>return,
             };

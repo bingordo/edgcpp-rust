@@ -851,11 +851,34 @@ struct expression_children {
   bool linked_list;
 };
 
+// Dynamic initialization has its own native union. Only the expression
+// and argument-list arms can be represented by the shared expression
+// tree; constant aggregate and destruction ownership are separate facts.
+static expression_children dynamic_init_expression_children(a_dynamic_init_ptr init)
+{
+  if (init == nullptr) return {nullptr, false};
+  switch (init->kind) {
+    case dik_expression:
+    case dik_class_result_via_ctor:
+      return {init->variant.expression, false};
+    case dik_constructor:
+      return {init->variant.constructor.args, true};
+    case dik_bitwise_copy:
+      return {init->variant.bitwise_copy.source, false};
+    default:
+      return {nullptr, false};
+  }
+}
+
 static expression_children children_of(an_expr_node_ptr node)
 {
   if (node == nullptr) return {nullptr, false};
   if (node->kind == enk_operation)
     return {node->variant.operation.operands, true};
+  if (node->kind == enk_temp_init || node->kind == enk_lambda)
+    return dynamic_init_expression_children(node->variant.init.dynamic_init);
+  if (node->kind == enk_initializer)
+    return dynamic_init_expression_children(node->variant.initializer.dyn_init);
   // EDG il_def.h: these variants directly own linked expression lists.
   // Function calls and constructor invocations are enk_operation nodes,
   // already handled by the branch above.
@@ -1646,6 +1669,25 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
         if (type == 0) { report_incomplete_snapshot(); return; }
         payload = num(type);
       }
+      break;
+    }
+    case enk_temp_init:
+    case enk_lambda:
+    case enk_initializer: {
+      variant = 5;
+      const a_dynamic_init_ptr init = node->kind == enk_initializer ?
+          node->variant.initializer.dyn_init : node->variant.init.dynamic_init;
+      if (init == nullptr) { report_incomplete_snapshot(); return; }
+      // Encode the original initialization kind and presence facts only.
+      // A missing flag is not a lifetime or storage-duration certificate.
+      uint32_t flags = (init->static_temp ? 1u : 0u) |
+          (init->is_compound_literal ? 2u : 0u) |
+          (init->is_partially_initialized ? 4u : 0u) |
+          (init->destructor != nullptr ? 8u : 0u) |
+          (init->lifetime != nullptr ? 16u : 0u) |
+          (init->init_expr_lifetime != nullptr ? 32u : 0u) |
+          (init->variable != nullptr ? 64u : 0u);
+      payload = num(static_cast<unsigned>(init->kind) | (flags << 8));
       break;
     }
     default: return;
