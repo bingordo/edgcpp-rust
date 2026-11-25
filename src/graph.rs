@@ -18,6 +18,11 @@ pub(crate) fn native_expression_kind(kind: u32) -> u32 {
     unsafe { edgcpp_codegen_kind(2, kind) }
 }
 
+/// Expected record-107 family from the actual configured EDG expression enum.
+pub(crate) fn native_expression_variant_family(kind: u32) -> u32 {
+    unsafe { edgcpp_codegen_kind(9, kind) }
+}
+
 /// EDG-native variable initialization category: 1 means initk_dynamic.
 pub(crate) fn native_variable_dynamic_init(kind: u32) -> bool {
     unsafe { edgcpp_codegen_kind(6, kind) == 1 }
