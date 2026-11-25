@@ -33,3 +33,26 @@ fn bridge_does_not_provide_edg_lowering_observers() {
         );
     }
 }
+
+#[test]
+fn native_operand_lists_are_selected_in_all_expression_contexts() {
+    // These are distinct linked-list owners in upstream traverse_expr,
+    // not ordinary operation operands. A count of zero from the fallback
+    // would silently hide all descendants from Rust.
+    let selector=BRIDGE.split("static expression_children children_of(")
+        .nth(1).expect("native child selector")
+        .split("static unsigned call_argument_offset(").next().unwrap();
+    for (kind,member) in [
+        ("enk_builtin_operation","builtin_operation.operands"),
+        ("enk_builtin_choose_expr","builtin_choose_expr.operands"),
+        ("enk_fold","fold.operands"),
+    ] {
+        let branch=format!("if (node->kind == {kind})");
+        let tail=selector.split(&branch).nth(1).expect("native kind selected");
+        assert!(tail.trim_start().starts_with(
+            &format!("return {{node->variant.{member}, true}};")),
+            "{kind} must preserve its original linked operands");
+    }
+    assert!(BRIDGE.contains("const auto children = children_of(node);"));
+    assert!(BRIDGE.contains("const auto children = children_of(expr);"));
+}

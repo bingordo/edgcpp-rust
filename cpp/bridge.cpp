@@ -865,6 +865,18 @@ static expression_children children_of(an_expr_node_ptr node)
     return {node->variant.typeid_info.type_with_opt_expr, true};
   if (node->kind == enk_c11_generic)
     return {node->variant.c11_generic.operands, true};
+  // Match traverse_expr in upstream il_walk.c: builtin operations own
+  // their own operand chain, not variant.operation.operands. Preserve
+  // these edges in every snapshot context, even when the consumer does
+  // not yet implement the builtin's execution semantics.
+  if (node->kind == enk_builtin_operation)
+    return {node->variant.builtin_operation.operands, true};
+#if BUILTIN_FUNCTIONS_ENABLED
+  if (node->kind == enk_builtin_choose_expr)
+    return {node->variant.builtin_choose_expr.operands, true};
+#endif
+  if (node->kind == enk_fold)
+    return {node->variant.fold.operands, true};
   if (node->kind == enk_object_lifetime)
     return {node->variant.object_lifetime.expr, false};
 #if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
