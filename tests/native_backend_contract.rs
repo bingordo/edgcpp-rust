@@ -56,3 +56,19 @@ fn native_operand_lists_are_selected_in_all_expression_contexts() {
     assert!(BRIDGE.contains("const auto children = children_of(node);"));
     assert!(BRIDGE.contains("const auto children = children_of(expr);"));
 }
+
+#[test]
+fn expression_owned_dynamic_initialization_keeps_native_edges() {
+    let selector=BRIDGE.split("static expression_children dynamic_init_expression_children(")
+        .nth(1).expect("dynamic initializer child selector")
+        .split("static unsigned call_argument_offset(").next().unwrap();
+    for edge in [
+        "return {init->variant.expression, false};",
+        "return {init->variant.constructor.args, true};",
+        "return {init->variant.bitwise_copy.source, false};",
+        "return dynamic_init_expression_children(node->variant.init.dynamic_init);",
+        "return dynamic_init_expression_children(node->variant.initializer.dyn_init);",
+    ] {
+        assert!(selector.contains(edge), "missing original initializer edge: {edge}");
+    }
+}
