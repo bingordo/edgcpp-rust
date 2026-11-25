@@ -72,3 +72,17 @@ fn expression_owned_dynamic_initialization_keeps_native_edges() {
         assert!(selector.contains(edge), "missing original initializer edge: {edge}");
     }
 }
+
+#[test]
+fn builtin_choose_expr_has_independent_native_arity_guard() {
+    let emitter = BRIDGE.split("static void emit_expression_variant(")
+        .nth(1).expect("native variant emitter")
+        .split("static void emit_expr(").next().unwrap();
+    let choose = emitter.split("case enk_builtin_choose_expr:")
+        .nth(1).expect("choose expression")
+        .split("case enk_type_operand:").next().unwrap();
+    assert!(choose.contains("node->variant.builtin_choose_expr.operands"));
+    assert!(choose.contains("third == nullptr || third->next != nullptr"));
+    assert!(choose.find("report_incomplete_snapshot()").unwrap() <
+            choose.find("variant = 2;").unwrap());
+}
