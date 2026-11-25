@@ -1649,10 +1649,21 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
       payload = num(static_cast<unsigned>(node->variant.builtin_operation.kind));
       break;
 #if BUILTIN_FUNCTIONS_ENABLED
-    case enk_builtin_choose_expr:
+    case enk_builtin_choose_expr: {
+      // il_def.h: exactly three original operands. c_gen_be.c selects
+      // operand two or three, so a truncated chain is not a valid snapshot
+      // even when children_of and its count agree on that truncation.
+      const auto first = node->variant.builtin_choose_expr.operands;
+      const auto second = first == nullptr ? nullptr : first->next;
+      const auto third = second == nullptr ? nullptr : second->next;
+      if (third == nullptr || third->next != nullptr) {
+        report_incomplete_snapshot();
+        return;
+      }
       variant = 2;
       payload = num(node->variant.builtin_choose_expr.choose_first ? 1 : 0);
       break;
+    }
 #endif
     case enk_type_operand: {
       variant = 3;
