@@ -29,6 +29,7 @@
 #include "qualified_scope_prefix.h"
 #include "scope_tree.h"
 #include "expression_tree.h"
+#include "ordinal_path.h"
 
 extern "C" {
 struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
@@ -1063,12 +1064,11 @@ struct supplemental_block_walk {
 
   // Store paths as parent/ordinal pairs. The full strings are materialized
   // only while emitting a record, not retained in every pending task.
-  struct ordinal_path {size_t parent;size_t ordinal;};
-  static constexpr size_t no_path=std::numeric_limits<size_t>::max();
+  static constexpr size_t no_path=edg_bridge::ordinal_path_arena::none;
   // In addition to the original 10000 native-node budget, bound the
   // synthetic list/declaration/initializer nodes of the mixed wire graph.
   static constexpr size_t max_graph_nodes=8*MAX_NATIVE_LIST_ELEMENTS;
-  std::vector<ordinal_path> paths;
+  edg_bridge::ordinal_path_arena paths{max_graph_nodes};
   enum class task_kind {expr_list,stmt_list,expr_item,stmt_item,
                         leave_expr,leave_stmt,declarations,initializer};
   struct task {
@@ -1093,23 +1093,12 @@ struct supplemental_block_walk {
     return true;
   }
   size_t child(size_t parent_id,size_t ordinal) {
-    if (failed || paths.size()>=max_graph_nodes) {fail();return no_path;}
-    paths.push_back({parent_id,ordinal});
-    return paths.size()-1;
+    if (failed) return no_path;
+    const auto id=paths.child(parent_id,ordinal);
+    if (id==no_path) fail();
+    return id;
   }
-  std::string path_text(size_t id) const {
-    std::vector<size_t> ordinals;
-    while (id!=no_path) {
-      ordinals.push_back(paths[id].ordinal);
-      id=paths[id].parent;
-    }
-    std::string result;
-    for (auto it=ordinals.rbegin();it!=ordinals.rend();++it) {
-      if (!result.empty()) result+=".";
-      result+=std::to_string(*it);
-    }
-    return result;
-  }
+  std::string path_text(size_t id) const {return paths.text(id);}
   void push(task next) {
     if (failed) return;
     if (pending.size()>=max_graph_nodes) {fail();return;}
@@ -1150,7 +1139,7 @@ struct supplemental_block_walk {
   void emit_expr_item(an_expr_node_ptr e,size_t id) {
     if (!enter(e)) return;
     const auto path=path_text(id);
-    const auto parent=path_text(paths[id].parent);
+    const auto parent=path_text(paths.parent(id));
     uint32_t symbol=0;
     if (e->kind==enk_variable && e->variant.variable.ptr!=nullptr) {
       auto v=e->variant.variable.ptr;
@@ -1192,7 +1181,7 @@ struct supplemental_block_walk {
   void emit_stmt_item(a_statement_ptr st,size_t id) {
     if (!enter(st)) return;
     const auto path=path_text(id);
-    const auto parent=path_text(paths[id].parent);
+    const auto parent=path_text(paths.parent(id));
     struct branch {a_statement_ptr root;bool single;std::string edge;};
     struct extra_expr {an_expr_node_ptr root;std::string edge;};
     std::vector<branch> branches;
@@ -1258,8 +1247,8 @@ struct supplemental_block_walk {
       queue_expr(extra.root,false,child(id,2+branches.size()+i-1),extra.edge);
     }
     for (size_t i=branches.size();i>0;--i) {
-      const auto &branch=branches[i-1];
-      queue_stmt(branch.root,branch.single,child(id,2+i-1),branch.edge);
+      const auto &entry=branches[i-1];
+      queue_stmt(entry.root,entry.single,child(id,2+i-1),entry.edge);
     }
     push({task_kind::declarations,st,nullptr,nullptr,child(id,1),0,false,""});
     queue_expr(st->expr,false,child(id,0),"primary");
@@ -1277,7 +1266,7 @@ struct supplemental_block_walk {
       }
     }
     const auto path=path_text(id);
-    node(path,path_text(paths[id].parent),"declarations",0,0,declarations.size());
+    node(path,path_text(paths.parent(id)),"declarations",0,0,declarations.size());
     for (size_t i=0;i<declarations.size();++i) {
       const auto item_id=child(id,i);
       if (failed) return;
@@ -1297,7 +1286,7 @@ struct supplemental_block_walk {
     }
     // Constants/lifetime/constructor flags are still opaque in this
     // structural block graph; never authorize execution from it.
-    node(path_text(id),path_text(paths[id].parent),"initializer",4,
+    node(path_text(id),path_text(paths.parent(id)),"initializer",4,
          static_cast<unsigned>(init->kind),1,ty,sym);
     const auto roots=dynamic_init_expression_children(init);
     queue_expr(roots.first,roots.linked_list,child(id,0),"roots");
@@ -1321,7 +1310,7 @@ struct supplemental_block_walk {
         } else {
           if (!count_list(work.st,work.linked,[](a_statement_ptr n){return n->next;},count)) break;
         }
-        node(path_text(work.path_id),path_text(paths[work.path_id].parent),
+        node(path_text(work.path_id),path_text(paths.parent(work.path_id)),
              work.edge,0,0,count);
         if (count!=0) {
           work.kind=is_expr?task_kind::expr_item:task_kind::stmt_item;
