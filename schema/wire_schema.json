@@ -54,7 +54,8 @@
     "RECORD_NATIVE_DYNAMIC_INIT_IDENTITY": 111,
     "RECORD_NATIVE_INITIALIZER_EXEC_ROOTS": 112,
     "RECORD_NATIVE_INITIALIZER_EXEC_NODE": 113,
-    "RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE": 114
+    "RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE": 114,
+    "RECORD_NATIVE_FILE_INIT_IDENTITY": 115
   },
   "record_arities": {
     "1": 1,
@@ -170,7 +171,8 @@
     "111": 11,
     "112": 8,
     "113": 15,
-    "114": 19
+    "114": 19,
+    "115": 11
   },
   "record_field_tags": {
     "1": [
@@ -903,6 +905,19 @@
       "ABSENT|UNSIGNED",
       "ABSENT|UNSIGNED|SIGNED",
       "UNSIGNED"
+    ],
+    "115": [
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
     ]
   }
 }
