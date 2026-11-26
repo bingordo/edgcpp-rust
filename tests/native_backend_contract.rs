@@ -7,7 +7,7 @@ const BRIDGE: &str = include_str!("../cpp/bridge.cpp");
 #[test]
 fn entry_point_consumes_normal_post_lowering_edg_il() {
     assert!(BRIDGE.contains("void back_end(void)"));
-    assert!(BRIDGE.contains("collect_scope(il_header.primary_scope, \"\", 0);"));
+    assert!(BRIDGE.contains("collect_scope(il_header.primary_scope, \"\");"));
     assert!(BRIDGE.contains("il_header.file_scope_dynamic_init_routines"));
     assert!(BRIDGE.contains("#if IL_SHOULD_BE_WRITTEN_TO_FILE"));
     assert!(BRIDGE.contains("if (!skip_il_read)"));

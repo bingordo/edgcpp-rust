@@ -833,12 +833,11 @@ static void emit_type_suffix(a_type_ptr type,uint32_t id,unsigned relation,uint3
 // existing ID can name a recursive or forward type; finish its records
 // exactly once. The explicit continuation preserves the previous DFS
 // order of type IDs, field symbols and record emission.
-static uint32_t emit_type(a_type_ptr root,unsigned depth)
+static uint32_t emit_type(a_type_ptr root,unsigned /*depth*/)
 {
   if (root==nullptr || current_callback==nullptr) return 0;
   const auto existing=type_ids.find(root);
   if (existing!=type_ids.end()) return existing->second;
-  if (!within_native_list_limit(depth)) return 0;
   enum class phase {related,prefix,field,field_done,base,base_done,
                     routine_prefix,parameter,parameter_done,finish};
   struct frame {
@@ -855,8 +854,7 @@ static uint32_t emit_type(a_type_ptr root,unsigned depth)
   std::vector<frame> stack;
   auto discover = [&](a_type_ptr next) {
     if (next==nullptr || type_ids.find(next)!=type_ids.end()) return true;
-    if (!within_native_list_limit(stack.size()+depth) ||
-        type_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+    if (type_ids.size()>=std::numeric_limits<uint32_t>::max()) {
       report_incomplete_snapshot();return false;
     }
     const auto id=static_cast<uint32_t>(type_ids.size()+1);
@@ -1111,7 +1109,7 @@ static void emit_initializer_constant_root(a_dynamic_init_ptr init,
        owner.expression.empty() ? absent() : txt(owner.expression)});
   if (root!=nullptr) {
     std::size_t visits=0;
-    if (!edg_bridge::walk_expression_tree(root,"0","",MAX_NATIVE_LIST_ELEMENTS,
+    if (!edg_bridge::walk_expression_tree(root,"0","",
         constant_children_of,[](a_constant_ptr n) {return n->next;},
         [&](a_constant_ptr n,const std::string &p,const std::string &parent) {
           if (!within_native_list_limit(visits)) return false;
@@ -1187,10 +1185,7 @@ struct supplemental_block_walk {
   // Store paths as parent/ordinal pairs. The full strings are materialized
   // only while emitting a record, not retained in every pending task.
   static constexpr size_t no_path=edg_bridge::ordinal_path_arena::none;
-  // In addition to the original 10000 native-node budget, bound the
-  // synthetic list/declaration/initializer nodes of the mixed wire graph.
-  static constexpr size_t max_graph_nodes=8*MAX_NATIVE_LIST_ELEMENTS;
-  edg_bridge::ordinal_path_arena paths{max_graph_nodes};
+  edg_bridge::ordinal_path_arena paths;
   enum class task_kind {expr_list,stmt_list,expr_item,stmt_item,
                         leave_expr,leave_stmt,declarations,initializer};
   struct task {
@@ -1223,7 +1218,6 @@ struct supplemental_block_walk {
   std::string path_text(size_t id) const {return paths.text(id);}
   void push(task next) {
     if (failed) return;
-    if (pending.size()>=max_graph_nodes) {fail();return;}
     pending.push_back(std::move(next));
   }
   void queue_expr(an_expr_node_ptr first,bool linked,size_t id,const std::string &edge) {
@@ -1558,7 +1552,7 @@ static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
   std::size_t visits=0;
   for (size_t i=0;i<ordered.size();++i) {
     if (!edg_bridge::walk_expression_tree(
-            ordered[i],std::to_string(i),"",MAX_NATIVE_LIST_ELEMENTS,
+            ordered[i],std::to_string(i),"",
             children_of,[](an_expr_node_ptr n) { return n->next; },
             [&](an_expr_node_ptr n,const std::string &p,const std::string &parent) {
               if (!within_native_list_limit(visits)) return false;
@@ -2744,7 +2738,7 @@ static void emit_expr(an_expr_node_ptr root, const std::string &function,
 {
   if (root == nullptr || current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(root,path,parent,
       children_of, [](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
         return emit_expr_node(n,function,stmt_path,p,owner);
@@ -2811,7 +2805,7 @@ static void emit_control_expr(an_expr_node_ptr root, const std::string &function
 {
   if (root == nullptr || current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(root,path,parent,
       children_of, [](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
         return emit_control_expr_node(n,function,statement,role,p,owner);
@@ -3808,24 +3802,15 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
 {
   if (expr == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(expr,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(expr,path,parent,
       children_of,[](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n,const std::string &p,const std::string &owner_path) {
         return emit_initializer_expr_node(n,owner,p,owner_path,constructor,position);
       })) report_incomplete_snapshot();
 }
 
-static void collect_scope(a_scope_ptr scope, const std::string &prefix,
-                          unsigned depth)
+static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
 {
-  if (scope == nullptr || current_callback == nullptr) return;
-  // Class scopes can be reached through more than one enclosing declaration.
-  if (visited_scopes.find(scope) != visited_scopes.end()) return;
-  // C++20 accepts deeply nested namespace chains (the bridge CI captures
-  // 136 levels). Retain a larger defensive recursion cap, but never return
-  // a seemingly complete snapshot when it is exceeded.
-  if (depth > 256) { report_incomplete_snapshot(); return; }
-  visited_scopes.insert(scope);
   // In the standard EDG configuration this scope-owned list, not the
   // optional separate-routine scheduler, holds the actual initialization
   // entries. Each file or namespace list is explicitly ordered by EDG.
@@ -4453,7 +4438,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(2, {txt(name)}, 0);
     }
   }
-  for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
+}
+
+static a_scope_ptr collect_named_type(a_type_ptr t,a_scope_ptr scope)
+{
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       const uint32_t named_type_id = emit_type(t, 0);
@@ -4470,17 +4458,71 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           t->variant.class_struct_union.extra_info != nullptr) {
         a_scope_ptr members = t->variant.class_struct_union.extra_info->assoc_scope;
         if (members != nullptr && members != scope) {
-          collect_scope(members, prefix, depth + 1);
+          return members;
         }
       }
     }
-  }
-  for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
-    if (ns->is_namespace_alias) continue;
-    const char *name = ns->source_corresp.name;
-    std::string qualified = prefix + (name != nullptr ? name : "<anonymous>");
-    emit_record(4, {txt(qualified)});
-    collect_scope(ns->variant.assoc_scope, qualified + "::", depth + 1);
+  return nullptr;
+}
+
+// Class scopes may be reached from several declarations, so retain the
+// original global visited set. Resume each type/namespace list only after
+// its child scope is complete; preserve symbol IDs and scope-key order.
+static void collect_scope(a_scope_ptr root,const std::string &root_prefix)
+{
+  if (root==nullptr || current_callback==nullptr) return;
+  struct frame {
+    a_scope_ptr scope;
+    a_type_ptr next_type;
+    a_namespace_ptr next_namespace;
+    size_t prefix_size;
+  };
+  std::vector<frame> stack;
+  std::string prefix=root_prefix;
+  // The contents pass walks routine lists twice. Certify each native
+  // declaration list once before either pass so a cycle cannot hang
+  // symbol collection or manufacture repeated declarations.
+  auto acyclic_list=[](auto first) {
+    auto slow=first,fast=first;
+    while (fast!=nullptr && fast->next!=nullptr) {
+      slow=slow->next;
+      fast=fast->next->next;
+      if (slow==fast) {report_incomplete_snapshot();return false;}
+    }
+    return true;
+  };
+  auto enter=[&](a_scope_ptr scope) {
+    if (scope==nullptr || visited_scopes.find(scope)!=visited_scopes.end())
+      return true;
+    if (!acyclic_list(scope->routines) || !acyclic_list(scope->variables) ||
+        !acyclic_list(scope->types) || !acyclic_list(scope->namespaces))
+      return false;
+    visited_scopes.insert(scope);
+    collect_scope_contents(scope,prefix);
+    stack.push_back({scope,scope->types,scope->namespaces,prefix.size()});
+    return true;
+  };
+  if (!enter(root)) return;
+  while (!stack.empty()) {
+    auto &work=stack.back();
+    prefix.resize(work.prefix_size);
+    if (work.next_type!=nullptr) {
+      auto t=work.next_type;
+      work.next_type=t->next;
+      auto members=collect_named_type(t,work.scope);
+      if (!enter(members)) return;
+    } else if (work.next_namespace!=nullptr) {
+      auto ns=work.next_namespace;
+      work.next_namespace=ns->next;
+      if (ns->is_namespace_alias) continue;
+      const char *name=ns->source_corresp.name;
+      prefix+=(name!=nullptr?name:"<anonymous>");
+      emit_record(4,{txt(prefix)});
+      prefix+="::";
+      if (!enter(ns->variant.assoc_scope)) return;
+    } else {
+      stack.pop_back();
+    }
   }
 }
 
@@ -4511,7 +4553,7 @@ void back_end(void)
   // or the presence of an already-mangled C++ symbol.
   emit_record(64, {num(C_mode() ? 0 : 1)});
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
-  collect_scope(il_header.primary_scope, "", 0);
+  collect_scope(il_header.primary_scope, "");
 
   // EDG explicitly owns this ordered runtime initialization schedule when
   // the separate-file-scope-init configuration is enabled. Preserve the

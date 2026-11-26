@@ -13,10 +13,8 @@ class ordinal_path_arena {
   using id = std::size_t;
   static constexpr id none = std::numeric_limits<id>::max();
 
-  explicit ordinal_path_arena(std::size_t limit) : limit_(limit) {}
-
   id child(id parent_id, std::size_t ordinal) {
-    if (entries_.size() >= limit_ ||
+    if (entries_.size() == none ||
         (parent_id != none && parent_id >= entries_.size())) return none;
     entries_.push_back({parent_id, ordinal});
     return entries_.size() - 1;
@@ -38,7 +36,6 @@ class ordinal_path_arena {
 
  private:
   struct entry { id parent; std::size_t ordinal; };
-  std::size_t limit_;
   std::vector<entry> entries_;
 };
 }
