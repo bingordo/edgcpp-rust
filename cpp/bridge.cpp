@@ -882,39 +882,50 @@ struct constant_tree_owner {
 };
 static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
     const constant_tree_owner &owner,const std::string &nested);
-static void emit_initializer_constant_tree(a_constant_ptr c,
-    const constant_tree_owner &owner, const std::string &path, const std::string &parent,
-    unsigned depth, unsigned &visits, std::unordered_set<a_constant_ptr> &active)
+// Constant aggregates own a linked list; repeats and dynamic wrappers own
+// a single child. Use the same occurrence walker as expressions, without
+// interpreting a repeat count as an expanded number of child nodes.
+struct constant_children {
+  a_constant_ptr first;
+  bool linked_list;
+};
+static constant_children constant_children_of(a_constant_ptr c)
 {
-  if (c == nullptr || depth > 64 ||
-      !within_native_list_limit(visits++) || !active.insert(c).second) {
-    report_incomplete_snapshot();
-    return;
+  if (c->kind==ck_aggregate) return {c->variant.aggregate.first_constant,true};
+  if (c->kind==ck_init_repeat) return {c->variant.init_repeat.constant,false};
+  if (c->kind==ck_dynamic_init) {
+    const auto d=c->variant.dynamic_init.ptr;
+    if (d!=nullptr && (d->kind==dik_constant ||
+        d->kind==dik_nonconstant_aggregate || d->kind==dik_lambda))
+      return {d->variant.constant.ptr,false};
   }
+  return {nullptr,false};
+}
+
+static bool emit_initializer_constant_node(a_constant_ptr c,
+    const constant_tree_owner &owner,const std::string &path,const std::string &parent)
+{
   uint32_t family=0, flags=0;
   edgcpp_field payload=absent();
-  std::vector<a_constant_ptr> children;
+  std::size_t child_count=0;
   if (c->kind == ck_aggregate) {
     family=1;
     flags=(c->explicit_braces_on_aggregate ? 1u : 0u) |
           (c->variant.aggregate.has_dynamic_init_component ? 2u : 0u);
-    std::unordered_set<a_constant_ptr> siblings;
-    for (auto child=c->variant.aggregate.first_constant; child!=nullptr;
+    a_constant_ptr last=nullptr;
+    for (auto child=c->variant.aggregate.first_constant;child!=nullptr;
          child=child->next) {
-      if (!within_native_list_limit(children.size()) ||
-          !siblings.insert(child).second) {
-        report_incomplete_snapshot(); break;
-      }
-      children.push_back(child);
+      if (!within_native_list_limit(child_count)) return false;
+      ++child_count;
+      last=child;
     }
-    if ((children.empty() ? nullptr : children.back()) !=
-        c->variant.aggregate.last_constant) report_incomplete_snapshot();
+    if (last!=c->variant.aggregate.last_constant) return false;
   } else if (c->kind == ck_init_repeat) {
     family=2;
     payload=num(c->variant.init_repeat.count);
     flags=c->variant.init_repeat.multidimensional_aggr_tail_not_repeated ? 1u : 0u;
-    if (c->variant.init_repeat.constant == nullptr) report_incomplete_snapshot();
-    else children.push_back(c->variant.init_repeat.constant);
+    if (c->variant.init_repeat.constant==nullptr) return false;
+    child_count=1;
   } else if (c->kind == ck_designator) {
     family=3;
     flags=(c->variant.designator.is_generic ? 1u : 0u) |
@@ -925,7 +936,7 @@ static void emit_initializer_constant_tree(a_constant_ptr c,
         if (field != nullptr) {
           const char *raw=source_name(field->source_corresp);
           payload=num(emit_symbol(field,3,raw==nullptr ? "" : raw));
-        } else report_incomplete_snapshot();
+        } else return false;
       } else payload=num(c->variant.designator.variant.array_element);
     }
   } else if (c->kind == ck_integer) {
@@ -952,31 +963,28 @@ static void emit_initializer_constant_tree(a_constant_ptr c,
       std::unordered_set<an_expr_node_ptr> seen;
       for (auto e=expressions.first;e!=nullptr;e=expressions.linked_list ? e->next : nullptr) {
         if (!within_native_list_limit(flags) || !seen.insert(e).second) {
-          report_incomplete_snapshot(); break;
+          return false;
         }
         ++flags;
       }
       if ((d->kind==dik_constant || d->kind==dik_nonconstant_aggregate ||
            d->kind==dik_lambda) && d->variant.constant.ptr!=nullptr)
-        children.push_back(d->variant.constant.ptr);
+        child_count=1;
       if (owner.context!=2 && owner.context!=5)
         emit_dynamic_init_identity(d,7,0,
             std::to_string(owner.context)+":"+std::to_string(owner.position)+":"+
             owner.statement+":"+owner.expression+":"+path);
-    } else report_incomplete_snapshot();
+    } else return false;
   }
   const uint32_t type=emit_type(c->type,0);
   emit_record(RECORD_NATIVE_CTOR_CONSTANT_NODE,
       {num(owner.symbol),num(owner.position),txt(path),
        parent.empty() ? absent() : txt(parent),
        num(static_cast<unsigned>(c->kind)),type ? num(type) : absent(),
-       num(family),num(children.size()),payload,num(flags),num(owner.context),
+       num(family),num(child_count),payload,num(flags),num(owner.context),
        owner.statement.empty() ? absent() : txt(owner.statement),
        owner.expression.empty() ? absent() : txt(owner.expression)});
-  for (size_t i=0;i<children.size();++i)
-    emit_initializer_constant_tree(children[i],owner,
-        path+"."+std::to_string(i),path,depth+1,visits,active);
-  active.erase(c);
+  return true;
 }
 
 // One independent root-presence witness for every original owner.
@@ -993,9 +1001,14 @@ static void emit_initializer_constant_root(a_dynamic_init_ptr init,
        owner.statement.empty() ? absent() : txt(owner.statement),
        owner.expression.empty() ? absent() : txt(owner.expression)});
   if (root!=nullptr) {
-    unsigned visits=0;
-    std::unordered_set<a_constant_ptr> active;
-    emit_initializer_constant_tree(root,owner,"0","",0,visits,active);
+    std::size_t visits=0;
+    if (!edg_bridge::walk_expression_tree(root,"0","",MAX_NATIVE_LIST_ELEMENTS,
+        constant_children_of,[](a_constant_ptr n) {return n->next;},
+        [&](a_constant_ptr n,const std::string &p,const std::string &parent) {
+          if (!within_native_list_limit(visits)) return false;
+          ++visits;
+          return emit_initializer_constant_node(n,owner,p,parent);
+        })) report_incomplete_snapshot();
   }
 }
 
