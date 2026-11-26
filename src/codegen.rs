@@ -938,6 +938,9 @@ fn validate_routine_abi(
 /// Require validated signed-i64 signatures and a single structured root.
    /// Unsupported native constructs are rejected before machine code emission.
 pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
+    if !il.native_supplemental_block_nodes.is_empty() {
+        return Err(CodegenError::InvalidFunction("detached statement-expression execution is unsupported".into()));
+    }
     let graph = Graph::from_il(il)
         .map_err(|e| CodegenError::InvalidFunction(format!("invalid EDG graph: {e:?}")))?;
     let mut output = Vec::new();
@@ -974,6 +977,9 @@ pub fn lower_edg(il: &Il) -> Result<Vec<Function>, CodegenError> {
 
 /// Translate an owned EDG compilation snapshot directly into a relocatable ELF.
 pub fn emit_edg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
+    if !il.native_supplemental_block_nodes.is_empty() {
+        return Err(CodegenError::InvalidFunction("detached statement-expression execution is unsupported".into()));
+    }
     // Keep ordinary integer C on the existing tested CFG. A translation
     // unit with source-verified FP signatures uses the separate typed
     // XMM path, or fails closed if it contains mixed/unsupported features.
