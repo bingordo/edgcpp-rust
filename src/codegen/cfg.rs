@@ -5249,6 +5249,27 @@ mod tests {
         }
     }
     #[test]
+    fn bulk_aggregate_copy_has_compact_code_and_overlap_semantics() {
+        let mut routines=Vec::new();
+        for bytes in [7,63,64,65,65_541] {
+            routines.push(Routine {
+                name:format!("copy_{bytes}"),parameters:2,locals:0,
+                body:vec![Stmt::Eval(Expr::CopyBytes(bytes,
+                    Box::new(Expr::Parameter(0)),Box::new(Expr::Parameter(1)))),
+                    Stmt::Return(Expr::Constant(0))],
+                abi:None,local_types:None,local_storage:None,
+                local_alignments:None,parameter_accesses:vec![],
+            });
+        }
+        let obj=emit_routines(&routines).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        assert!(obj.len()<16_384,"unexpected copy object size {}",obj.len());
+        if let Some(path)=std::env::var_os("EDG_BULK_COPY_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
+    }
+
+    #[test]
     fn rejects_nondefinite_local_initialization() {
         let mut vars = HashSet::new();
         let body = vec![
