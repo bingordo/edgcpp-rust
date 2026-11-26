@@ -50,7 +50,8 @@
     "RECORD_NATIVE_EXPRESSION_VARIANT": 107,
     "RECORD_NATIVE_CONSTRUCTOR_INIT_PROVENANCE": 108,
     "RECORD_NATIVE_CTOR_CONSTANT_ROOT": 109,
-    "RECORD_NATIVE_CTOR_CONSTANT_NODE": 110
+    "RECORD_NATIVE_CTOR_CONSTANT_NODE": 110,
+    "RECORD_NATIVE_DYNAMIC_INIT_IDENTITY": 111
   },
   "record_arities": {
     "1": 1,
@@ -162,7 +163,8 @@
     "107": 9,
     "108": 7,
     "109": 3,
-    "110": 10
+    "110": 10,
+    "111": 11
   },
   "record_field_tags": {
     "1": [
@@ -827,6 +829,19 @@
       "UNSIGNED",
       "UNSIGNED",
       "ABSENT|UNSIGNED|SIGNED",
+      "UNSIGNED"
+    ],
+    "111": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
       "UNSIGNED"
     ]
   }
