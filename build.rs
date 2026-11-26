@@ -4,6 +4,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/qualified_scope_prefix.h");
     println!("cargo:rerun-if-changed=cpp/scope_tree.h");
+    println!("cargo:rerun-if-changed=cpp/expression_tree.h");
     println!("cargo:rerun-if-changed=cpp/wire_schema_generated.inc");
     println!("cargo:rerun-if-changed=tools/build_bridge.py");
     for key in ["EDGCPP_COMPILE_COMMANDS", "EDGCPP_LIB_DIR", "EDGCPP_SOURCE_DIR"] {

@@ -28,6 +28,7 @@
 #include <initializer_list>
 #include "qualified_scope_prefix.h"
 #include "scope_tree.h"
+#include "expression_tree.h"
 
 extern "C" {
 struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
@@ -2180,12 +2181,10 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
        num(static_cast<unsigned>(node->kind)), num(variant), payload});
 }
 
-static void emit_expr(an_expr_node_ptr node, const std::string &function,
+static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
                       const std::string &stmt_path, const std::string &path,
-                      const std::string &parent, unsigned depth)
+                      const std::string &parent)
 {
-  if (node == nullptr || current_callback == nullptr) return;
-  if (depth > 64) { report_incomplete_snapshot(); return; }
   emit_expression_source(function, stmt_path, 0, path, node->position);
   const unsigned op = node->kind == enk_operation ?
       static_cast<unsigned>(node->variant.operation.kind) : 0;
@@ -2407,7 +2406,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
         object_initializer_type(source->type) != nullptr &&
         object_initializer_type(node->type)->kind == tk_pointer &&
         object_initializer_type(source->type)->kind == tk_pointer) {
-      const uint32_t original = emit_type(source->type, depth + 1);
+      const uint32_t original = emit_type(source->type, 0);
       if (original != 0) {
         emit_record(RECORD_IMPLICIT_POINTER_CAST,
                     {txt(function), txt(stmt_path), txt(path), num(original)});
@@ -2475,7 +2474,7 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           form = 2;
         }
       }
-      const uint32_t callee_type = emit_type(callee->type, depth + 1);
+      const uint32_t callee_type = emit_type(callee->type, 0);
       emit_record(RECORD_CALL_TARGET_PROVENANCE, {
           txt(function), txt(stmt_path), txt(path), num(form),
           callee_type ? num(callee_type) : absent(),
@@ -2490,44 +2489,52 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
     std::string edge = "gnu" + path;
     for (char &c : edge) if (c == '.') c = '_';
     emit_statements(node->variant.statement, function, stmt_path, edge,
-                    depth + 1, true);
+                    1, true);
   }
   const auto children = children_of(node);
   // Count independently of emitted operands so a missing tail fails closed.
   uint32_t native_child_count = 0;
   for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && within_native_list_limit(native_child_count);
+       operand != nullptr;
        operand = children.linked_list ? operand->next : nullptr,
-       ++native_child_count) {}
+       ++native_child_count) {
+    if (!within_native_list_limit(native_child_count)) return false;
+  }
 #if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
   if (node->kind == enk_lowered_eh_construct &&
       node->variant.lowered_eh.kind == leck_internal_try &&
       native_child_count != 2) {
     report_incomplete_snapshot();
-    return;
+    return false;
   }
 #endif
   emit_record(RECORD_NATIVE_EXPRESSION_CHILD_COUNT,
               {txt(function), txt(stmt_path), txt(path), num(native_child_count)});
-  unsigned index = 0;
-  for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && within_native_list_limit(index);
-       operand = children.linked_list ? operand->next : nullptr, ++index) {
-    emit_expr(operand, function, stmt_path,
-              path + "." + std::to_string(index), path, depth + 1);
-  }
+  return true;
+}
+
+// The two wire contexts share occurrence traversal, but retain independent
+// node schemas and native operand-count witnesses.
+static void emit_expr(an_expr_node_ptr root, const std::string &function,
+                      const std::string &stmt_path, const std::string &path,
+                      const std::string &parent, unsigned depth)
+{
+  if (root == nullptr || current_callback == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
+  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+      children_of, [](an_expr_node_ptr n) { return n->next; },
+      [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
+        return emit_expr_node(n,function,stmt_path,p,owner);
+      })) report_incomplete_snapshot();
 }
 
 // EDG stores several control expressions outside a_statement::expr.
 // Preserve their own operand trees with keys (function, statement, role, path).
 // Roles: 1=for increment, 2=range test, 3=range increment.
-static void emit_control_expr(an_expr_node_ptr node, const std::string &function,
+static bool emit_control_expr_node(an_expr_node_ptr node, const std::string &function,
                               const std::string &statement, unsigned role,
-                              const std::string &path, const std::string &parent,
-                              unsigned depth)
+                              const std::string &path, const std::string &parent)
 {
-  if (node == nullptr || current_callback == nullptr) return;
-  if (depth > 64) { report_incomplete_snapshot(); return; }
   uint32_t symbol = 0;
   if (node->kind == enk_variable && node->variant.variable.ptr != nullptr) {
     a_variable_ptr var = node->variant.variable.ptr;
@@ -2556,26 +2563,36 @@ static void emit_control_expr(an_expr_node_ptr node, const std::string &function
   const auto children = children_of(node);
   uint32_t native_child_count = 0;
   for (an_expr_node_ptr child = children.first;
-       child != nullptr && within_native_list_limit(native_child_count);
+       child != nullptr;
        child = children.linked_list ? child->next : nullptr,
-       ++native_child_count) {}
+       ++native_child_count) {
+    if (!within_native_list_limit(native_child_count)) return false;
+  }
 #if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
   if (node->kind == enk_lowered_eh_construct &&
       node->variant.lowered_eh.kind == leck_internal_try &&
       native_child_count != 2) {
     report_incomplete_snapshot();
-    return;
+    return false;
   }
 #endif
   emit_record(RECORD_NATIVE_CONTROL_CHILD_COUNT,
               {txt(function),txt(statement),num(role),txt(path),num(native_child_count)});
-  unsigned index = 0;
-  for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && within_native_list_limit(index);
-       operand = children.linked_list ? operand->next : nullptr, ++index) {
-    emit_control_expr(operand, function, statement, role,
-                      path + "." + std::to_string(index), path, depth + 1);
-  }
+  return true;
+}
+
+static void emit_control_expr(an_expr_node_ptr root, const std::string &function,
+                              const std::string &statement, unsigned role,
+                              const std::string &path, const std::string &parent,
+                              unsigned depth)
+{
+  if (root == nullptr || current_callback == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
+  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+      children_of, [](an_expr_node_ptr n) { return n->next; },
+      [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
+        return emit_control_expr_node(n,function,statement,role,p,owner);
+      })) report_incomplete_snapshot();
 }
 
 // A dependent statement is a *single* IL node, whereas block.statements is
