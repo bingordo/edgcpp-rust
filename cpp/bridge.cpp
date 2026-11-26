@@ -833,12 +833,11 @@ static void emit_type_suffix(a_type_ptr type,uint32_t id,unsigned relation,uint3
 // existing ID can name a recursive or forward type; finish its records
 // exactly once. The explicit continuation preserves the previous DFS
 // order of type IDs, field symbols and record emission.
-static uint32_t emit_type(a_type_ptr root,unsigned depth)
+static uint32_t emit_type(a_type_ptr root,unsigned /*depth*/)
 {
   if (root==nullptr || current_callback==nullptr) return 0;
   const auto existing=type_ids.find(root);
   if (existing!=type_ids.end()) return existing->second;
-  if (!within_native_list_limit(depth)) return 0;
   enum class phase {related,prefix,field,field_done,base,base_done,
                     routine_prefix,parameter,parameter_done,finish};
   struct frame {
@@ -855,8 +854,7 @@ static uint32_t emit_type(a_type_ptr root,unsigned depth)
   std::vector<frame> stack;
   auto discover = [&](a_type_ptr next) {
     if (next==nullptr || type_ids.find(next)!=type_ids.end()) return true;
-    if (!within_native_list_limit(stack.size()+depth) ||
-        type_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+    if (type_ids.size()>=std::numeric_limits<uint32_t>::max()) {
       report_incomplete_snapshot();return false;
     }
     const auto id=static_cast<uint32_t>(type_ids.size()+1);
@@ -1111,7 +1109,7 @@ static void emit_initializer_constant_root(a_dynamic_init_ptr init,
        owner.expression.empty() ? absent() : txt(owner.expression)});
   if (root!=nullptr) {
     std::size_t visits=0;
-    if (!edg_bridge::walk_expression_tree(root,"0","",MAX_NATIVE_LIST_ELEMENTS,
+    if (!edg_bridge::walk_expression_tree(root,"0","",
         constant_children_of,[](a_constant_ptr n) {return n->next;},
         [&](a_constant_ptr n,const std::string &p,const std::string &parent) {
           if (!within_native_list_limit(visits)) return false;
@@ -1187,10 +1185,7 @@ struct supplemental_block_walk {
   // Store paths as parent/ordinal pairs. The full strings are materialized
   // only while emitting a record, not retained in every pending task.
   static constexpr size_t no_path=edg_bridge::ordinal_path_arena::none;
-  // In addition to the original 10000 native-node budget, bound the
-  // synthetic list/declaration/initializer nodes of the mixed wire graph.
-  static constexpr size_t max_graph_nodes=8*MAX_NATIVE_LIST_ELEMENTS;
-  edg_bridge::ordinal_path_arena paths{max_graph_nodes};
+  edg_bridge::ordinal_path_arena paths;
   enum class task_kind {expr_list,stmt_list,expr_item,stmt_item,
                         leave_expr,leave_stmt,declarations,initializer};
   struct task {
@@ -1223,7 +1218,6 @@ struct supplemental_block_walk {
   std::string path_text(size_t id) const {return paths.text(id);}
   void push(task next) {
     if (failed) return;
-    if (pending.size()>=max_graph_nodes) {fail();return;}
     pending.push_back(std::move(next));
   }
   void queue_expr(an_expr_node_ptr first,bool linked,size_t id,const std::string &edge) {
@@ -1558,7 +1552,7 @@ static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
   std::size_t visits=0;
   for (size_t i=0;i<ordered.size();++i) {
     if (!edg_bridge::walk_expression_tree(
-            ordered[i],std::to_string(i),"",MAX_NATIVE_LIST_ELEMENTS,
+            ordered[i],std::to_string(i),"",
             children_of,[](an_expr_node_ptr n) { return n->next; },
             [&](an_expr_node_ptr n,const std::string &p,const std::string &parent) {
               if (!within_native_list_limit(visits)) return false;
@@ -2744,7 +2738,7 @@ static void emit_expr(an_expr_node_ptr root, const std::string &function,
 {
   if (root == nullptr || current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(root,path,parent,
       children_of, [](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
         return emit_expr_node(n,function,stmt_path,p,owner);
@@ -2811,7 +2805,7 @@ static void emit_control_expr(an_expr_node_ptr root, const std::string &function
 {
   if (root == nullptr || current_callback == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(root,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(root,path,parent,
       children_of, [](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n, const std::string &p, const std::string &owner) {
         return emit_control_expr_node(n,function,statement,role,p,owner);
@@ -3808,7 +3802,7 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
 {
   if (expr == nullptr) return;
   if (depth > 64) { report_incomplete_snapshot(); return; }
-  if (!edg_bridge::walk_expression_tree(expr,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+  if (!edg_bridge::walk_expression_tree(expr,path,parent,
       children_of,[](an_expr_node_ptr n) { return n->next; },
       [&](an_expr_node_ptr n,const std::string &p,const std::string &owner_path) {
         return emit_initializer_expr_node(n,owner,p,owner_path,constructor,position);
