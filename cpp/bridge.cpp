@@ -876,8 +876,12 @@ static expression_children dynamic_init_expression_children(a_dynamic_init_ptr i
 // Export native constant structure, not an executable byte image. A repeat
 // retains one child and its native count, even for runtime-sized arrays.
 // Dynamic and unsupported leaves are explicit and carry no invented value.
-static void emit_ctor_constant_tree(a_constant_ptr c, uint32_t routine,
-    uint32_t position, const std::string &path, const std::string &parent,
+struct constant_tree_owner {
+  uint32_t symbol, position, context;
+  std::string statement, expression;
+};
+static void emit_initializer_constant_tree(a_constant_ptr c,
+    const constant_tree_owner &owner, const std::string &path, const std::string &parent,
     unsigned depth, unsigned &visits, std::unordered_set<a_constant_ptr> &active)
 {
   if (c == nullptr || depth > 64 ||
@@ -942,14 +946,35 @@ static void emit_ctor_constant_tree(a_constant_ptr c, uint32_t routine,
   }
   const uint32_t type=emit_type(c->type,0);
   emit_record(RECORD_NATIVE_CTOR_CONSTANT_NODE,
-      {num(routine),num(position),txt(path),
+      {num(owner.symbol),num(owner.position),txt(path),
        parent.empty() ? absent() : txt(parent),
        num(static_cast<unsigned>(c->kind)),type ? num(type) : absent(),
-       num(family),num(children.size()),payload,num(flags)});
+       num(family),num(children.size()),payload,num(flags),num(owner.context),
+       owner.statement.empty() ? absent() : txt(owner.statement),
+       owner.expression.empty() ? absent() : txt(owner.expression)});
   for (size_t i=0;i<children.size();++i)
-    emit_ctor_constant_tree(children[i],routine,position,
+    emit_initializer_constant_tree(children[i],owner,
         path+"."+std::to_string(i),path,depth+1,visits,active);
   active.erase(c);
+}
+
+// One independent root-presence witness for every original owner.
+static void emit_initializer_constant_root(a_dynamic_init_ptr init,
+    const constant_tree_owner &owner)
+{
+  a_constant_ptr root=nullptr;
+  if (init != nullptr &&
+      (init->kind==dik_constant || init->kind==dik_nonconstant_aggregate ||
+       init->kind==dik_lambda)) root=init->variant.constant.ptr;
+  emit_record(RECORD_NATIVE_CTOR_CONSTANT_ROOT,
+      {num(owner.symbol),num(owner.position),num(root!=nullptr),num(owner.context),
+       owner.statement.empty() ? absent() : txt(owner.statement),
+       owner.expression.empty() ? absent() : txt(owner.expression)});
+  if (root!=nullptr) {
+    unsigned visits=0;
+    std::unordered_set<a_constant_ptr> active;
+    emit_initializer_constant_tree(root,owner,"0","",0,visits,active);
+  }
 }
 
 static expression_children children_of(an_expr_node_ptr node)
@@ -1814,6 +1839,9 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
           (init->init_expr_lifetime != nullptr ? 32u : 0u) |
           (init->variable != nullptr ? 64u : 0u);
       payload = num(static_cast<unsigned>(init->kind) | (flags << 8));
+      emit_initializer_constant_root(init,
+          {context<2 ? current_dynamic_init_routine : owner,
+           position,context+3,statement,path});
       break;
     }
     default: return;
@@ -2790,6 +2818,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
           (init->follows_an_exec_statement ? 1u : 0u) |
           (init->is_braced_initializer ? 2u : 0u);
       emit_dynamic_init_identity(init,1,0,path);
+      emit_initializer_constant_root(init,{current_dynamic_init_routine,0,1,path,""});
       emit_record(34, {txt(function), txt(path),
                        variable_symbol ? num(variable_symbol) : absent(),
                        num(static_cast<unsigned>(init->kind)),
@@ -3493,21 +3522,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                          num(executable_count), num(init->source_expr != nullptr),
                          num(shared_root), num(selected)});
             emit_dynamic_init_identity(init->initializer,0,init_position,"");
-            a_constant_ptr constant_root=nullptr;
-            if (init->initializer != nullptr &&
-                (init->initializer->kind==dik_constant ||
-                 init->initializer->kind==dik_nonconstant_aggregate ||
-                 init->initializer->kind==dik_lambda)) {
-              constant_root=init->initializer->variant.constant.ptr;
-            }
-            emit_record(RECORD_NATIVE_CTOR_CONSTANT_ROOT,
-                {num(routine_symbol),num(init_position),num(constant_root!=nullptr)});
-            if (constant_root != nullptr) {
-              unsigned visits=0;
-              std::unordered_set<a_constant_ptr> active;
-              emit_ctor_constant_tree(constant_root,routine_symbol,init_position,
-                  "0","",0,visits,active);
-            }
+            emit_initializer_constant_root(init->initializer,
+                {routine_symbol,init_position,0,"",""});
             if (init_expr == nullptr) init_expr = init->source_expr;
             emit_record(RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION,
                         {num(routine_symbol),num(init_position),
@@ -3811,6 +3827,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
         if (dyn->kind == dik_expression || dyn->kind == dik_class_result_via_ctor) {
           expr = dyn->variant.expression;
         }
+        emit_initializer_constant_root(dyn,{symbol_id,0,2,"",""});
         emit_record(16, {num(symbol_id), num(static_cast<unsigned>(dyn->kind)),
                          expr != nullptr ? num(static_cast<unsigned>(expr->kind)) : absent(),
                          expr != nullptr && expr->kind == enk_operation ?
