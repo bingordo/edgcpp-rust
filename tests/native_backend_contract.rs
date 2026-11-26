@@ -93,7 +93,8 @@ fn supplemental_statement_expression_cannot_silently_lose_its_block() {
         .nth(1).expect("native variant emitter")
         .split("static void emit_expr(").next().unwrap();
     assert!(emitter.contains("context != 0 && node->kind == enk_statement"));
-    assert!(emitter.contains("report_incomplete_snapshot();"));
+    assert!(emitter.contains("emit_supplemental_block(node->variant.statement"));
+    assert!(BRIDGE.contains("RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE"));
     assert!(emitter.contains("node->variant.c11_generic.result"));
     assert!(emitter.contains("child == result"));
     assert!(BRIDGE.contains("category == 9"));
