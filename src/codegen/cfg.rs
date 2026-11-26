@@ -1,17 +1,16 @@
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
-    MAX_NATIVE_AGGREGATE_IMAGE_BYTES as MAX_AGGREGATE_IMAGE_BYTES,
     MAX_NATIVE_OBJECT_BYTES, MAX_AGGREGATE_SCALAR_ELEMENTS,
     MAX_AGGREGATE_LAYOUT_DEPTH, MAX_CFG_LOCALS, bounded_array_bytes,
 };
 
 fn valid_aggregate_image_len(size: usize) -> bool {
-    size > 0 && size <= MAX_AGGREGATE_IMAGE_BYTES
+    size > 0 && u32::try_from(size).is_ok()
 }
 
 fn valid_zero_aggregate_bytes(size: u64) -> bool {
-    size > 0 && size <= MAX_AGGREGATE_IMAGE_BYTES as u64
+    size > 0 && u32::try_from(size).is_ok()
 }
 
 use super::*;
@@ -382,7 +381,7 @@ fn lower(
                 }
                 let bytes=byte_size(il,local_ty)?;
                 if !valid_zero_aggregate_bytes(bytes) {
-                    return Err(invalid("aggregate zero initializer exceeds 4 KiB limit"));
+                    return Err(invalid("aggregate zero initializer cannot be represented by a Cranelift stack slot"));
                 }
                 return Ok(vec![Stmt::ZeroAggregate(index,bytes as u32)]);
             }
@@ -4042,7 +4041,7 @@ fn emit_body(
             }
             Stmt::InitializeAggregate(index,bytes) => {
                 if !valid_aggregate_image_len(bytes.len()) {
-                    return Err(invalid("aggregate native image exceeds 4 KiB limit"));
+                    return Err(invalid("aggregate native image cannot be represented by a Cranelift stack slot"));
                 }
                 let base=local_address(fb,stack,*index)?;
                 let mut offset=0usize;
@@ -5069,7 +5068,7 @@ mod tests {
         }]).unwrap();
         assert_eq!(&obj[..4],b"\x7fELF");
         assert!(check(&[Stmt::ZeroAggregate(0,4097)],
-            &mut HashSet::new(),0,1,0).is_err());
+            &mut HashSet::new(),0,1,0).is_ok());
     }
     #[test]
     fn rejects_nondefinite_local_initialization() {
@@ -5234,11 +5233,15 @@ mod audit_resource_limits_tests {
     #[test]
     fn aggregate_image_boundaries_are_checked() {
         assert!(!valid_aggregate_image_len(0));
-        assert!(valid_aggregate_image_len(MAX_AGGREGATE_IMAGE_BYTES));
-        assert!(!valid_aggregate_image_len(MAX_AGGREGATE_IMAGE_BYTES + 1));
+        assert!(valid_aggregate_image_len(4097));
+        assert!(valid_aggregate_image_len(u32::MAX as usize));
+        if usize::BITS > 32 {
+            assert!(!valid_aggregate_image_len((u64::from(u32::MAX)+1) as usize));
+        }
         assert!(!valid_zero_aggregate_bytes(0));
-        assert!(valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64));
-        assert!(!valid_zero_aggregate_bytes(MAX_AGGREGATE_IMAGE_BYTES as u64 + 1));
+        assert!(valid_zero_aggregate_bytes(4097));
+        assert!(valid_zero_aggregate_bytes(u64::from(u32::MAX)));
+        assert!(!valid_zero_aggregate_bytes(u64::from(u32::MAX)+1));
     }
 }
 

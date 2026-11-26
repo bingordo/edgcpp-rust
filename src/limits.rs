@@ -9,9 +9,6 @@
 /// Maximum number of explicitly supported scalar arguments in one signature.
 pub(crate) const MAX_SUPPORTED_PARAMETERS: usize = 256;
 
-/// Maximum decoded native aggregate byte image; mirrors the C++ bridge cap.
-pub(crate) const MAX_NATIVE_AGGREGATE_IMAGE_BYTES: usize = 4096;
-
 /// Maximum representable native object size in CFG reference lowering.
 pub(crate) const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -77,7 +74,6 @@ mod tests {
         assert_eq!(MAX_FP_LOCALS, 4096);
         assert_eq!(MAX_FP_STATEMENTS, 10_000);
         assert_eq!(MAX_CFG_LOCALS, 10_000);
-        assert_eq!(MAX_NATIVE_AGGREGATE_IMAGE_BYTES, 4096);
         assert_eq!(MAX_NATIVE_OBJECT_BYTES, 16 * 1024 * 1024);
         assert_eq!(MAX_AGGREGATE_SCALAR_ELEMENTS, 256);
         assert_eq!(MAX_AGGREGATE_LAYOUT_DEPTH, 32);

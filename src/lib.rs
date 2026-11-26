@@ -33,15 +33,15 @@ struct WireField {
 // The tags and record arities are generated from schema/wire_schema.json.
 include!("wire_schema_generated.rs");
 type Callback = unsafe extern "C" fn(*mut c_void, u32, *const WireField, usize, u32);
-// A malformed native text length must not produce an enormous or
-// out-of-bounds slice before UTF-8 validation. This is a defensive
-// implementation cap, not a C/C++ language token-length restriction.
-const MAX_WIRE_TEXT_BYTES: usize = 1024 * 1024;
+// Native producers own the synchronous callback buffer and must provide
+// a valid pointer for the full length. Rust slices cannot exceed isize::MAX.
+// This representability check does not prove arbitrary foreign pointers valid.
+const MAX_SLICE_BYTES: usize = isize::MAX as usize;
 
 impl WireField {
     fn string(self) -> Option<String> {
         if self.tag != wire_tags::TEXT || self.data.is_null() ||
-            self.length > MAX_WIRE_TEXT_BYTES { return None; }
+            self.length > MAX_SLICE_BYTES { return None; }
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(self.data, self.length) })
             .ok().map(str::to_owned)
     }
@@ -1820,16 +1820,12 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
     }
 }
 
-// The shared limit mirrors cpp/bridge.cpp::MAX_NATIVE_AGGREGATE_IMAGE_BYTES.
 // C++ sends hex images with two ASCII characters per byte.
-use crate::limits::MAX_NATIVE_AGGREGATE_IMAGE_BYTES;
-const MAX_NATIVE_AGGREGATE_HEX_CHARS: usize = MAX_NATIVE_AGGREGATE_IMAGE_BYTES * 2;
-
-/// Decode a bounded native byte image. Reject arbitrary strings and odd
+// Decode the complete native byte image. Reject malformed strings and odd
 /// lengths; a malformed wire event must not become a partial initializer.
 fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
     let raw=input.as_bytes();
-    if raw.is_empty() || raw.len()>MAX_NATIVE_AGGREGATE_HEX_CHARS || !raw.len().is_multiple_of(2) {return None;}
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {return None;}
     let hex=|b:u8| ->Option<u8> {
         match b {
             b'0'..=b'9'=>Some(b-b'0'),
@@ -1837,7 +1833,8 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
             _=>None,
         }
     };
-    let mut out=Vec::with_capacity(raw.len()/2);
+    let mut out=Vec::new();
+    out.try_reserve_exact(raw.len()/2).ok()?;
     for pair in raw.as_chunks::<2>().0 {
         out.push((hex(pair[0])? << 4) | hex(pair[1])?);
     }
@@ -1858,7 +1855,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
     if fields.iter().any(|f|
         f.tag > wire_tags::MAX ||
         (f.tag == wire_tags::TEXT &&
-            (f.data.is_null() || f.length > MAX_WIRE_TEXT_BYTES))) { return; }
+            (f.data.is_null() || f.length > MAX_SLICE_BYTES))) { return; }
     if let Some(masks) = expected_wire_field_tag_masks(kind) {
         if fields.len() != masks.len() || fields.iter().zip(masks).any(|(field, mask)| {
             (mask & (1u8 << field.tag)) == 0
@@ -2273,8 +2270,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 return;
             }
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
-            if bytes.is_empty() || bytes.len()>MAX_NATIVE_AGGREGATE_IMAGE_BYTES ||
-                bytes.last()!=Some(&0) {return;}
+            if bytes.last()!=Some(&0) {return;}
             output.global_literal_objects.push(GlobalLiteralObject {
                 id,ty:TypeId(ty),bytes,
             });
@@ -2379,7 +2375,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             if function.is_empty() || statement_path.is_empty() ||
                 path.is_empty() || ty==0 {return;}
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
-            if bytes.len()>MAX_NATIVE_AGGREGATE_IMAGE_BYTES || bytes.last()!=Some(&0) {return;}
+            if bytes.last()!=Some(&0) {return;}
             output.string_literals.push(ExpressionStringLiteral {
                 function, statement_path, path, ty:TypeId(ty), bytes,
             });
@@ -7187,13 +7183,14 @@ mod audit_native_aggregate_image_cap_tests {
     use super::*;
 
     #[test]
-    fn hex_images_accept_exact_limit_and_reject_oversized_or_malformed_data() {
-        let good="7f".repeat(MAX_NATIVE_AGGREGATE_IMAGE_BYTES);
-        let bytes=decode_aggregate_hex(&good).expect("4 KiB native image");
-        assert_eq!(bytes.len(),MAX_NATIVE_AGGREGATE_IMAGE_BYTES);
-        assert_eq!(bytes[0],0x7f);
-        assert_eq!(bytes[MAX_NATIVE_AGGREGATE_IMAGE_BYTES-1],0x7f);
-        assert!(decode_aggregate_hex(&format!("{good}7f")).is_none());
+    fn hex_images_accept_large_valid_images_and_reject_malformed_data() {
+        for size in [4096,4097,600_000] {
+            let good="7f".repeat(size);
+            let bytes=decode_aggregate_hex(&good).expect("complete native image");
+            assert_eq!(bytes.len(),size);
+            assert_eq!(bytes[0],0x7f);
+            assert_eq!(bytes[size-1],0x7f);
+        }
         assert!(decode_aggregate_hex("").is_none());
         assert!(decode_aggregate_hex("0").is_none());
         assert!(decode_aggregate_hex("gg").is_none());
@@ -7696,7 +7693,7 @@ mod audit_wire_text_length_tests {
         // length would be invalid, even for UTF-8 validation.
         assert!(bad.string().is_none());
         let bad = WireField {
-            length:MAX_WIRE_TEXT_BYTES + 1, ..bad
+            length:MAX_SLICE_BYTES + 1, ..bad
         };
         assert!(bad.string().is_none());
     }
@@ -7706,7 +7703,7 @@ mod audit_wire_text_length_tests {
         let one=b"x";
         let field=WireField {
             data:one.as_ptr(),
-            length:MAX_WIRE_TEXT_BYTES + 1,
+            length:MAX_SLICE_BYTES + 1,
             value:0,tag:wire_tags::TEXT,
         };
         let mut collector=Collector::default();
@@ -7727,6 +7724,19 @@ mod audit_wire_text_length_tests {
         assert!(!valid.malformed);
         assert!(matches!(valid.il.entities.as_slice(),
             [Entity::Namespace { name }] if name=="x"));
+
+        // A genuinely allocated text buffer larger than the old 1 MiB
+        // policy must be accepted. Never use a fake short allocation.
+        let large=vec![b'x'; 1024*1024+1];
+        let field=WireField {data:large.as_ptr(),length:large.len(),..field};
+        let mut valid=Collector::default();
+        unsafe {
+            collect((&mut valid as *mut Collector).cast(),
+                    4,&field,1,0);
+        }
+        assert!(!valid.malformed);
+        assert!(matches!(valid.il.entities.as_slice(),
+            [Entity::Namespace { name }] if name.len()==large.len()));
     }
 }
 
