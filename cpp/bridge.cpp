@@ -177,21 +177,28 @@ static std::string namespace_prefix(a_scope_ptr parent)
 {
   // File-scope IL lists can include entities declared in nested namespaces.
   // Use each declaration's parent scope, not the containing list, to qualify it.
-  std::string result;
-  // A fixed depth cutoff silently truncated valid C++ qualified names.
-  // Track native scope identities instead, so even malformed cyclic parent
-  // chains terminate without modifying a valid deep namespace hierarchy.
+  // Walk the full parent chain before publishing a name. A repeated scope
+  // is malformed native IL, not a legitimate end of a qualified name.
   std::unordered_set<a_scope_ptr> visited;
+  std::vector<const char *> components;
   for (a_scope_ptr scope = parent; scope != nullptr;
        scope = scope->parent) {
-    if (!visited.insert(scope).second) break;
+    if (!visited.insert(scope).second) {
+      report_incomplete_snapshot();
+      return {};
+    }
     if (scope->kind != sck_namespace) continue;
     a_namespace_ptr ns = scope->variant.assoc_namespace;
     if (ns == nullptr) continue;
     const char *name = source_name(ns->source_corresp);
-    if (name != nullptr) {
-      result = std::string(name) + "::" + result;
-    }
+    if (name != nullptr) components.push_back(name);
+  }
+  // Append in outer-to-inner order rather than repeatedly copying the
+  // entire suffix for each namespace. Valid deep hierarchies stay intact.
+  std::string result;
+  for (auto it = components.rbegin(); it != components.rend(); ++it) {
+    result += *it;
+    result += "::";
   }
   return result;
 }
