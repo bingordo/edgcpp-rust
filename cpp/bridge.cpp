@@ -105,9 +105,15 @@ static void report_incomplete_snapshot()
     emit_record(RECORD_INCOMPLETE_SNAPSHOT, {});
 }
 
-// Full object images are intentionally limited to 4 KiB until larger
-// layouts and relocation storage receive separate resource validation.
-static constexpr std::size_t MAX_NATIVE_AGGREGATE_IMAGE_BYTES = 4096;
+// Images are encoded as two hex characters per byte. Check actual host
+// container representability before conversion/allocation, not an arbitrary
+// object-size cap. The native callback owns each text buffer until return.
+static bool native_image_size_fits(uint64_t bytes)
+{
+  return bytes!=0 &&
+         bytes<=std::vector<uint8_t>().max_size() &&
+         bytes<=std::string().max_size()/2;
+}
 // Count a native list independently of emitted records, without an arbitrary
 // length cutoff. Detect cycles before scanning; counts are wire u32 values.
 template<class Ptr,class Next>
@@ -1635,7 +1641,7 @@ static bool native_static_literal_image(a_constant_ptr literal,
   if (type == nullptr || type->kind != tk_array || type->incomplete ||
       type->variant.array.is_variable_size_array ||
       type->variant.array.is_template_dependent_size_array ||
-      type->size == 0 || type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES)
+      !native_image_size_fits(type->size))
     return false;
   a_type_ptr element=object_initializer_type(type->variant.array.element_type);
   if (element == nullptr || element->kind != tk_integer ||
@@ -1712,11 +1718,11 @@ static constexpr bool aggregate_subobject_fits(
 {
   return base <= total && relative <= total - base;
 }
-static_assert(aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
-                                       MAX_NATIVE_AGGREGATE_IMAGE_BYTES - 1, 1));
-static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
-                                        MAX_NATIVE_AGGREGATE_IMAGE_BYTES - 1, 2));
-static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
+static_assert(aggregate_subobject_fits(16,
+                                       15, 1));
+static_assert(!aggregate_subobject_fits(16,
+                                        15, 2));
+static_assert(!aggregate_subobject_fits(16,
                                         std::numeric_limits<size_t>::max(), 1));
 
 struct image_value {
@@ -1852,9 +1858,6 @@ static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
     } else {
       return false;
     }
-    // The 4 KiB image bound and disjoint eight-byte slots already limit
-    // relocations to 512; an independent 256-entry cap rejected valid data.
-    static_assert(MAX_NATIVE_AGGREGATE_IMAGE_BYTES / 8 == 512);
     const auto delta = address.offset;
     if (delta < static_cast<decltype(delta)>(
                     std::numeric_limits<int64_t>::min()) ||
@@ -1862,7 +1865,7 @@ static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
                     std::numeric_limits<int64_t>::max()))
       return false;
     // Check entire relocation ranges rather than only equal start offsets.
-    // Both start positions are inside the already validated 4 KiB image.
+    // Both start positions are inside the already validated object image.
     for (const auto &prior : *relocations) {
       if (!aggregate_subobject_fits(bytes.size(), prior.byte_offset, 8))
         return false;
@@ -2075,8 +2078,7 @@ static bool aggregate_initializer_image(
   type = object_initializer_type(type);
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
-       type->kind != tk_union) || type->size == 0 ||
-      type->size > MAX_NATIVE_AGGREGATE_IMAGE_BYTES) return false;
+       type->kind != tk_union) || !native_image_size_fits(type->size)) return false;
   std::vector<uint8_t> bytes(static_cast<size_t>(type->size), 0);
   if (!constant_initializer_image(root, type, 0, bytes, 0,
                                   relocations)) return false;
@@ -2173,8 +2175,7 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
   unsigned array_items=0;
   unsigned array_kind_mask=0;
   if (inner!=nullptr && array_element!=nullptr &&
-      array_element->size>0 &&
-      array_element->size<=MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
+      native_image_size_fits(array_element->size)) {
     std::vector<uint8_t> isolated(static_cast<size_t>(array_element->size),0);
     std::vector<NativeAggregateReloc> relocations;
     isolated_leaf_ok=constant_initializer_image(
@@ -2506,7 +2507,7 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
       const a_constant_ptr constant = node->variant.constant.ptr;
       const size_t n = constant->variant.string.length;
       const size_t size = array ? static_cast<size_t>(node->type->size) : n;
-      if (size > 0 && size <= MAX_NATIVE_AGGREGATE_IMAGE_BYTES && n <= size &&
+      if (native_image_size_fits(size) && n <= size &&
           constant->variant.string.value != nullptr) {
         std::vector<uint8_t> image(size, 0);
         std::memcpy(image.data(), constant->variant.string.value, n);
@@ -2554,7 +2555,7 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
           !array->incomplete && pointee != nullptr &&
           pointee->size == 1 && element != nullptr &&
           element->size == 1 &&
-          array->size>0 && array->size<=MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
+          native_image_size_fits(array->size)) {
         const size_t size=static_cast<size_t>(array->size);
         const size_t n=original->variant.string.length;
         if (n<=size && original->variant.string.value!=nullptr) {
@@ -3884,8 +3885,8 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
       }
       const a_constant_ptr constant = entry->asm_string;
       const auto native_length = constant->variant.string.length;
-      // Mirror Rust's MAX_WIRE_TEXT_BYTES; never overrun native string data.
-      if (native_length > (1u << 20)) {
+      // The source owns this buffer; only check string representability.
+      if (native_length > std::string().max_size()) {
         report_incomplete_snapshot();
         break;
       }
