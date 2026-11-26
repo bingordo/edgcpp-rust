@@ -2644,20 +2644,10 @@ static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
        num(d->variable!=nullptr ? 1u : 0u)});
 }
 
-static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
-                               uint32_t routine, unsigned parent,
-                               unsigned depth, bool native_child_edge = false)
+static bool emit_lifetime_node(an_object_lifetime_ptr lifetime,
+                               uint32_t routine, uint32_t parent,
+                               uint32_t id, bool native_child_edge)
 {
-  if (lifetime == nullptr || current_callback == nullptr) return;
-  if (current_lifetime_ids.find(lifetime) != current_lifetime_ids.end()) return;
-  // Neither an over-deep lifetime tree nor an exhausted ID budget can be
-  // represented by silently dropping destructors or scope relationships.
-  if (depth > 64 || current_lifetime_ids.size() >= MAX_NATIVE_LIST_ELEMENTS) {
-    report_incomplete_snapshot();
-    return;
-  }
-  const uint32_t id = static_cast<uint32_t>(current_lifetime_ids.size());
-  current_lifetime_ids.emplace(lifetime, id);
   emit_record(38, {num(routine), num(id),
                    parent == std::numeric_limits<uint32_t>::max() ?
                        absent() : num(parent),
@@ -2672,7 +2662,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
        entry = entry->next_in_destruction_list, ++native_destruction_count) {
     if (!count_seen.insert(entry).second) {
       report_incomplete_snapshot();
-      break;
+      return false;
     }
   }
   emit_record(RECORD_NATIVE_LIFETIME_DESTRUCTION_COUNT,
@@ -2711,7 +2701,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
     if (child == lifetime || !count_seen_children.insert(child).second ||
         child->parent_lifetime != lifetime) {
       report_incomplete_snapshot();
-      return;
+      return false;
     }
   }
   // Scope fallback can preserve a parent_lifetime pointer without
@@ -2720,10 +2710,24 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
   emit_record(RECORD_NATIVE_LIFETIME_CHILD_COUNT,
               {num(routine), num(id), num(native_child_count),
                num(native_child_edge ? 1u : 0u)});
-  unsigned children = 0;
-  for (an_object_lifetime_ptr child = lifetime->child_lifetime;
-       child != nullptr && within_native_list_limit(children++); child = child->next) {
-    emit_lifetime_tree(child, routine, id, depth + 1, true);
+  return true;
+}
+
+static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
+                               uint32_t routine, uint32_t parent)
+{
+  if (lifetime == nullptr || current_callback == nullptr) return;
+  // The routine root, static root and lexical fallback may legitimately
+  // discover the same lifetime. A repeated *child edge* is not a new root.
+  if (!edg_bridge::walk_scope_forest_root(
+          lifetime, MAX_NATIVE_LIST_ELEMENTS, parent, current_lifetime_ids,
+          [](an_object_lifetime_ptr node) { return node->child_lifetime; },
+          [](an_object_lifetime_ptr node) { return node->next; },
+          [&](an_object_lifetime_ptr node, uint32_t id, uint32_t owner,
+              bool child_edge) {
+            return emit_lifetime_node(node, routine, owner, id, child_edge);
+          })) {
+    report_incomplete_snapshot();
   }
 }
 
@@ -2732,9 +2736,9 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
   current_lifetime_ids.clear();
   if (body == nullptr || body->kind != sck_function) return;
   emit_lifetime_tree(body->lifetime, routine,
-                     std::numeric_limits<uint32_t>::max(), 0);
+                     std::numeric_limits<uint32_t>::max());
   emit_lifetime_tree(body->variant.routine.lifetime_of_local_static_vars,
-                     routine, std::numeric_limits<uint32_t>::max(), 0);
+                     routine, std::numeric_limits<uint32_t>::max());
   // A scope's lifetime can be distinct from its parent's lifetime
   // (e.g., after labels, temporaries and special static regions).
   std::vector<a_scope_ptr> pending{body};
@@ -2748,7 +2752,7 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
       unsigned parent = std::numeric_limits<uint32_t>::max();
       auto prior = current_lifetime_ids.find(scope->lifetime->parent_lifetime);
       if (prior != current_lifetime_ids.end()) parent = prior->second;
-      emit_lifetime_tree(scope->lifetime, routine, parent, 0);
+      emit_lifetime_tree(scope->lifetime, routine, parent);
     }
     unsigned children = 0;
     for (a_scope_ptr child = scope->scopes;
