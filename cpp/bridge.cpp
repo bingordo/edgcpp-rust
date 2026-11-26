@@ -105,13 +105,10 @@ static void report_incomplete_snapshot()
     emit_record(RECORD_INCOMPLETE_SNAPSHOT, {});
 }
 
-// Native linked lists have an explicit defensive upper bound. Never treat
-// reaching it as a clean end-of-list: report invalid IL to the Rust collector.
 // Full object images are intentionally limited to 4 KiB until larger
 // layouts and relocation storage receive separate resource validation.
 static constexpr std::size_t MAX_NATIVE_AGGREGATE_IMAGE_BYTES = 4096;
 static constexpr unsigned MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS = 4096;
-static constexpr std::size_t MAX_NATIVE_LIST_ELEMENTS = 10000;
 // Count a native list independently of emitted records, without an arbitrary
 // length cutoff. Detect cycles before scanning; counts are wire u32 values.
 template<class Ptr,class Next>
@@ -140,12 +137,6 @@ static bool native_next_count(Ptr first,Count &count)
     return false;
   count=static_cast<Count>(n);
   return true;
-}
-static bool within_native_list_limit(std::size_t index)
-{
-  if (index < MAX_NATIVE_LIST_ELEMENTS) return true;
-  report_incomplete_snapshot();
-  return false;
 }
 // EDG sequence numbers are compilation-global and may incorporate includes
 // and #line remapping. Resolve while the source-file lookup table is live.
@@ -2867,7 +2858,9 @@ static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
   if (d==nullptr || current_dynamic_init_routine==0) return;
   auto found=current_dynamic_init_ids.find(d);
   if (found==current_dynamic_init_ids.end()) {
-    if (!within_native_list_limit(current_dynamic_init_ids.size())) return;
+    if (current_dynamic_init_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+      report_incomplete_snapshot();return;
+    }
     found=current_dynamic_init_ids.emplace(d,
         static_cast<uint32_t>(current_dynamic_init_ids.size()+1)).first;
   }
@@ -2900,9 +2893,9 @@ static bool emit_lifetime_node(an_object_lifetime_ptr lifetime,
   uint32_t native_destruction_count = 0;
   std::unordered_set<a_dynamic_init_ptr> count_seen;
   for (a_dynamic_init_ptr entry = lifetime->destructions;
-       entry != nullptr && within_native_list_limit(native_destruction_count);
+       entry != nullptr ;
        entry = entry->next_in_destruction_list, ++native_destruction_count) {
-    if (!count_seen.insert(entry).second) {
+    if (native_destruction_count==std::numeric_limits<uint32_t>::max() || !count_seen.insert(entry).second) {
       report_incomplete_snapshot();
       return false;
     }
@@ -2913,7 +2906,7 @@ static bool emit_lifetime_node(an_object_lifetime_ptr lifetime,
   unsigned position = 0;
   std::unordered_set<a_dynamic_init_ptr> seen;
   for (a_dynamic_init_ptr d = lifetime->destructions;
-       d != nullptr && within_native_list_limit(position) && seen.insert(d).second;
+       d != nullptr && seen.insert(d).second;
        d = d->next_in_destruction_list) {
     uint32_t variable = 0, destructor = 0;
     if (d->variable != nullptr) {
@@ -2938,9 +2931,10 @@ static bool emit_lifetime_node(an_object_lifetime_ptr lifetime,
   uint32_t native_child_count = 0;
   std::unordered_set<an_object_lifetime_ptr> count_seen_children;
   for (an_object_lifetime_ptr child = lifetime->child_lifetime;
-       child != nullptr && within_native_list_limit(native_child_count);
+       child != nullptr;
        child = child->next, ++native_child_count) {
-    if (child == lifetime || !count_seen_children.insert(child).second ||
+    if (native_child_count==std::numeric_limits<uint32_t>::max() ||
+        child == lifetime || !count_seen_children.insert(child).second ||
         child->parent_lifetime != lifetime) {
       report_incomplete_snapshot();
       return false;
@@ -2962,7 +2956,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
   // The routine root, static root and lexical fallback may legitimately
   // discover the same lifetime. A repeated *child edge* is not a new root.
   if (!edg_bridge::walk_scope_forest_root(
-          lifetime, MAX_NATIVE_LIST_ELEMENTS, parent, current_lifetime_ids,
+          lifetime, parent, current_lifetime_ids,
           [](an_object_lifetime_ptr node) { return node->child_lifetime; },
           [](an_object_lifetime_ptr node) { return node->next; },
           [&](an_object_lifetime_ptr node, uint32_t id, uint32_t owner,
@@ -2985,7 +2979,7 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
   // (e.g., after labels, temporaries and special static regions).
   std::vector<a_scope_ptr> pending{body};
   std::unordered_set<a_scope_ptr> visited;
-  while (!pending.empty() && within_native_list_limit(visited.size())) {
+  while (!pending.empty()) {
     a_scope_ptr scope = pending.back();
     pending.pop_back();
     if (scope == nullptr || !visited.insert(scope).second) continue;
@@ -2996,9 +2990,10 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
       if (prior != current_lifetime_ids.end()) parent = prior->second;
       emit_lifetime_tree(scope->lifetime, routine, parent);
     }
-    unsigned children = 0;
+    std::size_t child_count=0;
+    if (!native_next_count(scope->scopes,child_count)) return;
     for (a_scope_ptr child = scope->scopes;
-         child != nullptr && within_native_list_limit(children++); child = child->next) {
+         child != nullptr; child = child->next) {
       pending.push_back(child);
     }
   }
@@ -3040,11 +3035,9 @@ static bool emit_local_scope(a_scope_ptr scope, uint32_t routine,
   for (unsigned group = 0; group < 2; ++group) {
     a_variable_ptr first = group == 0 ?
         scope->nonstatic_variables : scope->variables;
-    uint32_t visited_count = 0;
     std::unordered_set<a_variable_ptr> native_list_seen;
     a_variable_ptr var = first;
-    for (; var != nullptr && within_native_list_limit(visited_count);
-         var = var->next, ++visited_count) {
+    for (; var != nullptr; var = var->next) {
       if (!native_list_seen.insert(var).second) {
         report_incomplete_snapshot();
         return false;
@@ -3052,6 +3045,9 @@ static bool emit_local_scope(a_scope_ptr scope, uint32_t routine,
       if (!var->is_parameter && !var->is_this_parameter &&
           seen_locals.find(var) == seen_locals.end() &&
           native_scope_locals.insert(var).second) {
+        if (native_local_count==std::numeric_limits<uint32_t>::max()) {
+          report_incomplete_snapshot();return false;
+        }
         ++native_local_count;
       }
     }
@@ -3065,8 +3061,7 @@ static bool emit_local_scope(a_scope_ptr scope, uint32_t routine,
   for (unsigned group = 0; group < 2; ++group) {
     a_variable_ptr first = group == 0 ?
         scope->nonstatic_variables : scope->variables;
-    unsigned count = 0;
-    for (a_variable_ptr var = first; var != nullptr && within_native_list_limit(count++);
+    for (a_variable_ptr var = first; var != nullptr;
          var = var->next) {
       if (var->is_parameter || var->is_this_parameter ||
           !seen_locals.insert(var).second) continue;
@@ -3191,9 +3186,10 @@ static bool emit_local_scope(a_scope_ptr scope, uint32_t routine,
   uint32_t native_child_count = 0;
   std::unordered_set<a_scope_ptr> count_seen_children;
   for (a_scope_ptr child = scope->scopes;
-       child != nullptr && within_native_list_limit(native_child_count);
+       child != nullptr;
        child = child->next, ++native_child_count) {
-    if (child == scope || !count_seen_children.insert(child).second) {
+    if (native_child_count==std::numeric_limits<uint32_t>::max() ||
+        child == scope || !count_seen_children.insert(child).second) {
       report_incomplete_snapshot();
       return false;
     }
@@ -3213,16 +3209,19 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   // of the function-scope EDG parameter chain. Source-count the *actual*
   // non-this declarations before emitting any parameter event-29 records.
   uint32_t native_parameter_count = 0;
-  uint32_t counted = 0;
   std::unordered_set<a_variable_ptr> native_parameters;
   a_variable_ptr scan = body->variant.routine.parameters;
-  for (; scan != nullptr && within_native_list_limit(counted);
-       scan = scan->next, ++counted) {
+  for (; scan != nullptr; scan = scan->next) {
     if (!native_parameters.insert(scan).second) {
       report_incomplete_snapshot();
       return;
     }
-    if (!scan->is_this_parameter) ++native_parameter_count;
+    if (!scan->is_this_parameter) {
+      if (native_parameter_count==std::numeric_limits<uint32_t>::max()) {
+        report_incomplete_snapshot();return;
+      }
+      ++native_parameter_count;
+    }
   }
   if (scan != nullptr) {
     report_incomplete_snapshot();
@@ -3231,10 +3230,9 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   emit_record(RECORD_NATIVE_FUNCTION_PARAMETER_COUNT,
               {num(routine),num(native_parameter_count),
                num(body->variant.routine.this_param_variable != nullptr ? 1u : 0u)});
-  unsigned count = 0;
   std::unordered_set<a_variable_ptr> seen_parameters;
   for (a_variable_ptr var = body->variant.routine.parameters;
-       var != nullptr && within_native_list_limit(count++); var = var->next) {
+       var != nullptr; var = var->next) {
     if (var->is_this_parameter || !seen_parameters.insert(var).second) continue;
     const char *raw_name = source_name(var->source_corresp);
     const std::string name = function + "::" +
@@ -3257,7 +3255,7 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
   }
   std::unordered_set<a_variable_ptr> seen_locals;
   if (!edg_bridge::walk_scope_tree(
-          body, MAX_NATIVE_LIST_ELEMENTS,
+          body,
           [](a_scope_ptr scope) { return scope->scopes; },
           [](a_scope_ptr scope) { return scope->next; },
           [&](a_scope_ptr scope, uint32_t id, uint32_t parent) {
@@ -3313,10 +3311,8 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     }
     if (task.kind == TaskKind::List) {
       uint32_t sibling_count = 0;
-      for (a_statement_ptr scan = stmt; scan != nullptr;
-           scan = task.single ? nullptr : scan->next, ++sibling_count) {
-        if (!within_native_list_limit(sibling_count)) return;
-      }
+      if (task.single) sibling_count=stmt!=nullptr?1:0;
+      else if (!native_next_count(stmt,sibling_count)) return;
       emit_record(RECORD_NATIVE_STATEMENT_SIBLING_COUNT,
                   {txt(function), task.parent.empty() ? absent() : txt(task.parent),
                    txt(task.edge), num(sibling_count)});
@@ -3374,9 +3370,10 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     // or static assertions. Only variable entries have a variable identity.
     if (stmt->kind == stmk_decl) {
       unsigned position = 0;
-      unsigned traversed = 0;
+      std::size_t traversed=0;
+      if (!native_next_count(stmt->variant.decl.entities,traversed)) return;
       for (an_il_entity_list_entry_ptr entity = stmt->variant.decl.entities;
-           entity != nullptr && within_native_list_limit(traversed++); entity = entity->next) {
+           entity != nullptr; entity = entity->next) {
         if (entity->entity.kind != iek_variable || entity->entity.ptr == nullptr)
           continue;
         a_variable_ptr variable =
@@ -3725,10 +3722,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       a_try_supplement_ptr info = stmt->variant.try_block;
       // Count independently before publishing the ordered handler lists.
       uint32_t native_handler_count = 0;
-      for (a_handler_ptr handler = info != nullptr ? info->handlers : nullptr;
-           handler != nullptr; handler = handler->next, ++native_handler_count) {
-        if (!within_native_list_limit(native_handler_count)) return;
-      }
+      if (info!=nullptr && !native_next_count(info->handlers,native_handler_count)) return;
       emit_record(RECORD_NATIVE_TRY_HANDLER_COUNT,
                   {txt(function), txt(path), num(native_handler_count)});
       std::vector<a_statement_ptr> handlers;
@@ -3823,9 +3817,10 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
   if (scope->kind == sck_file || scope->kind == sck_namespace) {
     const std::string scope_key =
         std::to_string(visited_scopes.size()) + ":" + prefix;
-    std::size_t position = 0;
+    std::size_t position = 0,init_count=0;
+    if (!native_next_count(scope->dynamic_inits,init_count)) return;
     for (a_dynamic_init_ptr init = scope->dynamic_inits;
-         init != nullptr && within_native_list_limit(position);
+         init != nullptr;
          init = init->next, ++position) {
       uint32_t variable_id = 0;
       uint32_t destructor_id = 0;
@@ -3855,9 +3850,10 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
     std::unordered_set<an_asm_entry_ptr> seen_asm;
     std::size_t asm_position = 0;
     for (an_asm_entry_ptr entry = scope->asm_entries;
-         entry != nullptr && within_native_list_limit(asm_position);
+         entry != nullptr;
          entry = entry->next, ++asm_position) {
-      if (!seen_asm.insert(entry).second ||
+      if (asm_position==std::numeric_limits<uint32_t>::max() ||
+          !seen_asm.insert(entry).second ||
           entry->asm_string == nullptr ||
           entry->asm_string->kind != ck_string ||
           entry->asm_string->variant.string.value == nullptr) {
@@ -4061,16 +4057,14 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
           // Count EDG-owned initializer entries independently from the
           // record-20 emission loop. Even zero entries have a witness.
           uint32_t native_initializer_count = 0;
-          for (a_constructor_init_ptr entry = constructors;
-               entry != nullptr && within_native_list_limit(native_initializer_count);
-               entry = entry->next, ++native_initializer_count) {}
+          if (!native_next_count(constructors,native_initializer_count)) return;
           emit_record(RECORD_NATIVE_CONSTRUCTOR_INITIALIZER_COUNT,
                       {num(routine_symbol), num(native_initializer_count)});
           // The function scope owns constructor/destructor subobject
           // initialization entries, ordered by actual execution order.
           unsigned init_position = 0;
           for (a_constructor_init_ptr init = constructors;
-               init != nullptr && within_native_list_limit(init_position);
+               init != nullptr;
                init = init->next, ++init_position) {
             uint32_t target_type = 0;
             uint32_t target_symbol = 0;
@@ -4110,7 +4104,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
             std::unordered_set<an_expr_node_ptr> seen_roots;
             for (auto root = owned.first; root != nullptr;
                  root = owned.linked_list ? root->next : nullptr) {
-              if (!within_native_list_limit(executable_count) ||
+              if (executable_count==std::numeric_limits<uint32_t>::max() ||
                   !seen_roots.insert(root).second) {
                 report_incomplete_snapshot();
                 break;
@@ -4568,8 +4562,9 @@ void back_end(void)
 #if SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS
   a_routine_list_entry_ptr init_entry =
       il_header.file_scope_dynamic_init_routines;
-  std::size_t init_position = 0;
-  for (; init_entry != nullptr && within_native_list_limit(init_position);
+  std::size_t init_position = 0,init_count=0;
+  if (!native_next_count(init_entry,init_count)) return;
+  for (; init_entry != nullptr;
        init_entry = init_entry->next, ++init_position) {
     a_routine_ptr routine = init_entry->routine;
     if (routine == nullptr) {
