@@ -102,6 +102,9 @@ pub struct Il {
     pub native_ctor_constant_nodes: Vec<NativeCtorConstantNode>,
     /// Original routine-local initializer identities across owner contexts.
     pub native_dynamic_init_identities: Vec<NativeDynamicInitIdentity>,
+    /// Actual dynamic-init union roots, distinct from source-expression fallbacks.
+    pub native_initializer_exec_roots: Vec<NativeInitializerExecRoots>,
+    pub native_initializer_exec_nodes: Vec<NativeInitializerExecNode>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -840,6 +843,25 @@ pub struct NativeDynamicInitIdentity {
     pub id:u32, pub kind:u32, pub flags:u32,
     pub lifetime:Option<u32>, pub expression_lifetime:Option<u32>,
     pub has_variable:bool,
+}
+
+/// Native initializer owner and optional nested constant leaf.
+#[derive(Debug,Clone,PartialEq,Eq,Hash)]
+pub struct NativeInitializerExecOwner {
+    pub symbol:SymbolId, pub position:u32, pub context:u32,
+    pub statement:Option<String>, pub expression:Option<String>, pub nested:Option<String>,
+}
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeInitializerExecRoots {
+    pub owner:NativeInitializerExecOwner, pub count:u32, pub constructor:Option<SymbolId>,
+}
+/// Structural executable-root expression node; not an admission certificate.
+/// embedded_statement requires the separate block graph (#322).
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeInitializerExecNode {
+    pub owner:NativeInitializerExecOwner, pub path:String, pub parent:Option<String>,
+    pub kind:u32, pub operator:Option<u32>, pub ty:Option<TypeId>, pub symbol:Option<SymbolId>,
+    pub child_count:u32, pub integer:Option<NativeCtorConstantPayload>, pub embedded_statement:bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1769,6 +1791,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         109 => Some(il.native_ctor_constant_roots.len()),
         110 => Some(il.native_ctor_constant_nodes.len()),
         111 => Some(il.native_dynamic_init_identities.len()),
+        112 => Some(il.native_initializer_exec_roots.len()),
+        113 => Some(il.native_initializer_exec_nodes.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1992,6 +2016,36 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
             });
+        }
+        112|113 => {
+            let (Some(symbol),Some(position),Some(context))=(n(0),n(1),n(2)) else {return;};
+            let owner=NativeInitializerExecOwner {
+                symbol:SymbolId(symbol),position,context,statement:t(3),expression:t(4),nested:t(5),
+            };
+            if !valid_exec_owner(&owner) {return;}
+            if kind==112 {
+                let Some(count)=n(6).filter(|n|*n<=10000) else {return;};
+                let constructor=n(7).map(SymbolId);
+                if constructor.is_some_and(|id|!seen.symbols.contains(&id)) {return;}
+                output.native_initializer_exec_roots.push(NativeInitializerExecRoots {
+                    owner,count,constructor,
+                });
+            } else {
+                let (Some(path),Some(node_kind),Some(child_count),Some(block))=
+                    (t(6),n(8),n(12),n(14)) else {return;};
+                let ty=n(10).map(TypeId);
+                let symbol=n(11).map(SymbolId);
+                if block>1 || ty.is_some_and(|id|!seen.types.contains(&id)) ||
+                    symbol.is_some_and(|id|!seen.symbols.contains(&id)) {return;}
+                let integer=fields[13].unsigned().map(NativeCtorConstantPayload::Unsigned)
+                    .or_else(||fields[13].signed().map(NativeCtorConstantPayload::Signed));
+                let node=NativeInitializerExecNode {
+                    owner,path,parent:t(7),kind:node_kind,operator:n(9),ty,symbol,
+                    child_count,integer,embedded_statement:block==1,
+                };
+                if !valid_exec_node(&node) {return;}
+                output.native_initializer_exec_nodes.push(node);
+            }
         }
         111 => {
             let (Some(routine),Some(context),Some(position),Some(id),Some(kind),
@@ -4616,6 +4670,83 @@ fn validate_dynamic_init_identities(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+fn valid_exec_owner(o:&NativeInitializerExecOwner)->bool {
+    o.symbol.0!=0 && o.nested.as_deref()!=Some("") &&
+    valid_constant_owner(o.context,o.position,o.statement.as_deref(),o.expression.as_deref())
+}
+fn valid_exec_node(n:&NativeInitializerExecNode)->bool {
+    valid_exec_owner(&n.owner) && !n.path.is_empty() && n.child_count<=10000 &&
+    n.parent.as_deref()!=Some("") &&
+    n.embedded_statement==(graph::native_expression_kind(n.kind)==4)
+}
+fn exec_owner(symbol:SymbolId,position:u32,context:u32,statement:&Option<String>,
+    expression:&Option<String>,nested:Option<String>)->NativeInitializerExecOwner {
+    NativeInitializerExecOwner {symbol,position,context,
+        statement:statement.clone(),expression:expression.clone(),nested}
+}
+
+/// Every previously verified constant owner and dynamic leaf must have an
+/// independent executable-root witness, even where the union has no roots.
+fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
+    let mut expected=HashMap::new();
+    for r in &il.native_ctor_constant_roots {
+        let key=exec_owner(r.routine,r.position,r.context,&r.owner_statement,&r.owner_expression,None);
+        if expected.insert(key,None).is_some() {return Err(Error::MalformedCallback);}
+    }
+    for n in &il.native_ctor_constant_nodes {
+        if n.family!=5 {continue;}
+        let key=exec_owner(n.routine,n.position,n.context,&n.owner_statement,
+            &n.owner_expression,Some(n.path.clone()));
+        if expected.insert(key,Some(n.flags)).is_some() {return Err(Error::MalformedCallback);}
+    }
+    let mut counts=HashMap::new();
+    for r in &il.native_initializer_exec_roots {
+        let Some(prior)=expected.remove(&r.owner) else {return Err(Error::MalformedCallback);};
+        if !valid_exec_owner(&r.owner) || r.count>10000 ||
+            prior.is_some_and(|n|n!=r.count) ||
+            counts.insert(&r.owner,r.count).is_some() {return Err(Error::MalformedCallback);}
+        if r.owner.context==0 && r.owner.nested.is_none() {
+            let Some(proof)=il.native_constructor_init_provenance.iter()
+                .find(|p|p.routine==r.owner.symbol && p.position==r.owner.position)
+                else {return Err(Error::MalformedCallback);};
+            if r.count!=proof.executable_root_count {return Err(Error::MalformedCallback);}
+        }
+    }
+    if !expected.is_empty() {return Err(Error::MalformedCallback);}
+    let mut nodes=HashMap::new();
+    for n in &il.native_initializer_exec_nodes {
+        if !valid_exec_node(n) || !counts.contains_key(&n.owner) ||
+            nodes.insert((&n.owner,n.path.as_str()),n).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (&(owner,path),n) in &nodes {
+        let (ordinal,limit)=if let Some((parent,index))=path.rsplit_once('.') {
+            let Some(p)=nodes.get(&(owner,parent)) else {return Err(Error::MalformedCallback);};
+            if n.parent.as_deref()!=Some(parent) {return Err(Error::MalformedCallback);}
+            (index,p.child_count)
+        } else {
+            if n.parent.is_some() {return Err(Error::MalformedCallback);}
+            (path,counts[owner])
+        };
+        let Ok(i)=ordinal.parse::<u32>() else {return Err(Error::MalformedCallback);};
+        if i>=limit || i.to_string()!=ordinal {return Err(Error::MalformedCallback);}
+        for i in 0..n.child_count {
+            if !nodes.contains_key(&(owner,format!("{path}.{i}").as_str())) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    for (owner,count) in counts {
+        for i in 0..count {
+            if !nodes.contains_key(&(owner,i.to_string().as_str())) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4643,6 +4774,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_constructor_init_provenance(il).is_err() ||
        validate_ctor_constant_trees(il).is_err() ||
        validate_dynamic_init_identities(il).is_err() ||
+       validate_initializer_exec_trees(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
@@ -7313,7 +7445,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=111_u32 {
+        for kind in 1..=113_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7342,13 +7474,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=111_u32)
+        let schema_fields:usize=(1..=113_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(112).is_none());
+        assert!(expected_wire_field_tag_masks(114).is_none());
     }
 
     #[test]
