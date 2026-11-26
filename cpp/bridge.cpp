@@ -1048,6 +1048,9 @@ static expression_children children_of(an_expr_node_ptr node)
   return {nullptr, false};
 }
 
+static uint32_t emit_variable_type(a_variable_ptr var);
+static uint32_t emit_routine_type(a_routine_ptr routine);
+
 // The native executable roots are independent of the legacy source_expr
 // fallback. Keep argument lists as ordered roots, never concatenate them
 // into a fake comma expression or manufacture a statement/function ID.
@@ -1064,9 +1067,11 @@ static void emit_initializer_exec_node(an_expr_node_ptr e,
     const char *raw=source_name(v->source_corresp);
     symbol=emit_symbol(v,2,raw==nullptr ? "<initialized>" :
         declaration_name(v->source_corresp,false));
+    emit_variable_type(v);
   } else if (e->kind==enk_routine && e->variant.routine.ptr!=nullptr) {
     auto r=e->variant.routine.ptr;
     symbol=emit_symbol(r,1,declaration_name(r->source_corresp,true,true));
+    emit_routine_type(r);
   } else if (e->kind==enk_field && e->variant.field.ptr!=nullptr) {
     auto f=e->variant.field.ptr;
     const char *raw=source_name(f->source_corresp);
@@ -1127,6 +1132,7 @@ static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
       init->variant.constructor.ptr!=nullptr) {
     auto r=init->variant.constructor.ptr;
     ctor=emit_symbol(r,1,declaration_name(r->source_corresp,true,true));
+    emit_routine_type(r);
   }
   emit_record(RECORD_NATIVE_INITIALIZER_EXEC_ROOTS,
       {num(owner.symbol),num(owner.position),num(owner.context),
