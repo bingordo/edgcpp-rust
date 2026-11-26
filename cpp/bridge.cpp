@@ -882,6 +882,8 @@ struct constant_tree_owner {
   uint32_t symbol, position, context;
   std::string statement, expression;
 };
+static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
+    const constant_tree_owner &owner,const std::string &nested);
 static void emit_initializer_constant_tree(a_constant_ptr c,
     const constant_tree_owner &owner, const std::string &path, const std::string &parent,
     unsigned depth, unsigned &visits, std::unordered_set<a_constant_ptr> &active)
@@ -945,8 +947,9 @@ static void emit_initializer_constant_tree(a_constant_ptr c,
     const auto d=c->variant.dynamic_init.ptr;
     if (d != nullptr) {
       payload=num(static_cast<unsigned>(d->kind));
+      emit_initializer_exec_roots(d,owner,path);
       // Preserve nested constant roots without treating a dynamic leaf as
-      // a byte image. Count unexported executable roots explicitly.
+      // a byte image. Count the executable roots independently.
       const auto expressions=dynamic_init_expression_children(d);
       std::unordered_set<an_expr_node_ptr> seen;
       for (auto e=expressions.first;e!=nullptr;e=expressions.linked_list ? e->next : nullptr) {
@@ -982,6 +985,7 @@ static void emit_initializer_constant_tree(a_constant_ptr c,
 static void emit_initializer_constant_root(a_dynamic_init_ptr init,
     const constant_tree_owner &owner)
 {
+  emit_initializer_exec_roots(init,owner,"");
   a_constant_ptr root=nullptr;
   if (init != nullptr &&
       (init->kind==dik_constant || init->kind==dik_nonconstant_aggregate ||
@@ -1042,6 +1046,98 @@ static expression_children children_of(an_expr_node_ptr node)
        node->kind == enk_datasizeof) && !node->variant.sizeof_info.is_type)
     return {node->variant.sizeof_info.variant.expr, false};
   return {nullptr, false};
+}
+
+// The native executable roots are independent of the legacy source_expr
+// fallback. Keep argument lists as ordered roots, never concatenate them
+// into a fake comma expression or manufacture a statement/function ID.
+static void emit_initializer_exec_node(an_expr_node_ptr e,
+    const constant_tree_owner &owner,const std::string &nested,
+    const std::string &path,const std::string &parent,unsigned depth,
+    unsigned &visits,std::unordered_set<an_expr_node_ptr> &active)
+{
+  if (e==nullptr || depth>64 || !within_native_list_limit(visits++) ||
+      !active.insert(e).second) {report_incomplete_snapshot();return;}
+  uint32_t symbol=0;
+  if (e->kind==enk_variable && e->variant.variable.ptr!=nullptr) {
+    auto v=e->variant.variable.ptr;
+    const char *raw=source_name(v->source_corresp);
+    symbol=emit_symbol(v,2,raw==nullptr ? "<initialized>" :
+        declaration_name(v->source_corresp,false));
+  } else if (e->kind==enk_routine && e->variant.routine.ptr!=nullptr) {
+    auto r=e->variant.routine.ptr;
+    symbol=emit_symbol(r,1,declaration_name(r->source_corresp,true,true));
+  } else if (e->kind==enk_field && e->variant.field.ptr!=nullptr) {
+    auto f=e->variant.field.ptr;
+    const char *raw=source_name(f->source_corresp);
+    symbol=emit_symbol(f,3,raw==nullptr ? "" : raw);
+  }
+  edgcpp_field integer=absent();
+  if (e->kind==enk_constant && e->variant.constant.ptr!=nullptr &&
+      e->variant.constant.ptr->kind==ck_integer) {
+    auto c=e->variant.constant.ptr;
+    a_boolean overflow=FALSE;
+    if (int_constant_is_signed(c)) {
+      auto v=value_of_integer_constant(c,&overflow);
+      if (!overflow && sizeof(v)<=sizeof(int64_t)) integer=signed_num(static_cast<int64_t>(v));
+    } else {
+      auto v=unsigned_value_of_integer_constant(c,&overflow);
+      if (!overflow && sizeof(v)<=sizeof(uint64_t)) integer=num(static_cast<uint64_t>(v));
+    }
+  }
+  const auto children=children_of(e);
+  std::vector<an_expr_node_ptr> operands;
+  std::unordered_set<an_expr_node_ptr> seen;
+  for (auto x=children.first;x!=nullptr;x=children.linked_list ? x->next : nullptr) {
+    if (!within_native_list_limit(operands.size()) || !seen.insert(x).second) {
+      report_incomplete_snapshot();break;
+    }
+    operands.push_back(x);
+  }
+  const auto ty=emit_type(e->type,0);
+  emit_record(RECORD_NATIVE_INITIALIZER_EXEC_NODE,
+      {num(owner.symbol),num(owner.position),num(owner.context),
+       owner.statement.empty() ? absent() : txt(owner.statement),
+       owner.expression.empty() ? absent() : txt(owner.expression),
+       nested.empty() ? absent() : txt(nested),txt(path),
+       parent.empty() ? absent() : txt(parent),num(static_cast<unsigned>(e->kind)),
+       e->kind==enk_operation ? num(static_cast<unsigned>(e->variant.operation.kind)) : absent(),
+       ty ? num(ty) : absent(),symbol ? num(symbol) : absent(),
+       num(operands.size()),integer,num(e->kind==enk_statement ? 1u : 0u)});
+  for (size_t i=0;i<operands.size();++i)
+    emit_initializer_exec_node(operands[i],owner,nested,path+"."+std::to_string(i),
+        path,depth+1,visits,active);
+  active.erase(e);
+}
+
+static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
+    const constant_tree_owner &owner,const std::string &nested)
+{
+  const auto roots=dynamic_init_expression_children(init);
+  std::vector<an_expr_node_ptr> ordered;
+  std::unordered_set<an_expr_node_ptr> seen;
+  for (auto e=roots.first;e!=nullptr;e=roots.linked_list ? e->next : nullptr) {
+    if (!within_native_list_limit(ordered.size()) || !seen.insert(e).second) {
+      report_incomplete_snapshot();break;
+    }
+    ordered.push_back(e);
+  }
+  uint32_t ctor=0;
+  if (init!=nullptr && init->kind==dik_constructor &&
+      init->variant.constructor.ptr!=nullptr) {
+    auto r=init->variant.constructor.ptr;
+    ctor=emit_symbol(r,1,declaration_name(r->source_corresp,true,true));
+  }
+  emit_record(RECORD_NATIVE_INITIALIZER_EXEC_ROOTS,
+      {num(owner.symbol),num(owner.position),num(owner.context),
+       owner.statement.empty() ? absent() : txt(owner.statement),
+       owner.expression.empty() ? absent() : txt(owner.expression),
+       nested.empty() ? absent() : txt(nested),num(ordered.size()),
+       ctor ? num(ctor) : absent()});
+  unsigned visits=0;
+  std::unordered_set<an_expr_node_ptr> active;
+  for (size_t i=0;i<ordered.size();++i)
+    emit_initializer_exec_node(ordered[i],owner,nested,std::to_string(i),"",0,visits,active);
 }
 
 // EDG's call operators encode the callee as operand zero. Member calls
