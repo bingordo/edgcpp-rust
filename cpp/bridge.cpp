@@ -4487,10 +4487,22 @@ static void collect_scope(a_scope_ptr root,const std::string &root_prefix,unsign
   };
   std::vector<frame> stack;
   std::string prefix=root_prefix;
+  // The contents pass walks routine lists twice. Certify each native
+  // declaration list once before either pass so a cycle cannot hang
+  // symbol collection or manufacture repeated declarations.
+  auto bounded_list=[](auto first) {
+    size_t count=0;
+    for (auto item=first;item!=nullptr;item=item->next)
+      if (!within_native_list_limit(count++)) return false;
+    return true;
+  };
   auto enter=[&](a_scope_ptr scope) {
     if (scope==nullptr || visited_scopes.find(scope)!=visited_scopes.end())
       return true;
-    if (!within_native_list_limit(stack.size()+depth)) return false;
+    if (!within_native_list_limit(stack.size()+depth) ||
+        !bounded_list(scope->routines) || !bounded_list(scope->variables) ||
+        !bounded_list(scope->types) || !bounded_list(scope->namespaces))
+      return false;
     visited_scopes.insert(scope);
     collect_scope_contents(scope,prefix);
     stack.push_back({scope,scope->types,scope->namespaces,prefix.size(),0,0});
