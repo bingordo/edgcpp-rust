@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <vector>
 #include <initializer_list>
+#include "qualified_scope_prefix.h"
 
 extern "C" {
 struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
@@ -177,29 +178,15 @@ static std::string namespace_prefix(a_scope_ptr parent)
 {
   // File-scope IL lists can include entities declared in nested namespaces.
   // Use each declaration's parent scope, not the containing list, to qualify it.
-  // Walk the full parent chain before publishing a name. A repeated scope
-  // is malformed native IL, not a legitimate end of a qualified name.
-  std::unordered_set<a_scope_ptr> visited;
-  std::vector<const char *> components;
-  for (a_scope_ptr scope = parent; scope != nullptr;
-       scope = scope->parent) {
-    if (!visited.insert(scope).second) {
-      report_incomplete_snapshot();
-      return {};
-    }
-    if (scope->kind != sck_namespace) continue;
-    a_namespace_ptr ns = scope->variant.assoc_namespace;
-    if (ns == nullptr) continue;
-    const char *name = source_name(ns->source_corresp);
-    if (name != nullptr) components.push_back(name);
-  }
-  // Append in outer-to-inner order rather than repeatedly copying the
-  // entire suffix for each namespace. Valid deep hierarchies stay intact.
   std::string result;
-  for (auto it = components.rbegin(); it != components.rend(); ++it) {
-    result += *it;
-    result += "::";
-  }
+  const bool complete = edg_bridge::qualified_scope_prefix(
+      parent, [](a_scope_ptr scope) { return scope->parent; },
+      [](a_scope_ptr scope) -> const char * {
+        if (scope->kind != sck_namespace) return nullptr;
+        a_namespace_ptr ns = scope->variant.assoc_namespace;
+        return ns == nullptr ? nullptr : source_name(ns->source_corresp);
+      }, result);
+  if (!complete) report_incomplete_snapshot();
   return result;
 }
 
