@@ -3351,6 +3351,31 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                  init->initializer->kind == dik_class_result_via_ctor)) {
               init_expr = init->initializer->variant.expression;
             }
+            // Independently count executable roots in the dynamic-init union.
+            // The legacy expression view may select a source-only fallback;
+            // it must never be mistaken for complete executable ownership.
+            const auto owned = dynamic_init_expression_children(init->initializer);
+            uint32_t executable_count = 0;
+            std::unordered_set<an_expr_node_ptr> seen_roots;
+            for (auto root = owned.first; root != nullptr;
+                 root = owned.linked_list ? root->next : nullptr) {
+              if (!within_native_list_limit(executable_count) ||
+                  !seen_roots.insert(root).second) {
+                report_incomplete_snapshot();
+                break;
+              }
+              ++executable_count;
+            }
+            const unsigned selected = init_expr != nullptr ? 1u :
+                (init->source_expr != nullptr ? 2u : 0u);
+            const bool shared_root = init->source_expr != nullptr &&
+                seen_roots.find(init->source_expr) != seen_roots.end();
+            emit_record(RECORD_NATIVE_CONSTRUCTOR_INIT_PROVENANCE,
+                        {num(routine_symbol), num(init_position),
+                         init->initializer != nullptr ?
+                           num(static_cast<unsigned>(init->initializer->kind)) : absent(),
+                         num(executable_count), num(init->source_expr != nullptr),
+                         num(shared_root), num(selected)});
             if (init_expr == nullptr) init_expr = init->source_expr;
             emit_record(RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION,
                         {num(routine_symbol),num(init_position),

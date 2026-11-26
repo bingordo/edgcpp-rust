@@ -183,3 +183,43 @@ fn generic_selected_operand_requires_original_direct_value_child() {
     wrong_ordinal.native_expression_variants[0].payload=NativeExpressionPayload::GenericSelectedOperand(0);
     assert!(validate_native_expression_variant_coverage(&wrong_ordinal).is_err());
 }
+
+
+#[test]
+fn constructor_provenance_distinguishes_source_fallback_and_executable_roots() {
+    let mut state=Collector::default();
+    state.il.constructor_initializers.push(ConstructorInitializer {
+        routine:SymbolId(9),position:0,kind:3,target_type:None,target_field:None,
+        compiler_generated:false,braced:false,use_field_initializer:false,
+        pack_expansion:false,
+    });
+    state.il.native_constructor_root_admissions.push(NativeConstructorRootAdmission {
+        routine:SymbolId(9),position:0,present:true,
+    });
+    let fields=[num(9),num(0),num(4),num(2),num(1),num(0),num(2)];
+    assert!(validate_constructor_init_provenance(&state.il).is_err());
+    unsafe {collect((&mut state as *mut Collector).cast(),108,fields.as_ptr(),fields.len(),0);}
+    assert!(!state.malformed);
+    validate_constructor_init_provenance(&state.il).unwrap();
+    let p=&state.il.native_constructor_init_provenance[0];
+    assert_eq!(p.executable_root_count,2);
+    assert_eq!(p.selected_root,2);
+    assert!(!p.source_is_executable_root);
+    for (index,value) in [(3,num(0)),(4,num(0)),(5,num(2)),(6,num(1))] {
+        let mut bad=fields;
+        bad[index]=value;
+        if index==3 {bad[5]=num(1);}
+        let mut other=Collector::default();
+        unsafe {collect((&mut other as *mut Collector).cast(),108,bad.as_ptr(),bad.len(),0);}
+        assert!(other.malformed);
+    }
+    let mut wrong=state.il.clone();
+    wrong.native_constructor_init_provenance[0].position=1;
+    assert!(validate_constructor_init_provenance(&wrong).is_err());
+    let mut missing=state.il.clone();
+    missing.native_constructor_init_provenance.clear();
+    assert!(validate_constructor_init_provenance(&missing).is_err());
+    let mut duplicate=state.il.clone();
+    duplicate.native_constructor_init_provenance.push(p.clone());
+    assert!(validate_constructor_init_provenance(&duplicate).is_err());
+}
