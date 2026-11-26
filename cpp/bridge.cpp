@@ -518,19 +518,10 @@ static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
 }
 
 // Assign dense IDs during compilation; never export EDG type addresses.
-static uint32_t emit_type(a_type_ptr type, unsigned depth)
+static a_type_ptr native_related_type(a_type_ptr type,unsigned &relation)
 {
-  if (type == nullptr || current_callback == nullptr) return 0;
-  // Already registered recursive types are safe regardless of encounter depth.
-  auto existing = type_ids.find(type);
-  if (existing != type_ids.end()) return existing->second;
-  // Missing a type relationship must invalidate the whole native snapshot,
-  // not silently degrade the relationship to "no target".
-  if (depth > 64) { report_incomplete_snapshot(); return 0; }
-  uint32_t id = static_cast<uint32_t>(type_ids.size() + 1);
-  type_ids.emplace(type, id); // Register before recursion, including recursive types.
   a_type_ptr related = nullptr;
-  unsigned relation = 0;
+  relation = 0;
   if (type->kind == tk_pointer) {
     related = type->variant.pointer.type;
     relation = 1;
@@ -544,8 +535,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     related = type->variant.typeref.type;
     relation = 4; // Underlying typedef / qualified type.
   }
-  uint32_t child = emit_type(related, depth + 1);
-  if (child == 0) relation = 0; // Never export a relationship without a target.
+  return related;
+}
+
+static void emit_type_prefix(a_type_ptr type,uint32_t id)
+{
   // Event 63 is an immutable EDG class-scope proof. A bare C record has
   // no C++ class ABI; event 64 separately identifies the language.
   // In C++ mode a missing or false proof must fail closed even if a
@@ -656,10 +650,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     }
     emit_record(RECORD_NATIVE_RECORD_SHAPE,
                 {num(id), num(field_count), num(direct_base_count)});
-    unsigned index = 0;
-    for (a_field_ptr field = type->variant.class_struct_union.field_list;
-         field != nullptr && within_native_list_limit(index); field = field->next, ++index) {
-      uint32_t field_type = emit_type(field->type, depth + 1);
+  }
+}
+
+static void emit_type_field(uint32_t id,a_field_ptr field,unsigned index,uint32_t field_type)
+{
       const char *field_name = source_name(field->source_corresp);
       std::string field_text = field_name == nullptr ? "" : field_name;
       // Preserve the field's native identity. Matching by name or
@@ -669,18 +664,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
                        num(field->offset), num(field->offset_bit_remainder),
                        num(field->is_bit_field ? field->bit_size : 0),
                        num(field_symbol)});
-    }
-  }
-  // Direct base classes are linked in source declaration order, unlike
-  // the transitive postorder base_classes list.
-  if (!C_mode() && (type->kind == tk_class || type->kind == tk_struct) &&
-      type->variant.class_struct_union.extra_info != nullptr) {
-    unsigned position = 0;
-    for (a_base_class_ptr base =
-             type->variant.class_struct_union.extra_info->direct_base_classes;
-         base != nullptr && within_native_list_limit(position);
-         base = base->next_direct, ++position) {
-      const uint32_t base_id = emit_type(base->type, depth + 1);
+}
+
+static void emit_type_base(a_type_ptr type,uint32_t id,a_base_class_ptr base,
+                           unsigned position,uint32_t base_id)
+{
       if (base_id != 0) {
         emit_record(19, {num(id), num(position), num(base_id),
                          num(base->is_virtual ? 1 : 0)});
@@ -709,8 +697,10 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
                          num(base->is_pack_expansion ? 1 : 0)});
 
       }
-    }
-  }
+}
+
+static void emit_type_routine_prefix(a_type_ptr type,uint32_t id)
+{
   // Event 71 independently certifies the actual EDG parameter-list length.
   // Do not derive this from the event 8 records: a missing final event 8
   // would otherwise silently shorten a routine's native call signature.
@@ -732,15 +722,11 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
     emit_record(12, {num(id), num(info->prototyped ? 1 : 0),
                      num(info->has_ellipsis ? 1 : 0)});
   }
-  // Send additional parameter type edges in declaration order.
-  if (type->kind == tk_routine && type->variant.routine.extra_info != nullptr) {
-    unsigned position = 0;
-    for (a_param_type_ptr p = type->variant.routine.extra_info->param_type_list;
-         p != nullptr && within_native_list_limit(position); p = p->next, ++position) {
-      uint32_t parameter = emit_type(p->type, depth + 1);
-      emit_record(8, {num(id), num(position), num(parameter)});
-    }
-  }
+}
+
+static void emit_type_suffix(a_type_ptr type,uint32_t id,unsigned relation,uint32_t child)
+{
+  if (child==0) relation=0;
   emit_record(7, {num(id), num(static_cast<unsigned>(type->kind)),
                   num(relation), num(child)});
   // This reference backend only promises the signed i64 SysV C ABI.
@@ -841,7 +827,130 @@ static uint32_t emit_type(a_type_ptr type, unsigned depth)
   emit_record(RECORD_NATIVE_TYPE_LAYOUT_PROOF,
               {num(id), num(native_has_layout ? 1 : 0),
                num(native_has_fixed_array_bound ? 1 : 0)});
-  return id;
+}
+
+// Assign dense IDs on first discovery, before any outgoing edge. An
+// existing ID can name a recursive or forward type; finish its records
+// exactly once. The explicit continuation preserves the previous DFS
+// order of type IDs, field symbols and record emission.
+static uint32_t emit_type(a_type_ptr root,unsigned depth)
+{
+  if (root==nullptr || current_callback==nullptr) return 0;
+  const auto existing=type_ids.find(root);
+  if (existing!=type_ids.end()) return existing->second;
+  if (!within_native_list_limit(depth)) return 0;
+  enum class phase {related,prefix,field,field_done,base,base_done,
+                    routine_prefix,parameter,parameter_done,finish};
+  struct frame {
+    a_type_ptr type;
+    uint32_t id;
+    phase step;
+    a_type_ptr related;
+    unsigned relation;
+    a_field_ptr field;
+    a_base_class_ptr base;
+    a_param_type_ptr parameter;
+    unsigned index;
+  };
+  std::vector<frame> stack;
+  auto discover = [&](a_type_ptr next) {
+    if (next==nullptr || type_ids.find(next)!=type_ids.end()) return true;
+    if (!within_native_list_limit(stack.size()+depth) ||
+        type_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+      report_incomplete_snapshot();return false;
+    }
+    const auto id=static_cast<uint32_t>(type_ids.size()+1);
+    type_ids.emplace(next,id);
+    unsigned relation=0;
+    auto related=native_related_type(next,relation);
+    stack.push_back({next,id,phase::related,related,relation,
+                     nullptr,nullptr,nullptr,0});
+    return true;
+  };
+  auto known = [](a_type_ptr target)->uint32_t {
+    const auto it=type_ids.find(target);
+    return it==type_ids.end()?0:it->second;
+  };
+  if (!discover(root)) return 0;
+  const auto root_id=known(root);
+  while (!stack.empty()) {
+    auto &work=stack.back();
+    const auto type=work.type;
+    const auto id=work.id;
+    switch (work.step) {
+    case phase::related:
+      work.step=phase::prefix;
+      if (!discover(work.related)) return 0;
+      break;
+    case phase::prefix:
+      emit_type_prefix(type,id);
+      if (type->kind==tk_class || type->kind==tk_struct || type->kind==tk_union)
+        work.field=type->variant.class_struct_union.field_list;
+      work.step=phase::field;
+      break;
+    case phase::field:
+      if (work.field==nullptr) {
+        work.index=0;
+        if (!C_mode() && (type->kind==tk_class || type->kind==tk_struct) &&
+            type->variant.class_struct_union.extra_info!=nullptr)
+          work.base=type->variant.class_struct_union.extra_info->direct_base_classes;
+        work.step=phase::base;
+      } else {
+        if (!within_native_list_limit(work.index)) return 0;
+        work.step=phase::field_done;
+        if (!discover(work.field->type)) return 0;
+      }
+      break;
+    case phase::field_done:
+      emit_type_field(id,work.field,work.index,known(work.field->type));
+      work.field=work.field->next;
+      ++work.index;
+      work.step=phase::field;
+      break;
+    case phase::base:
+      if (work.base==nullptr) {
+        work.step=phase::routine_prefix;
+      } else {
+        if (!within_native_list_limit(work.index)) return 0;
+        work.step=phase::base_done;
+        if (!discover(work.base->type)) return 0;
+      }
+      break;
+    case phase::base_done:
+      emit_type_base(type,id,work.base,work.index,known(work.base->type));
+      work.base=work.base->next_direct;
+      ++work.index;
+      work.step=phase::base;
+      break;
+    case phase::routine_prefix:
+      emit_type_routine_prefix(type,id);
+      work.index=0;
+      if (type->kind==tk_routine && type->variant.routine.extra_info!=nullptr)
+        work.parameter=type->variant.routine.extra_info->param_type_list;
+      work.step=phase::parameter;
+      break;
+    case phase::parameter:
+      if (work.parameter==nullptr) {
+        work.step=phase::finish;
+      } else {
+        if (!within_native_list_limit(work.index)) return 0;
+        work.step=phase::parameter_done;
+        if (!discover(work.parameter->type)) return 0;
+      }
+      break;
+    case phase::parameter_done:
+      emit_record(8,{num(id),num(work.index),num(known(work.parameter->type))});
+      work.parameter=work.parameter->next;
+      ++work.index;
+      work.step=phase::parameter;
+      break;
+    case phase::finish:
+      emit_type_suffix(type,id,work.relation,known(work.related));
+      stack.pop_back();
+      break;
+    }
+  }
+  return root_id;
 }
 
 // Keep function-body and dynamic-initializer traversal in sync. EDG operation
