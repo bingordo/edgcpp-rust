@@ -105,6 +105,8 @@ pub struct Il {
     /// Actual dynamic-init union roots, distinct from source-expression fallbacks.
     pub native_initializer_exec_roots: Vec<NativeInitializerExecRoots>,
     pub native_initializer_exec_nodes: Vec<NativeInitializerExecNode>,
+    /// Detached GNU statement-expression blocks, available in structural snapshots.
+    pub native_supplemental_block_nodes: Vec<NativeSupplementalBlockNode>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -862,6 +864,23 @@ pub struct NativeInitializerExecNode {
     pub owner:NativeInitializerExecOwner, pub path:String, pub parent:Option<String>,
     pub kind:u32, pub operator:Option<u32>, pub ty:Option<TypeId>, pub symbol:Option<SymbolId>,
     pub child_count:u32, pub integer:Option<NativeCtorConstantPayload>, pub embedded_statement:bool,
+}
+
+/// Original supplemental expression occurrence, not a synthetic routine.
+#[derive(Debug,Clone,PartialEq,Eq,Hash)]
+pub struct NativeSupplementalBlockOwner {
+    pub initializer:NativeInitializerExecOwner,
+    pub from_exec:bool, pub expression_path:String,
+}
+/// Ordered list (0), native statement (1), expression (2), variable declaration
+/// (3), or dynamic initialization occurrence (4). Structural only.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeSupplementalBlockNode {
+    pub owner:NativeSupplementalBlockOwner,
+    pub path:String, pub parent:Option<String>, pub edge:String,
+    pub category:u32, pub kind:u32, pub count:u32,
+    pub ty:Option<TypeId>, pub symbol:Option<SymbolId>, pub operator:Option<u32>,
+    pub integer:Option<NativeCtorConstantPayload>, pub flags:u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1793,6 +1812,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         111 => Some(il.native_dynamic_init_identities.len()),
         112 => Some(il.native_initializer_exec_roots.len()),
         113 => Some(il.native_initializer_exec_nodes.len()),
+        114 => Some(il.native_supplemental_block_nodes.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2016,6 +2036,28 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
             });
+        }
+        114 => {
+            let (Some(symbol),Some(position),Some(context),Some(from_exec),Some(expression_path),
+                Some(path),Some(edge),Some(category),Some(node_kind),Some(count),Some(flags))=
+                (n(0),n(1),n(2),n(6),t(7),t(8),t(10),n(11),n(12),n(13),n(18))
+                else {return;};
+            let initializer=NativeInitializerExecOwner {
+                symbol:SymbolId(symbol),position,context,statement:t(3),expression:t(4),nested:t(5),
+            };
+            let ty=n(14).map(TypeId);
+            let symbol=n(15).map(SymbolId);
+            if from_exec>1 || ty.is_some_and(|id|!seen.types.contains(&id)) ||
+                symbol.is_some_and(|id|!seen.symbols.contains(&id)) {return;}
+            let integer=fields[17].unsigned().map(NativeCtorConstantPayload::Unsigned)
+                .or_else(||fields[17].signed().map(NativeCtorConstantPayload::Signed));
+            let node=NativeSupplementalBlockNode {
+                owner:NativeSupplementalBlockOwner {initializer,from_exec:from_exec==1,expression_path},
+                path,parent:t(9),edge,category,kind:node_kind,count,ty,symbol,
+                operator:n(16),integer,flags,
+            };
+            if !valid_supplemental_block_node(&node) {return;}
+            output.native_supplemental_block_nodes.push(node);
         }
         112|113 => {
             let (Some(symbol),Some(position),Some(context))=(n(0),n(1),n(2)) else {return;};
@@ -4747,6 +4789,115 @@ fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+fn valid_supplemental_block_node(n:&NativeSupplementalBlockNode)->bool {
+    if !valid_exec_owner(&n.owner.initializer) || n.owner.expression_path.is_empty() ||
+        n.path.is_empty() || n.edge.is_empty() || n.count>10000 ||
+        n.parent.as_deref()==Some("") {return false;}
+    match n.category {
+        0=>n.kind==0 && n.ty.is_none() && n.symbol.is_none() &&
+            n.operator.is_none() && n.integer.is_none() && n.flags==0,
+        1=>n.count>=2 && n.ty.is_none() && n.operator.is_none() &&
+            n.integer.is_none() && n.flags<=1,
+        2=>n.flags==u32::from(graph::native_expression_kind(n.kind)==4) &&
+            n.count==1+n.flags,
+        3=>n.kind==0 && n.count==0 && n.ty.is_some() && n.symbol.is_some() &&
+            n.operator.is_none() && n.integer.is_none() && n.flags==0,
+        4=>n.kind<=255 && n.count==1 && n.operator.is_none() &&
+            n.integer.is_none() && n.flags==0,
+        _=>false,
+    }
+}
+
+/// Independently census each original supplemental statement-expression
+/// occurrence, including occurrences in the native initializer root forest.
+fn validate_supplemental_block_graph(il:&Il)->Result<(),Error> {
+    let names:HashMap<_,_>=il.routine_identities.iter()
+        .map(|r|(r.function.as_str(),r.routine)).collect();
+    let mut expected=HashSet::new();
+    let mut add=|initializer:NativeInitializerExecOwner,from_exec:bool,path:&str|
+        ->Result<(),Error> {
+        if !expected.insert(NativeSupplementalBlockOwner {
+            initializer,from_exec,expression_path:path.to_owned(),
+        }) {return Err(Error::MalformedCallback);}
+        Ok(())
+    };
+    for n in &il.native_initializer_exec_nodes {
+        if n.embedded_statement {add(n.owner.clone(),true,&n.path)?;}
+    }
+    for e in &il.control_expressions {
+        if graph::native_expression_kind(e.kind)!=4 {continue;}
+        let symbol=*names.get(e.function.as_str()).ok_or(Error::MalformedCallback)?;
+        add(NativeInitializerExecOwner{symbol,position:e.role,context:4,
+            statement:Some(e.statement_path.clone()),expression:Some(e.path.clone()),nested:None},
+            false,&e.path)?;
+    }
+    for e in &il.initializer_expressions {
+        if graph::native_expression_kind(e.kind)!=4 {continue;}
+        add(NativeInitializerExecOwner{symbol:e.owner,position:0,context:5,
+            statement:None,expression:Some(e.path.clone()),nested:None},false,&e.path)?;
+    }
+    for e in &il.constructor_initializer_expressions {
+        if graph::native_expression_kind(e.kind)!=4 {continue;}
+        add(NativeInitializerExecOwner{symbol:e.routine,position:e.position,context:6,
+            statement:None,expression:Some(e.path.clone()),nested:None},false,&e.path)?;
+    }
+    let mut nodes=HashMap::new();
+    for n in &il.native_supplemental_block_nodes {
+        if !valid_supplemental_block_node(n) || !expected.contains(&n.owner) ||
+            nodes.insert((&n.owner,n.path.as_str()),n).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for owner in &expected {
+        let Some(root)=nodes.get(&(owner,"0")) else {return Err(Error::MalformedCallback);};
+        if root.category!=0 || root.parent.is_some() || root.edge!="embedded" ||
+            root.count!=1 {return Err(Error::MalformedCallback);}
+    }
+    for (&(owner,path),n) in &nodes {
+        if path!="0" {
+            let Some((parent,index))=path.rsplit_once('.') else {return Err(Error::MalformedCallback);};
+            let Some(p)=nodes.get(&(owner,parent)) else {return Err(Error::MalformedCallback);};
+            let Ok(i)=index.parse::<u32>() else {return Err(Error::MalformedCallback);};
+            if i>=p.count || i.to_string()!=index || n.parent.as_deref()!=Some(parent) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+        let mut edges=HashSet::new();
+        for i in 0..n.count {
+            let key=format!("{path}.{i}");
+            let Some(c)=nodes.get(&(owner,key.as_str())) else {return Err(Error::MalformedCallback);};
+            if n.category==0 {
+                let category=match n.edge.as_str() {
+                    "primary"|"operands"|"roots"|"increment"|"range-test"|"range-increment"|"vla-bound"=>2,
+                    "declarations"=>3,
+                    _=>1,
+                };
+                if c.category!=category || c.edge!="item" {return Err(Error::MalformedCallback);}
+            } else if !edges.insert(c.edge.as_str()) {
+                return Err(Error::MalformedCallback);
+            }
+            match n.category {
+                1 if (i==0 && (c.edge!="primary" || c.category!=0)) ||
+                     (i==1 && (c.edge!="declarations" || c.category!=0)) ||
+                     (i>=2 && c.category!=0 && !(c.category==4 && c.edge=="initializer")) =>
+                    return Err(Error::MalformedCallback),
+                2 if c.category!=0 || c.edge!=if i==0 {"operands"} else {"embedded"} =>
+                    return Err(Error::MalformedCallback),
+                4 if c.category!=0 || c.edge!="roots" =>return Err(Error::MalformedCallback),
+                _=>{},
+            }
+        }
+        if n.category==1 {
+            let required:&[&str]=match graph::native_statement_kind(n.kind) {
+                2=>&["block"], 7=>&["then","else"], 8|10=>&["body"],
+                9=>&["init","body","increment"], _=>&[],
+            };
+            if required.iter().any(|e|!edges.contains(e)) {return Err(Error::MalformedCallback);}
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4775,6 +4926,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_ctor_constant_trees(il).is_err() ||
        validate_dynamic_init_identities(il).is_err() ||
        validate_initializer_exec_trees(il).is_err() ||
+       validate_supplemental_block_graph(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
@@ -4795,6 +4947,19 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
 /// The caller must ensure that the EDG target configuration and input paths
 /// are appropriate for the selected EDG command-line options.
 pub fn compile<S: AsRef<str>>(args: &[S]) -> Result<Compilation, Error> {
+    let result=compile_structural(args)?;
+    // Existing consumers have no detached block lowering contract. Never
+    // make a supplemental block silently executable by dropping its effects.
+    if !result.il.native_supplemental_block_nodes.is_empty() {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(result)
+}
+
+/// Opt in to a structural snapshot containing detached supplemental blocks.
+/// This is NOT a code-generation admission API; callers must reject or
+/// explicitly implement every detached block before executing the IL.
+pub fn compile_structural<S: AsRef<str>>(args:&[S])->Result<Compilation,Error> {
     let _lock = COMPILER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if args.is_empty() { return Err(Error::EmptyArguments); }
     if args.len() > c_int::MAX as usize {
@@ -7445,7 +7610,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=113_u32 {
+        for kind in 1..=114_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7474,13 +7639,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=113_u32)
+        let schema_fields:usize=(1..=114_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(114).is_none());
+        assert!(expected_wire_field_tag_masks(115).is_none());
     }
 
     #[test]
