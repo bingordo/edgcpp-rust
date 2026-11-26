@@ -100,6 +100,8 @@ pub struct Il {
     /// Original constructor-owned constant roots and structural nodes.
     pub native_ctor_constant_roots: Vec<NativeCtorConstantRoot>,
     pub native_ctor_constant_nodes: Vec<NativeCtorConstantNode>,
+    /// Original routine-local initializer identities across owner contexts.
+    pub native_dynamic_init_identities: Vec<NativeDynamicInitIdentity>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -809,6 +811,8 @@ pub struct NativeConstructorInitProvenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCtorConstantRoot {
     pub routine:SymbolId, pub position:u32, pub present:bool,
+    /// 0 constructor, 1 statement, 2 variable, 3–6 expression owner kinds.
+    pub context:u32, pub owner_statement:Option<String>, pub owner_expression:Option<String>,
 }
 
 /// Structural constant node. Repeat/designator nodes retain their own
@@ -820,9 +824,23 @@ pub struct NativeCtorConstantNode {
     pub parent:Option<String>, pub kind:u32, pub ty:Option<TypeId>,
     pub family:u32, pub child_count:u32,
     pub payload:Option<NativeCtorConstantPayload>, pub flags:u32,
+    pub context:u32, pub owner_statement:Option<String>, pub owner_expression:Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCtorConstantPayload { Unsigned(u64), Signed(i64) }
+
+/// One occurrence of a native dynamic-init entry, with an opaque identity
+/// scoped to its routine's live IL region. Context 0=constructor, 1=statement,
+/// 2=ordered destruction, 3/4/6=expression owner, 7=nested constant leaf.
+/// Presence flags are independent of region lookup.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeDynamicInitIdentity {
+    pub routine:SymbolId, pub context:u32, pub position:u32,
+    pub path:Option<String>, pub destruction_region:Option<u32>,
+    pub id:u32, pub kind:u32, pub flags:u32,
+    pub lifetime:Option<u32>, pub expression_lifetime:Option<u32>,
+    pub has_variable:bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeControlChildCount {
@@ -1750,6 +1768,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         108 => Some(il.native_constructor_init_provenance.len()),
         109 => Some(il.native_ctor_constant_roots.len()),
         110 => Some(il.native_ctor_constant_nodes.len()),
+        111 => Some(il.native_dynamic_init_identities.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1964,12 +1983,27 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             });
         }
         109 => {
-            let (Some(routine),Some(position),Some(present))=(n(0),n(1),n(2))
+            let (Some(routine),Some(position),Some(present),Some(context))=(n(0),n(1),n(2),n(3))
                 else {return;};
-            if routine==0 || present>1 {return;}
+            let (owner_statement,owner_expression)=(t(4),t(5));
+            if routine==0 || present>1 ||
+                !valid_constant_owner(context,position,owner_statement.as_deref(),owner_expression.as_deref()) {return;}
             output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
                 routine:SymbolId(routine),position,present:present==1,
+                context,owner_statement,owner_expression,
             });
+        }
+        111 => {
+            let (Some(routine),Some(context),Some(position),Some(id),Some(kind),
+                Some(flags),Some(variable))=(n(0),n(1),n(2),n(5),n(6),n(7),n(10))
+                else {return;};
+            let record=NativeDynamicInitIdentity {
+                routine:SymbolId(routine),context,position,path:t(3),
+                destruction_region:n(4),id,kind,flags,lifetime:n(8),
+                expression_lifetime:n(9),has_variable:variable==1,
+            };
+            if variable>1 || !valid_dynamic_init_identity(&record) {return;}
+            output.native_dynamic_init_identities.push(record);
         }
         110 => {
             let (Some(routine),Some(position),Some(path),Some(kind),
@@ -1988,9 +2022,11 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             } else if let Some(v)=fields[8].signed() {
                 Some(NativeCtorConstantPayload::Signed(v))
             } else {None};
+            let Some(context)=n(10) else {return;};
+            let (owner_statement,owner_expression)=(t(11),t(12));
             let record=NativeCtorConstantNode {
                 routine:SymbolId(routine),position,path,parent,kind,ty,family,
-                child_count,payload,flags,
+                child_count,payload,flags,context,owner_statement,owner_expression,
             };
             if !valid_ctor_constant_node(&record) {return;}
             output.native_ctor_constant_nodes.push(record);
@@ -4358,6 +4394,7 @@ fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
 fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
     use NativeCtorConstantPayload::Unsigned;
     if n.routine.0==0 || n.path.is_empty() || n.child_count>10000 ||
+        !valid_constant_owner(n.context,n.position,n.owner_statement.as_deref(),n.owner_expression.as_deref()) ||
         n.parent.as_ref().is_some_and(String::is_empty) {return false;}
     match n.family {
         0=>n.child_count==0 && n.payload.is_none() && n.flags==0,
@@ -4367,25 +4404,77 @@ fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
             if n.flags&1!=0 {n.payload.is_none()}
             else {matches!(n.payload,Some(Unsigned(v)) if n.flags&2==0 || v!=0)},
         4=>n.child_count==0 && n.flags==0,
-        5=>n.child_count==0 && n.flags==0 &&
+        5=>n.child_count<=1 && n.flags<=10000 &&
             matches!(n.payload,Some(Unsigned(v)) if v<=255),
         _=>false,
     }
 }
 
-/// Join each root to its native constructor owner and verify every dense
-/// direct child, rejecting disconnected, duplicate or truncated subtrees.
+// All constant trees use the same owner key; a source symbol is a routine
+// except in file-scope variable/initializer-expression contexts.
+type ConstantOwnerKey<'a>=(SymbolId,u32,u32,Option<&'a str>,Option<&'a str>);
+fn valid_constant_owner(context:u32,position:u32,statement:Option<&str>,expression:Option<&str>)->bool {
+    if statement==Some("") || expression==Some("") {return false;}
+    match context {
+        0=>statement.is_none() && expression.is_none(),
+        1=>position==0 && statement.is_some() && expression.is_none(),
+        2=>position==0 && statement.is_none() && expression.is_none(),
+        3=>position==0 && statement.is_some() && expression.is_some(),
+        4=>position>0 && statement.is_some() && expression.is_some(),
+        5=>position==0 && statement.is_none() && expression.is_some(),
+        6=>statement.is_none() && expression.is_some(),
+        _=>false,
+    }
+}
+
+fn expression_constant_owner<'a>(
+    owner:&'a NativeExpressionOwner,path:&'a str,names:&HashMap<&str,SymbolId>
+)->Option<ConstantOwnerKey<'a>> {
+    Some(match owner {
+        NativeExpressionOwner::Statement{function,statement_path}=>
+            (*names.get(function.as_str())?,0,3,Some(statement_path.as_str()),Some(path)),
+        NativeExpressionOwner::Control{function,statement_path,role}=>
+            (*names.get(function.as_str())?,*role,4,Some(statement_path.as_str()),Some(path)),
+        NativeExpressionOwner::Initializer{owner}=>(*owner,0,5,None,Some(path)),
+        NativeExpressionOwner::Constructor{routine,position}=>(*routine,*position,6,None,Some(path)),
+    })
+}
+
+/// Require one independently emitted root witness for every original
+/// dynamic owner (including absent roots), then verify the exact child tree.
 fn validate_ctor_constant_trees(il:&Il)->Result<(),Error> {
-    let mut roots=il.constructor_initializers.iter()
-        .map(|i|((i.routine,i.position),None)).collect::<HashMap<_,Option<bool>>>();
+    let names:HashMap<_,_>=il.routine_identities.iter()
+        .map(|r|(r.function.as_str(),r.routine)).collect();
+    let mut roots:HashMap<ConstantOwnerKey<'_>,Option<bool>>=HashMap::new();
+    for c in &il.constructor_initializers {
+        if roots.insert((c.routine,c.position,0,None,None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for st in &il.statement_initializations {
+        let Some(&routine)=names.get(st.function.as_str()) else {return Err(Error::MalformedCallback);};
+        if roots.insert((routine,0,1,Some(st.statement_path.as_str()),None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for d in &il.dynamic_initializers {
+        if roots.insert((d.symbol,0,2,None,None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for e in &il.native_expression_variants {
+        if !matches!(e.payload,NativeExpressionPayload::DynamicInitializer{..}) {continue;}
+        let key=expression_constant_owner(&e.owner,&e.path,&names).ok_or(Error::MalformedCallback)?;
+        if roots.insert(key,None).is_some() {return Err(Error::MalformedCallback);}
+    }
     for r in &il.native_ctor_constant_roots {
-        let Some(slot)=roots.get_mut(&(r.routine,r.position))
-            else {return Err(Error::MalformedCallback);};
+        let key=(r.routine,r.position,r.context,r.owner_statement.as_deref(),r.owner_expression.as_deref());
+        let Some(slot)=roots.get_mut(&key) else {return Err(Error::MalformedCallback);};
         if slot.replace(r.present).is_some() {return Err(Error::MalformedCallback);}
     }
     let mut nodes=HashMap::new();
     for n in &il.native_ctor_constant_nodes {
-        let owner=(n.routine,n.position);
+        let owner=(n.routine,n.position,n.context,n.owner_statement.as_deref(),n.owner_expression.as_deref());
         if roots.get(&owner)!=Some(&Some(true)) || !valid_ctor_constant_node(n) ||
             nodes.insert((owner,n.path.as_str()),n).is_some() {
             return Err(Error::MalformedCallback);
@@ -4418,6 +4507,115 @@ fn validate_ctor_constant_trees(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+fn valid_dynamic_init_identity(d:&NativeDynamicInitIdentity)->bool {
+    d.routine.0!=0 && d.id!=0 && d.id<=10000 && d.kind<=255 &&
+    d.flags<=7 && (d.lifetime.is_none() || d.flags&1!=0) &&
+    (d.expression_lifetime.is_none() || d.flags&2!=0) &&
+    match d.context {
+        0=>d.path.is_none() && d.destruction_region.is_none(),
+        1=>d.position==0 && d.path.as_ref().is_some_and(|p|!p.is_empty()) &&
+            d.destruction_region.is_none(),
+        2=>d.path.is_none() && d.destruction_region.is_some(),
+        3|4|6|7=>d.path.as_ref().is_some_and(|p|!p.is_empty()) && d.destruction_region.is_none(),
+        _=>false,
+    }
+}
+
+/// Join original owners and destruction ordinals, without inferring lifetime
+/// from a variable name or a repeated destructor symbol. A region discovered
+/// later can refine an earlier present-but-unindexed reference.
+fn validate_dynamic_init_identities(il:&Il)->Result<(),Error> {
+    let names:HashMap<_,_>=il.routine_identities.iter()
+        .map(|r|(r.function.as_str(),r.routine)).collect();
+    let regions:HashSet<_>=il.object_lifetimes.iter().map(|r|(r.routine,r.id)).collect();
+    let mut constructors:HashMap<_,_>=il.native_constructor_init_provenance.iter()
+        .filter_map(|p|p.dynamic_kind.map(|kind|((p.routine,p.position),kind))).collect();
+    let mut statements=HashMap::new();
+    for s in &il.statement_initializations {
+        let Some(&routine)=names.get(s.function.as_str()) else {return Err(Error::MalformedCallback);};
+        if statements.insert((routine,s.statement_path.as_str()),(s.kind,s.symbol.is_some())).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut destructions:HashMap<_,_>=il.lifetime_destructions.iter()
+        .map(|d|((d.routine,d.lifetime,d.position),(d.variable.is_some(),d.destructor.is_some()))).collect();
+    // Expression wrappers and nested constant leaves have their own
+    // original owner identity, even when they share the same native entry.
+    let mut nested:HashMap<(SymbolId,u32,u32,String),(u32,Option<(u32,bool)>)>=HashMap::new();
+    for e in &il.native_expression_variants {
+        let NativeExpressionPayload::DynamicInitializer{kind,flags}=e.payload else {continue;};
+        let (routine,position,context,statement,expression)=
+            expression_constant_owner(&e.owner,&e.path,&names).ok_or(Error::MalformedCallback)?;
+        if context==5 {continue;} // file-scope entries need a separate region
+        let path=if let Some(st)=statement {format!("{st}:{}",expression.unwrap())}
+            else {expression.unwrap().to_owned()};
+        let presence=(u32::from(flags&16!=0)) |
+            (u32::from(flags&32!=0)<<1) | (u32::from(flags&8!=0)<<2);
+        if nested.insert((routine,context,position,path),(kind,Some((presence,flags&64!=0)))).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for n in &il.native_ctor_constant_nodes {
+        if n.family!=5 || matches!(n.context,2|5) {continue;}
+        let Some(NativeCtorConstantPayload::Unsigned(kind))=n.payload else {
+            return Err(Error::MalformedCallback);
+        };
+        let path=format!("{}:{}:{}:{}:{}",n.context,n.position,
+            n.owner_statement.as_deref().unwrap_or(""),
+            n.owner_expression.as_deref().unwrap_or(""),n.path);
+        if nested.insert((n.routine,7,0,path),(kind as u32,None)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut identities:HashMap<_,(u32,u32,bool,Option<u32>,Option<u32>)>=HashMap::new();
+    let mut destroyed=HashSet::new();
+    for d in &il.native_dynamic_init_identities {
+        if !valid_dynamic_init_identity(d) ||
+            [d.lifetime,d.expression_lifetime].into_iter().flatten()
+                .any(|id|!regions.contains(&(d.routine,id))) {return Err(Error::MalformedCallback);}
+        match d.context {
+            0=>if constructors.remove(&(d.routine,d.position))!=Some(d.kind) {
+                return Err(Error::MalformedCallback);
+            },
+            1=>if statements.remove(&(d.routine,d.path.as_deref().unwrap()))!=
+                Some((d.kind,d.has_variable)) {return Err(Error::MalformedCallback);},
+            2=>{
+                let region=d.destruction_region.unwrap();
+                if destructions.remove(&(d.routine,region,d.position))!=
+                    Some((d.has_variable,d.flags&4!=0)) ||
+                    !regions.contains(&(d.routine,region)) ||
+                    !destroyed.insert((d.routine,d.id)) ||
+                    d.lifetime.is_some_and(|id|id!=region) {
+                    return Err(Error::MalformedCallback);
+                }
+            }
+            3|4|6|7=>{
+                let Some((kind,presence))=nested.remove(&(d.routine,d.context,d.position,
+                    d.path.clone().unwrap())) else {return Err(Error::MalformedCallback);};
+                if kind!=d.kind || presence.is_some_and(|p|p!=(d.flags,d.has_variable)) {
+                    return Err(Error::MalformedCallback);
+                }
+            }
+            _=>return Err(Error::MalformedCallback),
+        }
+        let entry=identities.entry((d.routine,d.id))
+            .or_insert((d.kind,d.flags,d.has_variable,d.lifetime,d.expression_lifetime));
+        if (entry.0,entry.1,entry.2)!=(d.kind,d.flags,d.has_variable) {
+            return Err(Error::MalformedCallback);
+        }
+        for (known,new) in [(&mut entry.3,d.lifetime),(&mut entry.4,d.expression_lifetime)] {
+            if let Some(new)=new {
+                if known.is_some_and(|old|old!=new) {return Err(Error::MalformedCallback);}
+                *known=Some(new);
+            }
+        }
+    }
+    if !constructors.is_empty() || !statements.is_empty() || !destructions.is_empty() || !nested.is_empty() {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4444,6 +4642,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||
        validate_ctor_constant_trees(il).is_err() ||
+       validate_dynamic_init_identities(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
@@ -7114,7 +7313,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=110_u32 {
+        for kind in 1..=111_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7143,13 +7342,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=110_u32)
+        let schema_fields:usize=(1..=111_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(111).is_none());
+        assert!(expected_wire_field_tag_masks(112).is_none());
     }
 
     #[test]

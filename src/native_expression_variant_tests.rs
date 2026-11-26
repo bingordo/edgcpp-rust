@@ -233,14 +233,14 @@ fn constructor_constant_tree_preserves_repeat_and_rejects_missing_children() {
         compiler_generated:false,braced:true,use_field_initializer:false,
         pack_expansion:false,
     });
-    let root=[num(9),num(0),num(1)];
+    let root=[num(9),num(0),num(1),num(0),absent(),absent()];
     unsafe {collect((&mut state as *mut Collector).cast(),109,root.as_ptr(),root.len(),0);}
     state.seen.types.insert(TypeId(42));
     let records=[
-        [num(9),num(0),text("0"),absent(),num(1),num(42),num(1),num(2),absent(),num(1)],
-        [num(9),num(0),text("0.0"),text("0"),num(2),absent(),num(3),num(0),num(3),num(0)],
-        [num(9),num(0),text("0.1"),text("0"),num(3),absent(),num(2),num(1),num(5),num(0)],
-        [num(9),num(0),text("0.1.0"),text("0.1"),num(4),num(42),num(4),num(0),num(17),num(0)],
+        [num(9),num(0),text("0"),absent(),num(1),num(42),num(1),num(2),absent(),num(1),num(0),absent(),absent()],
+        [num(9),num(0),text("0.0"),text("0"),num(2),absent(),num(3),num(0),num(3),num(0),num(0),absent(),absent()],
+        [num(9),num(0),text("0.1"),text("0"),num(3),absent(),num(2),num(1),num(5),num(0),num(0),absent(),absent()],
+        [num(9),num(0),text("0.1.0"),text("0.1"),num(4),num(42),num(4),num(0),num(17),num(0),num(0),absent(),absent()],
     ];
     for fields in records {
         unsafe {collect((&mut state as *mut Collector).cast(),110,fields.as_ptr(),fields.len(),0);}
@@ -263,5 +263,99 @@ fn constructor_constant_tree_preserves_repeat_and_rejects_missing_children() {
     assert!(validate_ctor_constant_trees(&wrong).is_err());
     let mut wrong=state.il.clone();
     wrong.native_ctor_constant_nodes.push(wrong.native_ctor_constant_nodes[0].clone());
+    assert!(validate_ctor_constant_trees(&wrong).is_err());
+}
+
+
+#[test]
+fn dynamic_init_identity_joins_ordered_destructions_without_name_matching() {
+    let mut il=Il::default();
+    let routine=SymbolId(9);
+    il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+    il.object_lifetimes.extend([
+        ObjectLifetime{routine,id:0,parent:None,kind:0},
+        ObjectLifetime{routine,id:1,parent:Some(0),kind:1},
+    ]);
+    for position in 0..2 {
+        il.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+            routine,position,dynamic_kind:Some(4),executable_root_count:0,
+            source_root_present:false,source_is_executable_root:false,selected_root:0,
+        });
+        il.lifetime_destructions.push(LifetimeDestruction{
+            routine,lifetime:0,position,variable:None,destructor:Some(SymbolId(55)),
+        });
+        il.native_dynamic_init_identities.push(NativeDynamicInitIdentity {
+            routine,context:0,position,path:None,destruction_region:None,
+            id:position+1,kind:4,flags:7,lifetime:Some(0),expression_lifetime:Some(1),
+            has_variable:false,
+        });
+        il.native_dynamic_init_identities.push(NativeDynamicInitIdentity {
+            routine,context:2,position,path:None,destruction_region:Some(0),
+            id:2-position,kind:4,flags:7,lifetime:Some(0),expression_lifetime:None,
+            has_variable:false,
+        });
+    }
+    validate_dynamic_init_identities(&il).unwrap();
+    for i in 0..il.native_dynamic_init_identities.len() {
+        let mut missing=il.clone();
+        missing.native_dynamic_init_identities.remove(i);
+        assert!(validate_dynamic_init_identities(&missing).is_err());
+    }
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].id=1;
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].expression_lifetime=Some(0);
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].destruction_region=Some(1);
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+}
+
+
+#[test]
+fn constant_tree_owners_cannot_alias_equal_paths_across_contexts() {
+    let mut il=Il::default();
+    let routine=SymbolId(9);
+    il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+    il.statement_initializations.push(StatementInitialization {
+        function:"f".into(),statement_path:"0".into(),symbol:None,kind:1,
+        follows_execution:false,braced:true,role:0,
+    });
+    il.dynamic_initializers.push(DynamicInitializer {
+        symbol:routine,kind:1,expression_kind:None,operator:None,
+    });
+    il.native_expression_variants.push(NativeExpressionVariant {
+        owner:NativeExpressionOwner::Statement{function:"f".into(),statement_path:"0".into()},
+        path:"0".into(),expression_kind:1,
+        payload:NativeExpressionPayload::DynamicInitializer{kind:1,flags:0},
+    });
+    for (context,statement,expression) in [(1,Some("0"),None),(2,None,None),
+        (3,Some("0"),Some("0"))] {
+        il.native_ctor_constant_roots.push(NativeCtorConstantRoot{
+            routine,position:0,present:true,context,
+            owner_statement:statement.map(str::to_owned),
+            owner_expression:expression.map(str::to_owned),
+        });
+        il.native_ctor_constant_nodes.push(NativeCtorConstantNode{
+            routine,position:0,path:"0".into(),parent:None,kind:1,
+            ty:Some(TypeId(4)),family:4,child_count:0,
+            payload:Some(NativeCtorConstantPayload::Unsigned(42)),flags:0,context,
+            owner_statement:statement.map(str::to_owned),
+            owner_expression:expression.map(str::to_owned),
+        });
+    }
+    validate_ctor_constant_trees(&il).unwrap();
+    for i in 0..3 {
+        let mut missing=il.clone();
+        missing.native_ctor_constant_roots.remove(i);
+        assert!(validate_ctor_constant_trees(&missing).is_err());
+        let mut missing=il.clone();
+        missing.native_ctor_constant_nodes.remove(i);
+        assert!(validate_ctor_constant_trees(&missing).is_err());
+    }
+    let mut wrong=il.clone();
+    wrong.native_ctor_constant_nodes[2].context=1;
+    wrong.native_ctor_constant_nodes[2].owner_expression=None;
     assert!(validate_ctor_constant_trees(&wrong).is_err());
 }
