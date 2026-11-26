@@ -2,7 +2,7 @@
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
     MAX_NATIVE_OBJECT_BYTES,
-    MAX_AGGREGATE_LAYOUT_DEPTH, MAX_CFG_LOCALS, bounded_array_bytes,
+    MAX_CFG_LOCALS, bounded_array_bytes,
 };
 
 fn valid_aggregate_image_len(size: usize) -> bool {
@@ -1188,131 +1188,98 @@ fn scalar_lvalue(
 /// Aggregate record/union/vector types remain unsupported. An array size
 /// must come from the native EDG bound, not inferred from C source tokens.
 fn byte_size(il: &Il, ty: crate::TypeId) -> Result<u64,CodegenError> {
-    byte_size_depth(il,ty,0)
+    let root=canonical_abi_type(il,ty)?;
+    // Keep the common scalar/pointer path allocation-free.
+    if let Some(bytes)=scalar_layout_bytes(il,root)? {return Ok(bytes);}
+    let sizes=validated_layout_sizes(il,root)?;
+    sizes.get(&root).copied().ok_or_else(||invalid("missing validated layout"))
 }
 
-/// Validate an unambiguous by-value struct spine without recursive Rust
-/// layout calls.  A chain of singleton, ordinary named members has one scalar
-/// leaf and no field-order/union/bitfield ambiguity.  Native EDG sizes and
-/// alignments are still checked at EVERY level, along with the complete
-/// subobject extent; the existing depth-32 policy remains for branching
-/// record/union layouts.  Return (outer size, scalar leaf type, leaf offset).
-fn singleton_record_spine(
-    il:&Il, root:crate::TypeId,
-) -> Result<Option<(u64,crate::TypeId,u64)>,CodegenError> {
-    let mut current=canonical_abi_type(il,root)?;
-    let mut nodes:Vec<(crate::TypeId,&crate::RecordField)>=Vec::new();
-    let mut seen=HashSet::new();
-    let leaf=loop {
-        let def=il.types.iter().find(|def|def.id==current)
-            .ok_or_else(||invalid("missing singleton record type"))?;
-        if semantic(4,def.kind)!=7 {return Ok(None);}
-        if !seen.insert(current) {
-            return Err(invalid("cyclic native singleton record layout"));
-        }
-        if seen.len()>il.types.len() {
-            return Err(invalid("singleton record layout exceeds type graph"));
-        }
-        let mut fields=il.record_fields.iter().filter(|field|field.owner==current);
-        let Some(field)=fields.next() else {return Ok(None);};
-        if fields.next().is_some() || field.bit_width!=0 ||
-            field.bit_offset!=0 || scalar_memory_access(il,field.ty)?
-                !=MemoryAccess::Ordinary {
-            return Ok(None);
-        }
-        check_plain_storage_type(il,field.ty)?;
-        if field.position!=0 || field.name.is_empty() {
-            return Err(invalid("invalid native singleton record field"));
-        }
-        let child=canonical_abi_type(il,field.ty)?;
-        let child_kind=il.types.iter().find(|def|def.id==child)
-            .map(|def|semantic(4,def.kind))
-            .ok_or_else(||invalid("singleton record field type missing"))?;
-        nodes.push((current,field));
-        match child_kind {
-            7 => {current=child;}
-            1|5 => break field.ty,
-            _ => return Ok(None),
-        }
-    };
-    let mut width=byte_size_depth(il,leaf,0)?;
-    let mut leaf_offset=0u64;
-    for (owner,field) in nodes.into_iter().rev() {
-        let layout=il.type_object_sizes.iter().find(|entry|entry.owner==owner)
-            .ok_or_else(||invalid("record has no native EDG object size"))?;
-        if layout.bytes==0 || layout.bytes>MAX_NATIVE_OBJECT_BYTES ||
-            layout.alignment==0 || !layout.alignment.is_power_of_two() ||
-            layout.alignment>MAX_NATIVE_OBJECT_BYTES ||
-            layout.bytes%layout.alignment!=0 {
-            return Err(invalid("invalid native singleton record size/alignment"));
-        }
-        let end=field.byte_offset.checked_add(width)
-            .ok_or_else(||invalid("singleton record field offset overflows"))?;
-        if end>layout.bytes {
-            return Err(invalid("singleton record field exceeds native object"));
-        }
-        leaf_offset=leaf_offset.checked_add(field.byte_offset)
-            .ok_or_else(||invalid("singleton record leaf offset overflows"))?;
-        width=layout.bytes;
-    }
-    Ok(Some((width,leaf,leaf_offset)))
-}
-fn byte_size_depth(il: &Il, ty: crate::TypeId, depth: usize) -> Result<u64,CodegenError> {
-    // Array dimensions form a potentially deep chain. Traverse it without
-    // consuming the recursive *record* layout budget or the Rust call stack.
-    // EDG can emit more than 32 valid one-element array dimensions.
-    let mut current=ty;
-    let mut elements=1u64;
-    let mut seen_arrays=HashSet::new();
-    let current=loop {
-        let canonical=canonical_abi_type(il,current)?;
-        let def=il.types.iter().find(|t|t.id==canonical)
-            .ok_or_else(||invalid("missing memory type"))?;
-        if semantic(4,def.kind)!=6 {break canonical;}
-        if !seen_arrays.insert(canonical) {
-            return Err(invalid("cyclic native aggregate array type"));
-        }
-        let count=il.array_bounds.iter().find(|b|b.array==canonical)
-            .ok_or_else(||invalid("array has no fixed bound"))?.elements;
-        elements=bounded_array_bytes(elements,count)
-            .ok_or_else(||invalid("array object too large"))?;
-        current=checked_native_pointer_element(il,canonical)?;
-    };
-    // Linear singleton records have a validated iterative layout; do not
-    // spend the recursion budget reserved for branching record layouts.
-    if let Some((size,_,_))=singleton_record_spine(il,current)? {
-        return bounded_array_bytes(size,elements)
-            .ok_or_else(||invalid("array object too large"));
-    }
-    if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
-        return Err(invalid("nested aggregate record layout exceeds depth limit"));
-    }
-    let def=il.types.iter().find(|t|t.id==current)
+fn scalar_layout_bytes(il:&Il,ty:crate::TypeId)->Result<Option<u64>,CodegenError> {
+    let def=il.types.iter().find(|t|t.id==ty)
         .ok_or_else(||invalid("missing memory type"))?;
-    let base=match semantic(4,def.kind) {
-        1 => {
-            let info=il.c_integer_types.iter().find(|t|t.id==current)
+    match semantic(4,def.kind) {
+        1=>{
+            let info=il.c_integer_types.iter().find(|t|t.id==ty)
                 .ok_or_else(||invalid("unsupported integer memory layout"))?;
             if info.bits==0 || info.bits%8!=0 {
                 return Err(invalid("integer memory layout must be nonzero and byte-aligned"));
             }
-            u64::from(info.bits/8)
+            Ok(Some(u64::from(info.bits/8)))
         }
-        5 => {
-            // Native pointer structure must still be valid after unwrapping.
-            checked_pointer_element_type(il,current)?;
-            8
-        }
-        7|9 if il.record_fields.iter().any(|f|f.owner==current) => {
-            checked_record_fields_depth(il,current,depth+1)?;
-            il.type_object_sizes.iter().find(|entry|entry.owner==current)
-                .ok_or_else(||invalid("record missing native object layout"))?.bytes
-        }
-        _=>return Err(invalid("unsupported aggregate/element size")),
-    };
-    bounded_array_bytes(base,elements)
-        .ok_or_else(||invalid("array object too large"))
+        5=>{checked_pointer_element_type(il,ty)?;Ok(Some(8))}
+        6|7|9=>Ok(None),
+        _=>Err(invalid("unsupported aggregate/element size")),
+    }
 }
+
+// Postorder traversal of the by-value layout graph. Pointer edges are
+// leaves; only a repeated active by-value type is a cycle. Each completed
+// layout is cached, so shared nested types and large array extents never
+// cause repeated subtree validation or per-element work.
+fn validated_layout_sizes(il:&Il,root:crate::TypeId)
+    ->Result<HashMap<crate::TypeId,u64>,CodegenError> {
+    use crate::TypeId;
+    enum Work { Enter(TypeId), Finish(TypeId) }
+    let mut fields_by_owner:HashMap<TypeId,Vec<&crate::RecordField>>=HashMap::new();
+    for field in &il.record_fields {
+        fields_by_owner.entry(field.owner).or_default().push(field);
+    }
+    let types:HashMap<_,_>=il.types.iter().map(|t|(t.id,t)).collect();
+    let mut sizes=HashMap::new();
+    let mut active=HashSet::new();
+    let mut pending=vec![Work::Enter(root)];
+    while let Some(work)=pending.pop() {
+        let (ty,finish)=match work {
+            Work::Enter(ty)=>(canonical_abi_type(il,ty)?,false),
+            Work::Finish(ty)=>(ty,true),
+        };
+        let def=types.get(&ty).ok_or_else(||invalid("missing memory type"))?;
+        let kind=semantic(4,def.kind);
+        if !finish {
+            if sizes.contains_key(&ty) {continue;}
+            if let Some(bytes)=scalar_layout_bytes(il,ty)? {
+                sizes.insert(ty,bytes);
+                continue;
+            }
+            if !active.insert(ty) {return Err(invalid("cyclic native by-value layout"));}
+            pending.push(Work::Finish(ty));
+            match kind {
+                6=>pending.push(Work::Enter(checked_native_pointer_element(il,ty)?)),
+                7|9=>{
+                    let fields=fields_by_owner.get(&ty)
+                        .ok_or_else(||invalid("record has no fields"))?;
+                    for field in fields.iter().rev() {
+                        pending.push(Work::Enter(field.ty));
+                    }
+                }
+                _=>return Err(invalid("unsupported aggregate/element size")),
+            }
+            continue;
+        }
+        let bytes=match kind {
+            6=>{
+                let element=checked_pointer_element_type(il,ty)?;
+                let stride=*sizes.get(&element)
+                    .ok_or_else(||invalid("missing validated array element"))?;
+                let count=il.array_bounds.iter().find(|b|b.array==ty)
+                    .ok_or_else(||invalid("array has no fixed bound"))?.elements;
+                bounded_array_bytes(stride,count)
+                    .ok_or_else(||invalid("array object too large"))?
+            }
+            7|9=>{
+                let mut fields=fields_by_owner.get(&ty)
+                    .ok_or_else(||invalid("record has no fields"))?.clone();
+                validate_record_fields(il,ty,&mut fields,&sizes)?
+            }
+            _=>return Err(invalid("invalid aggregate layout continuation")),
+        };
+        active.remove(&ty);
+        sizes.insert(ty,bytes);
+    }
+    Ok(sizes)
+}
+
 /// Resolve an object's native EDG alignment before exposing its address to
 /// Cranelift or the ELF linker. Under-aligned storage is not a valid C object.
 fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
@@ -1350,23 +1317,20 @@ fn check_plain_storage_type(il:&Il,ty:crate::TypeId)->Result<(),CodegenError> {
 fn checked_record_fields<'a>(
     il: &'a Il, owner: crate::TypeId,
 ) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
-    checked_record_fields_depth(il, owner, 0)
+    let owner=canonical_abi_type(il,owner)?;
+    validated_layout_sizes(il,owner)?;
+    let mut fields:Vec<_>=il.record_fields.iter().filter(|f|f.owner==owner).collect();
+    fields.sort_by_key(|f|f.position);
+    Ok(fields)
 }
-fn checked_record_fields_depth<'a>(
-    il: &'a Il, owner: crate::TypeId, depth: usize,
-) -> Result<Vec<&'a crate::RecordField>, CodegenError> {
-    // The linear case is fully validated bottom-up by the nonrecursive
-    // spine walker, including every native layout and field extent.
-    if singleton_record_spine(il,owner)?.is_some() {
-        return Ok(il.record_fields.iter().filter(|f|f.owner==owner).collect());
-    }
-    if depth > MAX_AGGREGATE_LAYOUT_DEPTH { return Err(invalid("nested record layout exceeds depth limit")); }
+fn validate_record_fields(
+    il:&Il, owner:crate::TypeId, fields:&mut [&crate::RecordField],
+    sizes:&HashMap<crate::TypeId,u64>,
+)->Result<u64,CodegenError> {
     let kind=il.types.iter().find(|t|t.id==owner)
         .map(|t|semantic(4,t.kind)).ok_or_else(||invalid("missing record type"))?;
     if !matches!(kind,7|9) {return Err(invalid("unsupported record/union type"));}
     let is_union=kind==9;
-    let mut fields:Vec<_> = il.record_fields.iter()
-        .filter(|field| field.owner == owner).collect();
     fields.sort_by_key(|field| field.position);
     let native_size = il.type_object_sizes.iter()
         .find(|layout| layout.owner == owner)
@@ -1403,10 +1367,13 @@ fn checked_record_fields_depth<'a>(
             if is_bitfield {
                 return Err(invalid("qualified bitfield RMW unsupported"));
             }
-            let size=byte_size(il,field.ty)?;
+            let size=*sizes.get(&field_type).ok_or_else(||invalid("missing validated field size"))?;
             if field_kind!=1 || !matches!(size,1|2|4|8) ||
                 native_alignment<size || field.byte_offset%size!=0 ||
-                storage_alignment(il,field.ty)?<size {
+                il.type_object_sizes.iter().find(|l|l.owner==field_type)
+                    .is_none_or(|l|l.bytes!=size || l.alignment==0 ||
+                        !l.alignment.is_power_of_two() || l.alignment<size ||
+                        size%l.alignment!=0) {
                 return Err(invalid("qualified field needs naturally aligned integer storage"));
             }
         }
@@ -1434,7 +1401,7 @@ fn checked_record_fields_depth<'a>(
             if !matches!(field_kind,1|5|6|7|9) {
                 return Err(invalid("unsupported record field kind"));
             }
-            let width=byte_size_depth(il,field.ty,depth+1)?;
+            let width=*sizes.get(&field_type).ok_or_else(||invalid("missing validated field size"))?;
             let end=field.byte_offset.checked_add(width)
                 .ok_or_else(||invalid("record field offset overflows"))?;
             let start_bit=field.byte_offset.checked_mul(8)
@@ -1463,7 +1430,7 @@ fn checked_record_fields_depth<'a>(
             return Err(invalid("anonymous/unnamed bitfield layout unsupported"));
         }
     }
-    Ok(fields)
+    Ok(native_size)
 }
 /// C aggregate assignment may copy padding and bitfield storage units as
 /// bytes. Never copy a bitfield by reloading its *declared* integer type:
@@ -1528,16 +1495,7 @@ fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
                 work.push(Work::Visit(element,depth));
             }
             7|9=>{
-                // Every member in this spine is ordinary and scalar at
-                // the leaf. Validate the whole chain without nested frames.
-                if singleton_record_spine(il,ty)?.is_some() {
-                    active.remove(&ty);
-                    continue;
-                }
-                if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
-                    return Err(invalid("recursive native bitfield layout"));
-                }
-                let fields=checked_record_fields_depth(il,ty,depth+1)?;
+                let fields=checked_record_fields(il,ty)?;
                 if fields.iter().any(|f|f.bit_width!=0 || f.bit_offset!=0) {
                     return Ok(true);
                 }
@@ -1620,17 +1578,7 @@ fn flatten_copy_type(
                 }
             }
             7=>{
-                if let Some((_,leaf,leaf_offset))=singleton_record_spine(il,ty)? {
-                    let member=offset.checked_add(leaf_offset)
-                        .ok_or_else(||invalid("singleton record copy offset overflow"))?;
-                    work.push(Work::Exit(ty));
-                    work.push(Work::Visit(leaf,member,depth));
-                    continue;
-                }
-                if depth>MAX_AGGREGATE_LAYOUT_DEPTH {
-                    return Err(invalid("aggregate copy record nesting exceeds depth limit"));
-                }
-                let fields=checked_record_fields_depth(il,ty,depth+1)?;
+                let fields=checked_record_fields(il,ty)?;
                 work.push(Work::Exit(ty));
                 for field in fields.into_iter().rev() {
                     let member=offset.checked_add(field.byte_offset)
@@ -6888,10 +6836,9 @@ mod audit_deep_singleton_record_layout_tests {
     }
 
     #[test]
-    fn branching_records_keep_independent_depth_limit() {
+    fn branching_records_have_no_artificial_depth_limit() {
         // Make every record have TWO valid scalar-or-record members.
-        // This cannot take the singleton shortcut, and depth 33 still
-        // fails closed rather than changing the branching-layout budget.
+        // Branching record chains use the same postorder layout validator.
         let (mut il,outer)=singleton_records(40);
         for n in 0..40_u32 {
             let record=crate::TypeId(n+2);
@@ -6906,8 +6853,8 @@ mod audit_deep_singleton_record_layout_tests {
                 bit_offset:0,bit_width:0,
             });
         }
-        assert!(byte_size(&il,outer).is_err());
-        assert!(has_native_bitfield(&il,outer,0).is_err());
-        assert!(flattened_copy_fields(&il,outer).is_err());
+        assert_eq!(byte_size(&il,outer).unwrap(),164);
+        assert!(!has_native_bitfield(&il,outer,0).unwrap());
+        assert_eq!(flattened_copy_fields(&il,outer).unwrap().len(),41);
     }
 }
