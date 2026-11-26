@@ -4474,7 +4474,7 @@ static a_scope_ptr collect_named_type(a_type_ptr t,a_scope_ptr scope)
 // Class scopes may be reached from several declarations, so retain the
 // original global visited set. Resume each type/namespace list only after
 // its child scope is complete; preserve symbol IDs and scope-key order.
-static void collect_scope(a_scope_ptr root,const std::string &root_prefix,unsigned depth)
+static void collect_scope(a_scope_ptr root,const std::string &root_prefix)
 {
   if (root==nullptr || current_callback==nullptr) return;
   struct frame {
@@ -4482,30 +4482,30 @@ static void collect_scope(a_scope_ptr root,const std::string &root_prefix,unsign
     a_type_ptr next_type;
     a_namespace_ptr next_namespace;
     size_t prefix_size;
-    unsigned type_index;
-    unsigned namespace_index;
   };
   std::vector<frame> stack;
   std::string prefix=root_prefix;
   // The contents pass walks routine lists twice. Certify each native
   // declaration list once before either pass so a cycle cannot hang
   // symbol collection or manufacture repeated declarations.
-  auto bounded_list=[](auto first) {
-    size_t count=0;
-    for (auto item=first;item!=nullptr;item=item->next)
-      if (!within_native_list_limit(count++)) return false;
+  auto acyclic_list=[](auto first) {
+    auto slow=first,fast=first;
+    while (fast!=nullptr && fast->next!=nullptr) {
+      slow=slow->next;
+      fast=fast->next->next;
+      if (slow==fast) {report_incomplete_snapshot();return false;}
+    }
     return true;
   };
   auto enter=[&](a_scope_ptr scope) {
     if (scope==nullptr || visited_scopes.find(scope)!=visited_scopes.end())
       return true;
-    if (!within_native_list_limit(stack.size()+depth) ||
-        !bounded_list(scope->routines) || !bounded_list(scope->variables) ||
-        !bounded_list(scope->types) || !bounded_list(scope->namespaces))
+    if (!acyclic_list(scope->routines) || !acyclic_list(scope->variables) ||
+        !acyclic_list(scope->types) || !acyclic_list(scope->namespaces))
       return false;
     visited_scopes.insert(scope);
     collect_scope_contents(scope,prefix);
-    stack.push_back({scope,scope->types,scope->namespaces,prefix.size(),0,0});
+    stack.push_back({scope,scope->types,scope->namespaces,prefix.size()});
     return true;
   };
   if (!enter(root)) return;
@@ -4513,13 +4513,11 @@ static void collect_scope(a_scope_ptr root,const std::string &root_prefix,unsign
     auto &work=stack.back();
     prefix.resize(work.prefix_size);
     if (work.next_type!=nullptr) {
-      if (!within_native_list_limit(work.type_index++)) return;
       auto t=work.next_type;
       work.next_type=t->next;
       auto members=collect_named_type(t,work.scope);
       if (!enter(members)) return;
     } else if (work.next_namespace!=nullptr) {
-      if (!within_native_list_limit(work.namespace_index++)) return;
       auto ns=work.next_namespace;
       work.next_namespace=ns->next;
       if (ns->is_namespace_alias) continue;
@@ -4561,7 +4559,7 @@ void back_end(void)
   // or the presence of an already-mangled C++ symbol.
   emit_record(64, {num(C_mode() ? 0 : 1)});
   // Snapshot data while EDG owns the IL. Names are copied by Rust callback.
-  collect_scope(il_header.primary_scope, "", 0);
+  collect_scope(il_header.primary_scope, "");
 
   // EDG explicitly owns this ordered runtime initialization schedule when
   // the separate-file-scope-init configuration is enabled. Preserve the
