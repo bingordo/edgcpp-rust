@@ -359,3 +359,56 @@ fn constant_tree_owners_cannot_alias_equal_paths_across_contexts() {
     wrong.native_ctor_constant_nodes[2].owner_expression=None;
     assert!(validate_ctor_constant_trees(&wrong).is_err());
 }
+
+
+#[test]
+fn executable_initializer_forest_retains_ordered_constructor_arguments_and_nested_roots() {
+    let mut il=Il::default();
+    let routine=SymbolId(9);
+    il.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+        routine,position:0,dynamic_kind:Some(4),executable_root_count:2,
+        source_root_present:true,source_is_executable_root:false,selected_root:2,
+    });
+    il.native_ctor_constant_roots.push(NativeCtorConstantRoot {
+        routine,position:0,present:true,context:0,owner_statement:None,owner_expression:None,
+    });
+    il.native_ctor_constant_nodes.push(NativeCtorConstantNode {
+        routine,position:0,path:"0".into(),parent:None,kind:1,ty:None,
+        family:5,child_count:0,payload:Some(NativeCtorConstantPayload::Unsigned(4)),
+        flags:1,context:0,owner_statement:None,owner_expression:None,
+    });
+    let owner=NativeInitializerExecOwner {
+        symbol:routine,position:0,context:0,statement:None,expression:None,nested:None,
+    };
+    let nested=NativeInitializerExecOwner{nested:Some("0".into()),..owner.clone()};
+    il.native_initializer_exec_roots.extend([
+        NativeInitializerExecRoots{owner:owner.clone(),count:2,constructor:Some(SymbolId(77))},
+        NativeInitializerExecRoots{owner:nested.clone(),count:1,constructor:None},
+    ]);
+    let kind=(0..4096).find(|&k|graph::native_expression_kind(k)!=4).unwrap();
+    for (owner,path,parent,count) in [
+        (owner.clone(),"0",None,1),(owner.clone(),"0.0",Some("0"),0),
+        (owner,"1",None,0),(nested,"0",None,0),
+    ] {
+        il.native_initializer_exec_nodes.push(NativeInitializerExecNode {
+            owner,path:path.into(),parent:parent.map(str::to_owned),kind,
+            operator:None,ty:None,symbol:None,child_count:count,
+            integer:None,embedded_statement:false,
+        });
+    }
+    validate_initializer_exec_trees(&il).unwrap();
+    for i in 0..il.native_initializer_exec_nodes.len() {
+        let mut wrong=il.clone();
+        wrong.native_initializer_exec_nodes.remove(i);
+        assert!(validate_initializer_exec_trees(&wrong).is_err());
+    }
+    let mut wrong=il.clone();
+    wrong.native_initializer_exec_roots[0].count=1;
+    assert!(validate_initializer_exec_trees(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_initializer_exec_roots[1].owner.nested=Some("1".into());
+    assert!(validate_initializer_exec_trees(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_initializer_exec_nodes[1].parent=Some("1".into());
+    assert!(validate_initializer_exec_trees(&wrong).is_err());
+}
