@@ -265,3 +265,49 @@ fn constructor_constant_tree_preserves_repeat_and_rejects_missing_children() {
     wrong.native_ctor_constant_nodes.push(wrong.native_ctor_constant_nodes[0].clone());
     assert!(validate_ctor_constant_trees(&wrong).is_err());
 }
+
+
+#[test]
+fn dynamic_init_identity_joins_ordered_destructions_without_name_matching() {
+    let mut il=Il::default();
+    let routine=SymbolId(9);
+    il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+    il.object_lifetimes.extend([
+        ObjectLifetime{routine,id:0,parent:None,kind:0},
+        ObjectLifetime{routine,id:1,parent:Some(0),kind:1},
+    ]);
+    for position in 0..2 {
+        il.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+            routine,position,dynamic_kind:Some(4),executable_root_count:0,
+            source_root_present:false,source_is_executable_root:false,selected_root:0,
+        });
+        il.lifetime_destructions.push(LifetimeDestruction{
+            routine,lifetime:0,position,variable:None,destructor:Some(SymbolId(55)),
+        });
+        il.native_dynamic_init_identities.push(NativeDynamicInitIdentity {
+            routine,context:0,position,path:None,destruction_region:None,
+            id:position+1,kind:4,flags:7,lifetime:Some(0),expression_lifetime:Some(1),
+            has_variable:false,
+        });
+        il.native_dynamic_init_identities.push(NativeDynamicInitIdentity {
+            routine,context:2,position,path:None,destruction_region:Some(0),
+            id:2-position,kind:4,flags:7,lifetime:Some(0),expression_lifetime:None,
+            has_variable:false,
+        });
+    }
+    validate_dynamic_init_identities(&il).unwrap();
+    for i in 0..il.native_dynamic_init_identities.len() {
+        let mut missing=il.clone();
+        missing.native_dynamic_init_identities.remove(i);
+        assert!(validate_dynamic_init_identities(&missing).is_err());
+    }
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].id=1;
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].expression_lifetime=Some(0);
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_dynamic_init_identities[1].destruction_region=Some(1);
+    assert!(validate_dynamic_init_identities(&wrong).is_err());
+}
