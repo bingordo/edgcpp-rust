@@ -26,6 +26,7 @@
 #include <vector>
 #include <initializer_list>
 #include "qualified_scope_prefix.h"
+#include "scope_tree.h"
 
 extern "C" {
 struct edgcpp_field { const char *data; size_t length; uint64_t value; uint32_t tag; };
@@ -2757,22 +2758,12 @@ static void prepare_lifetimes(a_scope_ptr body, uint32_t routine)
   }
 }
 
-static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
+static bool emit_local_scope(a_scope_ptr scope, uint32_t routine,
                              a_routine_ptr source_owner,
-                             const std::string &function, uint32_t parent,
-                             unsigned &next_id,
-                             std::unordered_set<a_scope_ptr> &seen_scopes,
-                             std::unordered_set<a_variable_ptr> &seen_locals,
-                             unsigned depth)
+                             const std::string &function, uint32_t id,
+                             uint32_t parent,
+                             std::unordered_set<a_variable_ptr> &seen_locals)
 {
-  if (scope == nullptr || current_callback == nullptr) return;
-  if (seen_scopes.find(scope) != seen_scopes.end()) return;
-  if (depth > 64 || next_id >= MAX_NATIVE_LIST_ELEMENTS) {
-    report_incomplete_snapshot();
-    return;
-  }
-  seen_scopes.insert(scope);
-  const uint32_t id = next_id++;
   const auto known_path = scope_statement_paths.find(scope);
   emit_record(30, {num(routine), num(id),
                    parent == std::numeric_limits<uint32_t>::max() ?
@@ -2810,7 +2801,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
          var = var->next, ++visited_count) {
       if (!native_list_seen.insert(var).second) {
         report_incomplete_snapshot();
-        return;
+        return false;
       }
       if (!var->is_parameter && !var->is_this_parameter &&
           seen_locals.find(var) == seen_locals.end() &&
@@ -2820,7 +2811,7 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
     }
     if (var != nullptr) {
       report_incomplete_snapshot();
-      return;
+      return false;
     }
   }
   emit_record(RECORD_NATIVE_SCOPE_LOCAL_COUNT,
@@ -2958,17 +2949,12 @@ static void emit_local_scope(a_scope_ptr scope, uint32_t routine,
        child = child->next, ++native_child_count) {
     if (child == scope || !count_seen_children.insert(child).second) {
       report_incomplete_snapshot();
-      return;
+      return false;
     }
   }
   emit_record(RECORD_NATIVE_SCOPE_CHILD_COUNT,
               {num(routine),num(id),num(native_child_count)});
-  unsigned child_count = 0;
-  for (a_scope_ptr child = scope->scopes;
-       child != nullptr && within_native_list_limit(child_count++); child = child->next) {
-    emit_local_scope(child, routine, source_owner, function, id, next_id,
-                     seen_scopes, seen_locals, depth + 1);
-  }
+  return true;
 }
 
 static void emit_function_locals(a_scope_ptr body, uint32_t routine,
@@ -3023,12 +3009,17 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
                        num(1u | (this_var->compiler_generated ? 2u : 0u))});
     }
   }
-  unsigned next_id = 0;
-  std::unordered_set<a_scope_ptr> seen_scopes;
   std::unordered_set<a_variable_ptr> seen_locals;
-  emit_local_scope(body, routine, source_owner, function,
-                   std::numeric_limits<uint32_t>::max(), next_id,
-                   seen_scopes, seen_locals, 0);
+  if (!edg_bridge::walk_scope_tree(
+          body, MAX_NATIVE_LIST_ELEMENTS,
+          [](a_scope_ptr scope) { return scope->scopes; },
+          [](a_scope_ptr scope) { return scope->next; },
+          [&](a_scope_ptr scope, uint32_t id, uint32_t parent) {
+            return emit_local_scope(scope, routine, source_owner, function,
+                                    id, parent, seen_locals);
+          })) {
+    report_incomplete_snapshot();
+  }
 }
 
 static void emit_statements(a_statement_ptr head, const std::string &function,
