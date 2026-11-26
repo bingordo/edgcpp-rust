@@ -4393,8 +4393,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
-  file_init_ids.clear();
-  file_lifetime_ids.clear();
+  edg::file_init_ids.clear();
+  edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
   current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
@@ -4420,8 +4420,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
-  file_init_ids.clear();
-  file_lifetime_ids.clear();
+  edg::file_init_ids.clear();
+  edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
   current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
