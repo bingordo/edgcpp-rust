@@ -1438,9 +1438,13 @@ fn validate_record_fields(
 fn checked_aggregate_copy_size(il:&Il,ty:crate::TypeId)->Result<u32,CodegenError> {
     // Validate every distinct by-value type, not every array occurrence.
     // A qualified typeref is checked before canonical identity deduplication.
-    let bytes=u32::try_from(byte_size(il,ty)?)
+    let root=canonical_abi_type(il,ty)?;
+    let sizes=validated_layout_sizes(il,root)?;
+    let bytes=u32::try_from(*sizes.get(&root).ok_or_else(||invalid("missing copy layout"))?)
         .map_err(|_|invalid("aggregate copy size is not representable"))?;
     if bytes==0 {return Err(invalid("empty aggregate copy"));}
+    let mut fields_by_owner:HashMap<_,Vec<_>>=HashMap::new();
+    for field in &il.record_fields {fields_by_owner.entry(field.owner).or_default().push(field);}
     let mut seen=HashSet::new();
     let mut work=vec![ty];
     while let Some(raw)=work.pop() {
@@ -1458,7 +1462,7 @@ fn checked_aggregate_copy_size(il:&Il,ty:crate::TypeId)->Result<u32,CodegenError
             }
             6=>work.push(checked_native_pointer_element(il,ty)?),
             7|9=>{
-                for field in checked_record_fields(il,ty)? {
+                for field in fields_by_owner.get(&ty).ok_or_else(||invalid("missing copy fields"))? {
                     work.push(field.ty);
                 }
             }
@@ -1470,10 +1474,7 @@ fn checked_aggregate_copy_size(il:&Il,ty:crate::TypeId)->Result<u32,CodegenError
 #[cfg(test)]
 fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
     ->Result<bool,CodegenError> {
-    // Only record nesting consumes the bounded layout-recursion policy.
-    // Iterative array descent handles otherwise-valid deep dimensions, and
-    // the active path (not a global visited set) rejects cycles without
-    // mistaking independent uses of the same field type for recursion.
+    // Test oracle: traverse the validated aggregate graph for bitfields.
     enum Work { Visit(crate::TypeId,usize), Exit(crate::TypeId) }
     let mut active=HashSet::new();
     let mut work=vec![Work::Visit(ty,depth)];
@@ -1511,8 +1512,8 @@ fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
 }
 /// Expand a supported value-semantic aggregate into scalar fields at native
 /// byte offsets. This copies array elements and nested records without
-/// touching indeterminate C struct padding. The bound also keeps generated
-/// machine code and Cranelift SSA temporaries predictable.
+/// touching indeterminate C struct padding. Test oracle only; production
+/// copies use the complete validated object representation.
 #[cfg(test)]
 fn flattened_copy_fields(il:&Il,ty:crate::TypeId)
     ->Result<Vec<(CAbiInt,i64)>,CodegenError> {
@@ -1527,10 +1528,7 @@ fn flatten_copy_type(
     il:&Il,ty:crate::TypeId,offset:u64,depth:usize,
     out:&mut Vec<(CAbiInt,i64)>,
 ) -> Result<(),CodegenError> {
-    // Expand explicit source-order scalar copies with a bounded worklist,
-    // rather than one Rust recursive call per nested array dimension.
-    // Record nesting retains the 32-level layout policy, while repeated
-    // 1-element array dimensions cannot exhaust the native Rust stack.
+    // Expand source-order scalar offsets only for small test fixtures.
     enum Work {
         Visit(crate::TypeId,u64,usize),
         Exit(crate::TypeId),
