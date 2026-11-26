@@ -10,6 +10,7 @@ pub mod graph;
 pub mod memory_order;
 pub mod scalar_abi;
 pub mod startup_provenance;
+pub mod retained_eh;
 mod limits;
 #[cfg(feature = "codegen")]
 pub mod codegen;
@@ -4918,6 +4919,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_statement_attribute_coverage(il).is_err() ||
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
+       retained_eh::checked_retained_eh_actions(il).is_err() ||
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||
