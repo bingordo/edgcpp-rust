@@ -95,6 +95,8 @@ pub struct Il {
     pub native_control_root_admissions: Vec<NativeControlRootAdmission>,
     /// Per-constructor initializer native expression-root presence.
     pub native_constructor_root_admissions: Vec<NativeConstructorRootAdmission>,
+    /// Native dynamic-init versus legacy source-expression ownership.
+    pub native_constructor_init_provenance: Vec<NativeConstructorInitProvenance>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -784,6 +786,20 @@ pub struct NativeControlRootAdmission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeConstructorRootAdmission {
     pub routine:SymbolId, pub position:u32, pub present:bool,
+}
+
+/// One constructor initializer's independent original dynamic-init and
+/// source-expression facts. Selected root 0=none, 1=executable, 2=source
+/// fallback. A source fallback is not a complete executable initializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConstructorInitProvenance {
+    pub routine:SymbolId,
+    pub position:u32,
+    pub dynamic_kind:Option<u32>,
+    pub executable_root_count:u32,
+    pub source_root_present:bool,
+    pub source_is_executable_root:bool,
+    pub selected_root:u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1709,6 +1725,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         105 => Some(il.global_routine_relocations.len()),
         106 => Some(il.native_retained_eh_constructs.len()),
         107 => Some(il.native_expression_variants.len()),
+        108 => Some(il.native_constructor_init_provenance.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1921,6 +1938,25 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_expression_variants.push(NativeExpressionVariant {
                 owner,path,expression_kind,payload,
             });
+        }
+        108 => {
+            let (Some(routine),Some(position),Some(count),Some(source),
+                 Some(shared),Some(selected))=(n(0),n(1),n(3),n(4),n(5),n(6))
+                else {return;};
+            let dynamic_kind=if fields[2].present() {
+                let Some(kind)=n(2).filter(|k|*k<=255) else {return;};
+                Some(kind)
+            } else {None};
+            if routine==0 || count>10000 || source>1 || shared>1 || selected>2 {
+                return;
+            }
+            let record=NativeConstructorInitProvenance {
+                routine:SymbolId(routine),position,dynamic_kind,
+                executable_root_count:count,source_root_present:source==1,
+                source_is_executable_root:shared==1,selected_root:selected,
+            };
+            if !valid_constructor_init_provenance(&record) {return;}
+            output.native_constructor_init_provenance.push(record);
         }
         106 => {
             let (Some(function),Some(statement_path),Some(role),
@@ -4230,6 +4266,38 @@ fn validate_native_expression_variant_coverage(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+/// Verify the local consistency of independent root presence and selection.
+fn valid_constructor_init_provenance(p:&NativeConstructorInitProvenance)->bool {
+    (p.dynamic_kind.is_some() || p.executable_root_count==0) &&
+    (!p.source_is_executable_root ||
+        (p.source_root_present && p.executable_root_count>0)) &&
+    match p.selected_root {
+        0=>!p.source_root_present,
+        1=>p.dynamic_kind.is_some() && p.executable_root_count==1,
+        2=>p.source_root_present,
+        _=>false,
+    }
+}
+
+/// Require exactly one provenance witness per native constructor entry.
+fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
+    let mut owners=il.constructor_initializers.iter()
+        .map(|i|((i.routine,i.position),None)).collect::<HashMap<_,Option<bool>>>();
+    for root in &il.native_constructor_root_admissions {
+        let Some(slot)=owners.get_mut(&(root.routine,root.position))
+            else {return Err(Error::MalformedCallback);};
+        if slot.replace(root.present).is_some() {return Err(Error::MalformedCallback);}
+    }
+    for p in &il.native_constructor_init_provenance {
+        if !valid_constructor_init_provenance(p) ||
+            owners.remove(&(p.routine,p.position))!=Some(Some(p.selected_root!=0)) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if !owners.is_empty() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4254,6 +4322,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_child_counts(il).is_err() ||
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
+       validate_constructor_init_provenance(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
