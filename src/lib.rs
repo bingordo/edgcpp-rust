@@ -107,6 +107,8 @@ pub struct Il {
     pub native_initializer_exec_nodes: Vec<NativeInitializerExecNode>,
     /// Detached GNU statement-expression blocks, available in structural snapshots.
     pub native_supplemental_block_nodes: Vec<NativeSupplementalBlockNode>,
+    /// File-region identities, disjoint from routine-local initializer IDs.
+    pub native_file_init_identities: Vec<NativeFileInitIdentity>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -881,6 +883,17 @@ pub struct NativeSupplementalBlockNode {
     pub category:u32, pub kind:u32, pub count:u32,
     pub ty:Option<TypeId>, pub symbol:Option<SymbolId>, pub operator:Option<u32>,
     pub integer:Option<NativeCtorConstantPayload>, pub flags:u32,
+}
+
+/// One original file-region initializer occurrence: 0 variable, 1 scope
+/// schedule, 2 expression wrapper, 3/4 nested constant leaf. Lifetime IDs
+/// preserve pointer equality only; they do not certify a destruction plan.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct NativeFileInitIdentity {
+    pub context:u32, pub owner:Option<SymbolId>, pub scope:Option<String>,
+    pub position:u32, pub path:Option<String>, pub id:u32, pub kind:u32,
+    pub variable:Option<SymbolId>, pub destructor:Option<SymbolId>,
+    pub lifetime:Option<u32>, pub expression_lifetime:Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1813,6 +1826,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         112 => Some(il.native_initializer_exec_roots.len()),
         113 => Some(il.native_initializer_exec_nodes.len()),
         114 => Some(il.native_supplemental_block_nodes.len()),
+        115 => Some(il.native_file_init_identities.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2036,6 +2050,19 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
             });
+        }
+        115 => {
+            let (Some(context),Some(position),Some(id),Some(node_kind))=
+                (n(0),n(3),n(5),n(6)) else {return;};
+            let d=NativeFileInitIdentity {
+                context,owner:n(1).map(SymbolId),scope:t(2),position,path:t(4),id,
+                kind:node_kind,variable:n(7).map(SymbolId),destructor:n(8).map(SymbolId),
+                lifetime:n(9),expression_lifetime:n(10),
+            };
+            if !valid_file_init_identity(&d) ||
+                [d.owner,d.variable,d.destructor].into_iter().flatten()
+                    .any(|s|!seen.symbols.contains(&s)) {return;}
+            output.native_file_init_identities.push(d);
         }
         114 => {
             let (Some(symbol),Some(position),Some(context),Some(from_exec),Some(expression_path),
@@ -4900,6 +4927,77 @@ fn validate_supplemental_block_graph(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+fn valid_file_init_identity(d:&NativeFileInitIdentity)->bool {
+    d.id!=0 && d.kind<=255 && d.lifetime!=Some(0) && d.expression_lifetime!=Some(0) &&
+    d.owner!=Some(SymbolId(0)) && d.variable!=Some(SymbolId(0)) &&
+    d.destructor!=Some(SymbolId(0)) && d.path.as_deref()!=Some("") &&
+    d.scope.as_deref()!=Some("") &&
+    match d.context {
+        0=>d.owner.is_some() && d.scope.is_none() && d.position==0 && d.path.is_none(),
+        1=>d.owner.is_none() && d.scope.is_some() && d.path.is_none(),
+        2|3|4=>d.owner.is_some() && d.scope.is_none() && d.position==0 && d.path.is_some(),
+        _=>false,
+    }
+}
+
+/// Reconcile declarations, ordered scope entries, expression wrappers and
+/// nested leaves without guessing by variable/destructor names or ID order.
+fn validate_file_init_identities(il:&Il)->Result<(),Error> {
+    let mut variables:HashMap<_,_>=il.dynamic_initializers.iter()
+        .map(|d|(d.symbol,d.kind)).collect();
+    let mut schedules:HashMap<_,_>=il.scope_dynamic_initializers.iter()
+        .map(|d|((d.scope.as_str(),d.position),(d.kind,d.variable,d.destructor))).collect();
+    let mut nested=HashMap::new();
+    for e in &il.native_expression_variants {
+        if let (NativeExpressionOwner::Initializer{owner},NativeExpressionPayload::DynamicInitializer{kind,..})=(&e.owner,&e.payload) {
+            if nested.insert((2,*owner,e.path.clone()),*kind).is_some() {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    for n in &il.native_ctor_constant_nodes {
+        if n.family!=5 || !matches!(n.context,2|5) {continue;}
+        let Some(NativeCtorConstantPayload::Unsigned(kind))=n.payload else {return Err(Error::MalformedCallback);};
+        let path=if let Some(e)=&n.owner_expression {format!("{e}:{}",n.path)} else {n.path.clone()};
+        if nested.insert((if n.context==2 {3}else{4},n.routine,path),kind as u32).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut identities=HashMap::new();
+    let mut declaration_ids=HashMap::new();
+    let mut scheduled_ids=HashSet::new();
+    for d in &il.native_file_init_identities {
+        if !valid_file_init_identity(d) {return Err(Error::MalformedCallback);}
+        let facts=(d.kind,d.variable,d.destructor,d.lifetime,d.expression_lifetime);
+        if identities.insert(d.id,facts).is_some_and(|old|old!=facts) {return Err(Error::MalformedCallback);}
+        match d.context {
+            0=>{
+                let owner=d.owner.unwrap();
+                if variables.remove(&owner)!=Some(d.kind) ||
+                    declaration_ids.insert(owner,d.id).is_some() {return Err(Error::MalformedCallback);}
+                if d.variable.is_some_and(|v|v!=owner) {return Err(Error::MalformedCallback);}
+            }
+            1=>{
+                if schedules.remove(&(d.scope.as_deref().unwrap(),d.position))!=Some((d.kind,d.variable,d.destructor)) ||
+                    !scheduled_ids.insert(d.id) {return Err(Error::MalformedCallback);}
+            }
+            2|3|4=>{
+                if nested.remove(&(d.context,d.owner.unwrap(),d.path.clone().unwrap()))!=Some(d.kind) {
+                    return Err(Error::MalformedCallback);
+                }
+            }
+            _=>return Err(Error::MalformedCallback),
+        }
+    }
+    if !variables.is_empty() || !schedules.is_empty() || !nested.is_empty() {
+        return Err(Error::MalformedCallback);
+    }
+    // A schedule can contain generated entries without a corresponding
+    // declaration event. Only equate entries when the original pointer
+    // identity agrees; a variable name alone cannot prove identity.
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4929,6 +5027,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_dynamic_init_identities(il).is_err() ||
        validate_initializer_exec_trees(il).is_err() ||
        validate_supplemental_block_graph(il).is_err() ||
+       validate_file_init_identities(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
@@ -7612,7 +7711,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=114_u32 {
+        for kind in 1..=115_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7641,13 +7740,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=114_u32)
+        let schema_fields:usize=(1..=115_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(115).is_none());
+        assert!(expected_wire_field_tag_masks(116).is_none());
     }
 
     #[test]
