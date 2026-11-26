@@ -45,4 +45,27 @@ bool walk_scope_tree(Scope root, std::size_t limit, Children children,
   }
   return true;
 }
+
+// Admit another root into a previously indexed forest. Repeated roots are
+// valid discovery aliases, but repeated nodes reached by child edges are not.
+// Local preorder IDs are translated into the forest's global ID space.
+template<class Scope, class IdMap, class Children, class Next, class Visit>
+bool walk_scope_forest_root(Scope root, std::size_t limit,
+                            std::uint32_t parent, IdMap &ids,
+                            Children children, Next next, Visit visit)
+{
+  if (root == nullptr || ids.find(root) != ids.end()) return true;
+  const auto none = std::numeric_limits<std::uint32_t>::max();
+  if (ids.size() >= limit || ids.size() >= none) return false;
+  const auto base = static_cast<std::uint32_t>(ids.size());
+  return walk_scope_tree(root, limit - base, children, next,
+      [&](Scope node, std::uint32_t local_id, std::uint32_t local_parent) {
+        const bool child_edge = local_parent != none;
+        if (local_id >= none - base) return false;
+        const auto id = base + local_id;
+        if (!ids.emplace(node, id).second) return false;
+        return visit(node, id, child_edge ? base + local_parent : parent,
+                     child_edge);
+      });
+}
 }
