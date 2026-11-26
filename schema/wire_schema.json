@@ -53,7 +53,8 @@
     "RECORD_NATIVE_CTOR_CONSTANT_NODE": 110,
     "RECORD_NATIVE_DYNAMIC_INIT_IDENTITY": 111,
     "RECORD_NATIVE_INITIALIZER_EXEC_ROOTS": 112,
-    "RECORD_NATIVE_INITIALIZER_EXEC_NODE": 113
+    "RECORD_NATIVE_INITIALIZER_EXEC_NODE": 113,
+    "RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE": 114
   },
   "record_arities": {
     "1": 1,
@@ -168,7 +169,8 @@
     "110": 13,
     "111": 11,
     "112": 8,
-    "113": 15
+    "113": 15,
+    "114": 19
   },
   "record_field_tags": {
     "1": [
@@ -878,6 +880,27 @@
       "ABSENT|UNSIGNED",
       "ABSENT|UNSIGNED",
       "UNSIGNED",
+      "ABSENT|UNSIGNED|SIGNED",
+      "UNSIGNED"
+    ],
+    "114": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|TEXT",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "TEXT",
+      "TEXT",
+      "ABSENT|TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
       "ABSENT|UNSIGNED|SIGNED",
       "UNSIGNED"
     ]
