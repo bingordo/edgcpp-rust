@@ -412,3 +412,65 @@ fn executable_initializer_forest_retains_ordered_constructor_arguments_and_neste
     wrong.native_initializer_exec_nodes[1].parent=Some("1".into());
     assert!(validate_initializer_exec_trees(&wrong).is_err());
 }
+
+
+#[test]
+fn supplemental_statement_graph_requires_original_owner_and_complete_branch_lists() {
+    let mut il=Il::default();
+    let routine=SymbolId(9);
+    il.routine_identities.push(RoutineIdentity{routine,function:"f".into()});
+    let stmt_kind=|n| (0..4096).find(|&k|graph::native_statement_kind(k)==n).unwrap();
+    let expr_kind=|n| (0..4096).find(|&k|graph::native_expression_kind(k)==n).unwrap();
+    il.control_expressions.push(ControlExpression {
+        function:"f".into(),statement_path:"0".into(),role:1,path:"0".into(),
+        parent:None,kind:expr_kind(4),operator:None,type_id:None,symbol_id:None,
+    });
+    let owner=NativeSupplementalBlockOwner {
+        initializer:NativeInitializerExecOwner{symbol:routine,position:1,context:4,
+            statement:Some("0".into()),expression:Some("0".into()),nested:None},
+        from_exec:false,expression_path:"0".into(),
+    };
+    for (path,parent,edge,category,kind,count) in [
+        ("0",None,"embedded",0,0,1),
+        ("0.0",Some("0"),"item",1,stmt_kind(2),3),
+        ("0.0.0",Some("0.0"),"primary",0,0,0),
+        ("0.0.1",Some("0.0"),"declarations",0,0,0),
+        ("0.0.2",Some("0.0"),"block",0,0,2),
+        ("0.0.2.0",Some("0.0.2"),"item",1,stmt_kind(3),4),
+        ("0.0.2.0.0",Some("0.0.2.0"),"primary",0,0,1),
+        ("0.0.2.0.0.0",Some("0.0.2.0.0"),"item",2,expr_kind(1),1),
+        ("0.0.2.0.0.0.0",Some("0.0.2.0.0.0"),"operands",0,0,0),
+        ("0.0.2.0.1",Some("0.0.2.0"),"declarations",0,0,0),
+        ("0.0.2.0.2",Some("0.0.2.0"),"then",0,0,0),
+        ("0.0.2.0.3",Some("0.0.2.0"),"else",0,0,0),
+        ("0.0.2.1",Some("0.0.2"),"item",1,stmt_kind(12),2),
+        ("0.0.2.1.0",Some("0.0.2.1"),"primary",0,0,0),
+        ("0.0.2.1.1",Some("0.0.2.1"),"declarations",0,0,0),
+    ] {
+        il.native_supplemental_block_nodes.push(NativeSupplementalBlockNode {
+            owner:owner.clone(),path:path.into(),parent:parent.map(str::to_owned),
+            edge:edge.into(),category,kind,count,ty:None,symbol:None,operator:None,
+            integer:None,flags:0,
+        });
+    }
+    validate_supplemental_block_graph(&il).unwrap();
+    for i in 0..il.native_supplemental_block_nodes.len() {
+        let mut wrong=il.clone();
+        wrong.native_supplemental_block_nodes.remove(i);
+        assert!(validate_supplemental_block_graph(&wrong).is_err(),"missing node {i}");
+    }
+    let mut wrong=il.clone();
+    wrong.native_supplemental_block_nodes[11].edge="body".into();
+    assert!(validate_supplemental_block_graph(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_supplemental_block_nodes[0].owner.initializer.position=4;
+    assert!(validate_supplemental_block_graph(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.control_expressions.clear();
+    assert!(validate_supplemental_block_graph(&wrong).is_err());
+    #[cfg(feature="codegen")]
+    {
+        assert!(codegen::lower_edg(&il).is_err());
+        assert!(codegen::emit_edg_object(&il).is_err());
+    }
+}
