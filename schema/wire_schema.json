@@ -47,7 +47,8 @@
     "RECORD_FILE_SCOPE_DYNAMIC_INIT_OWNER": 104,
     "RECORD_STATIC_ROUTINE_RELOCATION": 105,
     "RECORD_NATIVE_RETAINED_EH_CONSTRUCT": 106,
-    "RECORD_NATIVE_EXPRESSION_VARIANT": 107
+    "RECORD_NATIVE_EXPRESSION_VARIANT": 107,
+    "RECORD_NATIVE_CONSTRUCTOR_INIT_PROVENANCE": 108
   },
   "record_arities": {
     "1": 1,
@@ -156,7 +157,8 @@
     "104": 2,
     "105": 4,
     "106": 6,
-    "107": 9
+    "107": 9,
+    "108": 7
   },
   "record_field_tags": {
     "1": [
@@ -796,6 +798,15 @@
       "UNSIGNED",
       "UNSIGNED",
       "ABSENT|UNSIGNED"
+    ],
+    "108": [
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED",
+      "UNSIGNED"
     ]
   }
 }
