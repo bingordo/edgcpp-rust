@@ -1249,7 +1249,7 @@ struct supplemental_block_walk {
     active.erase(st);
   }
 };
-static void emit_supplemental_block(an_statement_ptr root,const supplemental_block_owner &owner) {
+static void emit_supplemental_block(a_statement_ptr root,const supplemental_block_owner &owner) {
   supplemental_block_walk walk{owner,0,{}};
   walk.statements(root,true,"0","","embedded",0);
 }
@@ -2075,9 +2075,8 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
     const std::string &function, const std::string &statement,
     uint32_t owner, uint32_t position, const std::string &path)
 {
-  // Statement-expression blocks are only represented in the ordinary
-  // statement graph today. Do not certify a supplemental tree that lost
-  // its executable statement subtree.
+  // Preserve supplemental statement-expression subtrees in their own
+  // structural graph, separate from ordinary executable statements.
   if (context != 0 && node->kind == enk_statement) {
     emit_supplemental_block(node->variant.statement,
         {{context==1 ? current_dynamic_init_routine : owner,position,context+3,
