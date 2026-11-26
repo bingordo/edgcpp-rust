@@ -999,6 +999,7 @@ static expression_children dynamic_init_expression_children(a_dynamic_init_ptr i
 // Export native constant structure, not an executable byte image. A repeat
 // retains one child and its native count, even for runtime-sized arrays.
 // Dynamic and unsupported leaves are explicit and carry no invented value.
+static uint32_t native_dynamic_init_id(a_dynamic_init_ptr d);
 static void emit_dynamic_init_identity(a_dynamic_init_ptr d,uint32_t context,
     uint32_t position,const std::string &path,uint32_t destruction_region=0);
 struct constant_tree_owner {
@@ -2300,6 +2301,31 @@ static void emit_retained_eh_construct(
         {txt(function),txt(statement),num(role),txt(path),
          num(static_cast<unsigned>(node->kind)),
          num(static_cast<unsigned>(node->variant.lowered_eh.kind))});
+    const auto &eh=node->variant.lowered_eh;
+    // Preserve the active union arm; a null pointer is not an unresolved ID.
+    if (eh.kind==leck_cleanup_state || eh.kind==leck_unreachable_cleanup_state
+#if !GENERATE_EH_TABLES
+        || eh.kind==leck_initialization_completed
+#endif
+        ) {
+      if (current_dynamic_init_routine==0) {
+        report_incomplete_snapshot(); return;
+      }
+#if GENERATE_EH_TABLES
+      emit_record(RECORD_NATIVE_EH_CLEANUP_STATE,
+          {txt(function),txt(statement),num(role),txt(path),
+           num(current_dynamic_init_routine),num(1),
+           num(static_cast<uint64_t>(eh.variant.cleanup_region_number))});
+#else
+      auto d=eh.kind==leck_initialization_completed ?
+          eh.variant.dynamic_init : eh.variant.cleanup_ptr;
+      const uint32_t id=native_dynamic_init_id(d);
+      if (d!=nullptr && id==0) {report_incomplete_snapshot();return;}
+      emit_record(RECORD_NATIVE_EH_CLEANUP_STATE,
+          {txt(function),txt(statement),num(role),txt(path),
+           num(current_dynamic_init_routine),num(0),id ? num(id) : absent()});
+#endif
+    }
   }
 #else
   (void)node; (void)function; (void)statement; (void)role; (void)path;
@@ -2875,18 +2901,25 @@ static uint32_t emit_variable_type(a_variable_ptr var)
 // Emit after lifetime discovery (destruction edges are emitted separately
 // below, where the owning region is already indexed). Presence and lookup
 // are separate: a non-null but not-yet-indexed lifetime is never null.
-static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
-    uint32_t position, const std::string &path, uint32_t destruction_region)
+// Intern the original dynamic-init pointer once per routine, regardless of owner order.
+static uint32_t native_dynamic_init_id(a_dynamic_init_ptr d)
 {
-  if (d==nullptr || current_dynamic_init_routine==0) return;
+  if (d==nullptr || current_dynamic_init_routine==0) return 0;
   auto found=current_dynamic_init_ids.find(d);
   if (found==current_dynamic_init_ids.end()) {
     if (current_dynamic_init_ids.size()>=std::numeric_limits<uint32_t>::max()) {
-      report_incomplete_snapshot();return;
+      report_incomplete_snapshot();return 0;
     }
     found=current_dynamic_init_ids.emplace(d,
         static_cast<uint32_t>(current_dynamic_init_ids.size()+1)).first;
   }
+  return found->second;
+}
+static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
+    uint32_t position, const std::string &path, uint32_t destruction_region)
+{
+  const uint32_t id=native_dynamic_init_id(d);
+  if (id==0) return;
   const auto lifetime=current_lifetime_ids.find(d->lifetime);
   const auto expression=current_lifetime_ids.find(d->init_expr_lifetime);
   const unsigned flags=(d->lifetime!=nullptr ? 1u : 0u) |
@@ -2896,7 +2929,7 @@ static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
       {num(current_dynamic_init_routine),num(context),num(position),
        path.empty() ? absent() : txt(path),
        context==2 ? num(destruction_region) : absent(),
-       num(found->second),num(static_cast<unsigned>(d->kind)),num(flags),
+       num(id),num(static_cast<unsigned>(d->kind)),num(flags),
        lifetime==current_lifetime_ids.end() ? absent() : num(lifetime->second),
        expression==current_lifetime_ids.end() ? absent() : num(expression->second),
        num(d->variable!=nullptr ? 1u : 0u)});

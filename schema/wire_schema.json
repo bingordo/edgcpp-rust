@@ -55,7 +55,8 @@
     "RECORD_NATIVE_INITIALIZER_EXEC_ROOTS": 112,
     "RECORD_NATIVE_INITIALIZER_EXEC_NODE": 113,
     "RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE": 114,
-    "RECORD_NATIVE_CATCH_HANDLER": 115
+    "RECORD_NATIVE_CATCH_HANDLER": 115,
+    "RECORD_NATIVE_EH_CLEANUP_STATE": 116
   },
   "record_arities": {
     "1": 1,
@@ -172,7 +173,8 @@
     "112": 8,
     "113": 15,
     "114": 19,
-    "115": 8
+    "115": 8,
+    "116": 7
   },
   "record_field_tags": {
     "1": [
@@ -915,6 +917,15 @@
       "ABSENT|UNSIGNED",
       "UNSIGNED",
       "UNSIGNED"
+    ],
+    "116": [
+      "TEXT",
+      "TEXT",
+      "UNSIGNED",
+      "TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED"
     ]
   }
 }

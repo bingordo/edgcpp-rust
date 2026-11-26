@@ -114,6 +114,8 @@ pub struct Il {
     pub native_try_handler_counts: Vec<NativeTryHandlerCount>,
     /// Ordered source-owned catch declarations and optional native RTTI identities.
     pub native_catch_handlers: Vec<retained_eh::NativeCatchHandler>,
+    /// Native cleanup-state union payloads; not executable cleanup plans.
+    pub native_eh_cleanup_states: Vec<retained_eh::NativeEhCleanupState>,
     /// Native flags retained for each emitted statement.
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
@@ -1817,6 +1819,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         113 => Some(il.native_initializer_exec_nodes.len()),
         114 => Some(il.native_supplemental_block_nodes.len()),
         115 => Some(il.native_catch_handlers.len()),
+        116 => Some(il.native_eh_cleanup_states.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2036,6 +2039,26 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
+            });
+        }
+        116 => {
+            let (Some(function),Some(statement_path),Some(role),Some(path),
+                 Some(routine),Some(mode))=(t(0),t(1),n(2),t(3),n(4),n(5)) else {return;};
+            let routine=SymbolId(routine);
+            if role>4 || function.is_empty() || statement_path.is_empty() ||
+                path.is_empty() || !seen.symbols.contains(&routine) {return;}
+            let reference=match (mode,fields[6].unsigned()) {
+                (0,None)=>retained_eh::CleanupReference::DynamicInit(None),
+                (0,Some(id))=>{
+                    let Ok(id)=u32::try_from(id) else {return;};
+                    if id==0 {return;}
+                    retained_eh::CleanupReference::DynamicInit(Some(id))
+                }
+                (1,Some(region))=>retained_eh::CleanupReference::Region(region),
+                _=>return,
+            };
+            output.native_eh_cleanup_states.push(retained_eh::NativeEhCleanupState {
+                function,statement_path,role,path,routine,reference,
             });
         }
         115 => {
@@ -4945,6 +4968,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_supplemental_child_counts(il).is_err() ||
        retained_eh::checked_retained_eh_actions(il).is_err() ||
        retained_eh::validate_native_catch_handlers(il).is_err() ||
+       retained_eh::validate_native_eh_cleanup_states(il).is_err() ||
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||

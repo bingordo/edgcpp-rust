@@ -115,3 +115,29 @@ fn catch_roster_preserves_order_and_rejects_missing_and_invalid_metadata() {
     il.native_catch_handlers[1] = NativeCatchHandler { position: 0, ..all };
     assert!(validate_native_catch_handlers(&il).is_err());
 }
+
+#[test]
+fn cleanup_payload_is_required_and_routine_scoped() {
+    use edgcpp::{RoutineIdentity, SymbolId,
+        retained_eh::{CleanupReference, NativeEhCleanupState, validate_native_eh_cleanup_states}};
+    let Some(kind) = raw(8, 1) else { return };
+    let subkind = raw(7, 3).expect("native cleanup state");
+    let mut il = Il::default();
+    il.routine_identities.push(RoutineIdentity { routine: SymbolId(1), function: "f".into() });
+    il.native_retained_eh_constructs.push(action(kind, subkind, 0));
+    assert!(validate_native_eh_cleanup_states(&il).is_err());
+    let state = NativeEhCleanupState {
+        function: "f".into(), statement_path: "s".into(), role: 0, path: "0".into(),
+        routine: SymbolId(1), reference: CleanupReference::DynamicInit(None),
+    };
+    il.native_eh_cleanup_states.push(state.clone());
+    validate_native_eh_cleanup_states(&il).unwrap();
+    // Non-null but not independently exported is not null or executable.
+    il.native_eh_cleanup_states[0].reference = CleanupReference::DynamicInit(Some(42));
+    validate_native_eh_cleanup_states(&il).unwrap();
+    il.native_eh_cleanup_states[0].routine = SymbolId(2);
+    assert!(validate_native_eh_cleanup_states(&il).is_err());
+    il.native_eh_cleanup_states[0] = state.clone();
+    il.native_eh_cleanup_states.push(state);
+    assert!(validate_native_eh_cleanup_states(&il).is_err());
+}
