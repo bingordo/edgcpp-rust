@@ -204,3 +204,54 @@ pub fn validate_native_catch_handlers(il: &Il) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// Exact native cleanup union value. Dynamic-init IDs share the routine-local
+/// identity namespace; a non-null ID may lack an independently exported owner.
+/// Region numbers are EDG table-mode values, not generic lifetime IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupReference {
+    DynamicInit(Option<u32>),
+    Region(u64),
+}
+
+/// Cleanup-state or initialization-completed payload keyed by the original
+/// retained action occurrence. No destructor plan is implied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEhCleanupState {
+    pub function: String,
+    pub statement_path: String,
+    pub role: u32,
+    pub path: String,
+    pub routine: crate::SymbolId,
+    pub reference: CleanupReference,
+}
+
+/// Require exactly one payload per cleanup action and the correct routine
+/// owner. Equal dynamic-init IDs in different routines are unrelated.
+pub fn validate_native_eh_cleanup_states(il: &Il) -> Result<(), Error> {
+    let names: HashMap<_, _> = il.routine_identities.iter()
+        .map(|r| (r.function.as_str(), r.routine)).collect();
+    let mut expected = HashMap::new();
+    for a in &il.native_retained_eh_constructs {
+        let kind = RetainedEhKind::from_native(a.subkind).ok_or(Error::MalformedCallback)?;
+        if !matches!(kind, RetainedEhKind::CleanupState |
+            RetainedEhKind::UnreachableCleanupState | RetainedEhKind::InitializationCompleted) {
+            continue;
+        }
+        let key = (a.function.as_str(), a.statement_path.as_str(), a.role, a.path.as_str());
+        if expected.insert(key, kind).is_some() {return Err(Error::MalformedCallback);}
+    }
+    for state in &il.native_eh_cleanup_states {
+        let key = (state.function.as_str(), state.statement_path.as_str(),
+                   state.role, state.path.as_str());
+        let kind = expected.remove(&key).ok_or(Error::MalformedCallback)?;
+        if names.get(state.function.as_str()) != Some(&state.routine) ||
+            matches!(state.reference, CleanupReference::DynamicInit(Some(0))) ||
+            (kind == RetainedEhKind::InitializationCompleted &&
+                !matches!(state.reference, CleanupReference::DynamicInit(Some(_)))) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    if !expected.is_empty() {return Err(Error::MalformedCallback);}
+    Ok(())
+}
