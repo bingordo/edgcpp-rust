@@ -7,11 +7,11 @@
 #include <vector>
 
 namespace edg_bridge {
-// Preorder, source sibling order, dense IDs, and a global admission budget.
+// Preorder, source sibling order, dense IDs, and representable wire IDs.
 // The stack holds only the next sibling of each active parent. A repeated
 // identity is malformed (cycle or shared child), not an omitted subtree.
 template<class Scope, class Children, class Next, class Visit>
-bool walk_scope_tree(Scope root, std::size_t limit, Children children,
+bool walk_scope_tree(Scope root, Children children,
                      Next next, Visit visit)
 {
   if (root == nullptr) return true;
@@ -22,7 +22,7 @@ bool walk_scope_tree(Scope root, std::size_t limit, Children children,
   Scope node = root;
   std::uint32_t parent = no_parent;
   while (node != nullptr) {
-    if (seen.size() >= limit || seen.size() >= no_parent ||
+    if (seen.size() >= no_parent ||
         !seen.insert(node).second) return false;
     const auto id = static_cast<std::uint32_t>(seen.size() - 1);
     if (!visit(node, id, parent)) return false;
@@ -50,15 +50,15 @@ bool walk_scope_tree(Scope root, std::size_t limit, Children children,
 // valid discovery aliases, but repeated nodes reached by child edges are not.
 // Local preorder IDs are translated into the forest's global ID space.
 template<class Scope, class IdMap, class Children, class Next, class Visit>
-bool walk_scope_forest_root(Scope root, std::size_t limit,
+bool walk_scope_forest_root(Scope root,
                             std::uint32_t parent, IdMap &ids,
                             Children children, Next next, Visit visit)
 {
   if (root == nullptr || ids.find(root) != ids.end()) return true;
   const auto none = std::numeric_limits<std::uint32_t>::max();
-  if (ids.size() >= limit || ids.size() >= none) return false;
+  if (ids.size() >= none) return false;
   const auto base = static_cast<std::uint32_t>(ids.size());
-  return walk_scope_tree(root, limit - base, children, next,
+  return walk_scope_tree(root, children, next,
       [&](Scope node, std::uint32_t local_id, std::uint32_t local_parent) {
         const bool child_edge = local_parent != none;
         if (local_id >= none - base) return false;
