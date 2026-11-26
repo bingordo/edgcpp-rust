@@ -27,6 +27,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let typed_with_rtti = handlers.iter()
         .filter(|h| h.parameter.is_some() && h.typeinfo.is_some()).count();
     println!("EDG_NATIVE_CATCH_METADATA typed={typed} catch_all={catch_all} typed_with_rtti={typed_with_rtti}");
+    use edgcpp::retained_eh::CleanupReference;
+    let owned: HashSet<_> = result.il.native_dynamic_init_identities.iter()
+        .map(|d| (d.routine,d.id)).collect();
+    let mut null=0;
+    let mut joined=0;
+    let mut unresolved=0;
+    let mut regions=0;
+    for state in &result.il.native_eh_cleanup_states {
+        match state.reference {
+            CleanupReference::DynamicInit(None)=>null+=1,
+            CleanupReference::DynamicInit(Some(id)) if owned.contains(&(state.routine,id))=>joined+=1,
+            CleanupReference::DynamicInit(Some(_))=>unresolved+=1,
+            CleanupReference::Region(_)=>regions+=1,
+        }
+    }
+    if null+joined+unresolved+regions==0 {
+        return Err("original EH fixture has no cleanup payloads".into());
+    }
+    println!("EDG_NATIVE_EH_CLEANUP null={null} joined={joined} unresolved={unresolved} regions={regions}");
     let actions = &result.il.native_retained_eh_constructs;
     if actions.is_empty() {
         return Err("original EDG translation unit exported no retained EH actions".into());
