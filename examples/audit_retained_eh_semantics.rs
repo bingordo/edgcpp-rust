@@ -19,6 +19,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if result.status != 0 {
         return Err(format!("EDG compilation failed: {}", result.status).into());
     }
+    edgcpp::retained_eh::validate_native_catch_handlers(&result.il)
+        .map_err(|e| format!("invalid native catch roster: {e:?}"))?;
+    let handlers = &result.il.native_catch_handlers;
+    let typed = handlers.iter().filter(|h| h.parameter.is_some()).count();
+    let catch_all = handlers.iter().filter(|h| h.parameter.is_none()).count();
+    let typed_with_rtti = handlers.iter()
+        .filter(|h| h.parameter.is_some() && h.typeinfo.is_some()).count();
+    println!("EDG_NATIVE_CATCH_METADATA typed={typed} catch_all={catch_all} typed_with_rtti={typed_with_rtti}");
     let actions = &result.il.native_retained_eh_constructs;
     if actions.is_empty() {
         return Err("original EDG translation unit exported no retained EH actions".into());
