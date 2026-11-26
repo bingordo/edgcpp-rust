@@ -1857,8 +1857,11 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
   // arbitrary constant pointers and temporary/global addresses remain
   // unsupported. This intentionally excludes string address comparisons
   // until source identity is modeled across all occurrences.
-  if (has_constant && type_id != 0 && node->type != nullptr &&
-      node->type->kind == tk_pointer &&
+  // A typedef changes the expression's TypeId, not its pointer layout.
+  // Keep the original TypeId in event 62 while inspecting canonical storage.
+  a_type_ptr literal_pointer_type=object_initializer_type(node->type);
+  if (has_constant && type_id != 0 && literal_pointer_type != nullptr &&
+      literal_pointer_type->kind == tk_pointer &&
       node->variant.constant.ptr->kind == ck_address) {
     const auto &address=node->variant.constant.ptr->variant.address;
     if (address.kind == abk_constant && address.offset == 0 &&
@@ -1867,9 +1870,9 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
         address.variant.constant != nullptr &&
         address.variant.constant->kind == ck_string) {
       a_constant_ptr original=address.variant.constant;
-      a_type_ptr array=original->type;
+      a_type_ptr array=object_initializer_type(original->type);
       a_type_ptr pointee=object_initializer_type(
-          node->type->variant.pointer.type);
+          literal_pointer_type->variant.pointer.type);
       a_type_ptr element=array!=nullptr && array->kind==tk_array
           ? object_initializer_type(array->variant.array.element_type)
           : nullptr;
