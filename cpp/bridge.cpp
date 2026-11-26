@@ -108,7 +108,6 @@ static void report_incomplete_snapshot()
 // Full object images are intentionally limited to 4 KiB until larger
 // layouts and relocation storage receive separate resource validation.
 static constexpr std::size_t MAX_NATIVE_AGGREGATE_IMAGE_BYTES = 4096;
-static constexpr unsigned MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS = 4096;
 // Count a native list independently of emitted records, without an arbitrary
 // length cutoff. Detect cycles before scanning; counts are wire u32 values.
 template<class Ptr,class Next>
@@ -1587,10 +1586,16 @@ static unsigned call_argument_offset(an_expr_node_ptr node)
 // Incomplete, dynamic, bitfield or unrecognized entries are rejected rather
 // than silently treating an unknown initializer as zero.
 static a_type_ptr object_initializer_type(a_type_ptr type) {
-  for (unsigned n = 0; n < 64 && type != nullptr &&
-       type->kind == tk_typeref; ++n) {
-    type = type->variant.typeref.type;
+  auto next=[](a_type_ptr t)->a_type_ptr {
+    return t!=nullptr && t->kind==tk_typeref?t->variant.typeref.type:nullptr;
+  };
+  auto slow=type,fast=type;
+  while (fast!=nullptr && next(fast)!=nullptr) {
+    slow=next(slow);
+    fast=next(next(fast));
+    if (slow!=nullptr && slow==fast) return nullptr;
   }
+  while (type!=nullptr && type->kind==tk_typeref) type=next(type);
   return type;
 }
 // Resolve each original EDG C typedef-qualified array element before
@@ -1714,18 +1719,20 @@ static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
 static_assert(!aggregate_subobject_fits(MAX_NATIVE_AGGREGATE_IMAGE_BYTES,
                                         std::numeric_limits<size_t>::max(), 1));
 
-// Follow consecutive EDG designators iteratively, rather than spending one
-// native C++ call frame (and one unrelated aggregate-initializer depth unit)
-// per selected field/element. The 4 KiB image bound is unchanged, and the
-// explicit visit bound rejects malformed/cyclic next links fail closed.
-static bool constant_designated_value(
+struct image_value {
+  a_constant_ptr value;
+  a_type_ptr type;
+  size_t offset;
+};
+
+// Consume the designator sequence within a prevalidated native sibling
+// list, returning one actual subobject or writing an admitted bitfield.
+static bool resolve_designated_value(
     a_constant_ptr &current, a_type_ptr original_type, size_t offset,
-    std::vector<uint8_t> &bytes, unsigned depth,
-    std::vector<NativeAggregateReloc> *relocations) {
+    std::vector<uint8_t> &bytes,image_value &result) {
+  result={nullptr,nullptr,0};
   if (current == nullptr || offset > bytes.size()) return false;
-  unsigned visits = 0;
   while (current != nullptr && current->kind == ck_designator) {
-    if (++visits > MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS) return false;
     a_type_ptr type = object_initializer_type(original_type);
     if (type == nullptr || current->variant.designator.is_generic)
       return false;
@@ -1734,6 +1741,9 @@ static bool constant_designated_value(
     if (current->variant.designator.is_field_designator) {
       if (type->kind != tk_struct && type->kind != tk_union) return false;
       a_field_ptr selected = current->variant.designator.variant.field;
+      std::size_t field_count=0;
+      if (!native_next_count(type->variant.class_struct_union.field_list,field_count))
+        return false;
       bool found = false;
       for (a_field_ptr f = type->variant.class_struct_union.field_list;
            f != nullptr; f = f->next) {
@@ -1768,60 +1778,13 @@ static bool constant_designated_value(
     current = current->next;
   }
   if (current == nullptr || offset > bytes.size()) return false;
-  // Only actual nested aggregate images retain the separate depth-32
-  // stack-safety policy in constant_initializer_image().
-  if (!constant_initializer_image(current, original_type, offset,
-                                  bytes, depth + 1, relocations)) return false;
-  current = current->next;
+  result={current,original_type,offset};
+  current=current->next;
   return true;
 }
-static bool constant_initializer_image(
-    a_constant_ptr value, a_type_ptr original_type, size_t offset,
-    std::vector<uint8_t> &bytes, unsigned depth,
+static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
+    size_t offset,std::vector<uint8_t> &bytes,
     std::vector<NativeAggregateReloc> *relocations) {
-  a_type_ptr type = object_initializer_type(original_type);
-  if (value == nullptr || type == nullptr || type->incomplete ||
-      type->size == 0 || depth > 32 || offset > bytes.size() ||
-      type->size > bytes.size() - offset) return false;
-  // A chain of singleton aggregate images does not require a C++ call
-  // frame per nested native record or one-element array. Consume only the
-  // unambiguous case: exactly one initialized member and exactly one
-  // eligible child, with no designator or repeat semantics to reinterpret.
-  // Branching aggregates still use the separately depth-bounded walker.
-  unsigned linear_visits = 0;
-  while (value->kind == ck_aggregate) {
-    a_constant_ptr child = value->variant.aggregate.first_constant;
-    if (child == nullptr || child->next != nullptr ||
-        child->kind == ck_designator || child->kind == ck_init_repeat)
-      break;
-    a_type_ptr element = nullptr;
-    size_t element_offset = offset;
-    if (type->kind == tk_struct) {
-      a_field_ptr field = type->variant.class_struct_union.field_list;
-      if (field == nullptr || field->next != nullptr ||
-          field->is_bit_field || field->offset_bit_remainder != 0)
-        break;
-      if (!aggregate_subobject_fits(bytes.size(), offset, field->offset))
-        return false;
-      element = field->type;
-      element_offset += static_cast<size_t>(field->offset);
-    } else if (type->kind == tk_array &&
-               !type->variant.array.is_variable_size_array &&
-               !type->variant.array.is_template_dependent_size_array &&
-               type->variant.array.variant.number_of_elements == 1) {
-      element = checked_native_array_element(type);
-    } else {
-      break;
-    }
-    if (++linear_visits > MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS)
-      return false;
-    type = object_initializer_type(element);
-    offset = element_offset;
-    value = child;
-    if (type == nullptr || type->incomplete || type->size == 0 ||
-        offset > bytes.size() || type->size > bytes.size() - offset)
-      return false;
-  }
   // A GNU C explicit cast from a source pointer into a native 64-bit
   // integer is still a symbolic address relocation, never host pointer bits.
   // EDG must independently retain the original pointer type and prove the
@@ -1958,94 +1921,153 @@ static bool constant_initializer_image(
     std::memcpy(bytes.data() + offset, value->variant.string.value, n);
     return true;
   }
-  if (value->kind != ck_aggregate) return false;
-  a_constant_ptr current = value->variant.aggregate.first_constant;
-  if (type->kind == tk_array) {
-    if (type->variant.array.is_variable_size_array ||
-        type->variant.array.is_template_dependent_size_array) return false;
-    a_type_ptr element = checked_native_array_element(type);
-    if (element == nullptr) return false;
-    uint64_t index = 0;
-    const uint64_t count = type->variant.array.variant.number_of_elements;
-    unsigned visits = 0;
-    while (current != nullptr && visits++ < MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS) {
-      if (current->kind == ck_init_repeat) {
-        // EDG compresses repeated array constants (often implicit zeros).
-        // Do not implement multidimensional designated range tails by guess.
+  return false;
+}
+// Native aggregate traversal is an ordered explicit DFS. Only active
+// ancestor constants are forbidden from reappearing; a repeat may reuse
+// the same constant at many disjoint target offsets.
+static bool constant_initializer_image(
+    a_constant_ptr value,a_type_ptr original_type,size_t offset,
+    std::vector<uint8_t> &bytes,unsigned /*depth*/,
+    std::vector<NativeAggregateReloc> *relocations) {
+  enum class phase {enter,array_items,record_items,repeat,leave};
+  struct frame {
+    image_value item;
+    phase step;
+    a_constant_ptr current;
+    a_type_ptr element;
+    a_field_ptr field;
+    uint64_t index,count,repeat_end;
+  };
+  std::vector<frame> stack;
+  std::unordered_set<a_constant_ptr> active;
+  auto push=[&](image_value item) {
+    if (item.value!=nullptr)
+      stack.push_back({item,phase::enter,nullptr,nullptr,nullptr,0,0,0});
+  };
+  push({value,original_type,offset});
+  if (stack.empty()) return false;
+  while (!stack.empty()) {
+    auto &work=stack.back();
+    const auto c=work.item.value;
+    auto type=work.item.type;
+    const auto base=work.item.offset;
+    switch (work.step) {
+    case phase::enter: {
+      type=object_initializer_type(type);
+      if (type==nullptr || type->incomplete || type->size==0 ||
+          base>bytes.size() || type->size>bytes.size()-base ||
+          !active.insert(c).second) return false;
+      work.item.type=type;
+      if (c->kind!=ck_aggregate) {
+        if (!write_initializer_leaf(c,type,base,bytes,relocations)) return false;
+        active.erase(c);
+        stack.pop_back();
+        break;
+      }
+      work.current=c->variant.aggregate.first_constant;
+      std::size_t native_count=0;
+      if (!native_next_count(work.current,native_count)) return false;
+      if (type->kind==tk_array) {
+        work.element=checked_native_array_element(type);
+        if (work.element==nullptr) return false;
+        work.count=type->variant.array.variant.number_of_elements;
+        work.step=phase::array_items;
+      } else if (type->kind==tk_struct || type->kind==tk_union) {
+        work.field=type->variant.class_struct_union.field_list;
+        if (!native_next_count(work.field,native_count)) return false;
+        work.step=phase::record_items;
+      } else return false;
+      break;
+    }
+    case phase::array_items: {
+      auto current=work.current;
+      if (current==nullptr) {work.step=phase::leave;break;}
+      if (current->kind==ck_init_repeat) {
         const auto &repeat=current->variant.init_repeat;
-        if (repeat.count==0 || repeat.count>count-index ||
+        if (work.index>work.count || repeat.count==0 ||
+            repeat.count>work.count-work.index ||
             repeat.multidimensional_aggr_tail_not_repeated ||
             repeat.constant==nullptr) return false;
-        for (uint64_t r=0; r<repeat.count; ++r) {
-          const uint64_t element_index=index+r;
-          if (element_index >= count ||
-              element_index > (bytes.size()-offset)/element->size) return false;
-          if (!constant_initializer_image(repeat.constant,element,
-                 offset+static_cast<size_t>(element_index*element->size),
-                 bytes,depth+1,relocations)) return false;
-        }
-        index+=repeat.count;
-        current=current->next;
-        continue;
+        work.repeat_end=work.index+repeat.count;
+        work.step=phase::repeat;
+        break;
       }
-      if (current->kind == ck_designator) {
+      image_value child{nullptr,nullptr,0};
+      if (current->kind==ck_designator) {
         if (current->variant.designator.is_generic ||
             current->variant.designator.is_field_designator) return false;
-        index = current->variant.designator.variant.array_element;
-        if (index >= count) return false;
-        if (!constant_designated_value(current, type, offset, bytes,
-                                       depth + 1, relocations)) return false;
-      } else {
-        if (index >= count || index > (bytes.size() - offset) / element->size)
+        work.index=current->variant.designator.variant.array_element;
+        if (work.index>=work.count ||
+            !resolve_designated_value(work.current,type,base,bytes,child))
           return false;
-        if (!constant_designated_value(current, element,
-                         offset + static_cast<size_t>(index * element->size),
-                         bytes, depth + 1, relocations)) return false;
+      } else {
+        if (work.index>=work.count ||
+            work.index>(bytes.size()-base)/work.element->size ||
+            !resolve_designated_value(work.current,work.element,
+                base+static_cast<size_t>(work.index*work.element->size),
+                bytes,child)) return false;
       }
-      ++index;
+      ++work.index;
+      push(child);
+      break;
     }
-    return current == nullptr;
-  }
-  if (type->kind == tk_struct || type->kind == tk_union) {
-    a_field_ptr field = type->variant.class_struct_union.field_list;
-    unsigned visits = 0;
-    while (current != nullptr && visits++ < MAX_NATIVE_AGGREGATE_INITIALIZER_VISITS) {
-      if (current->kind == ck_designator) {
+    case phase::repeat: {
+      if (work.index==work.repeat_end) {
+        work.current=work.current->next;
+        work.step=phase::array_items;
+        break;
+      }
+      if (work.index>=work.count ||
+          work.index>(bytes.size()-base)/work.element->size) return false;
+      image_value child{work.current->variant.init_repeat.constant,work.element,
+                         base+static_cast<size_t>(work.index*work.element->size)};
+      ++work.index;
+      push(child);
+      break;
+    }
+    case phase::record_items: {
+      auto current=work.current;
+      if (current==nullptr) {work.step=phase::leave;break;}
+      image_value child{nullptr,nullptr,0};
+      if (current->kind==ck_designator) {
         if (current->variant.designator.is_generic ||
             !current->variant.designator.is_field_designator) return false;
-        field = current->variant.designator.variant.field;
-        bool valid = false;
-        for (a_field_ptr f = type->variant.class_struct_union.field_list;
-             f != nullptr; f = f->next)
-          if (field == f) {valid = true; break;}
-        if (!valid) return false;
-        if (!constant_designated_value(current, type, offset, bytes,
-                                       depth + 1, relocations)) return false;
+        work.field=current->variant.designator.variant.field;
+        bool valid=false;
+        for (auto field=type->variant.class_struct_union.field_list;
+             field!=nullptr;field=field->next)
+          if (field==work.field) {valid=true;break;}
+        if (!valid || !resolve_designated_value(work.current,type,base,bytes,child))
+          return false;
       } else {
-        if (field == nullptr) return false;
-        if (field->is_bit_field) {
-          if (!pack_constant_bitfield(current,field,offset,bytes))
-            return false;
-          current=current->next;
+        if (work.field==nullptr) return false;
+        if (work.field->is_bit_field) {
+          if (!pack_constant_bitfield(current,work.field,base,bytes)) return false;
+          work.current=current->next;
         } else {
-          if (field->offset_bit_remainder != 0) return false;
-          if (!aggregate_subobject_fits(bytes.size(), offset, field->offset) ||
-              !constant_designated_value(current, field->type,
-                                         offset + static_cast<size_t>(field->offset),
-                                         bytes, depth + 1, relocations))
+          if (work.field->offset_bit_remainder!=0 ||
+              !aggregate_subobject_fits(bytes.size(),base,work.field->offset) ||
+              !resolve_designated_value(work.current,work.field->type,
+                base+static_cast<size_t>(work.field->offset),bytes,child))
             return false;
         }
       }
-      if (type->kind == tk_union) {
-        // One active member, except explicit designators with their own
-        // native subobject identity. Do not infer union member overlap.
-        if (current != nullptr && current->kind != ck_designator) return false;
-      }
-      field = field != nullptr ? field->next : nullptr;
+      // An explicit designator may name a union member; otherwise
+      // only one active member is admitted.
+      if (type->kind==tk_union && work.current!=nullptr &&
+          work.current->kind!=ck_designator) return false;
+      work.field=work.field!=nullptr?work.field->next:nullptr;
+      push(child);
+      break;
     }
-    return current == nullptr;
+    case phase::leave:
+      active.erase(c);
+      stack.pop_back();
+      break;
+    }
   }
-  return false;
+  return true;
 }
 static bool aggregate_initializer_image(
     a_constant_ptr root, a_type_ptr type, std::string &encoded,
