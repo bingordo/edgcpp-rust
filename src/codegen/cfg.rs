@@ -3955,6 +3955,80 @@ struct LoopTargets<'a> {
     saw_break: &'a Cell<bool>,
     saw_continue: &'a Cell<bool>,
 }
+// A code-size heuristic, not an admission limit. Small objects use
+// straight-line stores; larger objects use one counted word-copy/fill
+// loop and a constant-sized tail. No dependency on libc is introduced.
+fn use_bulk_initializer(bytes:usize)->bool { bytes>=64 }
+
+type LocalImageValues<'a> = HashMap<&'a [u8],cranelift_codegen::ir::GlobalValue>;
+
+fn local_constant_images(body:&[Stmt])->HashSet<&[u8]> {
+    let mut images=HashSet::new();
+    let mut pending=vec![body];
+    while let Some(chunk)=pending.pop() {
+        for stmt in chunk {
+            match stmt {
+                Stmt::InitializeAggregate(_,bytes) if use_bulk_initializer(bytes.len()) => {
+                    images.insert(bytes.as_slice());
+                }
+                Stmt::If(_,yes,no)=>{pending.push(yes);pending.push(no);}
+                Stmt::While(_,body)|Stmt::DoWhile(body,_)|Stmt::Switch(_,body)=>{
+                    pending.push(body);
+                }
+                Stmt::For{init,body,increment,..}=>{
+                    pending.push(init);pending.push(body);pending.push(increment);
+                }
+                _=>{}
+            }
+        }
+    }
+    images
+}
+
+fn emit_local_image(
+    fb:&mut FunctionBuilder<'_>,base:cranelift_codegen::ir::Value,
+    size:usize,bytes:Option<&[u8]>,source:Option<cranelift_codegen::ir::Value>,
+) {
+    let mut offset=0;
+    if use_bulk_initializer(size) {
+        let bulk=size & !7;
+        let loop_block=fb.create_block();
+        let done=fb.create_block();
+        fb.append_block_param(loop_block,types::I64);
+        let start=fb.ins().iconst(types::I64,0);
+        fb.ins().jump(loop_block,&[start.into()]);
+        fb.switch_to_block(loop_block);
+        let index=fb.block_params(loop_block)[0];
+        let dest=fb.ins().iadd(base,index);
+        let value=if let Some(src)=source {
+            let addr=fb.ins().iadd(src,index);
+            fb.ins().load(types::I64,MemFlags::new(),addr,0)
+        } else {fb.ins().iconst(types::I64,0)};
+        fb.ins().store(MemFlags::new(),value,dest,0);
+        let next=fb.ins().iadd_imm(index,8);
+        let more=fb.ins().icmp_imm(IntCC::UnsignedLessThan,next,bulk as i64);
+        fb.ins().brif(more,loop_block,&[next.into()],done,&[]);
+        fb.seal_block(loop_block);
+        fb.switch_to_block(done);
+        fb.seal_block(done);
+        offset=bulk;
+    }
+    while offset<size {
+        let remaining=size-offset;
+        let width=if remaining>=8 {8} else if remaining>=4 {4}
+            else if remaining>=2 {2} else {1};
+        let mut raw=[0u8;8];
+        if let Some(bytes)=bytes {
+            raw[..width].copy_from_slice(&bytes[offset..offset+width]);
+        }
+        let value=fb.ins().iconst(types::I64,u64::from_le_bytes(raw) as i64);
+        let addr=if offset==0 {base} else {fb.ins().iadd_imm(base,offset as i64)};
+        let ty=CAbiInt{bits:(width*8) as u8,signed:false,is_bool:false};
+        super::memory::store_integer(fb,addr,value,ty);
+        offset+=width;
+    }
+}
+
 fn emit_body(
     stmts: &[Stmt], fb: &mut FunctionBuilder<'_>,
     args: &[cranelift_codegen::ir::Value], vars: &[Variable],
@@ -3963,6 +4037,7 @@ fn emit_body(
     globals: &GlobalValues,stack:&HashMap<usize,StackSlot>,
     calls: &CallValues, labels:&HashMap<crate::SymbolId,Block>,
     switch_break:Option<Block>,
+    images:&LocalImageValues,
 ) -> Result<bool, CodegenError> {
     let mut live = true;
     for stmt in stmts {
@@ -3996,7 +4071,7 @@ fn emit_body(
                 for (i,(_,chunk)) in cases.iter().enumerate() {
                     fb.switch_to_block(blocks[i]);
                     let arm_live=emit_body(chunk,fb,args,vars,outer,local_types,
-                        result,globals,stack,calls,labels,Some(exit))?;
+                        result,globals,stack,calls,labels,Some(exit),images)?;
                     if arm_live {
                         let target=blocks.get(i+1).copied().unwrap_or(exit);
                         fb.ins().jump(target,&[]);
@@ -4044,40 +4119,19 @@ fn emit_body(
                     return Err(invalid("aggregate native image cannot be represented by a Cranelift stack slot"));
                 }
                 let base=local_address(fb,stack,*index)?;
-                let mut offset=0usize;
-                while offset<bytes.len() {
-                    let remaining=bytes.len()-offset;
-                    let width=if remaining>=8 {8} else if remaining>=4 {4}
-                        else if remaining>=2 {2} else {1};
-                    let mut raw=[0u8;8];
-                    raw[..width].copy_from_slice(&bytes[offset..offset+width]);
-                    let value=fb.ins().iconst(types::I64,u64::from_le_bytes(raw) as i64);
-                    let address=if offset==0 {base} else {
-                        fb.ins().iadd_imm(base,offset as i64)
-                    };
-                    let ty=CAbiInt{bits:(width*8) as u8,signed:false,is_bool:false};
-                    super::memory::store_integer(fb,address,value,ty);
-                    offset+=width;
-                }
+                let source=if use_bulk_initializer(bytes.len()) {
+                    let image=images.get(bytes.as_slice())
+                        .ok_or_else(||invalid("missing local constant image"))?;
+                    Some(fb.ins().global_value(types::I64,*image))
+                } else {None};
+                emit_local_image(fb,base,bytes.len(),Some(bytes),source);
             }
             Stmt::ZeroAggregate(index,bytes) => {
                 if !valid_zero_aggregate_bytes(u64::from(*bytes)) {
                     return Err(invalid("aggregate zero initialization too large"));
                 }
                 let base=local_address(fb,stack,*index)?;
-                let zero=fb.ins().iconst(types::I64,0);
-                let mut offset=0u32;
-                while offset<*bytes {
-                    let remaining=*bytes-offset;
-                    let width=if remaining>=8 {8} else if remaining>=4 {4}
-                        else if remaining>=2 {2} else {1};
-                    let address=if offset==0 {base} else {
-                        fb.ins().iadd_imm(base,i64::from(offset))
-                    };
-                    let ty=CAbiInt{bits:(width*8) as u8,signed:false,is_bool:false};
-                    super::memory::store_integer(fb,address,zero,ty);
-                    offset+=width;
-                }
+                emit_local_image(fb,base,*bytes as usize,None,None);
             }
             Stmt::Store(i,e) => {
                 let v = emit_expr(e,fb,args,vars,globals,stack,local_types,calls)?;
@@ -4122,7 +4176,7 @@ fn emit_body(
                 fb.seal_block(t);
                 fb.seal_block(f);
                 fb.switch_to_block(t);
-                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)?;
+                let t_live = emit_body(yes,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break,images)?;
                 let mut merge = None;
                 if t_live {
                     let m = fb.create_block();
@@ -4130,7 +4184,7 @@ fn emit_body(
                     merge = Some(m);
                 }
                 fb.switch_to_block(f);
-                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)?;
+                let f_live = emit_body(no,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break,images)?;
                 if f_live {
                     let m = if let Some(m) = merge { m } else {
                         let m = fb.create_block();
@@ -4161,7 +4215,7 @@ fn emit_body(
                     break_to: exit, continue_to: head,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)? {
+                if emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break,images)? {
                     fb.ins().jump(head,&[]);
                 }
                 // Backedges and break edges are complete.
@@ -4170,7 +4224,7 @@ fn emit_body(
                 fb.switch_to_block(exit);
             }
             Stmt::For { init, condition, increment, body } => {
-                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break)? {
+                if !emit_body(init,fb,args,vars,outer,local_types,result,globals,stack,calls,labels,switch_break,images)? {
                     live = false;
                     continue;
                 }
@@ -4195,12 +4249,12 @@ fn emit_body(
                     break_to: exit, continue_to: step,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break,images)?;
                 if body_live { fb.ins().jump(step, &[]); }
                 fb.seal_block(step);
                 if body_live || saw_continue.get() {
                     fb.switch_to_block(step);
-                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)? {
+                    if emit_body(increment,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break,images)? {
                         fb.ins().jump(head, &[]);
                     }
                 }
@@ -4224,7 +4278,7 @@ fn emit_body(
                     break_to: exit, continue_to: test_block,
                     saw_break: &saw_break, saw_continue: &saw_continue,
                 };
-                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break)?;
+                let body_live = emit_body(body,fb,args,vars,Some(targets),local_types,result,globals,stack,calls,labels,switch_break,images)?;
                 if body_live { fb.ins().jump(test_block, &[]); }
                 fb.seal_block(test_block);
                 if body_live || saw_continue.get() {
@@ -4531,6 +4585,22 @@ fn emit_routines_with_globals(
         }).collect::<Result<HashMap<_,_>,CodegenError>>()?;
         let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty,access))|
             (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty,*access))).collect();
+        let mut image_values=LocalImageValues::new();
+        // Sort content before assigning anonymous object identities to keep
+        // the generated object deterministic across randomized hash seeds.
+        let mut images:Vec<_>=local_constant_images(&func.body).into_iter().collect();
+        images.sort_unstable();
+        for bytes in images {
+            let id=module.declare_anonymous_data(false,false)
+                .map_err(|e|CodegenError::Backend(e.to_string()))?;
+            let mut data=cranelift_module::DataDescription::new();
+            data.set_align(8);
+            data.define(bytes.to_vec().into_boxed_slice());
+            module.define_data(id,&data)
+                .map_err(|e|CodegenError::Backend(e.to_string()))?;
+            let value=module.declare_data_in_func(id,&mut context.func);
+            image_values.insert(bytes,value);
+        }
         let mut fb_context = FunctionBuilderContext::new();
         {
             let mut fb = FunctionBuilder::new(&mut context.func,&mut fb_context);
@@ -4637,7 +4707,7 @@ fn emit_routines_with_globals(
             }
             let body = emit_body(
                 &func.body, &mut fb, &params, &vars, None, &local_types, abi.result,
-                &global_values,&stack,&call_values,&labels,None)?;
+                &global_values,&stack,&call_values,&labels,None,&image_values)?;
             if body {
                 if abi.result.is_none() {
                     fb.ins().return_(&[]);
@@ -5069,6 +5139,34 @@ mod tests {
         assert_eq!(&obj[..4],b"\x7fELF");
         assert!(check(&[Stmt::ZeroAggregate(0,4097)],
             &mut HashSet::new(),0,1,0).is_ok());
+    }
+    #[test]
+    fn bulk_local_images_have_small_code_and_exact_tail() {
+        let size=65_541usize;
+        let bytes:Vec<u8>=(0..size).map(|i|((i%251)+1) as u8).collect();
+        let load=|index:usize| Expr::LoadAddress(
+            CAbiInt{bits:8,signed:false,is_bool:false},
+            Box::new(Expr::Add(Box::new(Expr::AddressLocal(0)),
+                               Box::new(Expr::Constant(index as i64)))));
+        let positions=[0,7,8,64,size/2,size-6,size-5,size-2,size-1];
+        let sum=||positions.iter().copied().map(load).reduce(|a,b|
+            Expr::Add(Box::new(a),Box::new(b))).unwrap();
+        let routine=|name:&str,body:Vec<Stmt>| Routine {
+            name:name.into(),parameters:0,locals:1,body,abi:None,
+            local_types:None,local_storage:Some(vec![size as u32]),
+            local_alignments:Some(vec![1]),parameter_accesses:vec![],
+        };
+        let obj=emit_routines(&[
+            routine("bulk_copy",vec![Stmt::InitializeAggregate(0,bytes.clone()),Stmt::Return(sum())]),
+            routine("bulk_zero",vec![Stmt::InitializeAggregate(0,bytes),
+                Stmt::ZeroAggregate(0,size as u32),Stmt::Return(sum())]),
+        ]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        // Two data blobs plus ordinary object overhead are sufficient.
+        assert!(obj.len()<2*size+16_384,"unexpected object size {}",obj.len());
+        if let Some(path)=std::env::var_os("EDG_BULK_IMAGE_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
     }
     #[test]
     fn rejects_nondefinite_local_initialization() {
