@@ -255,3 +255,99 @@ pub fn validate_native_eh_cleanup_states(il: &Il) -> Result<(), Error> {
     if !expected.is_empty() {return Err(Error::MalformedCallback);}
     Ok(())
 }
+
+/// Original native try supplement (position=None) or handler (position=Some).
+/// IDs are routine-local and disjoint from the dynamic-init namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEhOwner {
+    pub function: String,
+    pub statement_path: String,
+    pub routine: crate::SymbolId,
+    pub position: Option<u32>,
+    pub id: u32,
+    pub initialization: Option<u32>,
+}
+
+/// Original EH action union pointer. For function entry/exit the target is
+/// a routine symbol; for catch/try actions it is a routine-local owner ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEhActionTarget {
+    pub function: String,
+    pub statement_path: String,
+    pub role: u32,
+    pub path: String,
+    pub routine: crate::SymbolId,
+    pub target: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EhTargetCoverage {
+    pub handlers: usize,
+    pub tries: usize,
+    pub routines: usize,
+    /// A real native pointer without an exported primary-statement owner.
+    /// This must not authorize executable lowering.
+    pub unresolved: usize,
+}
+
+/// Cross-check owners against independent try/handler records and require
+/// exactly one correctly typed target for each pointer-bearing action.
+/// A missing owner is retained as unresolved, never inferred lexically.
+pub fn validate_native_eh_action_targets(il: &Il) -> Result<EhTargetCoverage, Error> {
+    let names: HashMap<_, _> = il.routine_identities.iter()
+        .map(|r| (r.function.as_str(), r.routine)).collect();
+    let symbols: HashMap<_, _> = il.symbols.iter().map(|s| (s.id, s.kind)).collect();
+    let mut tries: HashMap<_, _> = il.native_try_handler_counts.iter()
+        .map(|t| ((t.function.as_str(), t.statement_path.as_str()), t.count)).collect();
+    let mut handlers: HashMap<_, _> = il.native_catch_handlers.iter()
+        .map(|h| ((h.function.as_str(),h.statement_path.as_str(),h.position),h.has_initialization)).collect();
+    let mut owners = HashMap::new();
+    for o in &il.native_eh_owners {
+        let key=(o.function.as_str(),o.statement_path.as_str());
+        if names.get(key.0)!=Some(&o.routine) || o.id==0 ||
+            o.initialization==Some(0) ||
+            owners.insert((o.routine,o.id),o.position.is_some()).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+        match o.position {
+            Some(position) if handlers.remove(&(key.0,key.1,position))==Some(o.initialization.is_some()) => {}
+            None if tries.remove(&key).is_some() && o.initialization.is_none() => {}
+            _=>return Err(Error::MalformedCallback),
+        }
+    }
+    if !handlers.is_empty() || tries.values().any(|&count|count!=0) {
+        return Err(Error::MalformedCallback);
+    }
+    let mut expected=HashMap::new();
+    for a in &il.native_retained_eh_constructs {
+        let kind=RetainedEhKind::from_native(a.subkind).ok_or(Error::MalformedCallback)?;
+        if matches!(kind,RetainedEhKind::CaughtObjectAddress | RetainedEhKind::CatchEpilogue |
+            RetainedEhKind::TryEpilogue | RetainedEhKind::FunctionPrologue | RetainedEhKind::FunctionEpilogue) &&
+            expected.insert((a.function.as_str(),a.statement_path.as_str(),a.role,a.path.as_str()),kind).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut coverage=EhTargetCoverage::default();
+    for t in &il.native_eh_action_targets {
+        let key=(t.function.as_str(),t.statement_path.as_str(),t.role,t.path.as_str());
+        let kind=expected.remove(&key).ok_or(Error::MalformedCallback)?;
+        if names.get(key.0)!=Some(&t.routine) || t.target==0 {return Err(Error::MalformedCallback);}
+        match kind {
+            RetainedEhKind::FunctionPrologue | RetainedEhKind::FunctionEpilogue => {
+                if symbols.get(&crate::SymbolId(t.target))!=Some(&1) {return Err(Error::MalformedCallback);}
+                coverage.routines+=1;
+            }
+            _=>{
+                let handler=kind!=RetainedEhKind::TryEpilogue;
+                match owners.get(&(t.routine,t.target)) {
+                    Some(&actual) if actual!=handler=>return Err(Error::MalformedCallback),
+                    Some(_) if handler=>coverage.handlers+=1,
+                    Some(_)=>coverage.tries+=1,
+                    None=>coverage.unresolved+=1,
+                }
+            }
+        }
+    }
+    if !expected.is_empty() {return Err(Error::MalformedCallback);}
+    Ok(coverage)
+}

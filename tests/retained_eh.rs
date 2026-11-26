@@ -141,3 +141,38 @@ fn cleanup_payload_is_required_and_routine_scoped() {
     il.native_eh_cleanup_states.push(state);
     assert!(validate_native_eh_cleanup_states(&il).is_err());
 }
+
+#[test]
+fn action_targets_join_native_owners_not_lexical_paths() {
+    use edgcpp::{RoutineIdentity, SymbolId, NativeTryHandlerCount,
+        retained_eh::{NativeCatchHandler, NativeEhOwner, NativeEhActionTarget,
+            validate_native_eh_action_targets}};
+    let Some(kind)=raw(8,1) else {return};
+    let subkind=raw(7,1).expect("caught object");
+    let mut il=Il::default();
+    il.routine_identities.push(RoutineIdentity {routine:SymbolId(1),function:"f".into()});
+    il.native_try_handler_counts.push(NativeTryHandlerCount {
+        function:"f".into(),statement_path:"try-owner".into(),count:1,
+    });
+    il.native_catch_handlers.push(NativeCatchHandler {
+        function:"f".into(),statement_path:"try-owner".into(),position:0,
+        parameter:None,parameter_type:None,typeinfo:None,has_initialization:false,function_try:false,
+    });
+    let owner=NativeEhOwner {function:"f".into(),statement_path:"try-owner".into(),
+        routine:SymbolId(1),position:None,id:1,initialization:None};
+    il.native_eh_owners.push(owner.clone());
+    il.native_eh_owners.push(NativeEhOwner {position:Some(0),id:2,..owner});
+    il.native_retained_eh_constructs.push(action(kind,subkind,0));
+    assert!(validate_native_eh_action_targets(&il).is_err());
+    let target=NativeEhActionTarget {function:"f".into(),statement_path:"s".into(),role:0,
+        path:"0".into(),routine:SymbolId(1),target:2};
+    il.native_eh_action_targets.push(target.clone());
+    assert_eq!(validate_native_eh_action_targets(&il).unwrap().handlers,1);
+    il.native_eh_action_targets[0].target=1;
+    assert!(validate_native_eh_action_targets(&il).is_err());
+    il.native_eh_action_targets[0].target=99;
+    assert_eq!(validate_native_eh_action_targets(&il).unwrap().unresolved,1);
+    il.native_eh_action_targets[0]=target.clone();
+    il.native_eh_action_targets.push(target);
+    assert!(validate_native_eh_action_targets(&il).is_err());
+}

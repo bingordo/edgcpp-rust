@@ -116,6 +116,8 @@ pub struct Il {
     pub native_catch_handlers: Vec<retained_eh::NativeCatchHandler>,
     /// Native cleanup-state union payloads; not executable cleanup plans.
     pub native_eh_cleanup_states: Vec<retained_eh::NativeEhCleanupState>,
+    pub native_eh_owners: Vec<retained_eh::NativeEhOwner>,
+    pub native_eh_action_targets: Vec<retained_eh::NativeEhActionTarget>,
     /// Native flags retained for each emitted statement.
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
@@ -1820,6 +1822,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         114 => Some(il.native_supplemental_block_nodes.len()),
         115 => Some(il.native_catch_handlers.len()),
         116 => Some(il.native_eh_cleanup_states.len()),
+        117 => Some(il.native_eh_owners.len()),
+        118 => Some(il.native_eh_action_targets.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2039,6 +2043,31 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
+            });
+        }
+        117 => {
+            let (Some(function),Some(statement_path),Some(routine),Some(id))=
+                (t(0),t(1),n(2),n(4)) else {return;};
+            let routine=SymbolId(routine);
+            let position=n(3);
+            let initialization=n(5);
+            if function.is_empty() || statement_path.is_empty() || id==0 ||
+                !seen.symbols.contains(&routine) ||
+                (fields[3].present() && position.is_none()) ||
+                (fields[5].present() && (initialization.is_none() || initialization==Some(0))) ||
+                (position.is_none() && initialization.is_some()) {return;}
+            output.native_eh_owners.push(retained_eh::NativeEhOwner {
+                function,statement_path,routine,position,id,initialization,
+            });
+        }
+        118 => {
+            let (Some(function),Some(statement_path),Some(role),Some(path),Some(routine),Some(target))=
+                (t(0),t(1),n(2),t(3),n(4),n(5)) else {return;};
+            let routine=SymbolId(routine);
+            if function.is_empty() || statement_path.is_empty() || path.is_empty() ||
+                role>4 || target==0 || !seen.symbols.contains(&routine) {return;}
+            output.native_eh_action_targets.push(retained_eh::NativeEhActionTarget {
+                function,statement_path,role,path,routine,target,
             });
         }
         116 => {
@@ -4969,6 +4998,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        retained_eh::checked_retained_eh_actions(il).is_err() ||
        retained_eh::validate_native_catch_handlers(il).is_err() ||
        retained_eh::validate_native_eh_cleanup_states(il).is_err() ||
+       retained_eh::validate_native_eh_action_targets(il).is_err() ||
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||
