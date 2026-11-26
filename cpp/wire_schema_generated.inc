@@ -49,6 +49,7 @@ enum : uint32_t {
   RECORD_NATIVE_CONSTRUCTOR_INIT_PROVENANCE = 108,
   RECORD_NATIVE_CTOR_CONSTANT_ROOT = 109,
   RECORD_NATIVE_CTOR_CONSTANT_NODE = 110,
+  RECORD_NATIVE_DYNAMIC_INIT_IDENTITY = 111,
 };
 
 // Validate field tags before emitting typed native wire records.
@@ -1148,6 +1149,16 @@ static bool wire_record_field_tags_valid(
   }
   case 110: {
     const uint8_t masks[] = {4, 4, 2, 3, 4, 5, 4, 4, 13, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 111: {
+    const uint8_t masks[] = {4, 4, 4, 3, 5, 4, 4, 4, 5, 5, 4};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
