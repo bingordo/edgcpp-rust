@@ -4889,8 +4889,10 @@ fn validate_supplemental_block_graph(il:&Il)->Result<(),Error> {
         }
         if n.category==1 {
             let required:&[&str]=match graph::native_statement_kind(n.kind) {
-                2=>&["block"], 7=>&["then","else"], 8|10=>&["body"],
-                9=>&["init","body","increment"], _=>&[],
+                2=>&["block"], 3|17|20|21=>&["then","else"], 7|8|13=>&["body"],
+                9=>&["init","body","increment"],
+                18=>&["init","body","range-test","range-increment"],
+                19=>&["try"], _=>&[],
             };
             if required.iter().any(|e|!edges.contains(e)) {return Err(Error::MalformedCallback);}
         }
