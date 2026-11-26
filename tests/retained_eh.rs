@@ -75,3 +75,43 @@ fn internal_try_requires_both_ordered_children() {
     il.expressions[2].path = "0.2".into();
     assert!(checked_retained_eh_actions(&il).is_err());
 }
+
+#[test]
+fn catch_roster_preserves_order_and_rejects_missing_and_invalid_metadata() {
+    use edgcpp::{NativeTryHandlerCount, Symbol, SymbolId, SymbolType, TypeDef, TypeId,
+        retained_eh::{NativeCatchHandler, validate_native_catch_handlers}};
+    let mut il = Il::default();
+    il.native_try_handler_counts.push(NativeTryHandlerCount {
+        function: "f".into(), statement_path: "s".into(), count: 2,
+    });
+    il.types.push(TypeDef { id: TypeId(1), kind: 0, related_role: None, related: None });
+    for id in [SymbolId(1), SymbolId(2)] {
+        il.symbols.push(Symbol { id, kind: 2, name: "v".into() });
+        il.symbol_types.push(SymbolType { symbol: id, ty: TypeId(1) });
+    }
+    let typed = NativeCatchHandler {
+        function: "f".into(), statement_path: "s".into(), position: 0,
+        parameter: Some(SymbolId(1)), parameter_type: Some(TypeId(1)),
+        typeinfo: Some(SymbolId(2)), has_initialization: true, function_try: false,
+    };
+    let all = NativeCatchHandler {
+        position: 1, parameter: None, parameter_type: None, typeinfo: None,
+        has_initialization: false, ..typed.clone()
+    };
+    assert!(validate_native_catch_handlers(&il).is_err());
+    il.native_catch_handlers.push(typed.clone());
+    assert!(validate_native_catch_handlers(&il).is_err());
+    il.native_catch_handlers.push(all.clone());
+    validate_native_catch_handlers(&il).unwrap();
+    il.native_catch_handlers.push(all.clone());
+    assert!(validate_native_catch_handlers(&il).is_err());
+    il.native_catch_handlers.pop();
+    il.native_catch_handlers[0].parameter_type = Some(TypeId(2));
+    assert!(validate_native_catch_handlers(&il).is_err());
+    il.native_catch_handlers[0] = typed.clone();
+    il.native_catch_handlers[0].typeinfo = Some(SymbolId(99));
+    assert!(validate_native_catch_handlers(&il).is_err());
+    il.native_catch_handlers[0] = typed;
+    il.native_catch_handlers[1] = NativeCatchHandler { position: 0, ..all };
+    assert!(validate_native_catch_handlers(&il).is_err());
+}
