@@ -1,4 +1,4 @@
-/* A 4104-byte initializer must remain unsupported under the 4 KiB cap. */
+/* A 4104-byte initializer with 513 valid pointer relocations. */
 int audit_reloc_target_513 = 37;
 int *audit_many_relocs_513[513] = {
     &audit_reloc_target_513, /* 0 */
