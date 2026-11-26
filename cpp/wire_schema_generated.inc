@@ -1138,7 +1138,7 @@ static bool wire_record_field_tags_valid(
     return true;
   }
   case 109: {
-    const uint8_t masks[] = {4, 4, 4};
+    const uint8_t masks[] = {4, 4, 4, 4, 3, 3};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
@@ -1148,7 +1148,7 @@ static bool wire_record_field_tags_valid(
     return true;
   }
   case 110: {
-    const uint8_t masks[] = {4, 4, 2, 3, 4, 5, 4, 4, 13, 4};
+    const uint8_t masks[] = {4, 4, 2, 3, 4, 5, 4, 4, 13, 4, 4, 3, 3};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
