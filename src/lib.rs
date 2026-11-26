@@ -97,6 +97,9 @@ pub struct Il {
     pub native_constructor_root_admissions: Vec<NativeConstructorRootAdmission>,
     /// Native dynamic-init versus legacy source-expression ownership.
     pub native_constructor_init_provenance: Vec<NativeConstructorInitProvenance>,
+    /// Original constructor-owned constant roots and structural nodes.
+    pub native_ctor_constant_roots: Vec<NativeCtorConstantRoot>,
+    pub native_ctor_constant_nodes: Vec<NativeCtorConstantNode>,
     /// Independent EDG-derived counts for native statement sibling lists.
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
@@ -801,6 +804,25 @@ pub struct NativeConstructorInitProvenance {
     pub source_is_executable_root:bool,
     pub selected_root:u32,
 }
+
+/// Independent constant-root presence for one native constructor owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCtorConstantRoot {
+    pub routine:SymbolId, pub position:u32, pub present:bool,
+}
+
+/// Structural constant node. Repeat/designator nodes retain their own
+/// native identities, not an expanded byte image; absent leaf payloads
+/// and nested dynamic-init discriminants do not authorize execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCtorConstantNode {
+    pub routine:SymbolId, pub position:u32, pub path:String,
+    pub parent:Option<String>, pub kind:u32, pub ty:Option<TypeId>,
+    pub family:u32, pub child_count:u32,
+    pub payload:Option<NativeCtorConstantPayload>, pub flags:u32,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCtorConstantPayload { Unsigned(u64), Signed(i64) }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeControlChildCount {
@@ -1726,6 +1748,8 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         106 => Some(il.native_retained_eh_constructs.len()),
         107 => Some(il.native_expression_variants.len()),
         108 => Some(il.native_constructor_init_provenance.len()),
+        109 => Some(il.native_ctor_constant_roots.len()),
+        110 => Some(il.native_ctor_constant_nodes.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -1938,6 +1962,38 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_expression_variants.push(NativeExpressionVariant {
                 owner,path,expression_kind,payload,
             });
+        }
+        109 => {
+            let (Some(routine),Some(position),Some(present))=(n(0),n(1),n(2))
+                else {return;};
+            if routine==0 || present>1 {return;}
+            output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
+                routine:SymbolId(routine),position,present:present==1,
+            });
+        }
+        110 => {
+            let (Some(routine),Some(position),Some(path),Some(kind),
+                Some(family),Some(child_count),Some(flags))=
+                (n(0),n(1),t(2),n(4),n(6),n(7),n(9)) else {return;};
+            let parent=if fields[3].present() {
+                let Some(p)=t(3) else {return;}; Some(p)
+            } else {None};
+            let ty=if fields[5].present() {
+                let Some(id)=n(5).map(TypeId) else {return;};
+                if id.0==0 || !seen.types.contains(&id) {return;}
+                Some(id)
+            } else {None};
+            let payload=if let Some(v)=fields[8].unsigned() {
+                Some(NativeCtorConstantPayload::Unsigned(v))
+            } else if let Some(v)=fields[8].signed() {
+                Some(NativeCtorConstantPayload::Signed(v))
+            } else {None};
+            let record=NativeCtorConstantNode {
+                routine:SymbolId(routine),position,path,parent,kind,ty,family,
+                child_count,payload,flags,
+            };
+            if !valid_ctor_constant_node(&record) {return;}
+            output.native_ctor_constant_nodes.push(record);
         }
         108 => {
             let (Some(routine),Some(position),Some(count),Some(source),
@@ -4298,6 +4354,70 @@ fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
     Ok(())
 }
 
+/// Local structural invariants, deliberately not an execution certificate.
+fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
+    use NativeCtorConstantPayload::Unsigned;
+    if n.routine.0==0 || n.path.is_empty() || n.child_count>10000 ||
+        n.parent.as_ref().is_some_and(String::is_empty) {return false;}
+    match n.family {
+        0=>n.child_count==0 && n.payload.is_none() && n.flags==0,
+        1=>n.payload.is_none() && n.flags<=3,
+        2=>n.child_count==1 && matches!(n.payload,Some(Unsigned(_))) && n.flags<=1,
+        3=>n.child_count==0 && n.flags<=3 &&
+            if n.flags&1!=0 {n.payload.is_none()}
+            else {matches!(n.payload,Some(Unsigned(v)) if n.flags&2==0 || v!=0)},
+        4=>n.child_count==0 && n.flags==0,
+        5=>n.child_count==0 && n.flags==0 &&
+            matches!(n.payload,Some(Unsigned(v)) if v<=255),
+        _=>false,
+    }
+}
+
+/// Join each root to its native constructor owner and verify every dense
+/// direct child, rejecting disconnected, duplicate or truncated subtrees.
+fn validate_ctor_constant_trees(il:&Il)->Result<(),Error> {
+    let mut roots=il.constructor_initializers.iter()
+        .map(|i|((i.routine,i.position),None)).collect::<HashMap<_,Option<bool>>>();
+    for r in &il.native_ctor_constant_roots {
+        let Some(slot)=roots.get_mut(&(r.routine,r.position))
+            else {return Err(Error::MalformedCallback);};
+        if slot.replace(r.present).is_some() {return Err(Error::MalformedCallback);}
+    }
+    let mut nodes=HashMap::new();
+    for n in &il.native_ctor_constant_nodes {
+        let owner=(n.routine,n.position);
+        if roots.get(&owner)!=Some(&Some(true)) || !valid_ctor_constant_node(n) ||
+            nodes.insert((owner,n.path.as_str()),n).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (owner,present) in roots {
+        if present!=Some(nodes.contains_key(&(owner,"0"))) {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for (&(owner,path),n) in &nodes {
+        if path=="0" {
+            if n.parent.is_some() {return Err(Error::MalformedCallback);}
+        } else {
+            let Some((parent,ordinal))=path.rsplit_once('.') else {
+                return Err(Error::MalformedCallback);
+            };
+            let Some(p)=nodes.get(&(owner,parent)) else {return Err(Error::MalformedCallback);};
+            let Ok(i)=ordinal.parse::<u32>() else {return Err(Error::MalformedCallback);};
+            if i>=p.child_count || i.to_string()!=ordinal ||
+                n.parent.as_deref()!=Some(parent) {return Err(Error::MalformedCallback);}
+        }
+        for i in 0..n.child_count {
+            let child=format!("{path}.{i}");
+            if !nodes.contains_key(&(owner,child.as_str())) {
+                return Err(Error::MalformedCallback);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
     if il.cpp_language.is_none() ||
        validate_native_c_language_separation(il).is_err() ||
@@ -4323,6 +4443,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||
+       validate_ctor_constant_trees(il).is_err() ||
        validate_native_constructor_initializer_lists(il).is_err() ||
        validate_native_lifetime_destruction_counts(il).is_err() ||
        validate_native_lifetime_child_counts(il).is_err() ||
@@ -6993,7 +7114,7 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=108_u32 {
+        for kind in 1..=110_u32 {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7022,13 +7143,13 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=108_u32)
+        let schema_fields:usize=(1..=110_u32)
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(109).is_none());
+        assert!(expected_wire_field_tag_masks(111).is_none());
     }
 
     #[test]

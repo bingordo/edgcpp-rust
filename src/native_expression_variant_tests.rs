@@ -223,3 +223,45 @@ fn constructor_provenance_distinguishes_source_fallback_and_executable_roots() {
     duplicate.native_constructor_init_provenance.push(p.clone());
     assert!(validate_constructor_init_provenance(&duplicate).is_err());
 }
+
+
+#[test]
+fn constructor_constant_tree_preserves_repeat_and_rejects_missing_children() {
+    let mut state=Collector::default();
+    state.il.constructor_initializers.push(ConstructorInitializer {
+        routine:SymbolId(9),position:0,kind:3,target_type:None,target_field:None,
+        compiler_generated:false,braced:true,use_field_initializer:false,
+        pack_expansion:false,
+    });
+    let root=[num(9),num(0),num(1)];
+    unsafe {collect((&mut state as *mut Collector).cast(),109,root.as_ptr(),root.len(),0);}
+    state.seen.types.insert(TypeId(42));
+    let records=[
+        [num(9),num(0),text("0"),absent(),num(1),num(42),num(1),num(2),absent(),num(1)],
+        [num(9),num(0),text("0.0"),text("0"),num(2),absent(),num(3),num(0),num(3),num(0)],
+        [num(9),num(0),text("0.1"),text("0"),num(3),absent(),num(2),num(1),num(5),num(0)],
+        [num(9),num(0),text("0.1.0"),text("0.1"),num(4),num(42),num(4),num(0),num(17),num(0)],
+    ];
+    for fields in records {
+        unsafe {collect((&mut state as *mut Collector).cast(),110,fields.as_ptr(),fields.len(),0);}
+    }
+    assert!(!state.malformed);
+    validate_ctor_constant_trees(&state.il).unwrap();
+    for index in 0..4 {
+        let mut missing=state.il.clone();
+        missing.native_ctor_constant_nodes.remove(index);
+        assert!(validate_ctor_constant_trees(&missing).is_err());
+    }
+    let mut wrong=state.il.clone();
+    wrong.native_ctor_constant_nodes[2].child_count=0;
+    assert!(validate_ctor_constant_trees(&wrong).is_err());
+    let mut wrong=state.il.clone();
+    wrong.native_ctor_constant_nodes[3].parent=Some("0".into());
+    assert!(validate_ctor_constant_trees(&wrong).is_err());
+    let mut wrong=state.il.clone();
+    wrong.native_ctor_constant_roots.clear();
+    assert!(validate_ctor_constant_trees(&wrong).is_err());
+    let mut wrong=state.il.clone();
+    wrong.native_ctor_constant_nodes.push(wrong.native_ctor_constant_nodes[0].clone());
+    assert!(validate_ctor_constant_trees(&wrong).is_err());
+}
