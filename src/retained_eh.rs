@@ -144,3 +144,63 @@ pub fn checked_retained_eh_actions(il: &Il) -> Result<Vec<RetainedEhAction<'_>>,
     }
     Ok(actions)
 }
+
+/// One native catch clause, keyed by its owning try statement and ordinal.
+/// A missing parameter denotes an ellipsis catch, not a missing record.
+/// Typeinfo is an EDG variable identity, not a proven Itanium RTTI symbol.
+/// Initialization presence does not prove the copy or destruction plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCatchHandler {
+    pub function: String,
+    pub statement_path: String,
+    pub position: u32,
+    pub parameter: Option<crate::SymbolId>,
+    pub parameter_type: Option<crate::TypeId>,
+    pub typeinfo: Option<crate::SymbolId>,
+    pub has_initialization: bool,
+    pub function_try: bool,
+}
+
+/// Join the declaration roster to the independently counted try-handler
+/// lists. Reject gaps, duplicates, foreign owners and inconsistent types.
+/// Normal and exceptional cleanup schedules still require separate proof.
+pub fn validate_native_catch_handlers(il: &Il) -> Result<(), Error> {
+    use std::collections::HashSet;
+    let mut owners = HashMap::new();
+    for proof in &il.native_try_handler_counts {
+        if owners.insert((proof.function.as_str(), proof.statement_path.as_str()),
+                         (proof.count, 0u32, None)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let symbols: HashMap<_, _> = il.symbols.iter().map(|s| (s.id, s.kind)).collect();
+    let types: HashSet<_> = il.types.iter().map(|t| t.id).collect();
+    let declarations: HashMap<_, _> = il.symbol_types.iter().map(|d| (d.symbol, d.ty)).collect();
+    let mut seen = HashSet::new();
+    for h in &il.native_catch_handlers {
+        let key = (h.function.as_str(), h.statement_path.as_str());
+        let (count, observed, function_try) = owners.get_mut(&key)
+            .ok_or(Error::MalformedCallback)?;
+        if h.position >= *count || !seen.insert((key, h.position)) ||
+           function_try.is_some_and(|flag| flag != h.function_try) {
+            return Err(Error::MalformedCallback);
+        }
+        *function_try = Some(h.function_try);
+        match (h.parameter, h.parameter_type) {
+            (Some(symbol), Some(ty)) if symbols.get(&symbol) == Some(&2) &&
+                types.contains(&ty) && declarations.get(&symbol) == Some(&ty) => {}
+            (None, None) if h.position == *count - 1 && !h.has_initialization &&
+                h.typeinfo.is_none() => {}
+            _ => return Err(Error::MalformedCallback),
+        }
+        if h.typeinfo.is_some_and(|id| symbols.get(&id) != Some(&2) ||
+            !declarations.get(&id).is_some_and(|ty| types.contains(ty))) {
+            return Err(Error::MalformedCallback);
+        }
+        *observed += 1;
+    }
+    if owners.values().any(|(count, observed, _)| count != observed) {
+        return Err(Error::MalformedCallback);
+    }
+    Ok(())
+}
