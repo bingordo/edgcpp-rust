@@ -5141,6 +5141,34 @@ mod tests {
             &mut HashSet::new(),0,1,0).is_ok());
     }
     #[test]
+    fn bulk_local_images_have_small_code_and_exact_tail() {
+        let size=65_541usize;
+        let bytes:Vec<u8>=(0..size).map(|i|((i%251)+1) as u8).collect();
+        let load=|index:usize| Expr::LoadAddress(
+            CAbiInt{bits:8,signed:false,is_bool:false},
+            Box::new(Expr::Add(Box::new(Expr::AddressLocal(0)),
+                               Box::new(Expr::Constant(index as i64)))));
+        let positions=[0,7,8,64,size/2,size-6,size-5,size-2,size-1];
+        let sum=||positions.iter().copied().map(load).reduce(|a,b|
+            Expr::Add(Box::new(a),Box::new(b))).unwrap();
+        let routine=|name:&str,body:Vec<Stmt>| Routine {
+            name:name.into(),parameters:0,locals:1,body,abi:None,
+            local_types:None,local_storage:Some(vec![size as u32]),
+            local_alignments:Some(vec![1]),parameter_accesses:vec![],
+        };
+        let obj=emit_routines(&[
+            routine("bulk_copy",vec![Stmt::InitializeAggregate(0,bytes.clone()),Stmt::Return(sum())]),
+            routine("bulk_zero",vec![Stmt::InitializeAggregate(0,bytes),
+                Stmt::ZeroAggregate(0,size as u32),Stmt::Return(sum())]),
+        ]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        // Two data blobs plus ordinary object overhead are sufficient.
+        assert!(obj.len()<2*size+16_384,"unexpected object size {}",obj.len());
+        if let Some(path)=std::env::var_os("EDG_BULK_IMAGE_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
+    }
+    #[test]
     fn rejects_nondefinite_local_initialization() {
         let mut vars = HashSet::new();
         let body = vec![
