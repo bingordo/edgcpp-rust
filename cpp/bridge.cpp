@@ -1059,10 +1059,67 @@ struct supplemental_block_walk {
   const supplemental_block_owner &key;
   unsigned visits=0;
   std::unordered_set<const void *> active;
-  bool enter(const void *ptr,unsigned depth) {
-    if (ptr==nullptr || depth>64 || !within_native_list_limit(visits++) ||
-        !active.insert(ptr).second) {report_incomplete_snapshot();return false;}
+  bool failed=false;
+
+  // Store paths as parent/ordinal pairs. The full strings are materialized
+  // only while emitting a record, not retained in every pending task.
+  struct ordinal_path {size_t parent;size_t ordinal;};
+  static constexpr size_t no_path=std::numeric_limits<size_t>::max();
+  // In addition to the original 10000 native-node budget, bound the
+  // synthetic list/declaration/initializer nodes of the mixed wire graph.
+  static constexpr size_t max_graph_nodes=8*MAX_NATIVE_LIST_ELEMENTS;
+  std::vector<ordinal_path> paths;
+  enum class task_kind {expr_list,stmt_list,expr_item,stmt_item,
+                        leave_expr,leave_stmt,declarations,initializer};
+  struct task {
+    task_kind kind;
+    a_statement_ptr st;
+    an_expr_node_ptr e;
+    a_dynamic_init_ptr init;
+    size_t path_id;
+    size_t index;
+    bool linked;
+    std::string edge;
+  };
+  std::vector<task> pending;
+  explicit supplemental_block_walk(const supplemental_block_owner &owner):key(owner) {}
+  void fail() {
+    if (!failed) report_incomplete_snapshot();
+    failed=true;
+  }
+  bool enter(const void *ptr) {
+    if (ptr==nullptr || !within_native_list_limit(visits++) ||
+        !active.insert(ptr).second) {fail();return false;}
     return true;
+  }
+  size_t child(size_t parent_id,size_t ordinal) {
+    if (failed || paths.size()>=max_graph_nodes) {fail();return no_path;}
+    paths.push_back({parent_id,ordinal});
+    return paths.size()-1;
+  }
+  std::string path_text(size_t id) const {
+    std::vector<size_t> ordinals;
+    while (id!=no_path) {
+      ordinals.push_back(paths[id].ordinal);
+      id=paths[id].parent;
+    }
+    std::string result;
+    for (auto it=ordinals.rbegin();it!=ordinals.rend();++it) {
+      if (!result.empty()) result+=".";
+      result+=std::to_string(*it);
+    }
+    return result;
+  }
+  void push(task next) {
+    if (failed) return;
+    if (pending.size()>=max_graph_nodes) {fail();return;}
+    pending.push_back(std::move(next));
+  }
+  void queue_expr(an_expr_node_ptr first,bool linked,size_t id,const std::string &edge) {
+    push({task_kind::expr_list,nullptr,first,nullptr,id,0,linked,edge});
+  }
+  void queue_stmt(a_statement_ptr first,bool single,size_t id,const std::string &edge) {
+    push({task_kind::stmt_list,first,nullptr,nullptr,id,0,!single,edge});
   }
   void node(const std::string &path,const std::string &parent,
       const std::string &edge,unsigned category,unsigned kind,
@@ -1079,24 +1136,21 @@ struct supplemental_block_walk {
        num(category),num(kind),num(count),type?num(type):absent(),
        symbol?num(symbol):absent(),op,payload,num(flags)});
   }
-  static std::string child(const std::string &path,size_t i) {
-    return path+"."+std::to_string(i);
-  }
-  void expr_list(an_expr_node_ptr first,bool linked,const std::string &path,
-      const std::string &parent,const std::string &edge,unsigned depth) {
-    std::vector<an_expr_node_ptr> list;
-    std::unordered_set<an_expr_node_ptr> seen;
-    for (auto e=first;e!=nullptr;e=linked?e->next:nullptr) {
-      if (!within_native_list_limit(list.size()) || !seen.insert(e).second) {
-        report_incomplete_snapshot();break;
+  template<class Ptr,class Next>
+  bool count_list(Ptr first,bool linked,Next next,unsigned &count) {
+    std::unordered_set<Ptr> seen;
+    for (auto item=first;item!=nullptr;item=linked?next(item):nullptr) {
+      if (!within_native_list_limit(count) || !seen.insert(item).second) {
+        fail();return false;
       }
-      list.push_back(e);
+      ++count;
     }
-    node(path,parent,edge,0,0,list.size());
-    for (size_t i=0;i<list.size();++i) expr(list[i],child(path,i),path,depth+1);
+    return true;
   }
-  void expr(an_expr_node_ptr e,const std::string &path,const std::string &parent,unsigned depth) {
-    if (!enter(e,depth)) return;
+  void emit_expr_item(an_expr_node_ptr e,size_t id) {
+    if (!enter(e)) return;
+    const auto path=path_text(id);
+    const auto parent=path_text(paths[id].parent);
     uint32_t symbol=0;
     if (e->kind==enk_variable && e->variant.variable.ptr!=nullptr) {
       auto v=e->variant.variable.ptr;
@@ -1131,41 +1185,18 @@ struct supplemental_block_walk {
          e->kind==enk_operation?num(static_cast<unsigned>(e->variant.operation.kind)):absent(),
          payload,block?1:0);
     const auto operands=children_of(e);
-    expr_list(operands.first,operands.linked_list,child(path,0),path,"operands",depth+1);
-    if (block) statements(e->variant.statement,true,child(path,1),path,"embedded",depth+1);
-    active.erase(e);
+    push({task_kind::leave_expr,nullptr,e,nullptr,no_path,0,false,""});
+    if (block) queue_stmt(e->variant.statement,true,child(id,1),"embedded");
+    queue_expr(operands.first,operands.linked_list,child(id,0),"operands");
   }
-  void statements(a_statement_ptr first,bool single,const std::string &path,
-      const std::string &parent,const std::string &edge,unsigned depth) {
-    std::vector<a_statement_ptr> list;
-    std::unordered_set<a_statement_ptr> seen;
-    for (auto st=first;st!=nullptr;st=single?nullptr:st->next) {
-      if (!within_native_list_limit(list.size()) || !seen.insert(st).second) {
-        report_incomplete_snapshot();break;
-      }
-      list.push_back(st);
-    }
-    node(path,parent,edge,0,0,list.size());
-    for (size_t i=0;i<list.size();++i) statement(list[i],child(path,i),path,depth+1);
-  }
-  void statement(a_statement_ptr st,const std::string &path,
-      const std::string &parent,unsigned depth) {
-    if (!enter(st,depth)) return;
+  void emit_stmt_item(a_statement_ptr st,size_t id) {
+    if (!enter(st)) return;
+    const auto path=path_text(id);
+    const auto parent=path_text(paths[id].parent);
     struct branch {a_statement_ptr root;bool single;std::string edge;};
     struct extra_expr {an_expr_node_ptr root;std::string edge;};
     std::vector<branch> branches;
     std::vector<extra_expr> extras;
-    std::vector<a_variable_ptr> declarations;
-    if (st->kind==stmk_decl) {
-      std::unordered_set<an_il_entity_list_entry_ptr> seen;
-      for (auto d=st->variant.decl.entities;d!=nullptr;d=d->next) {
-        if (!within_native_list_limit(seen.size()) || !seen.insert(d).second) {
-          report_incomplete_snapshot();break;
-        }
-        if (d->entity.kind==iek_variable && d->entity.ptr!=nullptr)
-          declarations.push_back(reinterpret_cast<a_variable_ptr>(d->entity.ptr));
-      }
-    }
     a_dynamic_init_ptr init=nullptr;
     if (st->kind==stmk_init) init=st->variant.dynamic_init;
     else if (st->kind==stmk_return) init=st->variant.return_dynamic_init;
@@ -1200,7 +1231,7 @@ struct supplemental_block_walk {
       std::unordered_set<a_handler_ptr> seen;
       for (auto h=info?info->handlers:nullptr;h!=nullptr;h=h->next) {
         if (!within_native_list_limit(seen.size()) || !seen.insert(h).second) {
-          report_incomplete_snapshot();break;
+          fail();return;
         }
         branches.push_back({h->statement,true,"catch"+std::to_string(seen.size()-1)});
       }
@@ -1216,39 +1247,119 @@ struct supplemental_block_walk {
     node(path,parent,"item",1,static_cast<unsigned>(st->kind),
          2+branches.size()+extras.size()+(init!=nullptr?1:0),0,label,
          absent(),absent(),st->compiler_generated?1:0);
-    size_t index=0;
-    expr_list(st->expr,false,child(path,index++),path,"primary",depth+1);
-    auto decl_path=child(path,index++);
-    node(decl_path,path,"declarations",0,0,declarations.size());
+    // Reverse scheduling preserves primary, declarations, branches,
+    // extra expressions and initializer emission in the native order.
+    push({task_kind::leave_stmt,st,nullptr,nullptr,no_path,0,false,""});
+    if (init!=nullptr)
+      push({task_kind::initializer,nullptr,nullptr,init,
+            child(id,2+branches.size()+extras.size()),0,false,""});
+    for (size_t i=extras.size();i>0;--i) {
+      const auto &extra=extras[i-1];
+      queue_expr(extra.root,false,child(id,2+branches.size()+i-1),extra.edge);
+    }
+    for (size_t i=branches.size();i>0;--i) {
+      const auto &branch=branches[i-1];
+      queue_stmt(branch.root,branch.single,child(id,2+i-1),branch.edge);
+    }
+    push({task_kind::declarations,st,nullptr,nullptr,child(id,1),0,false,""});
+    queue_expr(st->expr,false,child(id,0),"primary");
+  }
+  void emit_declarations(a_statement_ptr st,size_t id) {
+    std::vector<a_variable_ptr> declarations;
+    if (st->kind==stmk_decl) {
+      std::unordered_set<an_il_entity_list_entry_ptr> seen;
+      for (auto d=st->variant.decl.entities;d!=nullptr;d=d->next) {
+        if (!within_native_list_limit(seen.size()) || !seen.insert(d).second) {
+          fail();return;
+        }
+        if (d->entity.kind==iek_variable && d->entity.ptr!=nullptr)
+          declarations.push_back(reinterpret_cast<a_variable_ptr>(d->entity.ptr));
+      }
+    }
+    const auto path=path_text(id);
+    node(path,path_text(paths[id].parent),"declarations",0,0,declarations.size());
     for (size_t i=0;i<declarations.size();++i) {
+      const auto item_id=child(id,i);
+      if (failed) return;
       auto v=declarations[i];
       const char *raw=source_name(v->source_corresp);
       auto sym=emit_symbol(v,2,raw==nullptr?"<declared>":declaration_name(v->source_corresp,false));
-      node(child(decl_path,i),decl_path,"item",3,0,0,emit_variable_type(v),sym);
+      node(path_text(item_id),path,"item",3,0,0,emit_variable_type(v),sym);
     }
-    for (auto &b:branches) statements(b.root,b.single,child(path,index++),path,b.edge,depth+1);
-    for (auto &e:extras) expr_list(e.root,false,child(path,index++),path,e.edge,depth+1);
-    if (init!=nullptr) {
-      auto p=child(path,index++);
-      uint32_t sym=0,ty=0;
-      if (init->variable!=nullptr) {
-        auto v=init->variable;
-        const char *raw=source_name(v->source_corresp);
-        sym=emit_symbol(v,2,raw==nullptr?"<initialized>":declaration_name(v->source_corresp,false));
-        ty=emit_variable_type(v);
+  }
+  void emit_initializer(a_dynamic_init_ptr init,size_t id) {
+    uint32_t sym=0,ty=0;
+    if (init->variable!=nullptr) {
+      auto v=init->variable;
+      const char *raw=source_name(v->source_corresp);
+      sym=emit_symbol(v,2,raw==nullptr?"<initialized>":declaration_name(v->source_corresp,false));
+      ty=emit_variable_type(v);
+    }
+    // Constants/lifetime/constructor flags are still opaque in this
+    // structural block graph; never authorize execution from it.
+    node(path_text(id),path_text(paths[id].parent),"initializer",4,
+         static_cast<unsigned>(init->kind),1,ty,sym);
+    const auto roots=dynamic_init_expression_children(init);
+    queue_expr(roots.first,roots.linked_list,child(id,0),"roots");
+  }
+  void run(a_statement_ptr root) {
+    queue_stmt(root,true,child(no_path,0),"embedded");
+    while (!pending.empty() && !failed) {
+      task work=std::move(pending.back());
+      pending.pop_back();
+      switch (work.kind) {
+      case task_kind::leave_expr: active.erase(work.e);break;
+      case task_kind::leave_stmt: active.erase(work.st);break;
+      case task_kind::declarations: emit_declarations(work.st,work.path_id);break;
+      case task_kind::initializer: emit_initializer(work.init,work.path_id);break;
+      case task_kind::expr_list:
+      case task_kind::stmt_list: {
+        const bool is_expr=work.kind==task_kind::expr_list;
+        unsigned count=0;
+        if (is_expr) {
+          if (!count_list(work.e,work.linked,[](an_expr_node_ptr n){return n->next;},count)) break;
+        } else {
+          if (!count_list(work.st,work.linked,[](a_statement_ptr n){return n->next;},count)) break;
+        }
+        node(path_text(work.path_id),path_text(paths[work.path_id].parent),
+             work.edge,0,0,count);
+        if (count!=0) {
+          work.kind=is_expr?task_kind::expr_item:task_kind::stmt_item;
+          push(std::move(work));
+        }
+        break;
       }
-      // Constants/lifetime/constructor flags are still opaque in this
-      // structural block graph; never authorize execution from it.
-      node(p,path,"initializer",4,static_cast<unsigned>(init->kind),1,ty,sym);
-      const auto roots=dynamic_init_expression_children(init);
-      expr_list(roots.first,roots.linked_list,child(p,0),p,"roots",depth+1);
+      case task_kind::expr_item: {
+        const auto id=child(work.path_id,work.index);
+        if (failed) break;
+        auto e=work.e;
+        if (work.linked && e->next!=nullptr) {
+          work.e=e->next;
+          ++work.index;
+          push(std::move(work));
+        }
+        if (!failed) emit_expr_item(e,id);
+        break;
+      }
+      case task_kind::stmt_item: {
+        const auto id=child(work.path_id,work.index);
+        if (failed) break;
+        auto st=work.st;
+        if (work.linked && st->next!=nullptr) {
+          work.st=st->next;
+          ++work.index;
+          push(std::move(work));
+        }
+        if (!failed) emit_stmt_item(st,id);
+        break;
+      }
+      }
     }
-    active.erase(st);
   }
 };
 static void emit_supplemental_block(a_statement_ptr root,const supplemental_block_owner &owner) {
-  supplemental_block_walk walk{owner,0,{}};
-  walk.statements(root,true,"0","","embedded",0);
+  supplemental_block_walk walk(owner);
+  walk.run(root);
 }
 
 // The native executable roots are independent of the legacy source_expr
