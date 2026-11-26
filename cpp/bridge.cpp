@@ -45,6 +45,9 @@ thread_local unsigned weak_image_diagnostic_count = 0;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
+// Function regions may be recycled. IDs are opaque within a routine only.
+thread_local std::unordered_map<const void *, uint32_t> current_dynamic_init_ids;
+thread_local uint32_t current_dynamic_init_routine=0;
 thread_local std::unordered_map<const void *, std::string> scope_statement_paths;
 thread_local std::unordered_set<const void *> emitted_routines;
 thread_local std::unordered_set<const void *> emitted_member_edges;
@@ -2259,6 +2262,34 @@ static uint32_t emit_variable_type(a_variable_ptr var)
 // The lifetime of all pointers is limited to the synchronous EDG callback.
 // Runtime object lifetimes are not equivalent to lexical scopes.
 // ID assignment and traversal are limited to one function's live IL region.
+// Emit after lifetime discovery (destruction edges are emitted separately
+// below, where the owning region is already indexed). Presence and lookup
+// are separate: a non-null but not-yet-indexed lifetime is never null.
+static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
+    uint32_t position, const std::string &path, uint32_t destruction_region=0)
+{
+  if (d==nullptr || current_dynamic_init_routine==0) return;
+  auto found=current_dynamic_init_ids.find(d);
+  if (found==current_dynamic_init_ids.end()) {
+    if (!within_native_list_limit(current_dynamic_init_ids.size())) return;
+    found=current_dynamic_init_ids.emplace(d,
+        static_cast<uint32_t>(current_dynamic_init_ids.size()+1)).first;
+  }
+  const auto lifetime=current_lifetime_ids.find(d->lifetime);
+  const auto expression=current_lifetime_ids.find(d->init_expr_lifetime);
+  const unsigned flags=(d->lifetime!=nullptr ? 1u : 0u) |
+      (d->init_expr_lifetime!=nullptr ? 2u : 0u) |
+      (d->destructor!=nullptr ? 4u : 0u);
+  emit_record(RECORD_NATIVE_DYNAMIC_INIT_IDENTITY,
+      {num(current_dynamic_init_routine),num(context),num(position),
+       path.empty() ? absent() : txt(path),
+       context==2 ? num(destruction_region) : absent(),
+       num(found->second),num(static_cast<unsigned>(d->kind)),num(flags),
+       lifetime==current_lifetime_ids.end() ? absent() : num(lifetime->second),
+       expression==current_lifetime_ids.end() ? absent() : num(expression->second),
+       num(d->variable!=nullptr ? 1u : 0u)});
+}
+
 static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
                                uint32_t routine, unsigned parent,
                                unsigned depth, bool native_child_edge = false)
@@ -2311,6 +2342,7 @@ static void emit_lifetime_tree(an_object_lifetime_ptr lifetime,
       destructor = emit_symbol(r, 1,
           declaration_name(r->source_corresp, true, true));
     }
+    emit_dynamic_init_identity(d,2,position,"",id);
     emit_record(41, {num(routine), num(id), num(position++),
                      variable ? num(variable) : absent(),
                      destructor ? num(destructor) : absent()});
@@ -2757,6 +2789,7 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       const unsigned init_flags =
           (init->follows_an_exec_statement ? 1u : 0u) |
           (init->is_braced_initializer ? 2u : 0u);
+      emit_dynamic_init_identity(init,1,0,path);
       emit_record(34, {txt(function), txt(path),
                        variable_symbol ? num(variable_symbol) : absent(),
                        num(static_cast<unsigned>(init->kind)),
@@ -3381,6 +3414,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       if (r->function_def_number != NULL_function_def_number) {
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
+          current_dynamic_init_ids.clear();
+          current_dynamic_init_routine=routine_symbol;
+          // Discover regions before constructor initializers reference them.
+          prepare_lifetimes(body, routine_symbol);
           // Constructor/member initialization is C++ only. C function scopes
           // still get the mandatory zero-count witness, but their C++-only
           // constructor list is never traversed.
@@ -3455,6 +3492,7 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                            num(static_cast<unsigned>(init->initializer->kind)) : absent(),
                          num(executable_count), num(init->source_expr != nullptr),
                          num(shared_root), num(selected)});
+            emit_dynamic_init_identity(init->initializer,0,init_position,"");
             a_constant_ptr constant_root=nullptr;
             if (init->initializer != nullptr &&
                 (init->initializer->kind==dik_constant ||
@@ -3486,7 +3524,6 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           if (body->assoc_block != nullptr) {
             scope_statement_paths.emplace(body, "0");
           }
-          prepare_lifetimes(body, routine_symbol);
           // Independent roots from the EDG function scope, not from the
           // already exported event-38 list. Always emit even if both are null.
           const auto body_region = current_lifetime_ids.find(body->lifetime);
@@ -3507,6 +3544,8 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           emit_statements(body->assoc_block, name, "", "", 0);
           emit_function_locals(body, routine_symbol, r, name);
           current_lifetime_ids.clear();
+          current_dynamic_init_ids.clear();
+          current_dynamic_init_routine=0;
         }
       }
     }
@@ -3960,6 +3999,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  current_dynamic_init_ids.clear();
+  current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
   visited_scopes.clear();
   emitted_symbol_types.clear();
@@ -3983,6 +4024,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  current_dynamic_init_ids.clear();
+  current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
   visited_scopes.clear();
   emitted_symbol_types.clear();
