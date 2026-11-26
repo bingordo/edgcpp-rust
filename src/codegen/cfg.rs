@@ -6836,6 +6836,28 @@ mod audit_deep_singleton_record_layout_tests {
     }
 
     #[test]
+    fn shared_by_value_layouts_are_memoized_and_cycles_rejected() {
+        let (mut il,outer)=singleton_records(18);
+        for n in 0..18_u32 {
+            let record=crate::TypeId(n+2);
+            let child=crate::TypeId(n+1);
+            let width=4u64<<n;
+            il.type_object_sizes.iter_mut().find(|l|l.owner==record).unwrap().bytes=width*2;
+            il.record_fields.push(crate::RecordField {
+                owner:record,position:1,ty:child,
+                symbol:crate::SymbolId(n+9000),name:"second".into(),
+                byte_offset:width,bit_offset:0,bit_width:0,
+            });
+        }
+        let sizes=validated_layout_sizes(&il,outer).unwrap();
+        assert_eq!(sizes.len(),19);
+        assert_eq!(sizes[&outer],4<<18);
+        assert_eq!(checked_aggregate_copy_size(&il,outer).unwrap(),4<<18);
+        il.record_fields.last_mut().unwrap().ty=outer;
+        assert!(byte_size(&il,outer).is_err());
+    }
+
+    #[test]
     fn branching_records_have_no_artificial_depth_limit() {
         // Make every record have TWO valid scalar-or-record members.
         // Branching record chains use the same postorder layout validator.
