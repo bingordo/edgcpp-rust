@@ -811,6 +811,8 @@ pub struct NativeConstructorInitProvenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCtorConstantRoot {
     pub routine:SymbolId, pub position:u32, pub present:bool,
+    /// 0 constructor, 1 statement, 2 variable, 3–6 expression owner kinds.
+    pub context:u32, pub owner_statement:Option<String>, pub owner_expression:Option<String>,
 }
 
 /// Structural constant node. Repeat/designator nodes retain their own
@@ -822,6 +824,7 @@ pub struct NativeCtorConstantNode {
     pub parent:Option<String>, pub kind:u32, pub ty:Option<TypeId>,
     pub family:u32, pub child_count:u32,
     pub payload:Option<NativeCtorConstantPayload>, pub flags:u32,
+    pub context:u32, pub owner_statement:Option<String>, pub owner_expression:Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCtorConstantPayload { Unsigned(u64), Signed(i64) }
@@ -1979,11 +1982,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             });
         }
         109 => {
-            let (Some(routine),Some(position),Some(present))=(n(0),n(1),n(2))
+            let (Some(routine),Some(position),Some(present),Some(context))=(n(0),n(1),n(2),n(3))
                 else {return;};
-            if routine==0 || present>1 {return;}
+            let (owner_statement,owner_expression)=(t(4),t(5));
+            if routine==0 || present>1 ||
+                !valid_constant_owner(context,position,owner_statement.as_deref(),owner_expression.as_deref()) {return;}
             output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
                 routine:SymbolId(routine),position,present:present==1,
+                context,owner_statement,owner_expression,
             });
         }
         111 => {
@@ -2015,9 +2021,11 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             } else if let Some(v)=fields[8].signed() {
                 Some(NativeCtorConstantPayload::Signed(v))
             } else {None};
+            let Some(context)=n(10) else {return;};
+            let (owner_statement,owner_expression)=(t(11),t(12));
             let record=NativeCtorConstantNode {
                 routine:SymbolId(routine),position,path,parent,kind,ty,family,
-                child_count,payload,flags,
+                child_count,payload,flags,context,owner_statement,owner_expression,
             };
             if !valid_ctor_constant_node(&record) {return;}
             output.native_ctor_constant_nodes.push(record);
@@ -4385,6 +4393,7 @@ fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
 fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
     use NativeCtorConstantPayload::Unsigned;
     if n.routine.0==0 || n.path.is_empty() || n.child_count>10000 ||
+        !valid_constant_owner(n.context,n.position,n.owner_statement.as_deref(),n.owner_expression.as_deref()) ||
         n.parent.as_ref().is_some_and(String::is_empty) {return false;}
     match n.family {
         0=>n.child_count==0 && n.payload.is_none() && n.flags==0,
@@ -4400,19 +4409,71 @@ fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
     }
 }
 
-/// Join each root to its native constructor owner and verify every dense
-/// direct child, rejecting disconnected, duplicate or truncated subtrees.
+// All constant trees use the same owner key; a source symbol is a routine
+// except in file-scope variable/initializer-expression contexts.
+type ConstantOwnerKey<'a>=(SymbolId,u32,u32,Option<&'a str>,Option<&'a str>);
+fn valid_constant_owner(context:u32,position:u32,statement:Option<&str>,expression:Option<&str>)->bool {
+    if statement==Some("") || expression==Some("") {return false;}
+    match context {
+        0=>statement.is_none() && expression.is_none(),
+        1=>position==0 && statement.is_some() && expression.is_none(),
+        2=>position==0 && statement.is_none() && expression.is_none(),
+        3=>position==0 && statement.is_some() && expression.is_some(),
+        4=>position>0 && statement.is_some() && expression.is_some(),
+        5=>position==0 && statement.is_none() && expression.is_some(),
+        6=>statement.is_none() && expression.is_some(),
+        _=>false,
+    }
+}
+
+fn expression_constant_owner<'a>(
+    owner:&'a NativeExpressionOwner,path:&'a str,names:&HashMap<&str,SymbolId>
+)->Option<ConstantOwnerKey<'a>> {
+    Some(match owner {
+        NativeExpressionOwner::Statement{function,statement_path}=>
+            (*names.get(function.as_str())?,0,3,Some(statement_path.as_str()),Some(path)),
+        NativeExpressionOwner::Control{function,statement_path,role}=>
+            (*names.get(function.as_str())?,*role,4,Some(statement_path.as_str()),Some(path)),
+        NativeExpressionOwner::Initializer{owner}=>(*owner,0,5,None,Some(path)),
+        NativeExpressionOwner::Constructor{routine,position}=>(*routine,*position,6,None,Some(path)),
+    })
+}
+
+/// Require one independently emitted root witness for every original
+/// dynamic owner (including absent roots), then verify the exact child tree.
 fn validate_ctor_constant_trees(il:&Il)->Result<(),Error> {
-    let mut roots=il.constructor_initializers.iter()
-        .map(|i|((i.routine,i.position),None)).collect::<HashMap<_,Option<bool>>>();
+    let names:HashMap<_,_>=il.routine_identities.iter()
+        .map(|r|(r.function.as_str(),r.routine)).collect();
+    let mut roots:HashMap<ConstantOwnerKey<'_>,Option<bool>>=HashMap::new();
+    for c in &il.constructor_initializers {
+        if roots.insert((c.routine,c.position,0,None,None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for st in &il.statement_initializations {
+        let Some(&routine)=names.get(st.function.as_str()) else {return Err(Error::MalformedCallback);};
+        if roots.insert((routine,0,1,Some(st.statement_path.as_str()),None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for d in &il.dynamic_initializers {
+        if roots.insert((d.symbol,0,2,None,None),None).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for e in &il.native_expression_variants {
+        if !matches!(e.payload,NativeExpressionPayload::DynamicInitializer{..}) {continue;}
+        let key=expression_constant_owner(&e.owner,&e.path,&names).ok_or(Error::MalformedCallback)?;
+        if roots.insert(key,None).is_some() {return Err(Error::MalformedCallback);}
+    }
     for r in &il.native_ctor_constant_roots {
-        let Some(slot)=roots.get_mut(&(r.routine,r.position))
-            else {return Err(Error::MalformedCallback);};
+        let key=(r.routine,r.position,r.context,r.owner_statement.as_deref(),r.owner_expression.as_deref());
+        let Some(slot)=roots.get_mut(&key) else {return Err(Error::MalformedCallback);};
         if slot.replace(r.present).is_some() {return Err(Error::MalformedCallback);}
     }
     let mut nodes=HashMap::new();
     for n in &il.native_ctor_constant_nodes {
-        let owner=(n.routine,n.position);
+        let owner=(n.routine,n.position,n.context,n.owner_statement.as_deref(),n.owner_expression.as_deref());
         if roots.get(&owner)!=Some(&Some(true)) || !valid_ctor_constant_node(n) ||
             nodes.insert((owner,n.path.as_str()),n).is_some() {
             return Err(Error::MalformedCallback);
