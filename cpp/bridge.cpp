@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 #include <initializer_list>
 #include "qualified_scope_prefix.h"
 #include "scope_tree.h"
@@ -3027,23 +3028,93 @@ static void emit_function_locals(a_scope_ptr body, uint32_t routine,
 }
 
 static void emit_statements(a_statement_ptr head, const std::string &function,
-                            const std::string &parent, const std::string &edge,
+                            const std::string &root_parent, const std::string &edge,
                             unsigned depth, bool single)
 {
   if (current_callback == nullptr) return;
-  if (depth > 64) { report_incomplete_snapshot(); return; }
-  uint32_t sibling_count = 0;
-  for (a_statement_ptr stmt = head;
-       stmt != nullptr && within_native_list_limit(sibling_count);
-       stmt = single ? nullptr : stmt->next, ++sibling_count) {}
-  emit_record(RECORD_NATIVE_STATEMENT_SIBLING_COUNT,
-              {txt(function), parent.empty() ? absent() : txt(parent),
-               txt(edge), num(sibling_count)});
-  unsigned index = 0;
-  for (a_statement_ptr stmt = head; stmt != nullptr && within_native_list_limit(index);
-       stmt = single ? nullptr : stmt->next, ++index) {
-    std::string path = parent.empty() ? std::to_string(index) :
-                         parent + "." + edge + "." + std::to_string(index);
+  // Ordinary statement nesting is iterative. Expression-owned statement
+  // subtrees can still re-enter this function through emit_expr; bound
+  // that distinct recursive transition until expression traversal is unified.
+  static thread_local unsigned reentries = 0;
+  if (depth > 64 || reentries >= 64) {
+    report_incomplete_snapshot();
+    return;
+  }
+  struct ReentryGuard {
+    unsigned &count;
+    explicit ReentryGuard(unsigned &n) : count(n) { ++count; }
+    ~ReentryGuard() { --count; }
+  } guard(reentries);
+
+  enum class TaskKind { List, Statement, Leave, Increment };
+  struct Task {
+    TaskKind kind;
+    a_statement_ptr stmt;
+    std::string parent;
+    std::string edge;
+    unsigned index;
+    bool single;
+  };
+  std::vector<Task> pending;
+  std::unordered_set<a_statement_ptr> active;
+  auto queue_list = [&](a_statement_ptr first, const std::string &owner,
+                        const std::string &role, bool one) {
+    pending.push_back({TaskKind::List, first, owner, role, 0, one});
+  };
+  queue_list(head, root_parent, edge, single);
+  while (!pending.empty()) {
+    Task task = std::move(pending.back());
+    pending.pop_back();
+    a_statement_ptr stmt = task.stmt;
+    if (task.kind == TaskKind::Leave) {
+      active.erase(stmt);
+      continue;
+    }
+    if (task.kind == TaskKind::List) {
+      uint32_t sibling_count = 0;
+      for (a_statement_ptr scan = stmt; scan != nullptr;
+           scan = task.single ? nullptr : scan->next, ++sibling_count) {
+        if (!within_native_list_limit(sibling_count)) return;
+      }
+      emit_record(RECORD_NATIVE_STATEMENT_SIBLING_COUNT,
+                  {txt(function), task.parent.empty() ? absent() : txt(task.parent),
+                   txt(task.edge), num(sibling_count)});
+      if (stmt != nullptr) {
+        task.kind = TaskKind::Statement;
+        pending.push_back(std::move(task));
+      }
+      continue;
+    }
+    if (task.kind == TaskKind::Increment) {
+      a_for_loop_ptr info = stmt->variant.for_loop.extra_info;
+      const std::string &path = task.parent;
+      emit_control_expr(info->increment, function, path, 1, "0", "", 0);
+      // Preserve the original role-1 snapshot and synthetic executable
+      // increment, in the same event order after the initializer subtree.
+      if (info->increment != nullptr) {
+        const std::string increment_path = path + ".increment.0";
+        emit_record(5, {txt(function), txt(increment_path), txt(path)},
+                    static_cast<uint32_t>(stmk_expr));
+        emit_record(26, {txt(function), txt(increment_path), num(0)});
+        emit_record(RECORD_NATIVE_CONTROL_ROOT_ADMISSION,
+                    {txt(function), txt(increment_path), num(0)});
+        emit_expr(info->increment, function, increment_path, "0", "", 0);
+      }
+      continue;
+    }
+    if (!active.insert(stmt).second) {
+      report_incomplete_snapshot();
+      return;
+    }
+    const std::string &parent = task.parent;
+    std::string path = parent.empty() ? std::to_string(task.index) :
+                         parent + "." + task.edge + "." + std::to_string(task.index);
+    // Resume the sibling only after every child and deferred increment.
+    if (!task.single && stmt->next != nullptr) {
+      pending.push_back({TaskKind::Statement, stmt->next, parent,
+                         task.edge, task.index + 1, false});
+    }
+    pending.push_back({TaskKind::Leave, stmt, "", "", 0, false});
     emit_record(5, {txt(function), txt(path), parent.empty() ? absent() : txt(parent)},
                 static_cast<uint32_t>(stmt->kind));
     emit_statement_source(function, path, stmt->position);
@@ -3362,57 +3433,37 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
     if (stmt->expr != nullptr) {
       emit_expr(stmt->expr, function, path, "0", "", 0);
     }
+    // LIFO scheduling reverses enqueue order, preserving the original
+    // native preorder and the witnesses for empty branch/list roots.
     if (stmt->kind == stmk_block) {
       if (stmt->variant.block.extra_info != nullptr &&
           stmt->variant.block.extra_info->assoc_scope != nullptr) {
         scope_statement_paths.emplace(
             stmt->variant.block.extra_info->assoc_scope, path);
       }
-      emit_statements(stmt->variant.block.statements, function, path, "block", depth + 1);
+      queue_list(stmt->variant.block.statements, path, "block", false);
     } else if (stmt->kind == stmk_if ||
                stmt->kind == stmk_if_consteval ||
                stmt->kind == stmk_if_not_consteval) {
-      emit_statements(stmt->variant.if_stmt.then_statement,
-                      function, path, "then", depth + 1, true);
-      emit_statements(stmt->variant.if_stmt.else_statement,
-                      function, path, "else", depth + 1, true);
+      queue_list(stmt->variant.if_stmt.else_statement, path, "else", true);
+      queue_list(stmt->variant.if_stmt.then_statement, path, "then", true);
     } else if (stmt->kind == stmk_constexpr_if) {
       a_constexpr_if_ptr info = stmt->variant.constexpr_if;
-      // Even a missing supplement has both empty native branch-list
-      // witnesses: otherwise a dropped last event-84 is undetectable.
-      emit_statements(info != nullptr ? info->then_statement : nullptr,
-                      function, path, "then", depth + 1, true);
-      emit_statements(info != nullptr ? info->else_statement : nullptr,
-                      function, path, "else", depth + 1, true);
+      queue_list(info != nullptr ? info->else_statement : nullptr, path, "else", true);
+      queue_list(info != nullptr ? info->then_statement : nullptr, path, "then", true);
     } else if (stmt->kind == stmk_while ||
                stmt->kind == stmk_end_test_while) {
-      emit_statements(stmt->variant.loop_statement,
-                      function, path, "body", depth + 1, true);
+      queue_list(stmt->variant.loop_statement, path, "body", true);
     } else if (stmt->kind == stmk_for) {
       a_for_loop_ptr info = stmt->variant.for_loop.extra_info;
+      queue_list(stmt->variant.for_loop.statement, path, "body", true);
       if (info != nullptr) {
         if (info->for_init_scope != nullptr) {
           scope_statement_paths.emplace(info->for_init_scope, path);
         }
-        emit_statements(info->initialization, function, path, "init", depth + 1, true);
-        emit_control_expr(info->increment, function, path, 1, "0", "", 0);
-        // The role-1 control snapshot contains no constant values. Retain a
-        // parallel executable expression tree on a synthetic statement,
-        // preserving the original role-1 snapshot and loop edge identity.
-        if (info->increment != nullptr) {
-          const std::string increment_path = path + ".increment.0";
-          emit_record(5, {txt(function), txt(increment_path), txt(path)},
-                      static_cast<uint32_t>(stmk_expr));
-          // Synthetic increments have no source flags but still require
-          // the mandatory native statement-attributes witness.
-          emit_record(26, {txt(function), txt(increment_path), num(0)});
-          emit_record(RECORD_NATIVE_CONTROL_ROOT_ADMISSION,
-                      {txt(function), txt(increment_path), num(0)});
-          emit_expr(info->increment, function, increment_path, "0", "", 0);
-        }
+        pending.push_back({TaskKind::Increment, stmt, path, "", 0, false});
+        queue_list(info->initialization, path, "init", true);
       }
-      emit_statements(stmt->variant.for_loop.statement,
-                      function, path, "body", depth + 1, true);
     } else if (stmt->kind == stmk_range_based_for) {
       a_range_based_for_loop_ptr info = stmt->variant.range_based_for_loop.extra_info;
       if (info != nullptr) {
@@ -3425,40 +3476,37 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
         emit_control_expr(info->ne_call_expr, function, path, 2, "0", "", 0);
         emit_control_expr(info->incr_call_expr, function, path, 3, "0", "", 0);
       }
-      emit_statements(info != nullptr ? info->initialization : nullptr,
-                      function, path, "init", depth + 1, true);
-      emit_statements(stmt->variant.range_based_for_loop.statement,
-                      function, path, "body", depth + 1, true);
+      queue_list(stmt->variant.range_based_for_loop.statement, path, "body", true);
+      queue_list(info != nullptr ? info->initialization : nullptr, path, "init", true);
     } else if (stmt->kind == stmk_switch) {
-      emit_statements(stmt->variant.switch_stmt.body_statement,
-                      function, path, "body", depth + 1, true);
+      queue_list(stmt->variant.switch_stmt.body_statement, path, "body", true);
     } else if (stmt->kind == stmk_try_block) {
       a_try_supplement_ptr info = stmt->variant.try_block;
-      // Independent EDG handler-list cardinality witness. Without it,
-      // losing a final catchN list (including its event-84 proof) would
-      // make a truncated try/catch tree appear complete.
+      // Count independently before publishing the ordered handler lists.
       uint32_t native_handler_count = 0;
       for (a_handler_ptr handler = info != nullptr ? info->handlers : nullptr;
-           handler != nullptr && within_native_list_limit(native_handler_count);
-           handler = handler->next, ++native_handler_count) {}
+           handler != nullptr; handler = handler->next, ++native_handler_count) {
+        if (!within_native_list_limit(native_handler_count)) return;
+      }
       emit_record(RECORD_NATIVE_TRY_HANDLER_COUNT,
                   {txt(function), txt(path), num(native_handler_count)});
-      emit_statements(info != nullptr ? info->statement : nullptr,
-                      function, path, "try", depth + 1, true);
+      std::vector<a_statement_ptr> handlers;
       if (info != nullptr) {
-        unsigned handler_index = 0;
         for (a_handler_ptr handler = info->handlers;
-             handler != nullptr && within_native_list_limit(handler_index);
-             handler = handler->next, ++handler_index) {
-          emit_statements(handler->statement, function, path,
-                          "catch" + std::to_string(handler_index), depth + 1, true);
+             handler != nullptr; handler = handler->next) {
+          handlers.push_back(handler->statement);
         }
       }
+      for (size_t i = handlers.size(); i != 0; --i) {
+        queue_list(handlers[i - 1], path, "catch" + std::to_string(i - 1), true);
+      }
+      queue_list(info != nullptr ? info->statement : nullptr, path, "try", true);
     }
   }
 }
 
 // Independently owned expression nodes for dynamic variable initializers.
+
 static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
                                   const std::string &path,
                                   const std::string &parent, unsigned depth,
