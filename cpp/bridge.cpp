@@ -52,6 +52,8 @@ thread_local std::unordered_set<const void *> emitted_symbol_types;
 thread_local std::unordered_map<const void *, uint32_t> current_lifetime_ids;
 // Function regions may be recycled. IDs are opaque within a routine only.
 thread_local std::unordered_map<const void *, uint32_t> current_dynamic_init_ids;
+// Native try and handler pointers share a separate routine-local namespace.
+thread_local std::unordered_map<const void *, uint32_t> current_eh_owner_ids;
 thread_local uint32_t current_dynamic_init_routine=0;
 thread_local std::unordered_map<const void *, std::string> scope_statement_paths;
 thread_local std::unordered_set<const void *> emitted_routines;
@@ -2288,6 +2290,20 @@ static bool standard_float_image(a_constant_ptr c, a_type_ptr ty,
   }
   return false;
 }
+static uint32_t native_eh_owner_id(const void *owner)
+{
+  if (owner==nullptr || current_dynamic_init_routine==0) return 0;
+  auto it=current_eh_owner_ids.find(owner);
+  if (it==current_eh_owner_ids.end()) {
+    if (current_eh_owner_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+      report_incomplete_snapshot();return 0;
+    }
+    it=current_eh_owner_ids.emplace(owner,
+        static_cast<uint32_t>(current_eh_owner_ids.size()+1)).first;
+  }
+  return it->second;
+}
+
 // Preserve the original EDG *nonportable* EH action kind and expression
 // identity. A native kind is an IL fact, not an Itanium execution ABI.
 // The full portable-C backend has no such discriminant and emits no event.
@@ -2302,6 +2318,39 @@ static void emit_retained_eh_construct(
          num(static_cast<unsigned>(node->kind)),
          num(static_cast<unsigned>(node->variant.lowered_eh.kind))});
     const auto &eh=node->variant.lowered_eh;
+    // Retain actual pointer targets, including references emitted before
+    // their declaration. Never infer the catch from lexical nesting.
+    bool has_target=true;
+    uint32_t target=0;
+    a_routine_ptr target_routine=nullptr;
+    switch (eh.kind) {
+      case leck_caught_object_address:
+        target=native_eh_owner_id(eh.variant.caught_object_handler);break;
+      case leck_catch_epilogue:
+        target=native_eh_owner_id(eh.variant.epilogue_handler);break;
+      case leck_try_epilogue:
+        target=native_eh_owner_id(eh.variant.epilogue_try_block);break;
+      case leck_function_prologue:
+        if (eh.variant.prologue_info!=nullptr)
+          target_routine=eh.variant.prologue_info->routine;
+        break;
+      case leck_function_epilogue:
+        target_routine=eh.variant.epilogue_routine;break;
+      default: has_target=false;break;
+    }
+    if (target_routine!=nullptr) {
+      target=emit_symbol(target_routine,1,
+          declaration_name(target_routine->source_corresp,true,true));
+      emit_routine_type(target_routine);
+    }
+    if (has_target) {
+      if (target==0 || current_dynamic_init_routine==0) {
+        report_incomplete_snapshot();return;
+      }
+      emit_record(RECORD_NATIVE_EH_ACTION_TARGET,
+          {txt(function),txt(statement),num(role),txt(path),
+           num(current_dynamic_init_routine),num(target)});
+    }
     // Preserve the active union arm; a null pointer is not an unresolved ID.
     if (eh.kind==leck_cleanup_state || eh.kind==leck_unreachable_cleanup_state
 #if !GENERATE_EH_TABLES
@@ -3783,6 +3832,11 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                   {txt(function), txt(path), num(native_handler_count)});
       std::vector<a_statement_ptr> handlers;
       if (info != nullptr) {
+        const uint32_t try_id=native_eh_owner_id(info);
+        if (try_id==0) {report_incomplete_snapshot();return;}
+        emit_record(RECORD_NATIVE_EH_OWNER,
+            {txt(function),txt(path),num(current_dynamic_init_routine),
+             absent(),num(try_id),absent()});
         for (a_handler_ptr handler = info->handlers;
              handler != nullptr; handler = handler->next) {
           // Preserve the source-owned declaration and matching type-info
@@ -3816,6 +3870,14 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
                typeinfo ? num(typeinfo) : absent(),
                num(handler->dynamic_init!=nullptr ? 1u : 0u),
                num(info->is_function_try_block ? 1u : 0u)});
+          const uint32_t handler_id=native_eh_owner_id(handler);
+          const uint32_t init_id=native_dynamic_init_id(handler->dynamic_init);
+          if (handler_id==0 || (handler->dynamic_init!=nullptr && init_id==0)) {
+            report_incomplete_snapshot();return;
+          }
+          emit_record(RECORD_NATIVE_EH_OWNER,
+              {txt(function),txt(path),num(current_dynamic_init_routine),
+               num(handlers.size()),num(handler_id),init_id ? num(init_id) : absent()});
           handlers.push_back(handler->statement);
         }
       }
@@ -4133,6 +4195,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
         a_scope_ptr body = scope_for_routine_or_null(r);
         if (body != nullptr) {
           current_dynamic_init_ids.clear();
+          current_eh_owner_ids.clear();
           current_dynamic_init_routine=routine_symbol;
           // Discover regions before constructor initializers reference them.
           prepare_lifetimes(body, routine_symbol);
@@ -4248,6 +4311,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
           emit_function_locals(body, routine_symbol, r, name);
           current_lifetime_ids.clear();
           current_dynamic_init_ids.clear();
+          current_eh_owner_ids.clear();
           current_dynamic_init_routine=0;
         }
       }
@@ -4762,6 +4826,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   symbol_ids.clear();
   static_literal_ids.clear();
   current_dynamic_init_ids.clear();
+  current_eh_owner_ids.clear();
   current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
   visited_scopes.clear();
@@ -4787,6 +4852,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   symbol_ids.clear();
   static_literal_ids.clear();
   current_dynamic_init_ids.clear();
+  current_eh_owner_ids.clear();
   current_dynamic_init_routine=0;
   weak_image_diagnostic_count = 0;
   visited_scopes.clear();
