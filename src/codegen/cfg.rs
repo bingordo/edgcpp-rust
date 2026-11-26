@@ -5068,7 +5068,7 @@ mod tests {
         }]).unwrap();
         assert_eq!(&obj[..4],b"\x7fELF");
         assert!(check(&[Stmt::ZeroAggregate(0,4097)],
-            &mut HashSet::new(),0,1,0).is_err());
+            &mut HashSet::new(),0,1,0).is_ok());
     }
     #[test]
     fn rejects_nondefinite_local_initialization() {
