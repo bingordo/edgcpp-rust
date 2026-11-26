@@ -12,9 +12,6 @@ pub(crate) const MAX_SUPPORTED_PARAMETERS: usize = 256;
 /// Maximum representable native object size in CFG reference lowering.
 pub(crate) const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Maximum aggregate scalar elements expanded into individual CFG operations.
-pub(crate) const MAX_AGGREGATE_SCALAR_ELEMENTS: u64 = 256;
-
 /// Conservative upper bound on *explicit* Cranelift stack slots per CFG
 /// function, including materialized aggregate call results. This does not
 /// account for final register spills or outgoing call frames, which Cranelift
@@ -75,7 +72,6 @@ mod tests {
         assert_eq!(MAX_FP_STATEMENTS, 10_000);
         assert_eq!(MAX_CFG_LOCALS, 10_000);
         assert_eq!(MAX_NATIVE_OBJECT_BYTES, 16 * 1024 * 1024);
-        assert_eq!(MAX_AGGREGATE_SCALAR_ELEMENTS, 256);
         assert_eq!(MAX_AGGREGATE_LAYOUT_DEPTH, 32);
         assert_eq!(MAX_FUNCTION_EXPLICIT_STACK_BYTES, 16 * 1024 * 1024);
     }
