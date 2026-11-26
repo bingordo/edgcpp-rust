@@ -3815,17 +3815,8 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
       })) report_incomplete_snapshot();
 }
 
-static void collect_scope(a_scope_ptr scope, const std::string &prefix,
-                          unsigned depth)
+static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
 {
-  if (scope == nullptr || current_callback == nullptr) return;
-  // Class scopes can be reached through more than one enclosing declaration.
-  if (visited_scopes.find(scope) != visited_scopes.end()) return;
-  // C++20 accepts deeply nested namespace chains (the bridge CI captures
-  // 136 levels). Retain a larger defensive recursion cap, but never return
-  // a seemingly complete snapshot when it is exceeded.
-  if (depth > 256) { report_incomplete_snapshot(); return; }
-  visited_scopes.insert(scope);
   // In the standard EDG configuration this scope-owned list, not the
   // optional separate-routine scheduler, holds the actual initialization
   // entries. Each file or namespace list is explicitly ordered by EDG.
@@ -4453,7 +4444,10 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
       emit_record(2, {txt(name)}, 0);
     }
   }
-  for (a_type_ptr t = scope->types; t != nullptr; t = t->next) {
+}
+
+static a_scope_ptr collect_named_type(a_type_ptr t,a_scope_ptr scope)
+{
     if (source_name(t->source_corresp) != nullptr) {
       std::string name = declaration_name(t->source_corresp, false);
       const uint32_t named_type_id = emit_type(t, 0);
@@ -4470,17 +4464,61 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
           t->variant.class_struct_union.extra_info != nullptr) {
         a_scope_ptr members = t->variant.class_struct_union.extra_info->assoc_scope;
         if (members != nullptr && members != scope) {
-          collect_scope(members, prefix, depth + 1);
+          return members;
         }
       }
     }
-  }
-  for (a_namespace_ptr ns = scope->namespaces; ns != nullptr; ns = ns->next) {
-    if (ns->is_namespace_alias) continue;
-    const char *name = ns->source_corresp.name;
-    std::string qualified = prefix + (name != nullptr ? name : "<anonymous>");
-    emit_record(4, {txt(qualified)});
-    collect_scope(ns->variant.assoc_scope, qualified + "::", depth + 1);
+  return nullptr;
+}
+
+// Class scopes may be reached from several declarations, so retain the
+// original global visited set. Resume each type/namespace list only after
+// its child scope is complete; preserve symbol IDs and scope-key order.
+static void collect_scope(a_scope_ptr root,const std::string &root_prefix,unsigned depth)
+{
+  if (root==nullptr || current_callback==nullptr) return;
+  struct frame {
+    a_scope_ptr scope;
+    a_type_ptr next_type;
+    a_namespace_ptr next_namespace;
+    size_t prefix_size;
+    unsigned type_index;
+    unsigned namespace_index;
+  };
+  std::vector<frame> stack;
+  std::string prefix=root_prefix;
+  auto enter=[&](a_scope_ptr scope) {
+    if (scope==nullptr || visited_scopes.find(scope)!=visited_scopes.end())
+      return true;
+    if (!within_native_list_limit(stack.size()+depth)) return false;
+    visited_scopes.insert(scope);
+    collect_scope_contents(scope,prefix);
+    stack.push_back({scope,scope->types,scope->namespaces,prefix.size(),0,0});
+    return true;
+  };
+  if (!enter(root)) return;
+  while (!stack.empty()) {
+    auto &work=stack.back();
+    prefix.resize(work.prefix_size);
+    if (work.next_type!=nullptr) {
+      if (!within_native_list_limit(work.type_index++)) return;
+      auto t=work.next_type;
+      work.next_type=t->next;
+      auto members=collect_named_type(t,work.scope);
+      if (!enter(members)) return;
+    } else if (work.next_namespace!=nullptr) {
+      if (!within_native_list_limit(work.namespace_index++)) return;
+      auto ns=work.next_namespace;
+      work.next_namespace=ns->next;
+      if (ns->is_namespace_alias) continue;
+      const char *name=ns->source_corresp.name;
+      prefix+=(name!=nullptr?name:"<anonymous>");
+      emit_record(4,{txt(prefix)});
+      prefix+="::";
+      if (!enter(ns->variant.assoc_scope)) return;
+    } else {
+      stack.pop_back();
+    }
   }
 }
 
