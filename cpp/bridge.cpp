@@ -870,6 +870,85 @@ static expression_children dynamic_init_expression_children(a_dynamic_init_ptr i
   }
 }
 
+// Export native constant structure, not an executable byte image. A repeat
+// retains one child and its native count, even for runtime-sized arrays.
+// Dynamic and unsupported leaves are explicit and carry no invented value.
+static void emit_ctor_constant_tree(a_constant_ptr c, uint32_t routine,
+    uint32_t position, const std::string &path, const std::string &parent,
+    unsigned depth, unsigned &visits, std::unordered_set<a_constant_ptr> &active)
+{
+  if (c == nullptr || depth > 64 ||
+      !within_native_list_limit(visits++) || !active.insert(c).second) {
+    report_incomplete_snapshot();
+    return;
+  }
+  uint32_t family=0, flags=0;
+  edgcpp_field payload=absent();
+  std::vector<a_constant_ptr> children;
+  if (c->kind == ck_aggregate) {
+    family=1;
+    flags=(c->explicit_braces_on_aggregate ? 1u : 0u) |
+          (c->variant.aggregate.has_dynamic_init_component ? 2u : 0u);
+    std::unordered_set<a_constant_ptr> siblings;
+    for (auto child=c->variant.aggregate.first_constant; child!=nullptr;
+         child=child->next) {
+      if (!within_native_list_limit(children.size()) ||
+          !siblings.insert(child).second) {
+        report_incomplete_snapshot(); break;
+      }
+      children.push_back(child);
+    }
+    if ((children.empty() ? nullptr : children.back()) !=
+        c->variant.aggregate.last_constant) report_incomplete_snapshot();
+  } else if (c->kind == ck_init_repeat) {
+    family=2;
+    payload=num(c->variant.init_repeat.count);
+    flags=c->variant.init_repeat.multidimensional_aggr_tail_not_repeated ? 1u : 0u;
+    if (c->variant.init_repeat.constant == nullptr) report_incomplete_snapshot();
+    else children.push_back(c->variant.init_repeat.constant);
+  } else if (c->kind == ck_designator) {
+    family=3;
+    flags=(c->variant.designator.is_generic ? 1u : 0u) |
+          (c->variant.designator.is_field_designator ? 2u : 0u);
+    if (!c->variant.designator.is_generic) {
+      if (c->variant.designator.is_field_designator) {
+        auto field=c->variant.designator.variant.field;
+        if (field != nullptr) {
+          const char *raw=source_name(field->source_corresp);
+          payload=num(emit_symbol(field,3,raw==nullptr ? "" : raw));
+        } else report_incomplete_snapshot();
+      } else payload=num(c->variant.designator.variant.array_element);
+    }
+  } else if (c->kind == ck_integer) {
+    family=4;
+    a_boolean overflow=FALSE;
+    if (int_constant_is_signed(c)) {
+      const auto v=value_of_integer_constant(c,&overflow);
+      if (!overflow && sizeof(v)<=sizeof(int64_t))
+        payload=signed_num(static_cast<int64_t>(v));
+    } else {
+      const auto v=unsigned_value_of_integer_constant(c,&overflow);
+      if (!overflow && sizeof(v)<=sizeof(uint64_t))
+        payload=num(static_cast<uint64_t>(v));
+    }
+  } else if (c->kind == ck_dynamic_init) {
+    family=5;
+    if (c->variant.dynamic_init.ptr != nullptr)
+      payload=num(static_cast<unsigned>(c->variant.dynamic_init.ptr->kind));
+    else report_incomplete_snapshot();
+  }
+  const uint32_t type=emit_type(c->type,0);
+  emit_record(RECORD_NATIVE_CTOR_CONSTANT_NODE,
+      {num(routine),num(position),txt(path),
+       parent.empty() ? absent() : txt(parent),
+       num(static_cast<unsigned>(c->kind)),type ? num(type) : absent(),
+       num(family),num(children.size()),payload,num(flags)});
+  for (size_t i=0;i<children.size();++i)
+    emit_ctor_constant_tree(children[i],routine,position,
+        path+"."+std::to_string(i),path,depth+1,visits,active);
+  active.erase(c);
+}
+
 static expression_children children_of(an_expr_node_ptr node)
 {
   if (node == nullptr) return {nullptr, false};
@@ -3376,6 +3455,21 @@ static void collect_scope(a_scope_ptr scope, const std::string &prefix,
                            num(static_cast<unsigned>(init->initializer->kind)) : absent(),
                          num(executable_count), num(init->source_expr != nullptr),
                          num(shared_root), num(selected)});
+            a_constant_ptr constant_root=nullptr;
+            if (init->initializer != nullptr &&
+                (init->initializer->kind==dik_constant ||
+                 init->initializer->kind==dik_nonconstant_aggregate ||
+                 init->initializer->kind==dik_lambda)) {
+              constant_root=init->initializer->variant.constant.ptr;
+            }
+            emit_record(RECORD_NATIVE_CTOR_CONSTANT_ROOT,
+                {num(routine_symbol),num(init_position),num(constant_root!=nullptr)});
+            if (constant_root != nullptr) {
+              unsigned visits=0;
+              std::unordered_set<a_constant_ptr> active;
+              emit_ctor_constant_tree(constant_root,routine_symbol,init_position,
+                  "0","",0,visits,active);
+            }
             if (init_expr == nullptr) init_expr = init->source_expr;
             emit_record(RECORD_NATIVE_CONSTRUCTOR_ROOT_ADMISSION,
                         {num(routine_symbol),num(init_position),
