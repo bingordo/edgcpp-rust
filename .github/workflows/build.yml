@@ -2314,17 +2314,14 @@ jobs:
               printf 'Aggregate 4096 GCC: %s, EDG: %s\n' "$expected" "$actual"
               exit 1
             fi
-            rm -f audit_image_4097.o
-            if ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c >audit_image_4097.log 2>&1; then
-              echo "Unexpectedly accepted explicit 4097-byte initializer"
-              exit 1
-            fi
-            grep -qF 'no single supported aggregate initializer' audit_image_4097.log || {
-              cat audit_image_4097.log
-              exit 1
-            }
-            test ! -f audit_image_4097.o
-            echo "Aggregate native object-image 4096/4097 boundary validation passed"
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_image_4097.o --c11 audit_image_4097.c
+            cat > image_4097_driver.c <<'EOF'
+          extern int audit_image_too_large(void);
+          int main(void) { return audit_image_too_large() != 89; }
+          EOF
+            gcc audit_image_4097.o image_4097_driver.c -o image_4097_driver
+            ./image_4097_driver
+            echo "Aggregate native object-image 4096/4097 validation passed"
           )
 
       - name: C11 aggregate data relocation boundary differential
@@ -2352,17 +2349,14 @@ jobs:
               printf '512 pointer relocations: GCC=%s EDG=%s\n' "$baseline" "$generated"
               exit 1
             fi
-            rm -f audit_reloc_513.o
-            if ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c >audit_reloc_513.log 2>&1; then
-              echo "Unexpectedly accepted explicit 4104-byte image with 513 pointers"
-              exit 1
-            fi
-            grep -qF 'no single supported aggregate initializer' audit_reloc_513.log || {
-              cat audit_reloc_513.log
-              exit 1
-            }
-            test ! -f audit_reloc_513.o
-            echo "Native aggregate 512/513 pointer relocation boundary passed"
+            ../../../edgcpp-rust/target/debug/examples/codegen audit_reloc_513.o --c11 audit_reloc_513.c
+            cat > reloc_513_driver.c <<'EOF'
+          extern int audit_reloc_bad_use(void);
+          int main(void) { return audit_reloc_bad_use() != 37; }
+          EOF
+            gcc audit_reloc_513.o reloc_513_driver.c -o reloc_513_driver
+            ./reloc_513_driver
+            echo "Native aggregate 512/513 pointer relocation validation passed"
           )
 
       - name: Reject unsupported EDG constructs
