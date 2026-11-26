@@ -831,7 +831,8 @@ pub enum NativeCtorConstantPayload { Unsigned(u64), Signed(i64) }
 
 /// One occurrence of a native dynamic-init entry, with an opaque identity
 /// scoped to its routine's live IL region. Context 0=constructor, 1=statement,
-/// 2=ordered destruction. Presence flags are independent of region lookup.
+/// 2=ordered destruction, 3/4/6=expression owner, 7=nested constant leaf.
+/// Presence flags are independent of region lookup.
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct NativeDynamicInitIdentity {
     pub routine:SymbolId, pub context:u32, pub position:u32,
@@ -4403,7 +4404,7 @@ fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
             if n.flags&1!=0 {n.payload.is_none()}
             else {matches!(n.payload,Some(Unsigned(v)) if n.flags&2==0 || v!=0)},
         4=>n.child_count==0 && n.flags==0,
-        5=>n.child_count==0 && n.flags==0 &&
+        5=>n.child_count<=1 && n.flags<=10000 &&
             matches!(n.payload,Some(Unsigned(v)) if v<=255),
         _=>false,
     }
@@ -4515,6 +4516,7 @@ fn valid_dynamic_init_identity(d:&NativeDynamicInitIdentity)->bool {
         1=>d.position==0 && d.path.as_ref().is_some_and(|p|!p.is_empty()) &&
             d.destruction_region.is_none(),
         2=>d.path.is_none() && d.destruction_region.is_some(),
+        3|4|6|7=>d.path.as_ref().is_some_and(|p|!p.is_empty()) && d.destruction_region.is_none(),
         _=>false,
     }
 }
@@ -4537,6 +4539,34 @@ fn validate_dynamic_init_identities(il:&Il)->Result<(),Error> {
     }
     let mut destructions:HashMap<_,_>=il.lifetime_destructions.iter()
         .map(|d|((d.routine,d.lifetime,d.position),(d.variable.is_some(),d.destructor.is_some()))).collect();
+    // Expression wrappers and nested constant leaves have their own
+    // original owner identity, even when they share the same native entry.
+    let mut nested:HashMap<(SymbolId,u32,u32,String),(u32,Option<(u32,bool)>)>=HashMap::new();
+    for e in &il.native_expression_variants {
+        let NativeExpressionPayload::DynamicInitializer{kind,flags}=e.payload else {continue;};
+        let (routine,position,context,statement,expression)=
+            expression_constant_owner(&e.owner,&e.path,&names).ok_or(Error::MalformedCallback)?;
+        if context==5 {continue;} // file-scope entries need a separate region
+        let path=if let Some(st)=statement {format!("{st}:{}",expression.unwrap())}
+            else {expression.unwrap().to_owned()};
+        let presence=(u32::from(flags&16!=0)) |
+            (u32::from(flags&32!=0)<<1) | (u32::from(flags&8!=0)<<2);
+        if nested.insert((routine,context,position,path),(kind,Some((presence,flags&64!=0)))).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for n in &il.native_ctor_constant_nodes {
+        if n.family!=5 || matches!(n.context,2|5) {continue;}
+        let Some(NativeCtorConstantPayload::Unsigned(kind))=n.payload else {
+            return Err(Error::MalformedCallback);
+        };
+        let path=format!("{}:{}:{}:{}:{}",n.context,n.position,
+            n.owner_statement.as_deref().unwrap_or(""),
+            n.owner_expression.as_deref().unwrap_or(""),n.path);
+        if nested.insert((n.routine,7,0,path),(kind as u32,None)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
     let mut identities:HashMap<_,(u32,u32,bool,Option<u32>,Option<u32>)>=HashMap::new();
     let mut destroyed=HashSet::new();
     for d in &il.native_dynamic_init_identities {
@@ -4559,6 +4589,13 @@ fn validate_dynamic_init_identities(il:&Il)->Result<(),Error> {
                     return Err(Error::MalformedCallback);
                 }
             }
+            3|4|6|7=>{
+                let Some((kind,presence))=nested.remove(&(d.routine,d.context,d.position,
+                    d.path.clone().unwrap())) else {return Err(Error::MalformedCallback);};
+                if kind!=d.kind || presence.is_some_and(|p|p!=(d.flags,d.has_variable)) {
+                    return Err(Error::MalformedCallback);
+                }
+            }
             _=>return Err(Error::MalformedCallback),
         }
         let entry=identities.entry((d.routine,d.id))
@@ -4573,7 +4610,7 @@ fn validate_dynamic_init_identities(il:&Il)->Result<(),Error> {
             }
         }
     }
-    if !constructors.is_empty() || !statements.is_empty() || !destructions.is_empty() {
+    if !constructors.is_empty() || !statements.is_empty() || !destructions.is_empty() || !nested.is_empty() {
         return Err(Error::MalformedCallback);
     }
     Ok(())
