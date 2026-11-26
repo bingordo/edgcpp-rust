@@ -3752,6 +3752,37 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
       if (info != nullptr) {
         for (a_handler_ptr handler = info->handlers;
              handler != nullptr; handler = handler->next) {
+          // Preserve the source-owned declaration and matching type-info
+          // identities in handler order, not inferred from the catch body.
+          uint32_t parameter=0, parameter_type=0, typeinfo=0;
+          if (handler->parameter != nullptr) {
+            auto v=handler->parameter;
+            const char *raw=source_name(v->source_corresp);
+            parameter=emit_symbol(v,2,raw==nullptr ? "<catch-parameter>" :
+                                  declaration_name(v->source_corresp,false));
+            parameter_type=emit_variable_type(v);
+            if (parameter==0 || parameter_type==0) {
+              report_incomplete_snapshot(); return;
+            }
+          }
+#if DO_IL_LOWERING && !DO_FULL_PORTABLE_EH_LOWERING
+          if (handler->typeinfo_var != nullptr) {
+            auto v=handler->typeinfo_var;
+            const char *raw=source_name(v->source_corresp);
+            typeinfo=emit_symbol(v,2,raw==nullptr ? "<catch-typeinfo>" :
+                                 declaration_name(v->source_corresp,false));
+            if (typeinfo==0 || emit_variable_type(v)==0) {
+              report_incomplete_snapshot(); return;
+            }
+          }
+#endif
+          emit_record(RECORD_NATIVE_CATCH_HANDLER,
+              {txt(function),txt(path),num(handlers.size()),
+               parameter ? num(parameter) : absent(),
+               parameter_type ? num(parameter_type) : absent(),
+               typeinfo ? num(typeinfo) : absent(),
+               num(handler->dynamic_init!=nullptr ? 1u : 0u),
+               num(info->is_function_try_block ? 1u : 0u)});
           handlers.push_back(handler->statement);
         }
       }
