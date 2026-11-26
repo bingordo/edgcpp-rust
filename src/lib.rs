@@ -112,6 +112,8 @@ pub struct Il {
     pub native_statement_sibling_counts: Vec<NativeStatementSiblingCount>,
     /// EDG-native count of catch handlers owned by each try statement (wire 86).
     pub native_try_handler_counts: Vec<NativeTryHandlerCount>,
+    /// Ordered source-owned catch declarations and optional native RTTI identities.
+    pub native_catch_handlers: Vec<retained_eh::NativeCatchHandler>,
     /// Native flags retained for each emitted statement.
     pub statement_attributes: Vec<StatementAttributes>,
     /// Additional expressions on structured controls (e.g. for increments).
@@ -1814,6 +1816,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         112 => Some(il.native_initializer_exec_roots.len()),
         113 => Some(il.native_initializer_exec_nodes.len()),
         114 => Some(il.native_supplemental_block_nodes.len()),
+        115 => Some(il.native_catch_handlers.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2033,6 +2036,27 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_ctor_constant_roots.push(NativeCtorConstantRoot {
                 routine:SymbolId(routine),position,present:present==1,
                 context,owner_statement,owner_expression,
+            });
+        }
+        115 => {
+            let (Some(function),Some(statement_path),Some(position),
+                 Some(initialization),Some(function_try))=
+                (t(0),t(1),n(2),n(6),n(7)) else {return;};
+            let parameter=n(3).map(SymbolId);
+            let parameter_type=n(4).map(TypeId);
+            let typeinfo=n(5).map(SymbolId);
+            if function.is_empty() || statement_path.is_empty() ||
+                initialization>1 || function_try>1 ||
+                parameter.is_some()!=parameter_type.is_some() ||
+                parameter.is_some_and(|id|!seen.symbols.contains(&id)) ||
+                parameter_type.is_some_and(|id|!seen.types.contains(&id)) ||
+                typeinfo.is_some_and(|id|!seen.symbols.contains(&id)) ||
+                (parameter.is_none() && (initialization!=0 || typeinfo.is_some())) {
+                return;
+            }
+            output.native_catch_handlers.push(retained_eh::NativeCatchHandler {
+                function,statement_path,position,parameter,parameter_type,typeinfo,
+                has_initialization:initialization==1,function_try:function_try==1,
             });
         }
         114 => {
@@ -4920,6 +4944,7 @@ fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
        validate_native_tree_count_coverage(il).is_err() ||
        validate_native_supplemental_child_counts(il).is_err() ||
        retained_eh::checked_retained_eh_actions(il).is_err() ||
+       retained_eh::validate_native_catch_handlers(il).is_err() ||
        validate_native_expression_variant_coverage(il).is_err() ||
        validate_native_supplemental_root_admission(il).is_err() ||
        validate_constructor_init_provenance(il).is_err() ||
@@ -7611,7 +7636,8 @@ mod audit_complete_wire_field_tags_tests {
     fn every_record_field_rejects_an_incorrect_but_defined_tag() {
         let mut total=0;
         let mut optional=0;
-        for kind in 1..=114_u32 {
+        let kinds = || (1..).take_while(|&kind| expected_wire_field_count(kind).is_some());
+        for kind in kinds() {
             let expected=expected_wire_field_tag_masks(kind)
                 .expect("all native wire record kinds have typed fields");
             assert_eq!(Some(expected.len()),expected_wire_field_count(kind));
@@ -7640,13 +7666,14 @@ mod audit_complete_wire_field_tags_tests {
         }
         // Compare against the generated schema rather than a manually
         // maintained total that becomes stale when records gain fields.
-        let schema_fields:usize=(1..=114_u32)
+        let schema_fields:usize=kinds()
             .map(|kind|expected_wire_field_count(kind).unwrap()).sum();
         assert_eq!(expected_wire_field_count(100),Some(4));
         assert_eq!(total,schema_fields);
         assert!(optional>0);
         assert!(expected_wire_field_tag_masks(0).is_none());
-        assert!(expected_wire_field_tag_masks(115).is_none());
+        let last = kinds().last().expect("nonempty generated schema");
+        assert!(expected_wire_field_tag_masks(last + 1).is_none());
     }
 
     #[test]
