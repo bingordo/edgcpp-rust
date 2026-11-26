@@ -1051,6 +1051,209 @@ static expression_children children_of(an_expr_node_ptr node)
 static uint32_t emit_variable_type(a_variable_ptr var);
 static uint32_t emit_routine_type(a_routine_ptr routine);
 
+// Independent supplemental graph. Each list has a count witness and
+// each item has a dense ordinal path. No invented routine or source statement.
+struct supplemental_block_owner {
+  constant_tree_owner owner;
+  std::string nested, expression_path;
+  bool from_exec;
+};
+struct supplemental_block_walk {
+  const supplemental_block_owner &key;
+  unsigned visits=0;
+  std::unordered_set<const void *> active;
+  bool enter(const void *ptr,unsigned depth) {
+    if (ptr==nullptr || depth>64 || !within_native_list_limit(visits++) ||
+        !active.insert(ptr).second) {report_incomplete_snapshot();return false;}
+    return true;
+  }
+  void node(const std::string &path,const std::string &parent,
+      const std::string &edge,unsigned category,unsigned kind,
+      unsigned count,uint32_t type=0,uint32_t symbol=0,
+      edgcpp_field op=absent(),edgcpp_field payload=absent(),unsigned flags=0) {
+    const auto &o=key.owner;
+    emit_record(RECORD_NATIVE_SUPPLEMENTAL_BLOCK_NODE,
+      {num(o.symbol),num(o.position),num(o.context),
+       o.statement.empty()?absent():txt(o.statement),
+       o.expression.empty()?absent():txt(o.expression),
+       key.nested.empty()?absent():txt(key.nested),
+       num(key.from_exec),txt(key.expression_path),txt(path),
+       parent.empty()?absent():txt(parent),txt(edge),
+       num(category),num(kind),num(count),type?num(type):absent(),
+       symbol?num(symbol):absent(),op,payload,num(flags)});
+  }
+  static std::string child(const std::string &path,size_t i) {
+    return path+"."+std::to_string(i);
+  }
+  void expr_list(an_expr_node_ptr first,bool linked,const std::string &path,
+      const std::string &parent,const std::string &edge,unsigned depth) {
+    std::vector<an_expr_node_ptr> list;
+    std::unordered_set<an_expr_node_ptr> seen;
+    for (auto e=first;e!=nullptr;e=linked?e->next:nullptr) {
+      if (!within_native_list_limit(list.size()) || !seen.insert(e).second) {
+        report_incomplete_snapshot();break;
+      }
+      list.push_back(e);
+    }
+    node(path,parent,edge,0,0,list.size());
+    for (size_t i=0;i<list.size();++i) expr(list[i],child(path,i),path,depth+1);
+  }
+  void expr(an_expr_node_ptr e,const std::string &path,const std::string &parent,unsigned depth) {
+    if (!enter(e,depth)) return;
+    uint32_t symbol=0;
+    if (e->kind==enk_variable && e->variant.variable.ptr!=nullptr) {
+      auto v=e->variant.variable.ptr;
+      const char *raw=source_name(v->source_corresp);
+      symbol=emit_symbol(v,2,raw==nullptr?"<initialized>":declaration_name(v->source_corresp,false));
+      emit_variable_type(v);
+    } else if (e->kind==enk_routine && e->variant.routine.ptr!=nullptr) {
+      auto r=e->variant.routine.ptr;
+      symbol=emit_symbol(r,1,declaration_name(r->source_corresp,true,true));
+      emit_routine_type(r);
+    } else if (e->kind==enk_field && e->variant.field.ptr!=nullptr) {
+      auto f=e->variant.field.ptr;
+      const char *raw=source_name(f->source_corresp);
+      symbol=emit_symbol(f,3,raw==nullptr?"":raw);
+    }
+    edgcpp_field payload=absent();
+    if (e->kind==enk_constant && e->variant.constant.ptr!=nullptr &&
+        e->variant.constant.ptr->kind==ck_integer) {
+      auto c=e->variant.constant.ptr;
+      a_boolean overflow=FALSE;
+      if (int_constant_is_signed(c)) {
+        auto v=value_of_integer_constant(c,&overflow);
+        if (!overflow && sizeof(v)<=sizeof(int64_t)) payload=signed_num(static_cast<int64_t>(v));
+      } else {
+        auto v=unsigned_value_of_integer_constant(c,&overflow);
+        if (!overflow && sizeof(v)<=sizeof(uint64_t)) payload=num(static_cast<uint64_t>(v));
+      }
+    }
+    const bool block=e->kind==enk_statement;
+    node(path,parent,"item",2,static_cast<unsigned>(e->kind),block?2:1,
+         emit_type(e->type,0),symbol,
+         e->kind==enk_operation?num(static_cast<unsigned>(e->variant.operation.kind)):absent(),
+         payload,block?1:0);
+    const auto operands=children_of(e);
+    expr_list(operands.first,operands.linked_list,child(path,0),path,"operands",depth+1);
+    if (block) statements(e->variant.statement,true,child(path,1),path,"embedded",depth+1);
+    active.erase(e);
+  }
+  void statements(a_statement_ptr first,bool single,const std::string &path,
+      const std::string &parent,const std::string &edge,unsigned depth) {
+    std::vector<a_statement_ptr> list;
+    std::unordered_set<a_statement_ptr> seen;
+    for (auto st=first;st!=nullptr;st=single?nullptr:st->next) {
+      if (!within_native_list_limit(list.size()) || !seen.insert(st).second) {
+        report_incomplete_snapshot();break;
+      }
+      list.push_back(st);
+    }
+    node(path,parent,edge,0,0,list.size());
+    for (size_t i=0;i<list.size();++i) statement(list[i],child(path,i),path,depth+1);
+  }
+  void statement(a_statement_ptr st,const std::string &path,
+      const std::string &parent,unsigned depth) {
+    if (!enter(st,depth)) return;
+    struct branch {a_statement_ptr root;bool single;std::string edge;};
+    struct extra_expr {an_expr_node_ptr root;std::string edge;};
+    std::vector<branch> branches;
+    std::vector<extra_expr> extras;
+    std::vector<a_variable_ptr> declarations;
+    if (st->kind==stmk_decl) {
+      std::unordered_set<an_il_entity_list_entry_ptr> seen;
+      for (auto d=st->variant.decl.entities;d!=nullptr;d=d->next) {
+        if (!within_native_list_limit(seen.size()) || !seen.insert(d).second) {
+          report_incomplete_snapshot();break;
+        }
+        if (d->entity.kind==iek_variable && d->entity.ptr!=nullptr)
+          declarations.push_back(reinterpret_cast<a_variable_ptr>(d->entity.ptr));
+      }
+    }
+    a_dynamic_init_ptr init=nullptr;
+    if (st->kind==stmk_init) init=st->variant.dynamic_init;
+    else if (st->kind==stmk_return) init=st->variant.return_dynamic_init;
+    else if (st->kind==stmk_stmt_expr_result) init=st->variant.stmt_expr_result.dynamic_init;
+    if (st->kind==stmk_block)
+      branches.push_back({st->variant.block.statements,false,"block"});
+    else if (st->kind==stmk_if || st->kind==stmk_if_consteval || st->kind==stmk_if_not_consteval) {
+      branches.push_back({st->variant.if_stmt.then_statement,true,"then"});
+      branches.push_back({st->variant.if_stmt.else_statement,true,"else"});
+    } else if (st->kind==stmk_constexpr_if) {
+      auto info=st->variant.constexpr_if;
+      branches.push_back({info?info->then_statement:nullptr,true,"then"});
+      branches.push_back({info?info->else_statement:nullptr,true,"else"});
+    } else if (st->kind==stmk_while || st->kind==stmk_end_test_while)
+      branches.push_back({st->variant.loop_statement,true,"body"});
+    else if (st->kind==stmk_for) {
+      auto info=st->variant.for_loop.extra_info;
+      branches.push_back({info?info->initialization:nullptr,true,"init"});
+      branches.push_back({st->variant.for_loop.statement,true,"body"});
+      extras.push_back({info?info->increment:nullptr,"increment"});
+    } else if (st->kind==stmk_range_based_for) {
+      auto info=st->variant.range_based_for_loop.extra_info;
+      branches.push_back({info?info->initialization:nullptr,true,"init"});
+      branches.push_back({st->variant.range_based_for_loop.statement,true,"body"});
+      extras.push_back({info?info->ne_call_expr:nullptr,"range-test"});
+      extras.push_back({info?info->incr_call_expr:nullptr,"range-increment"});
+    } else if (st->kind==stmk_switch)
+      branches.push_back({st->variant.switch_stmt.body_statement,true,"body"});
+    else if (st->kind==stmk_try_block) {
+      auto info=st->variant.try_block;
+      branches.push_back({info?info->statement:nullptr,true,"try"});
+      std::unordered_set<a_handler_ptr> seen;
+      for (auto h=info?info->handlers:nullptr;h!=nullptr;h=h->next) {
+        if (!within_native_list_limit(seen.size()) || !seen.insert(h).second) {
+          report_incomplete_snapshot();break;
+        }
+        branches.push_back({h->statement,true,"catch"+std::to_string(seen.size()-1)});
+      }
+    }
+    if (st->kind==stmk_set_vla_size && st->variant.vla_dimension!=nullptr)
+      extras.push_back({st->variant.vla_dimension->dimension_expr,"vla-bound"});
+    uint32_t label=0;
+    if ((st->kind==stmk_goto || st->kind==stmk_label) && st->variant.label.ptr!=nullptr) {
+      auto lab=st->variant.label.ptr;
+      const char *raw=source_name(lab->source_corresp);
+      label=emit_symbol(lab,4,raw==nullptr?"":raw);
+    }
+    node(path,parent,"item",1,static_cast<unsigned>(st->kind),
+         2+branches.size()+extras.size()+(init!=nullptr?1:0),0,label,
+         absent(),absent(),st->compiler_generated?1:0);
+    size_t index=0;
+    expr_list(st->expr,false,child(path,index++),path,"primary",depth+1);
+    auto decl_path=child(path,index++);
+    node(decl_path,path,"declarations",0,0,declarations.size());
+    for (size_t i=0;i<declarations.size();++i) {
+      auto v=declarations[i];
+      const char *raw=source_name(v->source_corresp);
+      auto sym=emit_symbol(v,2,raw==nullptr?"<declared>":declaration_name(v->source_corresp,false));
+      node(child(decl_path,i),decl_path,"item",3,0,0,emit_variable_type(v),sym);
+    }
+    for (auto &b:branches) statements(b.root,b.single,child(path,index++),path,b.edge,depth+1);
+    for (auto &e:extras) expr_list(e.root,false,child(path,index++),path,e.edge,depth+1);
+    if (init!=nullptr) {
+      auto p=child(path,index++);
+      uint32_t sym=0,ty=0;
+      if (init->variable!=nullptr) {
+        auto v=init->variable;
+        const char *raw=source_name(v->source_corresp);
+        sym=emit_symbol(v,2,raw==nullptr?"<initialized>":declaration_name(v->source_corresp,false));
+        ty=emit_variable_type(v);
+      }
+      // Constants/lifetime/constructor flags are still opaque in this
+      // structural block graph; never authorize execution from it.
+      node(p,path,"initializer",4,static_cast<unsigned>(init->kind),1,ty,sym);
+      const auto roots=dynamic_init_expression_children(init);
+      expr_list(roots.first,roots.linked_list,child(p,0),p,"roots",depth+1);
+    }
+    active.erase(st);
+  }
+};
+static void emit_supplemental_block(an_statement_ptr root,const supplemental_block_owner &owner) {
+  supplemental_block_walk walk{owner,0,{}};
+  walk.statements(root,true,"0","","embedded",0);
+}
+
 // The native executable roots are independent of the legacy source_expr
 // fallback. Keep argument lists as ordered roots, never concatenate them
 // into a fake comma expression or manufacture a statement/function ID.
@@ -1109,6 +1312,8 @@ static void emit_initializer_exec_node(an_expr_node_ptr e,
        e->kind==enk_operation ? num(static_cast<unsigned>(e->variant.operation.kind)) : absent(),
        ty ? num(ty) : absent(),symbol ? num(symbol) : absent(),
        num(operands.size()),integer,num(e->kind==enk_statement ? 1u : 0u)});
+  if (e->kind==enk_statement)
+    emit_supplemental_block(e->variant.statement,{owner,nested,path,true});
   for (size_t i=0;i<operands.size();++i)
     emit_initializer_exec_node(operands[i],owner,nested,path+"."+std::to_string(i),
         path,depth+1,visits,active);
@@ -1874,8 +2079,9 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
   // statement graph today. Do not certify a supplemental tree that lost
   // its executable statement subtree.
   if (context != 0 && node->kind == enk_statement) {
-    report_incomplete_snapshot();
-    return;
+    emit_supplemental_block(node->variant.statement,
+        {{context==1 ? current_dynamic_init_routine : owner,position,context+3,
+          statement,path},"",path,false});
   }
   uint32_t variant = 0;
   edgcpp_field payload = absent();
