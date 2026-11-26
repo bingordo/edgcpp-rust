@@ -876,6 +876,8 @@ static expression_children dynamic_init_expression_children(a_dynamic_init_ptr i
 // Export native constant structure, not an executable byte image. A repeat
 // retains one child and its native count, even for runtime-sized arrays.
 // Dynamic and unsupported leaves are explicit and carry no invented value.
+static void emit_dynamic_init_identity(a_dynamic_init_ptr d,uint32_t context,
+    uint32_t position,const std::string &path,uint32_t destruction_region=0);
 struct constant_tree_owner {
   uint32_t symbol, position, context;
   std::string statement, expression;
@@ -940,9 +942,27 @@ static void emit_initializer_constant_tree(a_constant_ptr c,
     }
   } else if (c->kind == ck_dynamic_init) {
     family=5;
-    if (c->variant.dynamic_init.ptr != nullptr)
-      payload=num(static_cast<unsigned>(c->variant.dynamic_init.ptr->kind));
-    else report_incomplete_snapshot();
+    const auto d=c->variant.dynamic_init.ptr;
+    if (d != nullptr) {
+      payload=num(static_cast<unsigned>(d->kind));
+      // Preserve nested constant roots without treating a dynamic leaf as
+      // a byte image. Count unexported executable roots explicitly.
+      const auto expressions=dynamic_init_expression_children(d);
+      std::unordered_set<an_expr_node_ptr> seen;
+      for (auto e=expressions.first;e!=nullptr;e=expressions.linked_list ? e->next : nullptr) {
+        if (!within_native_list_limit(flags) || !seen.insert(e).second) {
+          report_incomplete_snapshot(); break;
+        }
+        ++flags;
+      }
+      if ((d->kind==dik_constant || d->kind==dik_nonconstant_aggregate ||
+           d->kind==dik_lambda) && d->variant.constant.ptr!=nullptr)
+        children.push_back(d->variant.constant.ptr);
+      if (owner.context!=2 && owner.context!=5)
+        emit_dynamic_init_identity(d,7,0,
+            std::to_string(owner.context)+":"+std::to_string(owner.position)+":"+
+            owner.statement+":"+owner.expression+":"+path);
+    } else report_incomplete_snapshot();
   }
   const uint32_t type=emit_type(c->type,0);
   emit_record(RECORD_NATIVE_CTOR_CONSTANT_NODE,
@@ -1839,6 +1859,10 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
           (init->init_expr_lifetime != nullptr ? 32u : 0u) |
           (init->variable != nullptr ? 64u : 0u);
       payload = num(static_cast<unsigned>(init->kind) | (flags << 8));
+      if (context<2)
+        emit_dynamic_init_identity(init,context+3,position,statement+":"+path);
+      else if (context==3)
+        emit_dynamic_init_identity(init,6,position,path);
       emit_initializer_constant_root(init,
           {context<2 ? current_dynamic_init_routine : owner,
            position,context+3,statement,path});
@@ -2294,7 +2318,7 @@ static uint32_t emit_variable_type(a_variable_ptr var)
 // below, where the owning region is already indexed). Presence and lookup
 // are separate: a non-null but not-yet-indexed lifetime is never null.
 static void emit_dynamic_init_identity(a_dynamic_init_ptr d, uint32_t context,
-    uint32_t position, const std::string &path, uint32_t destruction_region=0)
+    uint32_t position, const std::string &path, uint32_t destruction_region)
 {
   if (d==nullptr || current_dynamic_init_routine==0) return;
   auto found=current_dynamic_init_ids.find(d);
