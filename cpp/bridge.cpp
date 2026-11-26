@@ -1254,13 +1254,10 @@ static void emit_supplemental_block(a_statement_ptr root,const supplemental_bloc
 // The native executable roots are independent of the legacy source_expr
 // fallback. Keep argument lists as ordered roots, never concatenate them
 // into a fake comma expression or manufacture a statement/function ID.
-static void emit_initializer_exec_node(an_expr_node_ptr e,
+static bool emit_initializer_exec_node(an_expr_node_ptr e,
     const constant_tree_owner &owner,const std::string &nested,
-    const std::string &path,const std::string &parent,unsigned depth,
-    unsigned &visits,std::unordered_set<an_expr_node_ptr> &active)
+    const std::string &path,const std::string &parent)
 {
-  if (e==nullptr || depth>64 || !within_native_list_limit(visits++) ||
-      !active.insert(e).second) {report_incomplete_snapshot();return;}
   uint32_t symbol=0;
   if (e->kind==enk_variable && e->variant.variable.ptr!=nullptr) {
     auto v=e->variant.variable.ptr;
@@ -1291,13 +1288,10 @@ static void emit_initializer_exec_node(an_expr_node_ptr e,
     }
   }
   const auto children=children_of(e);
-  std::vector<an_expr_node_ptr> operands;
-  std::unordered_set<an_expr_node_ptr> seen;
+  std::size_t operand_count=0;
   for (auto x=children.first;x!=nullptr;x=children.linked_list ? x->next : nullptr) {
-    if (!within_native_list_limit(operands.size()) || !seen.insert(x).second) {
-      report_incomplete_snapshot();break;
-    }
-    operands.push_back(x);
+    if (!within_native_list_limit(operand_count)) return false;
+    ++operand_count;
   }
   const auto ty=emit_type(e->type,0);
   emit_record(RECORD_NATIVE_INITIALIZER_EXEC_NODE,
@@ -1308,13 +1302,10 @@ static void emit_initializer_exec_node(an_expr_node_ptr e,
        parent.empty() ? absent() : txt(parent),num(static_cast<unsigned>(e->kind)),
        e->kind==enk_operation ? num(static_cast<unsigned>(e->variant.operation.kind)) : absent(),
        ty ? num(ty) : absent(),symbol ? num(symbol) : absent(),
-       num(operands.size()),integer,num(e->kind==enk_statement ? 1u : 0u)});
+       num(operand_count),integer,num(e->kind==enk_statement ? 1u : 0u)});
   if (e->kind==enk_statement)
     emit_supplemental_block(e->variant.statement,{owner,nested,path,true});
-  for (size_t i=0;i<operands.size();++i)
-    emit_initializer_exec_node(operands[i],owner,nested,path+"."+std::to_string(i),
-        path,depth+1,visits,active);
-  active.erase(e);
+  return true;
 }
 
 static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
@@ -1342,10 +1333,20 @@ static void emit_initializer_exec_roots(a_dynamic_init_ptr init,
        owner.expression.empty() ? absent() : txt(owner.expression),
        nested.empty() ? absent() : txt(nested),num(ordered.size()),
        ctor ? num(ctor) : absent()});
-  unsigned visits=0;
-  std::unordered_set<an_expr_node_ptr> active;
-  for (size_t i=0;i<ordered.size();++i)
-    emit_initializer_exec_node(ordered[i],owner,nested,std::to_string(i),"",0,visits,active);
+  std::size_t visits=0;
+  for (size_t i=0;i<ordered.size();++i) {
+    if (!edg_bridge::walk_expression_tree(
+            ordered[i],std::to_string(i),"",MAX_NATIVE_LIST_ELEMENTS,
+            children_of,[](an_expr_node_ptr n) { return n->next; },
+            [&](an_expr_node_ptr n,const std::string &p,const std::string &parent) {
+              if (!within_native_list_limit(visits)) return false;
+              ++visits;
+              return emit_initializer_exec_node(n,owner,nested,p,parent);
+            })) {
+      report_incomplete_snapshot();
+      return;
+    }
+  }
 }
 
 // EDG's call operators encode the callee as operand zero. Member calls
@@ -3524,13 +3525,11 @@ static void emit_statements(a_statement_ptr head, const std::string &function,
 
 // Independently owned expression nodes for dynamic variable initializers.
 
-static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
+static bool emit_initializer_expr_node(an_expr_node_ptr expr, uint32_t owner,
                                   const std::string &path,
-                                  const std::string &parent, unsigned depth,
-                                  bool constructor = false, uint32_t position = 0)
+                                  const std::string &parent,
+                                  bool constructor, uint32_t position)
 {
-  if (expr == nullptr) return;
-  if (depth > 64) { report_incomplete_snapshot(); return; }
   uint32_t symbol = 0;
   if (expr->kind == enk_variable && expr->variant.variable.ptr != nullptr) {
     auto ptr = expr->variant.variable.ptr;
@@ -3565,9 +3564,11 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
   const auto children = children_of(expr);
   uint32_t native_child_count = 0;
   for (an_expr_node_ptr child = children.first;
-       child != nullptr && within_native_list_limit(native_child_count);
+       child != nullptr;
        child = children.linked_list ? child->next : nullptr,
-       ++native_child_count) {}
+       ++native_child_count) {
+    if (!within_native_list_limit(native_child_count)) return false;
+  }
   if (constructor) {
     emit_record(RECORD_NATIVE_CONSTRUCTOR_CHILD_COUNT,
                 {num(owner),num(position),txt(path),num(native_child_count)});
@@ -3575,13 +3576,21 @@ static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
     emit_record(RECORD_NATIVE_INITIALIZER_CHILD_COUNT,
                 {num(owner),txt(path),num(native_child_count)});
   }
-  unsigned index = 0;
-  for (an_expr_node_ptr operand = children.first;
-       operand != nullptr && within_native_list_limit(index);
-       operand = children.linked_list ? operand->next : nullptr, ++index) {
-    emit_initializer_expr(operand, owner, path + "." + std::to_string(index),
-                          path, depth + 1, constructor, position);
-  }
+  return true;
+}
+
+static void emit_initializer_expr(an_expr_node_ptr expr, uint32_t owner,
+                                  const std::string &path,
+                                  const std::string &parent, unsigned depth,
+                                  bool constructor = false, uint32_t position = 0)
+{
+  if (expr == nullptr) return;
+  if (depth > 64) { report_incomplete_snapshot(); return; }
+  if (!edg_bridge::walk_expression_tree(expr,path,parent,MAX_NATIVE_LIST_ELEMENTS,
+      children_of,[](an_expr_node_ptr n) { return n->next; },
+      [&](an_expr_node_ptr n,const std::string &p,const std::string &owner_path) {
+        return emit_initializer_expr_node(n,owner,p,owner_path,constructor,position);
+      })) report_incomplete_snapshot();
 }
 
 static void collect_scope(a_scope_ptr scope, const std::string &prefix,
