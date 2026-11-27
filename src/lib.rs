@@ -9301,6 +9301,9 @@ mod separate_file_scope_initializer_owner_wire_tests {
 }
 
 #[cfg(test)]
+mod literal_identity_tests;
+
+#[cfg(test)]
 mod bootstrap_literal_global_wire_tests {
     use super::*;
     fn number(n:u64)->WireField {
