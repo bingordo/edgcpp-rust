@@ -1930,6 +1930,30 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
       }
     }
   }
+  // Private diagnostic only: correlate an original address expression with
+  // a later consumer rejection inside the isolated CI worker. The worker
+  // exports only validated numeric kind/shape flags, never this raw key.
+  if (has_constant && node->variant.constant.ptr->kind == ck_address &&
+      std::getenv("EDG_PRIVATE_ADDRESS_SHAPE") != nullptr) {
+    const auto &address=node->variant.constant.ptr->variant.address;
+    a_type_ptr root=object_initializer_type(node->type);
+    a_type_ptr pointee=root!=nullptr && root->kind==tk_pointer
+        ? object_initializer_type(root->variant.pointer.type) : nullptr;
+    a_constant_ptr object=(address.kind==abk_constant || address.kind==abk_temporary)
+        ? address.variant.constant : nullptr;
+    a_type_ptr storage=object!=nullptr ? object_initializer_type(object->type) : nullptr;
+    std::fprintf(stderr,
+        "EDG_PRIVATE_ADDRESS_SHAPE\t%s\t%s\t%s\tbase=%u object=%u target=%u storage=%u displaced=%u past=%u subobject=%u reflection=%u\n",
+        function.c_str(),stmt_path.c_str(),path.c_str(),
+        static_cast<unsigned>(address.kind),
+        object!=nullptr ? static_cast<unsigned>(object->kind)+1u : 0u,
+        pointee!=nullptr ? static_cast<unsigned>(pointee->kind)+1u : 0u,
+        storage!=nullptr ? static_cast<unsigned>(storage->kind)+1u : 0u,
+        static_cast<unsigned>(address.offset!=0),
+        static_cast<unsigned>(address.one_past_the_end),
+        static_cast<unsigned>(address.subobject_path!=nullptr),
+        static_cast<unsigned>(address.is_object_reflection));
+  }
   // Some routine designators are already folded to ck_address/abk_routine
   // by EDG (for example, both arms of a function-pointer conditional).
   // Record the exact routine symbol, never treat a function as data bytes.
