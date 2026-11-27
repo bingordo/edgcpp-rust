@@ -57,6 +57,7 @@ enum : uint32_t {
   RECORD_NATIVE_EH_CLEANUP_STATE = 116,
   RECORD_NATIVE_EH_OWNER = 117,
   RECORD_NATIVE_EH_ACTION_TARGET = 118,
+  RECORD_NATIVE_FILE_INIT_IDENTITY = 119,
 };
 
 // Validate field tags before emitting typed native wire records.
@@ -1236,6 +1237,16 @@ static bool wire_record_field_tags_valid(
   }
   case 118: {
     const uint8_t masks[] = {2, 2, 4, 2, 4, 4};
+    if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
+    size_t index = 0;
+    for (const auto &field : fields) {
+      if (field.tag > WIRE_SIGNED ||
+          (masks[index++] & (1u << field.tag)) == 0) return false;
+    }
+    return true;
+  }
+  case 119: {
+    const uint8_t masks[] = {4, 5, 3, 4, 3, 4, 4, 5, 5, 5, 5};
     if (fields.size() != sizeof(masks) / sizeof(masks[0])) return false;
     size_t index = 0;
     for (const auto &field : fields) {
