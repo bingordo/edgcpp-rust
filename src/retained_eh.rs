@@ -351,3 +351,103 @@ pub fn validate_native_eh_action_targets(il: &Il) -> Result<EhTargetCoverage, Er
     if !expected.is_empty() {return Err(Error::MalformedCallback);}
     Ok(coverage)
 }
+
+/** Source-owned match identity, not an ABI selector or a guessed RTTI name. */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatchMatch {
+    Typed { parameter: crate::SymbolId, ty: crate::TypeId, typeinfo: Option<crate::SymbolId> },
+    Any,
+}
+
+/// Borrow the original handler body and owner. This is a checked frontend
+/// view to drive canonical CFG lowering; it is not a second executable IR.
+#[derive(Debug, Clone)]
+pub struct CatchDispatchClause<'a> {
+    pub declaration: &'a NativeCatchHandler,
+    pub owner: &'a NativeEhOwner,
+    pub body: &'a crate::Statement,
+    pub matcher: CatchMatch,
+}
+
+#[derive(Debug, Clone)]
+pub struct CatchDispatchRegion<'a> {
+    pub owner: &'a NativeEhOwner,
+    pub protected_body: &'a crate::Statement,
+    /// Original EDG first-match order, including catch-all last.
+    pub clauses: Vec<CatchDispatchClause<'a>>,
+}
+
+/// Join source try/catch metadata to the actual native child statement roots.
+/// Never reconstruct a handler from a lexical search or a type name. The
+/// bridge's explicit sibling-list witnesses certify both protected and
+/// handler body edges. A missing root, wrong owner or duplicate is an error.
+/// Unresolved RTTI and initializer identities are retained, not admitted
+/// for target exception lowering. Work is linear in snapshot size.
+pub fn checked_catch_dispatch(il: &Il) -> Result<Vec<CatchDispatchRegion<'_>>, Error> {
+    validate_native_catch_handlers(il)?;
+    validate_native_eh_action_targets(il)?;
+    if il.native_try_handler_counts.is_empty() {return Ok(Vec::new());}
+    type OwnerKey<'a> = (&'a str, &'a str, Option<u32>);
+    let mut owners = HashMap::<OwnerKey<'_>, &NativeEhOwner>::new();
+    let mut clauses = HashMap::new();
+    for owner in &il.native_eh_owners {
+        if owners.insert((&owner.function,&owner.statement_path,owner.position),owner).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    for clause in &il.native_catch_handlers {
+        if clauses.insert((clause.function.as_str(),clause.statement_path.as_str(),clause.position),clause).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut statements = HashMap::new();
+    for statement in &il.statements {
+        if statements.insert((statement.function.as_str(),statement.path.as_str()),statement).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut lists = HashMap::new();
+    for list in &il.native_statement_sibling_counts {
+        if let Some(parent)=list.parent.as_deref() {
+            if list.edge=="try" || list.edge.starts_with("catch") {
+                if lists.insert((list.function.as_str(),parent,list.edge.as_str()),list.count).is_some() {
+                    return Err(Error::MalformedCallback);
+                }
+            }
+        }
+    }
+    let body = |function: &str, parent: &str, edge: &str| -> Result<&crate::Statement, Error> {
+        if lists.get(&(function,parent,edge))!=Some(&1) {
+            return Err(Error::MalformedCallback);
+        }
+        let path=format!("{parent}.{edge}.0");
+        let statement=statements.get(&(function,path.as_str())).copied().ok_or(Error::MalformedCallback)?;
+        if statement.parent.as_deref()!=Some(parent) {return Err(Error::MalformedCallback);}
+        Ok(statement)
+    };
+    let mut regions=Vec::with_capacity(il.native_try_handler_counts.len());
+    for count in &il.native_try_handler_counts {
+        let function=count.function.as_str();
+        let path=count.statement_path.as_str();
+        if !statements.contains_key(&(function,path)) || count.count==0 {
+            return Err(Error::MalformedCallback);
+        }
+        let owner=owners.get(&(function,path,None)).copied().ok_or(Error::MalformedCallback)?;
+        let protected_body=body(function,path,"try")?;
+        let mut ordered=Vec::new();
+        for ordinal in 0..count.count {
+            let declaration=clauses.get(&(function,path,ordinal)).copied().ok_or(Error::MalformedCallback)?;
+            let clause_owner=owners.get(&(function,path,Some(ordinal))).copied().ok_or(Error::MalformedCallback)?;
+            let matcher=match (declaration.parameter,declaration.parameter_type) {
+                (Some(parameter),Some(ty))=>CatchMatch::Typed{parameter,ty,typeinfo:declaration.typeinfo},
+                (None,None)=>CatchMatch::Any,
+                _=>return Err(Error::MalformedCallback),
+            };
+            ordered.push(CatchDispatchClause{
+                declaration,owner:clause_owner,body:body(function,path,&format!("catch{ordinal}"))?,matcher,
+            });
+        }
+        regions.push(CatchDispatchRegion{owner,protected_body,clauses:ordered});
+    }
+    Ok(regions)
+}

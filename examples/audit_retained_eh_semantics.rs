@@ -50,6 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("invalid native EH action targets: {e:?}"))?;
     println!("EDG_NATIVE_EH_TARGETS handlers={} tries={} routines={} unresolved={}",
              coverage.handlers,coverage.tries,coverage.routines,coverage.unresolved);
+    let dispatch=edgcpp::retained_eh::checked_catch_dispatch(&result.il)
+        .map_err(|e|format!("invalid source catch dispatch: {e:?}"))?;
+    let clauses=dispatch.iter().map(|r|r.clauses.len()).sum::<usize>();
+    if dispatch.is_empty() || clauses!=handlers.len() {
+        return Err("native try/catch body inventory incomplete".into());
+    }
+    println!("EDG_NATIVE_CATCH_DISPATCH regions={} clauses={clauses}",dispatch.len());
     let actions = &result.il.native_retained_eh_constructs;
     if actions.is_empty() {
         return Err("original EDG translation unit exported no retained EH actions".into());
