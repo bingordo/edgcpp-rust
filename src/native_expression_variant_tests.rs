@@ -474,3 +474,39 @@ fn supplemental_statement_graph_requires_original_owner_and_complete_branch_list
         assert!(codegen::emit_edg_object(&il).is_err());
     }
 }
+
+
+#[test]
+fn file_initializer_identity_preserves_shared_schedule_entry_and_distinct_full_expression_region() {
+    let mut il=Il::default();
+    let variable=SymbolId(9);
+    il.dynamic_initializers.push(DynamicInitializer {
+        symbol:variable,kind:4,expression_kind:None,operator:None,
+    });
+    il.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+        scope:"1:".into(),position:0,variable:Some(variable),
+        destructor:Some(SymbolId(10)),kind:4,
+    });
+    let declaration=NativeFileInitIdentity {
+        context:0,owner:Some(variable),scope:None,position:0,path:None,
+        id:1,kind:4,variable:Some(variable),destructor:Some(SymbolId(10)),
+        lifetime:Some(1),expression_lifetime:Some(2),
+    };
+    let schedule=NativeFileInitIdentity {
+        context:1,owner:None,scope:Some("1:".into()),..declaration.clone()
+    };
+    il.native_file_init_identities.extend([declaration,schedule]);
+    validate_file_init_identities(&il).unwrap();
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities[1].expression_lifetime=Some(1);
+    assert!(validate_file_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities[1].position=1;
+    assert!(validate_file_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities.pop();
+    assert!(validate_file_init_identities(&wrong).is_err());
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities.push(wrong.native_file_init_identities[0].clone());
+    assert!(validate_file_init_identities(&wrong).is_err());
+}
