@@ -9352,6 +9352,22 @@ mod bootstrap_literal_global_wire_tests {
         assert_eq!(state.il.global_literal_relocations[2].literal_id,1);
     }
     #[test]
+    fn large_literal_pool_and_relocation_lists_keep_exact_identity() {
+        let mut state=Collector::default();
+        let count=4101u64;
+        global_image(&mut state,7,&vec![0;count as usize*8]);
+        for id in 1..=count {
+            send(&mut state,102,&[number(id),number(44),text(b"6100")]);
+            send(&mut state,103,&[number(7),number((id-1)*8),number(id),signed(0)]);
+        }
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_literal_objects.len(),count as usize);
+        assert_eq!(state.il.global_literal_relocations.len(),count as usize);
+        assert_eq!(state.il.global_literal_relocations.last().unwrap().literal_id,count as u32);
+        send(&mut state,52,&[number(7),number(3),number(8),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+    #[test]
     fn duplicate_missing_or_malformed_source_literal_rejects_without_panic() {
         for image in [b"abcd".as_slice(),b"0".as_slice(),b"gg00".as_slice()] {
             let mut state=Collector::default();
@@ -9443,6 +9459,22 @@ mod bootstrap_static_routine_relocation_wire_tests {
         assert!(!state.malformed && !state.panicked);
         state
     }
+    #[test]
+    fn large_routine_relocation_list_is_not_capped() {
+        let mut state=Collector::default();
+        let count=4101u64;
+        send(&mut state,13,&[n(9),n(1),t(b"target")]);
+        let hex=vec![b'0';count as usize*16];
+        send(&mut state,51,&[n(7),n(70),t(&hex)]);
+        for i in 0..count {
+            send(&mut state,105,&[n(7),n(i*8),n(9),signed(0)]);
+        }
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_routine_relocations.len(),count as usize);
+        send(&mut state,105,&[n(7),n((count-1)*8),n(9),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+
     #[test]
     fn source_routine_relocation_preserves_target_identity_and_zeroed_slot() {
         let mut state=setup();
