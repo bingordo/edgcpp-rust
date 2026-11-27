@@ -10,7 +10,8 @@
 //! registration order, or ELF .init_array admission.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use crate::{CallTargetForm, FileScopeInitSchedule, Il, SymbolId, TypeId};
+use crate::{CallTargetForm, FileInitIdentityAssociation, FileScopeInitSchedule,
+            Il, SymbolId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupRootSource {
@@ -113,6 +114,9 @@ pub enum StartupEvidenceError {
     /// The requested all-registered subset has no certified direct atexit
     /// call for an initializer root. Does not mean no cleanup happens.
     MissingDirectCleanupRegistration(SymbolId),
+    /// Event-119 source-owned initializer witnesses contradict original IL
+    /// declarations, scope records, symbol roles or each other.
+    InvalidFileInitializerSourceEvidence,
 }
 
 /// Build a *diagnostic* candidate-root / direct-call view from source-owned
@@ -358,6 +362,95 @@ pub fn collect_checked_separate_initializer_schedule(
         });
     }
     Ok(CheckedSeparateInitializerSchedule{entries})
+}
+
+
+/// Source-owned declaration and checked separate-mode routine association.
+/// An original initializer is optional: EDG lowering can erase the earlier
+/// dynamic entry, even when the later variable→routine owner is retained.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct CheckedSeparateOriginalInitializer {
+    pub initializer: CheckedSeparateInitializer,
+    pub original: Option<FileInitIdentityAssociation>,
+}
+
+/// A read-only census of all currently available native startup witnesses.
+/// The separate-mode subset is checked against EDG's exact 66/67/104 records.
+/// Everything else remains explicitly unattributed or unmatched; in the
+/// default grouped mode no per-object startup routine mapping is invented.
+///
+/// In particular, neither an empty list nor an event-66 "complete" bit
+/// proves the original file-scope initializer roster, cross-TU ordering,
+/// destructor registration or ELF `.init_array` execution.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct FileStartupSourceCensus {
+    pub checked_separate_scheduler: bool,
+    pub scheduled: Vec<CheckedSeparateOriginalInitializer>,
+    /// Original dynamic initializer IDs with no certified separate-mode
+    /// variable→routine association. Includes source scope-only entries.
+    pub unmatched_originals: Vec<FileInitIdentityAssociation>,
+    /// Source-owned startup roots outside the checked separate scheduler.
+    /// These cannot be assigned to a particular global by routine names.
+    pub unattributed_roots: Vec<StartupRootEvidence>,
+}
+
+/// Combine independent native startup evidence without inventing a missing
+/// pre-lowering roster. Only join via two original EDG pointer relationships:
+/// event 119 declares the initializer's exact SymbolId, and event 104 binds
+/// that original variable pointer to a scheduler routine. Event-67 order is
+/// local to the separate scheduler; source event-68 order stays scope-local.
+///
+/// Run the strict event-119 validator even in grouped mode: a forged public
+/// Il must not silently contribute a partial, apparently reliable census.
+pub fn collect_file_startup_source_census(
+    il: &Il,
+) -> Result<FileStartupSourceCensus, StartupEvidenceError> {
+    let evidence=collect_startup_evidence(il)?;
+    let originals=crate::collect_file_init_identity_associations(il)
+        .map_err(|_|StartupEvidenceError::InvalidFileInitializerSourceEvidence)?;
+
+    // Incomplete or unavailable native scheduler records must not become
+    // an apparently complete mapping merely because their visible prefix
+    // happens to contain every currently visible source initializer.
+    let separate=matches!(il.file_scope_init_schedule,
+        Some(FileScopeInitSchedule{available:true,complete:true}));
+    let schedule=if separate {
+        collect_checked_separate_initializer_schedule(il)?.entries
+    } else {
+        Vec::new()
+    };
+    let mut by_variable=HashMap::with_capacity(originals.len());
+    for (index,original) in originals.iter().enumerate() {
+        if let Some(variable)=original.declaration {
+            // The source validator already rejects multiple declarations
+            // of one SymbolId; recheck this join's own uniqueness.
+            if by_variable.insert(variable,index).is_some() {
+                return Err(StartupEvidenceError::InvalidFileInitializerSourceEvidence);
+            }
+        }
+    }
+    let mut matched=HashSet::with_capacity(schedule.len());
+    let mut scheduled=Vec::with_capacity(schedule.len());
+    let mut scheduled_routines=HashSet::with_capacity(schedule.len());
+    for initializer in schedule {
+        let original=by_variable.get(&initializer.variable).map(|&index|{
+            matched.insert(index);
+            originals[index].clone()
+        });
+        scheduled_routines.insert(initializer.routine);
+        scheduled.push(CheckedSeparateOriginalInitializer {
+            initializer,original,
+        });
+    }
+    let unmatched_originals=originals.into_iter().enumerate()
+        .filter_map(|(index,original)|(!matched.contains(&index)).then_some(original))
+        .collect();
+    let unattributed_roots=evidence.roots.into_iter()
+        .filter(|root|!scheduled_routines.contains(&root.routine)).collect();
+    Ok(FileStartupSourceCensus {
+        checked_separate_scheduler: separate,
+        scheduled,unmatched_originals,unattributed_roots,
+    })
 }
 
 /// Exact per-scheduled-object match for native immediate `__cxa_atexit`
