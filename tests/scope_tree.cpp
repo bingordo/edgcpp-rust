@@ -54,6 +54,15 @@ int main()
   for (std::size_t i = 1; i < chain.size(); ++i) chain[i-1].next = &chain[i];
   assert(walk(&root, edges) && edges.size() == chain.size()+1);
   for (std::size_t i = 1; i < edges.size(); ++i) assert(edges[i].parent == 0);
+  // Class declaration and method lists can be arbitrarily wide.
+  assert(edg_bridge::acyclic_next_list(static_cast<Scope *>(nullptr)));
+  assert(edg_bridge::acyclic_next_list(&chain[0]));
+  chain.back().next = &chain[5000]; // long tail into a cycle
+  assert(!edg_bridge::acyclic_next_list(&chain[0]));
+  chain.back().next = &chain.back(); // self-cycle at the tail
+  assert(!edg_bridge::acyclic_next_list(&chain[0]));
+  chain.back().next = nullptr;
+  assert(edg_bridge::acyclic_next_list(&chain[0]));
   unsigned visits = 0;
   assert(!edg_bridge::walk_scope_tree(&root,
       [](Scope *s) { return s->child; }, [](Scope *s) { return s->next; },
