@@ -5254,6 +5254,45 @@ mod tests {
     }
 
     #[test]
+    fn wire_counts_accept_large_dense_lists_and_reject_incomplete_witnesses() {
+        let kind=(0..256).find(|&k|graph::native_statement_kind(k)==19).unwrap();
+        let mut il=Il::default();
+        il.statements.push(Statement {
+            function:"f".into(),path:"0".into(),parent:None,kind,
+        });
+        il.native_statement_sibling_counts.extend([
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:None,edge:String::new(),count:1,
+            },
+            NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),edge:"try".into(),count:0,
+            },
+        ]);
+        let count=10_001;
+        il.native_try_handler_counts.push(NativeTryHandlerCount {
+            function:"f".into(),statement_path:"0".into(),count,
+        });
+        for i in 0..count {
+            il.native_statement_sibling_counts.push(NativeStatementSiblingCount {
+                function:"f".into(),parent:Some("0".into()),edge:format!("catch{i}"),count:0,
+            });
+        }
+        validate_native_tree_count_coverage(&il).unwrap();
+        il.native_try_handler_counts[0].count=u32::MAX;
+        assert!(validate_native_tree_count_coverage(&il).is_err());
+        il.native_try_handler_counts[0].count=count;
+        il.native_statement_sibling_counts.pop();
+        assert!(validate_native_tree_count_coverage(&il).is_err());
+
+        let nodes=||std::iter::once((0,None)).chain((1..=count).map(|i|(i,Some(0))));
+        let proofs=||std::iter::once((0,count)).chain((1..=count).map(|i|(i,0)));
+        validate_native_child_witnesses(nodes(),proofs()).unwrap();
+        assert!(validate_native_child_witnesses(nodes(),
+            std::iter::once((0,u32::MAX)).chain((1..=count).map(|i|(i,0)))).is_err());
+        assert!(validate_native_child_witnesses(nodes().take(count as usize),proofs()).is_err());
+    }
+
+    #[test]
     fn native_try_handler_cardinality_rejects_missing_tail_and_extra_catch() {
         let kind=(0..256).find(|&k|graph::native_statement_kind(k)==19)
             .expect("EDG try block kind");
