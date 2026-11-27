@@ -1,22 +1,4 @@
-//! Shared defensive bounds for the EDG wire reader and reference backends.
-//!
-//! These are implementation resource policies, not ISO C/C++ or SysV ABI
-//! limits. Keep unrelated resources separate: a function's local count,
-//! flattened aggregate elements, and a native object's byte size have
-//! different memory and compile-time costs. Do not raise a limit solely to
-//! accept a test case without checking allocation and code-generation costs.
-
-/// Maximum number of explicitly supported scalar arguments in one signature.
-pub(crate) const MAX_SUPPORTED_PARAMETERS: usize = 256;
-
-/// Maximum local variables per scalar FP reference function.
-pub(crate) const MAX_FP_LOCALS: usize = 4096;
-
-/// Maximum statements within an FP reference function or checked statement arm.
-pub(crate) const MAX_FP_STATEMENTS: usize = 10_000;
-
-/// Maximum locals exposed by the integer CFG/reference expression backend.
-pub(crate) const MAX_CFG_LOCALS: usize = 10_000;
+//! Checked representation arithmetic shared by reference backends.
 
 /// The CFG uses signed 64-bit pointer displacements/strides and host
 /// slices for materialized object data. Do not conflate layout sizes with
@@ -52,15 +34,6 @@ pub(crate) fn bounded_explicit_stack_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Verify the shared caps distinguish their different resources.
-    #[test]
-    fn distinct_backend_limits_stay_explicit() {
-        assert_eq!(MAX_SUPPORTED_PARAMETERS, 256);
-        assert_eq!(MAX_FP_LOCALS, 4096);
-        assert_eq!(MAX_FP_STATEMENTS, 10_000);
-        assert_eq!(MAX_CFG_LOCALS, 10_000);
-    }
 
     #[test]
     fn explicit_stack_slot_sum_checks_alignment_and_overflow() {
