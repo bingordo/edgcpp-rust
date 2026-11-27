@@ -6542,7 +6542,12 @@ mod tests {
                     fields.as_ptr(),fields.len(),0);
         }
         assert!(state.malformed,"duplicate record shape proof must fail closed");
-        for values in [[0,0,0],[7,10001,0],[7,0,10001]] {
+        let mut large=Collector::default();
+        let fields=[number(7),number(10001),number(10001)];
+        unsafe {collect((&mut large as *mut Collector).cast(),74,fields.as_ptr(),fields.len(),0);}
+        assert!(!large.malformed);
+        assert_eq!(large.il.native_record_shapes[0].field_count,10001);
+        for values in [[0,0,0],[7,u64::from(u32::MAX)+1,0],[7,0,u64::from(u32::MAX)+1]] {
             let mut bad=Collector::default();
             let fields=values.map(number);
             unsafe {
@@ -6585,11 +6590,16 @@ mod tests {
             NativeRoutineSupplement {owner:TypeId(8),has_extra_info:false,parameter_count:0},
         ]);
         assert!(!state.malformed);
+        let mut large=Collector::default();
+        let proof=[number(9),number(1),number(10001)];
+        unsafe {collect((&mut large as *mut Collector).cast(),71,proof.as_ptr(),proof.len(),0);}
+        assert!(!large.malformed);
+        assert_eq!(large.il.routine_supplements[0].parameter_count,10001);
         for fields in [
             [number(9),number(2),number(0)],
             [number(0),number(1),number(0)],
             [number(9),number(0),number(1)],
-            [number(9),number(1),number(10001)],
+            [number(9),number(1),number(u64::from(u32::MAX)+1)],
         ] {
             let mut bad=Collector::default();
             unsafe {
