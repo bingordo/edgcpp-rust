@@ -4663,6 +4663,27 @@ int main(void) {
 mod audit_resource_budget_tests {
     use super::*;
 
+    #[test]
+    fn large_fp_signature_locals_and_flat_body_emit() {
+        let ty=ScalarType::Float(FloatType::F64);
+        let mut statements=Vec::new();
+        for i in 0..4100 {
+            statements.push(FloatStmt::Assign(i,FloatExpr::Parameter(299)));
+        }
+        for _ in 4100..10_001 {
+            statements.push(FloatStmt::Assign(4099,FloatExpr::Parameter(299)));
+        }
+        statements.push(FloatStmt::Return(FloatExpr::Local(4099)));
+        let object=emit_scalar_float_bodies(&[ScalarFloatBody {
+            name:"large_fp_body".into(),parameters:vec![ty;300],
+            result:ty,locals:vec![ty;4100],statements,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_LARGE_FP_TEST_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+    }
+
     /// Admit valid counts above the former arbitrary limits.
     #[test]
     fn fp_parameter_local_and_statement_limits_are_checked_independently() {
