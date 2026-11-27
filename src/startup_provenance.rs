@@ -84,7 +84,8 @@ pub enum StartupEvidenceError {
     AmbiguousCleanupWitness,
     /// A runtime call has an unsupported argument shape; never guess an ABI.
     UnsupportedCleanupCall,
-    /// The diagnostic has a finite analysis budget; never silently truncate.
+    /// The source-derived diagnostic could not represent or allocate its
+    /// complete result; never silently truncate a proven call graph.
     ReachabilityLimit,
     /// EDG marked its optional native scheduler traversal incomplete.
     IncompleteScheduler,
@@ -453,10 +454,9 @@ pub struct StartupCallTrace {
     pub revisited_local_bodies: usize,
 }
 
-// Hard caps protect diagnostics from pathological or corrupt IL snapshots.
-// Exceeding either budget is an error, never a seemingly complete trace.
-const MAX_TRACE_BODIES_PER_ROOT: usize = 4096;
-const MAX_TRACE_EDGES: usize = 100_000;
+// Trace size follows the finite, source-owned IL graph. Revisited bodies are
+// eliminated by identity; allocation or representability failures are errors,
+// never incomplete results labelled as complete.
 
 /// Trace source-owned *syntactic* direct call chains from all startup roots.
 /// This adds transitive helper visibility beyond `immediate_calls` without
@@ -521,13 +521,17 @@ pub fn trace_startup_calls(
         let mut queue = VecDeque::from([root.routine]);
         let mut visited = HashSet::new();
         while let Some(caller) = queue.pop_front() {
-            if !visited.insert(caller) {
+            if visited.contains(&caller) {
                 revisited_local_bodies += 1;
                 continue;
             }
-            if visited.len() > MAX_TRACE_BODIES_PER_ROOT {
-                return Err(StartupEvidenceError::ReachabilityLimit);
+            if visited.len()==visited.capacity() {
+                visited.try_reserve(1)
+                    .map_err(|_|StartupEvidenceError::ReachabilityLimit)?;
             }
+            visited.insert(caller);
+            // The local-body filter enqueues only defined source-owned
+            // symbols, so this worklist terminates after their distinct IDs.
             let function = by_symbol[&caller];
             if by_function.get(function) != Some(&Some(caller)) {
                 return Err(StartupEvidenceError::AmbiguousReachableFunction(
@@ -549,8 +553,9 @@ pub fn trace_startup_calls(
                 if !consumed.insert(key) {
                     return Err(StartupEvidenceError::DuplicateCallTarget);
                 }
-                if edges.len() >= MAX_TRACE_EDGES {
-                    return Err(StartupEvidenceError::ReachabilityLimit);
+                if edges.len()==edges.capacity() {
+                    edges.try_reserve(1)
+                        .map_err(|_|StartupEvidenceError::ReachabilityLimit)?;
                 }
                 let direct = matches!(target.form,CallTargetForm::DirectRoutine |
                                                 CallTargetForm::ConstantRoutineAddress);
@@ -632,8 +637,11 @@ fn cleanup_argument_nodes<'a>(
         if !seen.insert(node.path.as_str()) {
             return Err(StartupEvidenceError::AmbiguousCleanupWitness);
         }
-        if seen.len()>64 {
-            return Err(StartupEvidenceError::ReachabilityLimit);
+        // All admitted __cxa_atexit operands have at most two original
+        // expression nodes (bare value or one cast/address-of wrapper).
+        // A larger tree is unsupported by shape, not by a depth ceiling.
+        if result.len()>=2 {
+            return Err(StartupEvidenceError::UnsupportedCleanupCall);
         }
         result.push(node);
         if let Some(nested)=children.get(&(function,statement,node.path.as_str())) {
