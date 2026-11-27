@@ -1550,6 +1550,53 @@ mod tests {
     }
 
     #[test]
+    fn trace_handles_more_reachable_native_bodies_than_the_old_arbitrary_budget() {
+        let mut il=Il::default();
+        const COUNT:u32=4_100;
+        for i in 0..COUNT {
+            generated(&mut il,20_000+i,&format!("helper_{i}"),i==0);
+        }
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{
+                routine:SymbolId(20_000),priority:0,
+            });
+        for i in 0..COUNT-1 {
+            add_call(&mut il,&format!("helper_{i}"),"0",
+                CallTargetForm::DirectRoutine,Some(SymbolId(20_001+i)));
+        }
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(proof.roots.len(),1);
+        let trace=trace_startup_calls(&il,&proof).unwrap();
+        assert_eq!(trace.edges.len(),(COUNT-1) as usize);
+        assert_eq!(trace.external_calls,0);
+        assert_eq!(trace.unresolved_indirect,0);
+        assert_eq!(trace.revisited_local_bodies,0);
+        assert_eq!(trace.edges.first().unwrap().caller,SymbolId(20_000));
+        assert_eq!(trace.edges.last().unwrap().caller,SymbolId(20_000+COUNT-2));
+    }
+
+    #[test]
+    fn trace_handles_more_immediate_edges_than_the_old_arbitrary_budget() {
+        let mut il=Il::default();
+        generated(&mut il,42,"startup",true);
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(42),priority:0});
+        const EDGES:usize=100_001;
+        for i in 0..EDGES {
+            add_call(&mut il,"startup",&format!("call_{i}"),
+                CallTargetForm::IndirectUnresolved,None);
+        }
+        let proof=collect_startup_evidence(&il).unwrap();
+        assert_eq!(proof.immediate_calls.len(),EDGES);
+        let trace=trace_startup_calls(&il,&proof).unwrap();
+        assert_eq!(trace.edges.len(),EDGES);
+        assert_eq!(trace.unresolved_indirect,EDGES);
+        assert_eq!(trace.external_calls,0);
+        assert_eq!(trace.edges.first().unwrap().statement_path,"call_0");
+        assert_eq!(trace.edges.last().unwrap().statement_path,"call_100000");
+    }
+
+    #[test]
     fn trace_rejects_foreign_or_stale_startup_evidence() {
         let mut il=Il::default();
         generated(&mut il,42,"startup",true);
