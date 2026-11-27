@@ -80,12 +80,8 @@ pub enum Expr {
     CompoundBitField(BitFieldLayout, CAbiInt, CCompoundOp, Box<Expr>, Box<Expr>),
     /// C postfix ++/--: return the old narrow bitfield value.
     PostBitField(BitFieldLayout, i64, Box<Expr>),
-    /// Copy all supported C struct scalar fields after reading every source
-    /// field, preserving observable value semantics even under aliasing.
-    /// Offsets come directly from validated native EDG field layouts.
-    CopyStruct(Vec<(CAbiInt,i64)>, Box<Expr>, Box<Expr>),
-    /// Bytewise object-representation copy for unions. Do not read
-    /// inactive union members as typed scalar values.
+    /// Copy the validated native object representation, including padding.
+    /// Do not read inactive union members as typed scalar values.
     CopyBytes(u32, Box<Expr>, Box<Expr>),
     CompoundAddress(CAbiInt, CAbiInt, CCompoundOp, Box<Expr>, Box<Expr>),
     PostAddress(CAbiInt, i64, Box<Expr>),
@@ -193,12 +189,12 @@ fn emit_expr(
         })?,
         Expr::StoreLocal(index, value, body) => {
             let value = emit_expr(value, builder, params, locals)?;
-            if *index >= crate::limits::MAX_CFG_LOCALS {
-                return Err(CodegenError::InvalidFunction(format!(
-                    "local index {index} exceeds reference backend limit")));
-            }
             if *index >= locals.len() {
-                locals.resize(*index + 1, None);
+                let length=index.checked_add(1).ok_or_else(||
+                    CodegenError::InvalidFunction("local index overflow".into()))?;
+                locals.try_reserve(length-locals.len()).map_err(|e|
+                    CodegenError::InvalidFunction(format!("local storage allocation: {e}")))?;
+                locals.resize(length, None);
             }
             locals[*index] = Some(value);
             emit_expr(body, builder, params, locals)?
@@ -239,7 +235,7 @@ fn emit_expr(
         Expr::PackAggregate(..) |
         Expr::LoadBitField(..) | Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
-        Expr::CopyStruct(..) | Expr::CopyBytes(..) |
+        Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) |
         Expr::PostAddress(..) | Expr::PointerOffset(..) | Expr::AssignGlobal(..) |
         Expr::CompoundGlobal(..) | Expr::PostGlobal(..) =>
@@ -494,7 +490,7 @@ fn contains_local_write(expr: &Expr) -> bool {
         Expr::AtomicCompareExchange {..} |
         Expr::StoreBitField(..) |
         Expr::CompoundBitField(..) | Expr::PostBitField(..) |
-        Expr::CopyStruct(..) | Expr::CopyBytes(..) |
+        Expr::CopyBytes(..) |
         Expr::CompoundAddress(..) | Expr::PostAddress(..) |
         Expr::StoreLocal(..) | Expr::AssignLocal(..) |
         Expr::CompoundLocal(..) | Expr::PostLocal(..) |

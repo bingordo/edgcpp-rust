@@ -79,16 +79,11 @@ impl ScalarKind {
 }
 const SYSV_INTEGER_ARGUMENT_REGISTERS:u8=6;
 const SYSV_SSE_ARGUMENT_REGISTERS:u8=8;
-// The implementation cap is shared with FP source lowering, not SysV.
-pub(crate) use crate::limits::MAX_SUPPORTED_PARAMETERS;
 
 impl Signature {
     pub fn plan_sysv_x86_64(&self)->Result<PassingPlan,PlanError> {
         if !self.prototyped || self.variadic {
             return Err(PlanError::UnprototypedOrVariadic);
-        }
-        if self.parameters.len()>MAX_SUPPORTED_PARAMETERS {
-            return Err(PlanError::OversizedSignature);
         }
         let mut gpr=0u8;
         let mut xmm=0u8;
@@ -107,7 +102,12 @@ impl Signature {
                     Location::Register{class,index}
                 }
                 _=>{
-                    let slot=stack;stack+=1;
+                    let slot=stack;
+                    stack=stack.checked_add(1).ok_or(PlanError::OversizedSignature)?;
+                    // Each SysV stack argument occupies an eight-byte slot.
+                    if stack.checked_mul(8).is_none_or(|n|n>i32::MAX as u32) {
+                        return Err(PlanError::OversizedSignature);
+                    }
                     Location::Stack{slot}
                 }
             };
@@ -223,21 +223,18 @@ mod tests {
             assert_eq!(sig.plan_sysv_x86_64(),
                 Err(PlanError::UnprototypedOrVariadic));
         }
-        // The implementation cap is inclusive; a maximum-length signature
-        // must still get a deterministic and ordered stack argument plan.
-        let boundary=Signature{
-            parameters:vec![ScalarKind::Float64;MAX_SUPPORTED_PARAMETERS],
-            result:ScalarKind::Float64,prototyped:true,variadic:false,
-        }.plan_sysv_x86_64().unwrap();
-        assert_eq!(boundary.parameters.len(),MAX_SUPPORTED_PARAMETERS);
-        assert_eq!(boundary.outgoing_stack_slots,
-            (MAX_SUPPORTED_PARAMETERS-8) as u32);
-        assert_eq!(boundary.parameters[MAX_SUPPORTED_PARAMETERS-1].location,
-            Location::Stack{slot:(MAX_SUPPORTED_PARAMETERS-9) as u32});
-        assert_eq!(Signature{
-            parameters:vec![ScalarKind::Float64;MAX_SUPPORTED_PARAMETERS+1],
-            result:ScalarKind::Float64,prototyped:true,variadic:false,
-        }.plan_sysv_x86_64(),Err(PlanError::OversizedSignature));
+        // Large signatures preserve the independent register banks and
+        // stack order instead of rejecting the former 256-parameter cap.
+        for count in [256,257,1024] {
+            let plan=Signature{
+                parameters:vec![ScalarKind::Float64;count],
+                result:ScalarKind::Float64,prototyped:true,variadic:false,
+            }.plan_sysv_x86_64().unwrap();
+            assert_eq!(plan.parameters.len(),count);
+            assert_eq!(plan.outgoing_stack_slots,(count-8) as u32);
+            assert_eq!(plan.parameters[count-1].location,
+                Location::Stack{slot:(count-9) as u32});
+        }
         assert!(Signature{
             parameters:vec![],result:ScalarKind::Float64,
             prototyped:true,variadic:false,

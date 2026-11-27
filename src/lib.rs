@@ -191,6 +191,8 @@ pub struct Il {
     /// Source-keyed exact byte images of narrow EDG C string literals.
     /// These are owned constant objects, not reinterpretations of pointers.
     pub string_literals: Vec<ExpressionStringLiteral>,
+    /// Native object identity shared by expression literals and static relocation targets.
+    pub literal_identities: Vec<LiteralIdentity>,
     /// Identity-preserving types captured during this compilation.
     pub types: Vec<TypeDef>,
     /// EDG-verified signed, non-enum 64-bit integer ABI types (event 43).
@@ -1108,6 +1110,13 @@ pub struct GlobalLiteralObject {
     pub bytes: Vec<u8>,
 }
 
+/// Shared EDG constant identity; no pointer bits or content hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiteralIdentity {
+    Expression { function:String, statement_path:String, path:String, identity:u32 },
+    Static { literal_id:u32, identity:u32 },
+}
+
 /// A symbolic pointer in a source-owned file-scope global initializer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalLiteralRelocation {
@@ -1824,6 +1833,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         116 => Some(il.native_eh_cleanup_states.len()),
         117 => Some(il.native_eh_owners.len()),
         118 => Some(il.native_eh_action_targets.len()),
+        119 => Some(il.literal_identities.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2059,6 +2069,32 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_eh_owners.push(retained_eh::NativeEhOwner {
                 function,statement_path,routine,position,id,initialization,
             });
+        }
+        119 => {
+            let (Some(context),Some(literal_id),Some(identity))=(n(0),n(4),n(5))
+                else {return;};
+            if identity==0 {return;}
+            let entry=match context {
+                0 if literal_id==0=>{
+                    let (Some(function),Some(statement_path),Some(path))=
+                        (t(1),t(2),t(3)) else {return;};
+                    if !output.string_literals.iter().any(|v|
+                        v.function==function && v.statement_path==statement_path && v.path==path) ||
+                        output.literal_identities.iter().any(|v|matches!(v,
+                            LiteralIdentity::Expression{function:f,statement_path:s,path:p,..}
+                            if f==&function && s==&statement_path && p==&path)) {return;}
+                    LiteralIdentity::Expression{function,statement_path,path,identity}
+                }
+                1 if literal_id!=0 && t(1).is_none() && t(2).is_none() && t(3).is_none()=>{
+                    if !output.global_literal_objects.iter().any(|v|v.id==literal_id) ||
+                        output.literal_identities.iter().any(|v|matches!(v,
+                            LiteralIdentity::Static{literal_id:id,identity:other}
+                            if *id==literal_id || *other==identity)) {return;}
+                    LiteralIdentity::Static{literal_id,identity}
+                }
+                _=>return,
+            };
+            output.literal_identities.push(entry);
         }
         118 => {
             let (Some(function),Some(statement_path),Some(role),Some(path),Some(routine),Some(target))=
