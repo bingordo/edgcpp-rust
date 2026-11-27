@@ -1324,6 +1324,9 @@ impl Graph {
         }
         let mut field_positions = std::collections::HashSet::new();
         let mut field_symbol_positions = std::collections::HashSet::new();
+        // An EDG field symbol denotes one native field declaration, not a
+        // distinct declaration in each owner record.
+        let mut global_field_symbols = std::collections::HashSet::new();
         for field in &il.record_fields {
             for id in [field.owner, field.ty] {
                 if !type_map.contains_key(&id) {
@@ -1343,7 +1346,8 @@ impl Graph {
                     owner: field.owner, position: field.position,
                 });
             }
-            if !field_symbol_positions.insert((field.owner, field.symbol)) {
+            if !field_symbol_positions.insert((field.owner, field.symbol)) ||
+               !global_field_symbols.insert(field.symbol) {
                 return Err(GraphError::DuplicateRecordFieldSymbol {
                     owner: field.owner, symbol: field.symbol,
                 });
@@ -3328,14 +3332,22 @@ impl Graph {
             }
             if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==5 {
                 if let Some(symbol)=node.data.symbol_id {
-                    if let Some(record)=self.record_fields.iter().find(|f|
-                        f.symbol==symbol && f.name=="__vptr") {
-                        if node.data.reference.as_deref()!=Some("__vptr") ||
-                           field.is_some() || record.bit_width!=0 {
+                    // A Graph has publicly mutable records; reject ambiguous
+                    // source field symbols even if from_il was bypassed.
+                    let mut records=self.record_fields.iter()
+                        .filter(|f|f.symbol==symbol);
+                    if let Some(record)=records.next() {
+                        if records.next().is_some() {
                             return None;
                         }
-                        field=Some((symbol,record.owner,node.data.path.clone(),
-                                    record.byte_offset));
+                        if record.name=="__vptr" {
+                            if node.data.reference.as_deref()!=Some("__vptr") ||
+                               field.is_some() || record.bit_width!=0 {
+                                return None;
+                            }
+                            field=Some((symbol,record.owner,node.data.path.clone(),
+                                        record.byte_offset));
+                        }
                     }
                 }
             }
@@ -4006,6 +4018,12 @@ mod callee_vptr_field_tests {
         graph.record_fields[0].bit_width=1;
         assert!(graph.callee_vptr_field_reference(&call).is_none(),
             "a bit-field is not a vptr-sized source field");
+        let (mut graph,call)=fixture();
+        let mut stolen=graph.record_fields[0].clone();
+        stolen.owner=TypeId(999);
+        graph.record_fields.push(stolen);
+        assert!(graph.callee_vptr_field_reference(&call).is_none(),
+            "two record owners cannot claim one native vptr field symbol");
     }
 
     #[test]
@@ -6918,6 +6936,38 @@ mod tests {
             il.types[0].kind=native_type_kind_for_semantic(semantic);
             Graph::from_il(&il).expect("struct, class and union field owner");
         }
+    }
+
+    #[test]
+    fn one_native_field_symbol_cannot_belong_to_two_record_owners() {
+        let mut il=Il::default();
+        il.types.extend([
+            TypeDef{id:TypeId(1),kind:native_type_kind_for_semantic(7),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(2),kind:native_type_kind_for_semantic(7),
+                related_role:None,related:None},
+            TypeDef{id:TypeId(3),kind:native_type_kind_for_semantic(1),
+                related_role:None,related:None},
+        ]);
+        il.symbols.push(Symbol{
+            id:SymbolId(10),kind:3,name:"field".into(),
+        });
+        for owner in [TypeId(1),TypeId(2)] {
+            il.record_fields.push(RecordField{
+                owner,position:0,ty:TypeId(3),symbol:SymbolId(10),
+                name:"field".into(),byte_offset:0,bit_offset:0,bit_width:0,
+            });
+        }
+        assert_eq!(Graph::from_il(&il).unwrap_err(),
+            GraphError::DuplicateRecordFieldSymbol{
+                owner:TypeId(2),symbol:SymbolId(10),
+            });
+        // Equal source names and layouts do not imply shared declarations.
+        il.symbols.push(Symbol{
+            id:SymbolId(11),kind:3,name:"field".into(),
+        });
+        il.record_fields[1].symbol=SymbolId(11);
+        Graph::from_il(&il).expect("independently owned fields");
     }
 
     #[test]
