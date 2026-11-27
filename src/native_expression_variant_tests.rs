@@ -625,3 +625,98 @@ fn file_region_join_rejects_ambiguous_public_il_without_collapsing_duplicates() 
     assert!(collect_file_init_identity_associations(&wrong).is_err(),
         "repeated scope ordinals must not be swallowed by HashMap collection");
 }
+
+#[test]
+fn thousands_of_constructor_exec_roots_have_linear_exact_owner_provenance() {
+    let mut il=Il::default();
+    // A translation unit with many explicit constructor initializers, all
+    // lacking executable root expressions. Native count zero is a witness,
+    // not permission to infer that initialization has no effects.
+    for position in 0..4096_u32 {
+        let routine=SymbolId(100+position);
+        il.constructor_initializers.push(ConstructorInitializer {
+            routine,position:0,kind:1,target_type:None,target_field:None,
+            compiler_generated:false,braced:false,
+            use_field_initializer:false,pack_expansion:false,
+        });
+        il.native_constructor_root_admissions.push(NativeConstructorRootAdmission {
+            routine,position:0,present:false,
+        });
+        il.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+            routine,position:0,dynamic_kind:None,executable_root_count:0,
+            source_root_present:false,source_is_executable_root:false,selected_root:0,
+        });
+        il.native_ctor_constant_roots.push(NativeCtorConstantRoot {
+            routine,position:0,present:false,context:0,
+            owner_statement:None,owner_expression:None,
+        });
+        il.native_initializer_exec_roots.push(NativeInitializerExecRoots {
+            owner:NativeInitializerExecOwner {
+                symbol:routine,position:0,context:0,statement:None,
+                expression:None,nested:None,
+            },
+            count:0,constructor:None,
+        });
+    }
+    validate_constructor_init_provenance(&il).unwrap();
+    validate_ctor_constant_trees(&il).unwrap();
+    validate_initializer_exec_trees(&il).unwrap();
+    let mut wrong=il.clone();
+    wrong.native_constructor_init_provenance.push(
+        wrong.native_constructor_init_provenance[0].clone());
+    assert!(validate_initializer_exec_trees(&wrong).is_err(),
+        "duplicate source proofs cannot make an executable-root witness ambiguous");
+    let mut wrong=il.clone();
+    wrong.native_initializer_exec_roots.pop();
+    assert!(validate_initializer_exec_trees(&wrong).is_err(),
+        "a missing zero-count root witness remains an error");
+    let mut wrong=il.clone();
+    wrong.native_constructor_init_provenance[1].executable_root_count=1;
+    assert!(validate_initializer_exec_trees(&wrong).is_err(),
+        "native executable roots must exactly match independent count");
+    let mut wrong=il.clone();
+    wrong.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+        routine:SymbolId(99999),position:0,dynamic_kind:None,
+        executable_root_count:0,source_root_present:false,
+        source_is_executable_root:false,selected_root:0,
+    });
+    assert!(validate_initializer_exec_trees(&wrong).is_err(),
+        "a source proof without a matching native root is not silently ignored");
+
+    // This lower-level validator must also reject duplicate declaration
+    // owners rather than silently replacing one in HashMap::collect().
+    let mut wrong=il.clone();
+    wrong.constructor_initializers.push(wrong.constructor_initializers[0].clone());
+    assert!(validate_constructor_init_provenance(&wrong).is_err());
+}
+
+#[test]
+fn constructor_exec_witness_checks_duplicate_keys_even_when_first_proof_matches() {
+    let mut il=Il::default();
+    let routine=SymbolId(55);
+    il.native_constructor_init_provenance.push(NativeConstructorInitProvenance {
+        routine,position:0,dynamic_kind:Some(4),executable_root_count:0,
+        source_root_present:false,source_is_executable_root:false,selected_root:0,
+    });
+    il.native_ctor_constant_roots.push(NativeCtorConstantRoot {
+        routine,position:0,present:false,context:0,
+        owner_statement:None,owner_expression:None,
+    });
+    il.native_initializer_exec_roots.push(NativeInitializerExecRoots {
+        owner:NativeInitializerExecOwner {
+            symbol:routine,position:0,context:0,statement:None,
+            expression:None,nested:None,
+        },
+        count:0,constructor:None,
+    });
+    validate_initializer_exec_trees(&il).unwrap();
+    let mut duplicate=il.clone();
+    duplicate.native_constructor_init_provenance.push(
+        NativeConstructorInitProvenance {
+            executable_root_count:1,source_root_present:true,
+            selected_root:2,
+            ..duplicate.native_constructor_init_provenance[0].clone()
+        }
+    );
+    assert!(validate_initializer_exec_trees(&duplicate).is_err());
+}

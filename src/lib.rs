@@ -4656,8 +4656,16 @@ fn valid_constructor_init_provenance(p:&NativeConstructorInitProvenance)->bool {
 
 /// Require exactly one provenance witness per native constructor entry.
 fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
-    let mut owners=il.constructor_initializers.iter()
-        .map(|i|((i.routine,i.position),None)).collect::<HashMap<_,Option<bool>>>();
+    // Do not collect() by owner: a mutated public Il can contain multiple
+    // initializer declarations with the same native source position, and
+    // replacing one in the map would turn contradictory input into a valid
+    // single owner.
+    let mut owners=HashMap::new();
+    for init in &il.constructor_initializers {
+        if owners.insert((init.routine,init.position),None::<bool>).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
     for root in &il.native_constructor_root_admissions {
         let Some(slot)=owners.get_mut(&(root.routine,root.position))
             else {return Err(Error::MalformedCallback);};
@@ -4916,6 +4924,18 @@ fn exec_owner(symbol:SymbolId,position:u32,context:u32,statement:&Option<String>
 /// Every previously verified constant owner and dynamic leaf must have an
 /// independent executable-root witness, even where the union has no roots.
 fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
+    // One source-owned proof per (constructor routine, initializer ordinal).
+    // Previously each executable root rescanned the full provenance vector;
+    // on generated C++ TUs with thousands of constructor entries that was
+    // quadratic, and the first of two conflicting proofs could be selected.
+    let mut proofs=HashMap::with_capacity(il.native_constructor_init_provenance.len());
+    for proof in &il.native_constructor_init_provenance {
+        if !valid_constructor_init_provenance(proof) ||
+           proofs.insert((proof.routine,proof.position),
+                         proof.executable_root_count).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
     let mut expected=HashMap::new();
     for r in &il.native_ctor_constant_roots {
         let key=exec_owner(r.routine,r.position,r.context,&r.owner_statement,&r.owner_expression,None);
@@ -4932,14 +4952,16 @@ fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
         let Some(prior)=expected.remove(&r.owner) else {return Err(Error::MalformedCallback);};
         if !valid_exec_owner(&r.owner) || prior.is_some_and(|n|n!=r.count) ||
             counts.insert(&r.owner,r.count).is_some() {return Err(Error::MalformedCallback);}
-        if r.owner.context==0 && r.owner.nested.is_none() {
-            let Some(proof)=il.native_constructor_init_provenance.iter()
-                .find(|p|p.routine==r.owner.symbol && p.position==r.owner.position)
-                else {return Err(Error::MalformedCallback);};
-            if r.count!=proof.executable_root_count {return Err(Error::MalformedCallback);}
+        if r.owner.context==0 && r.owner.nested.is_none() &&
+           proofs.remove(&(r.owner.symbol,r.owner.position))!=Some(r.count) {
+            return Err(Error::MalformedCallback);
         }
     }
-    if !expected.is_empty() {return Err(Error::MalformedCallback);}
+    // Every checked constructor proof must have an independently exported
+    // executable-root count witness, including a zero-count witness.
+    if !expected.is_empty() || !proofs.is_empty() {
+        return Err(Error::MalformedCallback);
+    }
     let mut nodes=HashMap::new();
     for n in &il.native_initializer_exec_nodes {
         if !valid_exec_node(n) || !counts.contains_key(&n.owner) ||
