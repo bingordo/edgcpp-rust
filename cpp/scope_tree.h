@@ -7,6 +7,21 @@
 #include <vector>
 
 namespace edg_bridge {
+// Check native next-linked lists in linear time and constant extra space,
+// independently of the caller's semantic predicates. A repeated identity
+// is malformed; there is no artificial declaration-count ceiling.
+template<class Ptr>
+bool acyclic_next_list(Ptr first)
+{
+  auto slow=first, fast=first;
+  while (fast!=nullptr && fast->next!=nullptr) {
+    slow=slow->next;
+    fast=fast->next->next;
+    if (slow==fast) return false;
+  }
+  return true;
+}
+
 // Preorder, source sibling order, dense IDs, and representable wire IDs.
 // The stack holds only the next sibling of each active parent. A repeated
 // identity is malformed (cycle or shared child), not an omitted subtree.
