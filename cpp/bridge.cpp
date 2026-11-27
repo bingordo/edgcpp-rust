@@ -1878,7 +1878,8 @@ static void emit_expr(an_expr_node_ptr node, const std::string &function,
           : nullptr;
       if (array != nullptr && array->kind == tk_array &&
           !array->incomplete && pointee != nullptr &&
-          pointee->size == 1 && element != nullptr &&
+          (pointee->size == 1 || (C_mode() && pointee->kind == tk_void)) &&
+          element != nullptr &&
           element->size == 1 &&
           array->size>0 && array->size<=MAX_NATIVE_AGGREGATE_IMAGE_BYTES) {
         const size_t size=static_cast<size_t>(array->size);
