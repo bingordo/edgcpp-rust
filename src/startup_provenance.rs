@@ -1233,11 +1233,25 @@ mod tests {
     #[test]
     fn startup_source_census_keeps_originals_and_unknown_schedule_owners_separate() {
         let mut il=separate_init_fixture(2_048);
+        // The ordinary tiny fixture uses routine IDs 10+i and variable IDs
+        // 1000+i. For a large stress size these ranges would overlap,
+        // producing intentionally invalid native SymbolId identities.
+        // Rebase only its variable IDs so every emitted source pointer ID
+        // remains unique across all symbol kinds.
+        for symbol in &mut il.symbols {
+            if symbol.kind==2 {symbol.id=SymbolId(symbol.id.0+10_000);}
+        }
+        for variable in &mut il.global_variables {
+            variable.symbol=SymbolId(variable.symbol.0+10_000);
+        }
+        for owner in &mut il.file_scope_dynamic_init_owners {
+            owner.variable=SymbolId(owner.variable.0+10_000);
+        }
         for i in 0..2_048_u32 {
             // Most originals have no surviving post-lowering scope entry.
             // They still retain a source declaration without inventing an
             // execution order or a missing scope ordinal.
-            append_original_file_initializer(&mut il,SymbolId(1_000+i),
+            append_original_file_initializer(&mut il,SymbolId(11_000+i),
                 i+1,(i%2==0).then_some(i/2));
         }
         let census=collect_file_startup_source_census(&il).unwrap();
