@@ -27,9 +27,6 @@ pub(crate) const MAX_FP_STATEMENTS: usize = 10_000;
 /// Maximum locals exposed by the integer CFG/reference expression backend.
 pub(crate) const MAX_CFG_LOCALS: usize = 10_000;
 
-/// Maximum recursion depth for CFG aggregate layouts and scalar expansion.
-pub(crate) const MAX_AGGREGATE_LAYOUT_DEPTH: usize = 32;
-
 /// Return the byte size of a bounded native array, rejecting overflow or zero.
 pub(crate) fn bounded_array_bytes(element_bytes: u64, elements: u64) -> Option<u64> {
     element_bytes.checked_mul(elements)
@@ -72,7 +69,6 @@ mod tests {
         assert_eq!(MAX_FP_STATEMENTS, 10_000);
         assert_eq!(MAX_CFG_LOCALS, 10_000);
         assert_eq!(MAX_NATIVE_OBJECT_BYTES, 16 * 1024 * 1024);
-        assert_eq!(MAX_AGGREGATE_LAYOUT_DEPTH, 32);
         assert_eq!(MAX_FUNCTION_EXPLICIT_STACK_BYTES, 16 * 1024 * 1024);
     }
 
