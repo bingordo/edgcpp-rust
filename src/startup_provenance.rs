@@ -1205,6 +1205,143 @@ mod tests {
                    Err(StartupEvidenceError::DuplicateCleanupRegistration(SymbolId(10))));
     }
 
+
+    fn append_original_file_initializer(
+        il:&mut Il, variable:SymbolId, id:u32, scope_position:Option<u32>,
+    ) {
+        il.dynamic_initializers.push(crate::DynamicInitializer {
+            symbol:variable,kind:4,expression_kind:None,operator:None,
+        });
+        let declaration=crate::NativeFileInitIdentity {
+            context:0,owner:Some(variable),scope:None,position:0,path:None,
+            id,kind:4,variable:Some(variable),destructor:None,
+            lifetime:None,expression_lifetime:None,
+        };
+        il.native_file_init_identities.push(declaration.clone());
+        if let Some(position)=scope_position {
+            il.scope_dynamic_initializers.push(crate::ScopeDynamicInitializer {
+                scope:"file:scope".into(),position,variable:Some(variable),
+                destructor:None,kind:4,
+            });
+            il.native_file_init_identities.push(crate::NativeFileInitIdentity {
+                context:1,owner:None,scope:Some("file:scope".into()),position,
+                ..declaration
+            });
+        }
+    }
+
+    #[test]
+    fn startup_source_census_keeps_originals_and_unknown_schedule_owners_separate() {
+        let mut il=separate_init_fixture(2_048);
+        for i in 0..2_048_u32 {
+            // Most originals have no surviving post-lowering scope entry.
+            // They still retain a source declaration without inventing an
+            // execution order or a missing scope ordinal.
+            append_original_file_initializer(&mut il,SymbolId(1_000+i),
+                i+1,(i%2==0).then_some(i/2));
+        }
+        let census=collect_file_startup_source_census(&il).unwrap();
+        assert!(census.checked_separate_scheduler);
+        assert_eq!(census.scheduled.len(),2_048);
+        assert!(census.unmatched_originals.is_empty());
+        assert!(census.unattributed_roots.is_empty());
+        assert_eq!(census.scheduled[0].initializer.scheduler_position,0);
+        assert_eq!(census.scheduled[0].original.as_ref().unwrap().id,1);
+        assert_eq!(census.scheduled[0].original.as_ref().unwrap()
+            .scope.as_ref().unwrap().position,0);
+        assert!(census.scheduled[1].original.as_ref().unwrap().scope.is_none());
+        assert_eq!(census.scheduled[2047].original.as_ref().unwrap().id,2048);
+
+        // A post-lowering scheduler can identify an object even when no
+        // original initializer declaration survived the native snapshot.
+        let empty=separate_init_fixture(4);
+        let missing=collect_file_startup_source_census(&empty).unwrap();
+        assert!(missing.checked_separate_scheduler);
+        assert_eq!(missing.scheduled.len(),4);
+        assert!(missing.scheduled.iter().all(|entry|entry.original.is_none()));
+        assert!(missing.unmatched_originals.is_empty());
+    }
+
+    #[test]
+    fn startup_source_census_preserves_orphaned_originals_and_scope_only_entries() {
+        let mut il=separate_init_fixture(2);
+        il.symbols.push(Symbol{
+            id:SymbolId(9_000),kind:2,name:"unowned_global".into(),
+        });
+        append_original_file_initializer(&mut il,SymbolId(9_000),99,None);
+        // The second native identity occurs only in a surviving scope list:
+        // matching variable names or destructors is not original-pointer
+        // equality and cannot assign this to any startup routine.
+        il.scope_dynamic_initializers.push(crate::ScopeDynamicInitializer {
+            scope:"foreign:scope".into(),position:0,
+            variable:Some(SymbolId(1_000)),destructor:None,kind:4,
+        });
+        il.native_file_init_identities.push(crate::NativeFileInitIdentity {
+            context:1,owner:None,scope:Some("foreign:scope".into()),
+            position:0,path:None,id:123,kind:4,
+            variable:Some(SymbolId(1_000)),destructor:None,
+            lifetime:None,expression_lifetime:None,
+        });
+        let census=collect_file_startup_source_census(&il).unwrap();
+        assert!(census.checked_separate_scheduler);
+        assert!(census.scheduled.iter().all(|entry|entry.original.is_none()));
+        assert_eq!(census.unmatched_originals.len(),2);
+        assert_eq!(census.unmatched_originals[0].declaration,Some(SymbolId(9_000)));
+        assert!(census.unmatched_originals[0].scope.is_none());
+        assert_eq!(census.unmatched_originals[1].declaration,None);
+        assert_eq!(census.unmatched_originals[1].scope.as_ref().unwrap().scope,
+                   "foreign:scope");
+    }
+
+    #[test]
+    fn grouped_startup_root_cannot_be_joined_by_original_variable_or_body_name() {
+        let mut il=separate_init_fixture(2);
+        append_original_file_initializer(&mut il,SymbolId(1_000),10,None);
+        il.file_scope_init_schedule=None;
+        il.file_scope_init_routines.clear();
+        il.file_scope_dynamic_init_owners.clear();
+        il.file_scope_lowered_startup_routines.push(
+            FileScopeLoweredStartupRoutine{routine:SymbolId(10),priority:0});
+        let census=collect_file_startup_source_census(&il).unwrap();
+        assert!(!census.checked_separate_scheduler);
+        assert!(census.scheduled.is_empty());
+        assert_eq!(census.unmatched_originals.len(),1);
+        assert_eq!(census.unattributed_roots.len(),1);
+        assert_eq!(census.unattributed_roots[0].routine,SymbolId(10));
+
+        // Even a seemingly full visible scheduler prefix is *not* a
+        // checked complete roster when EDG marks the list incomplete.
+        il.file_scope_init_schedule=Some(FileScopeInitSchedule {
+            available:true,complete:false,
+        });
+        let incomplete=collect_file_startup_source_census(&il).unwrap();
+        assert!(!incomplete.checked_separate_scheduler);
+        assert_eq!(incomplete.unattributed_roots.len(),1);
+        assert_eq!(incomplete.unmatched_originals.len(),1);
+    }
+
+    #[test]
+    fn startup_source_census_rejects_mutated_original_provenance() {
+        let mut il=separate_init_fixture(2);
+        append_original_file_initializer(&mut il,SymbolId(1_000),10,None);
+        let census=collect_file_startup_source_census(&il).unwrap();
+        assert_eq!(census.scheduled[0].original.as_ref().unwrap().id,10);
+
+        let mut wrong=il.clone();
+        wrong.native_file_init_identities[0].variable=Some(SymbolId(10));
+        assert_eq!(collect_file_startup_source_census(&wrong),
+            Err(StartupEvidenceError::InvalidFileInitializerSourceEvidence));
+        let mut wrong=il.clone();
+        wrong.native_file_init_identities.push(
+            wrong.native_file_init_identities[0].clone());
+        assert_eq!(collect_file_startup_source_census(&wrong),
+            Err(StartupEvidenceError::InvalidFileInitializerSourceEvidence));
+        let mut wrong=il;
+        wrong.dynamic_initializers.push(wrong.dynamic_initializers[0].clone());
+        assert_eq!(collect_file_startup_source_census(&wrong),
+            Err(StartupEvidenceError::InvalidFileInitializerSourceEvidence));
+    }
+
     #[test]
     fn checked_separate_scheduler_scales_with_exact_global_owners() {
         let il=separate_init_fixture(512);
