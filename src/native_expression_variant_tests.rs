@@ -480,6 +480,10 @@ fn supplemental_statement_graph_requires_original_owner_and_complete_branch_list
 fn file_initializer_identity_preserves_shared_schedule_entry_and_distinct_full_expression_region() {
     let mut il=Il::default();
     let variable=SymbolId(9);
+    il.symbols.extend([
+        Symbol{id:variable,kind:2,name:"global".into()},
+        Symbol{id:SymbolId(10),kind:1,name:"destroy_global".into()},
+    ]);
     il.dynamic_initializers.push(DynamicInitializer {
         symbol:variable,kind:4,expression_kind:None,operator:None,
     });
@@ -509,4 +513,115 @@ fn file_initializer_identity_preserves_shared_schedule_entry_and_distinct_full_e
     let mut wrong=il.clone();
     wrong.native_file_init_identities.push(wrong.native_file_init_identities[0].clone());
     assert!(validate_file_init_identities(&wrong).is_err());
+}
+
+#[test]
+fn file_scope_identity_census_never_infers_ownership_from_variable_names_or_order() {
+    let mut il=Il::default();
+    // Large generated TUs must construct the census in linear expected time.
+    // Keep every initializer's original identity distinct even when every
+    // name, kind and lifetime fact happens to look the same.
+    for n in 0..2048_u32 {
+        let variable=SymbolId(1000+n);
+        let destructor=SymbolId(6000+n);
+        il.symbols.push(Symbol{id:variable,kind:2,name:"global".into()});
+        il.symbols.push(Symbol{id:destructor,kind:1,name:"dtor".into()});
+        il.dynamic_initializers.push(DynamicInitializer {
+            symbol:variable,kind:4,expression_kind:None,operator:None,
+        });
+        let declaration=NativeFileInitIdentity {
+            context:0,owner:Some(variable),scope:None,position:0,path:None,
+            id:n+1,kind:4,variable:Some(variable),destructor:Some(destructor),
+            lifetime:Some(n+1),expression_lifetime:Some(5000+n),
+        };
+        il.native_file_init_identities.push(declaration.clone());
+        if n%2==0 {
+            il.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+                scope:"1:nested".into(),position:n/2,
+                variable:Some(variable),destructor:Some(destructor),kind:4,
+            });
+            il.native_file_init_identities.push(NativeFileInitIdentity {
+                context:1,owner:None,scope:Some("1:nested".into()),position:n/2,
+                ..declaration
+            });
+        }
+    }
+    let joins=collect_file_init_identity_associations(&il).unwrap();
+    assert_eq!(joins.len(),2048);
+    assert_eq!(joins.iter().filter(|a|a.scope.is_some()).count(),1024);
+    assert_eq!(joins[0].declaration,Some(SymbolId(1000)));
+    assert_eq!(joins[0].scope,Some(FileInitScopePosition {
+        scope:"1:nested".into(),position:0,
+    }));
+    assert_eq!(joins[1].declaration,Some(SymbolId(1001)));
+    assert!(joins[1].scope.is_none(), "a missing post-lowering scope edge is UNKNOWN");
+
+    // Preserve identical variable/destructor evidence, but substitute a
+    // different opaque pointer ID on one surviving schedule occurrence.
+    // The two sides remain independently valid and no join may be invented.
+    let mut changed=il.clone();
+    let scope_entry=changed.native_file_init_identities.iter_mut()
+        .find(|d|d.context==1).unwrap();
+    scope_entry.id=50000;
+    let separated=collect_file_init_identity_associations(&changed).unwrap();
+    assert_eq!(separated.len(),2049);
+    assert_eq!(separated.iter().filter(|a|a.scope.is_some() &&
+                    a.declaration.is_none()).count(),1);
+    assert_eq!(separated.iter().filter(|a|a.declaration.is_some() &&
+                    a.scope.is_none()).count(),1025);
+}
+
+#[test]
+fn file_region_join_rejects_ambiguous_public_il_without_collapsing_duplicates() {
+    let mut il=Il::default();
+    il.symbols.extend([
+        Symbol{id:SymbolId(4),kind:2,name:"a".into()},
+        Symbol{id:SymbolId(5),kind:2,name:"b".into()},
+        Symbol{id:SymbolId(6),kind:1,name:"destroy".into()},
+    ]);
+    for id in [4,5] {
+        il.dynamic_initializers.push(DynamicInitializer {
+            symbol:SymbolId(id),kind:4,expression_kind:None,operator:None,
+        });
+        il.native_file_init_identities.push(NativeFileInitIdentity {
+            context:0,owner:Some(SymbolId(id)),scope:None,position:0,path:None,
+            id,kind:4,variable:None,destructor:Some(SymbolId(6)),
+            lifetime:None,expression_lifetime:None,
+        });
+    }
+    assert_eq!(collect_file_init_identity_associations(&il).unwrap().len(),2);
+    let mut wrong=il.clone();
+    wrong.dynamic_initializers.push(wrong.dynamic_initializers[0].clone());
+    assert!(collect_file_init_identity_associations(&wrong).is_err(),
+        "duplicate declaration records must not be silently overwritten");
+
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities[1].id=4;
+    assert!(collect_file_init_identity_associations(&wrong).is_err(),
+        "one original native initializer pointer cannot own two declarations");
+
+    let mut wrong=il.clone();
+    wrong.symbols[2].kind=2;
+    assert!(collect_file_init_identity_associations(&wrong).is_err(),
+        "a destructor witness cannot name a variable symbol");
+
+    let mut wrong=il.clone();
+    wrong.native_file_init_identities[0].variable=Some(SymbolId(6));
+    assert!(collect_file_init_identity_associations(&wrong).is_err(),
+        "a source object witness cannot name a routine symbol");
+
+    let mut wrong=il;
+    wrong.scope_dynamic_initializers.push(ScopeDynamicInitializer {
+        scope:"1:".into(),position:0,variable:None,
+        destructor:Some(SymbolId(6)),kind:4,
+    });
+    wrong.native_file_init_identities.push(NativeFileInitIdentity {
+        context:1,owner:None,scope:Some("1:".into()),position:0,path:None,
+        id:10,kind:4,variable:None,destructor:Some(SymbolId(6)),
+        lifetime:None,expression_lifetime:None,
+    });
+    assert_eq!(collect_file_init_identity_associations(&wrong).unwrap().len(),3);
+    wrong.scope_dynamic_initializers.push(wrong.scope_dynamic_initializers[0].clone());
+    assert!(collect_file_init_identity_associations(&wrong).is_err(),
+        "repeated scope ordinals must not be swallowed by HashMap collection");
 }
