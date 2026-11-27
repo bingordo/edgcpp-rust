@@ -1633,6 +1633,28 @@ struct NativeAggregateReloc {
   int64_t addend;
 };
 
+// Maintain source emission order while indexing occupied relocation bytes.
+// A relocation covers exactly eight bytes on this target. Check the
+// entire range, including unaligned/partially overlapping slots.
+struct NativeAggregateRelocations {
+  std::vector<NativeAggregateReloc> entries;
+  std::unordered_set<size_t> starts;
+  bool append(NativeAggregateReloc reloc) {
+    const auto offset=reloc.byte_offset;
+    for (size_t delta=0;delta<8;++delta) {
+      if (offset>=delta && starts.count(offset-delta)) return false;
+      if (delta!=0 && offset<=std::numeric_limits<size_t>::max()-delta &&
+          starts.count(offset+delta)) return false;
+    }
+    starts.insert(offset);
+    entries.push_back(reloc);
+    return true;
+  }
+  size_t size() const {return entries.size();}
+  auto begin() const -> decltype(entries.begin()) {return entries.begin();}
+  auto end() const -> decltype(entries.end()) {return entries.end();}
+};
+
 // Exact target-machine byte image of EDG's own addressable string constant.
 // This is shared by the static aggregate image verifier and literal emitter.
 // Padding comes only from EDG's complete array extent, never source tokens.
@@ -1669,7 +1691,7 @@ static bool native_static_literal_image(a_constant_ptr literal,
 static bool constant_initializer_image(
     a_constant_ptr value, a_type_ptr original_type, size_t offset,
     std::vector<uint8_t> &bytes, unsigned depth,
-    std::vector<NativeAggregateReloc> *relocations);
+    NativeAggregateRelocations *relocations);
 // The existing object image is zero-filled. Apply only the bits of an EDG
 // constant bitfield; adjacent members and padding are never overwritten.
 // This uses native *byte* offset and offset_bit_remainder on little-endian
@@ -1793,7 +1815,7 @@ static bool resolve_designated_value(
 }
 static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
     size_t offset,std::vector<uint8_t> &bytes,
-    std::vector<NativeAggregateReloc> *relocations) {
+    NativeAggregateRelocations *relocations) {
   // A GNU C explicit cast from a source pointer into a native 64-bit
   // integer is still a symbolic address relocation, never host pointer bits.
   // EDG must independently retain the original pointer type and prove the
@@ -1867,17 +1889,8 @@ static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
         delta > static_cast<decltype(delta)>(
                     std::numeric_limits<int64_t>::max()))
       return false;
-    // Check entire relocation ranges rather than only equal start offsets.
-    // Both start positions are inside the already validated object image.
-    for (const auto &prior : *relocations) {
-      if (!aggregate_subobject_fits(bytes.size(), prior.byte_offset, 8))
-        return false;
-      if (offset < prior.byte_offset + 8 && prior.byte_offset < offset + 8)
-        return false;
-    }
-    relocations->push_back({offset, variable, literal, routine,
-                            static_cast<int64_t>(delta)});
-    return true;
+    return relocations->append({offset,variable,literal,routine,
+                                static_cast<int64_t>(delta)});
   }
   // EDG represents a C null pointer constant in static aggregate data as
   // ck_integer with the final pointer type. Write only a *proven zero* for
@@ -1935,7 +1948,7 @@ static bool write_initializer_leaf(a_constant_ptr value,a_type_ptr type,
 static bool constant_initializer_image(
     a_constant_ptr value,a_type_ptr original_type,size_t offset,
     std::vector<uint8_t> &bytes,unsigned /*depth*/,
-    std::vector<NativeAggregateReloc> *relocations) {
+    NativeAggregateRelocations *relocations) {
   enum class phase {enter,array_items,record_items,repeat,leave};
   struct frame {
     image_value item;
@@ -2077,7 +2090,7 @@ static bool constant_initializer_image(
 }
 static bool aggregate_initializer_image(
     a_constant_ptr root, a_type_ptr type, std::string &encoded,
-    std::vector<NativeAggregateReloc> *relocations = nullptr) {
+    NativeAggregateRelocations *relocations = nullptr) {
   type = object_initializer_type(type);
   if (root == nullptr || type == nullptr || type->incomplete ||
       (type->kind != tk_array && type->kind != tk_struct &&
@@ -2180,7 +2193,7 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
   if (inner!=nullptr && array_element!=nullptr &&
       native_image_size_fits(array_element->size)) {
     std::vector<uint8_t> isolated(static_cast<size_t>(array_element->size),0);
-    std::vector<NativeAggregateReloc> relocations;
+    NativeAggregateRelocations relocations;
     isolated_leaf_ok=constant_initializer_image(
         inner,array_element,0,isolated,0,&relocations);
     isolated_leaf_relocs=relocations.size();
@@ -2188,7 +2201,7 @@ static void diagnose_weak_static_image(a_variable_ptr v) {
   if (field_type!=nullptr && field_type->kind==tk_array &&
       second!=nullptr && second->kind==ck_aggregate) {
     std::string encoded;
-    std::vector<NativeAggregateReloc> relocations;
+    NativeAggregateRelocations relocations;
     isolated_array_ok=aggregate_initializer_image(
         second,field_type,encoded,&relocations);
     isolated_array_relocs=relocations.size();
@@ -4503,7 +4516,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
       }
       if (v->init_kind == initk_static && v->initializer.constant != nullptr) {
         std::string hex;
-        std::vector<NativeAggregateReloc> relocations;
+        NativeAggregateRelocations relocations;
         if (aggregate_initializer_image(v->initializer.constant, v->type,
                                         hex, &relocations)) {
           emit_record(51, {num(symbol_id), num(emit_type(v->type, 0)), txt(hex)});
@@ -4516,7 +4529,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
               auto found=static_literal_ids.find(reloc.literal);
               uint32_t id=0;
               if (found==static_literal_ids.end()) {
-                if (static_literal_ids.size()>=256) {
+                if (static_literal_ids.size()>=std::numeric_limits<uint32_t>::max()) {
                   report_incomplete_snapshot();
                   break;
                 }

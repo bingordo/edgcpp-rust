@@ -1643,6 +1643,10 @@ struct WireSeen {
     native_type_layout_proofs: HashSet<TypeId>,
     native_scalar_proofs: HashSet<TypeId>,
     symbols: HashSet<SymbolId>,
+    aggregate_image_indices: HashMap<SymbolId,usize>,
+    // Shared across all relocation families, retaining wire emission order
+    // in the public vectors rather than rescanning them for each callback.
+    relocation_slots: HashMap<SymbolId,HashSet<u64>>,
     routine_symbols: HashSet<SymbolId>,
     /// Only source-correspondence routines and variables can carry raw linker names.
     linkable_symbols: HashSet<SymbolId>,
@@ -1854,6 +1858,20 @@ fn decode_aggregate_hex(input: &str) -> Option<Vec<u8>> {
 
 // Keep the decoder's arity table separately testable from record collection.
 // Every kind with a wire arity must also have a destination count below.
+// Relocations occupy eight bytes in the current native wire protocol.
+// Check adjacent starts as well as equality, without scanning prior records.
+fn admit_relocation_slot(seen:&mut WireSeen,owner:SymbolId,offset:u64)->bool {
+    if offset.checked_add(8).is_none() {return false;}
+    let slots=seen.relocation_slots.entry(owner).or_default();
+    for delta in 0..8 {
+        if offset.checked_sub(delta).is_some_and(|p|slots.contains(&p)) ||
+            (delta!=0 && offset.checked_add(delta).is_some_and(|p|slots.contains(&p))) {
+            return false;
+        }
+    }
+    slots.insert(offset)
+}
+
 unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                         data: *const WireField, length: usize, aux: u32) {
     // This preflight must precede from_raw_parts even for direct callers
@@ -2340,10 +2358,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         102 => {
             let (Some(id),Some(ty),Some(hex))=(n(0),n(1),t(2)) else {return;};
-            // The bridge assigns IDs by first observed original EDG constant
-            // identity, starting at one. Incomplete or duplicate pools fail.
-            if id==0 || id>256 || ty==0 ||
-                id as usize!=output.global_literal_objects.len()+1 {
+            // The bridge assigns dense identities starting at one.
+            if id==0 || ty==0 ||
+                output.global_literal_objects.len().checked_add(1)!=Some(id as usize) {
                 return;
             }
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
@@ -2358,20 +2375,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             let owner=SymbolId(symbol);
             let target=SymbolId(routine);
-            let Some(image)=output.global_aggregate_initializers.iter()
-                .find(|g|g.symbol==owner) else {return;};
+            let Some(&index)=seen.aggregate_image_indices.get(&owner) else {return;};
+            let image=&output.global_aggregate_initializers[index];
             let Ok(start)=usize::try_from(offset) else {return;};
             if symbol==0 || routine==0 || offset%8!=0 || addend!=0 ||
-                !output.symbols.iter().any(|s|s.id==target && s.kind==1) ||
-                output.global_routine_relocations.len()>=4096 ||
+                !seen.routine_symbols.contains(&target) ||
                 start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
                 image.bytes[start..start+8].iter().any(|&b|b!=0) ||
-                output.global_routine_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) ||
-                output.global_literal_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) ||
-                output.global_aggregate_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) {
+                !admit_relocation_slot(seen,owner,offset) {
                 return;
             }
             output.global_routine_relocations.push(GlobalRoutineRelocation {
@@ -2382,28 +2393,21 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(symbol),Some(offset),Some(literal_id),Some(addend))=
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
                 else {return;};
-            // Event 51 is emitted before source-owned relocation events.
-            // Reject forged, dangling, out-of-bounds, nonzero, or duplicated
-            // slots before a later consumer could turn them into linker data.
             let owner=SymbolId(symbol);
-            let Some(image)=output.global_aggregate_initializers.iter()
-                .find(|g|g.symbol==owner) else {return;};
+            let Some(&index)=seen.aggregate_image_indices.get(&owner) else {return;};
+            let image=&output.global_aggregate_initializers[index];
             let Ok(start)=usize::try_from(offset) else {return;};
-            if symbol==0 || literal_id==0 || literal_id>256 ||
-                !output.global_literal_objects.iter().any(|v|v.id==literal_id) ||
-                offset%8!=0 || output.global_literal_relocations.len()>=4096 ||
+            if symbol==0 || literal_id==0 ||
+                output.global_literal_objects.get((literal_id-1) as usize)
+                    .is_none_or(|v|v.id!=literal_id) ||
+                offset%8!=0 ||
                 start.checked_add(8).is_none_or(|end|end>image.bytes.len()) ||
                 image.bytes[start..start+8].iter().any(|&b|b!=0) ||
-                output.global_literal_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) ||
-                output.global_aggregate_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) ||
-                output.global_routine_relocations.iter().any(|p|
-                    p.symbol==owner && p.offset==offset) {
+                !admit_relocation_slot(seen,owner,offset) {
                 return;
             }
             output.global_literal_relocations.push(GlobalLiteralRelocation {
-                symbol:SymbolId(symbol),offset,literal_id,addend,
+                symbol:owner,offset,literal_id,addend,
             });
         }
         52 => {
@@ -2411,10 +2415,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 (n(0),fields[1].unsigned(),n(2),fields[3].signed())
                 else {return;};
             if symbol==0 || target==0 ||
-                output.global_literal_relocations.iter().any(|p|
-                    p.symbol==SymbolId(symbol) && p.offset==offset) ||
-                output.global_routine_relocations.iter().any(|p|
-                    p.symbol==SymbolId(symbol) && p.offset==offset) {return;}
+                !admit_relocation_slot(seen,SymbolId(symbol),offset) {return;}
             output.global_aggregate_relocations.push(GlobalAggregateRelocation {
                 symbol:SymbolId(symbol),offset,target:SymbolId(target),addend
             });
@@ -2472,6 +2473,8 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 else {return;};
             if symbol==0 || ty==0 {return;}
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
+            if seen.aggregate_image_indices.insert(SymbolId(symbol),
+                output.global_aggregate_initializers.len()).is_some() {return;}
             output.global_aggregate_initializers.push(GlobalAggregateInitializer {
                 symbol:SymbolId(symbol),ty:TypeId(ty),bytes
             });
@@ -9349,6 +9352,22 @@ mod bootstrap_literal_global_wire_tests {
         assert_eq!(state.il.global_literal_relocations[2].literal_id,1);
     }
     #[test]
+    fn large_literal_pool_and_relocation_lists_keep_exact_identity() {
+        let mut state=Collector::default();
+        let count=4101u64;
+        global_image(&mut state,7,&vec![0;count as usize*8]);
+        for id in 1..=count {
+            send(&mut state,102,&[number(id),number(44),text(b"6100")]);
+            send(&mut state,103,&[number(7),number((id-1)*8),number(id),signed(0)]);
+        }
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_literal_objects.len(),count as usize);
+        assert_eq!(state.il.global_literal_relocations.len(),count as usize);
+        assert_eq!(state.il.global_literal_relocations.last().unwrap().literal_id,count as u32);
+        send(&mut state,52,&[number(7),number(3),number(8),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+    #[test]
     fn duplicate_missing_or_malformed_source_literal_rejects_without_panic() {
         for image in [b"abcd".as_slice(),b"0".as_slice(),b"gg00".as_slice()] {
             let mut state=Collector::default();
@@ -9440,6 +9459,22 @@ mod bootstrap_static_routine_relocation_wire_tests {
         assert!(!state.malformed && !state.panicked);
         state
     }
+    #[test]
+    fn large_routine_relocation_list_is_not_capped() {
+        let mut state=Collector::default();
+        let count=4101u64;
+        send(&mut state,13,&[n(9),n(1),t(b"target")]);
+        let hex=vec![b'0';count as usize*16];
+        send(&mut state,51,&[n(7),n(70),t(&hex)]);
+        for i in 0..count {
+            send(&mut state,105,&[n(7),n(i*8),n(9),signed(0)]);
+        }
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.global_routine_relocations.len(),count as usize);
+        send(&mut state,105,&[n(7),n((count-1)*8),n(9),signed(0)]);
+        assert!(state.malformed && !state.panicked);
+    }
+
     #[test]
     fn source_routine_relocation_preserves_target_identity_and_zeroed_slot() {
         let mut state=setup();
