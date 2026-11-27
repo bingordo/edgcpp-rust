@@ -1920,7 +1920,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         101 => {
             let (Some(scope),Some(position),Some(assembly),Some(flags))=
                 (t(0),n(1),t(2),n(3)) else {return;};
-            if scope.is_empty() || scope.len()>1024 || (flags & !31)!=0 {return;}
+            if scope.is_empty() || (flags & !31)!=0 {return;}
             // EDG emits a contiguous ordinal sequence independently in each
             // scope. Validate in O(1) expected time per callback, not by
             // repeatedly scanning the entire compiled directive roster.
@@ -1954,7 +1954,6 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         }
         68 => {
             let (Some(scope),Some(position),Some(kind))=(t(0),n(1),n(4)) else {return;};
-            if scope.len()>1024 {return;}
             let variable=n(2).map(SymbolId);
             let destructor=n(3).map(SymbolId);
             if variable==Some(SymbolId(0)) || destructor==Some(SymbolId(0)) {return;}
@@ -3291,7 +3290,7 @@ fn validate_native_scope_dynamic_initializer_coverage(il:&Il)->Result<(),&'stati
         .filter(|symbol|symbol.kind==1).map(|symbol|symbol.id).collect();
     let mut next_position:HashMap<&str,u32>=HashMap::new();
     for init in &il.scope_dynamic_initializers {
-        if init.scope.is_empty() || init.scope.len()>1024 {
+        if init.scope.is_empty() {
             return Err("native dynamic initializer lacks valid scope identity");
         }
         let expected=next_position.entry(init.scope.as_str()).or_insert(0);
@@ -3339,6 +3338,28 @@ mod native_scope_dynamic_initializer_coverage_tests {
         // of no shutdown effects.
         il.scope_dynamic_initializers[0].destructor=None;
         assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_ok());
+    }
+
+    #[test]
+    fn long_native_scope_name_preserves_identity_without_truncation() {
+        // Deep namespace paths are source-owned strings; the wire protocol
+        // already checks representable lengths and the ordinal remains u32.
+        let long=format!("1:{}", "nested::".repeat(1024));
+        assert!(long.len()>1024);
+        let mut il=Il::default();
+        il.symbols.extend([
+            Symbol{id:SymbolId(10),kind:2,name:"global".into()},
+            Symbol{id:SymbolId(20),kind:1,name:"destructor".into()},
+        ]);
+        for position in 0..3 {
+            il.scope_dynamic_initializers.push(ScopeDynamicInitializer{
+                scope:long.clone(),position,
+                variable:Some(SymbolId(10)),destructor:Some(SymbolId(20)),kind:1,
+            });
+        }
+        assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_ok());
+        il.scope_dynamic_initializers[1].position=0;
+        assert!(validate_native_scope_dynamic_initializer_coverage(&il).is_err());
     }
 
     #[test]
@@ -8112,6 +8133,21 @@ mod native_scope_asm_wire_tests {
     }
 
     #[test]
+    fn long_scope_asm_identity_survives_native_wire_and_order_checks() {
+        let mut state=Collector::default();
+        let scope=format!("1:{}", "nested::".repeat(1024));
+        assert!(scope.len()>1024);
+        send(&mut state,&scope,0,"nop",0);
+        send(&mut state,&scope,1,".globl exact_linker_anchor",2);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.native_scope_asm.len(),2);
+        assert_eq!(state.il.native_scope_asm[0].scope,scope);
+        assert_eq!(state.seen.native_scope_asm_next.get(&scope),Some(&2));
+        send(&mut state,&scope,1,"duplicate",0);
+        assert!(state.malformed);
+    }
+
+    #[test]
     fn interleaved_scopes_keep_independent_native_asm_ordinals() {
         let mut state=Collector::default();
         for position in 0..2048_u32 {
@@ -8214,6 +8250,20 @@ mod file_scope_init_schedule_wire_tests {
             collect((state as *mut Collector).cast(),68,
                     fields.as_ptr(),fields.len(),0);
         }
+    }
+
+    #[test]
+    fn long_scope_dynamic_initializer_preserves_native_wire_owner_and_order() {
+        let mut state=Collector::default();
+        let scope=format!("1:{}", "nested::".repeat(1024));
+        send_scope(&mut state,&scope,0,11,31);
+        send_scope(&mut state,&scope,1,12,32);
+        assert!(!state.malformed && !state.panicked);
+        assert_eq!(state.il.scope_dynamic_initializers.len(),2);
+        assert_eq!(state.il.scope_dynamic_initializers[0].scope,scope);
+        assert_eq!(state.seen.scope_dynamic_initializer_next.get(&scope),Some(&2));
+        send_scope(&mut state,&scope,1,12,32);
+        assert!(state.malformed);
     }
 
     #[test]
