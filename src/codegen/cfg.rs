@@ -5215,6 +5215,23 @@ mod tests {
     }
 
     #[test]
+    fn large_integer_signature_and_locals_emit() {
+        let count=10_001;
+        let body=vec![Stmt::Store(count-1,Expr::Parameter(299)),
+            Stmt::Return(Expr::Local(count-1))];
+        assert!(!check(&body,&mut HashSet::new(),300,count,0).unwrap());
+        let obj=emit_routines(&[Routine {
+            name:"large_integer_body".into(),parameters:300,locals:count,
+            body,abi:None,local_types:None,local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        }]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_LARGE_INTEGER_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
+    }
+
+    #[test]
     fn rejects_nondefinite_local_initialization() {
         let mut vars = HashSet::new();
         let body = vec![
