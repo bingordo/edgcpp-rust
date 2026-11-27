@@ -3323,6 +3323,11 @@ impl Graph {
         let mut seen=std::collections::HashSet::new();
         let mut field=None;
         let mut integers=Vec::new();
+        // A public Graph may contain additional or modified records after
+        // construction. Index the live field slice once per query rather than
+        // rescanning all record declarations for each callee field operand.
+        // Multiple records claiming one source SymbolId remain ambiguous.
+        let mut fields_by_symbol:Option<HashMap<SymbolId,Option<&RecordField>>>=None;
         while let Some(id)=stack.pop() {
             if !seen.insert(id) || seen.len()>512 {return None;}
             let node=self.expressions.get(id.0)?;
@@ -3332,14 +3337,21 @@ impl Graph {
             }
             if unsafe {edgcpp_codegen_kind(2,node.data.kind)}==5 {
                 if let Some(symbol)=node.data.symbol_id {
-                    // A Graph has publicly mutable records; reject ambiguous
-                    // source field symbols even if from_il was bypassed.
-                    let mut records=self.record_fields.iter()
-                        .filter(|f|f.symbol==symbol);
-                    if let Some(record)=records.next() {
-                        if records.next().is_some() {
-                            return None;
+                    // Build lazily: calls without field expressions should
+                    // not pay a full record-field indexing cost.
+                    let indexed=fields_by_symbol.get_or_insert_with(|| {
+                        let mut by_symbol=HashMap::with_capacity(self.record_fields.len());
+                        for record in &self.record_fields {
+                            use std::collections::hash_map::Entry;
+                            match by_symbol.entry(record.symbol) {
+                                Entry::Vacant(slot)=>{slot.insert(Some(record));}
+                                Entry::Occupied(mut slot)=>{slot.insert(None);}
+                            }
                         }
+                        by_symbol
+                    });
+                    if let Some(record)=indexed.get(&symbol) {
+                        let record=record.ok_or(()) .ok()?;
                         if record.name=="__vptr" {
                             if node.data.reference.as_deref()!=Some("__vptr") ||
                                field.is_some() || record.bit_width!=0 {
@@ -4024,6 +4036,26 @@ mod callee_vptr_field_tests {
         graph.record_fields.push(stolen);
         assert!(graph.callee_vptr_field_reference(&call).is_none(),
             "two record owners cannot claim one native vptr field symbol");
+    }
+
+    #[test]
+    fn large_record_catalog_preserves_exact_vptr_owner_and_duplicate_rejection() {
+        let (mut graph,call)=fixture();
+        // Generated C++ TUs can carry many unrelated record fields. Querying
+        // one callee tree must not linearly rescan that catalog per operand.
+        for i in 0..8192_u32 {
+            let mut record=graph.record_fields[0].clone();
+            record.symbol=SymbolId(10000+i);
+            record.name=format!("ordinary_{i}");
+            graph.record_fields.push(record);
+        }
+        let evidence=graph.callee_vptr_field_reference(&call).unwrap();
+        assert_eq!(evidence.field,SymbolId(106));
+        assert_eq!(evidence.owner,TypeId(145));
+        let mut conflicting=graph.record_fields[0].clone();
+        conflicting.owner=TypeId(999);
+        graph.record_fields.push(conflicting);
+        assert!(graph.callee_vptr_field_reference(&call).is_none());
     }
 
     #[test]
