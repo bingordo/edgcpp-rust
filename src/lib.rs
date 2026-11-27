@@ -905,6 +905,26 @@ pub struct NativeFileInitIdentity {
     pub lifetime:Option<u32>, pub expression_lifetime:Option<u32>,
 }
 
+/// A scope-local EDG list position. Neither these positions nor the opaque
+/// initializer IDs define a process-wide or cross-translation-unit order.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct FileInitScopePosition {
+    pub scope:String, pub position:u32,
+}
+
+/// A strictly original-pointer-identity join of file-region initializer
+/// occurrences. Either side may be missing because post-lowering EDG can
+/// drain scope lists. Missing is UNKNOWN, never proof of no side effects.
+/// This is not an executable C++ construction or destruction plan.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct FileInitIdentityAssociation {
+    pub id:u32, pub kind:u32,
+    pub declaration:Option<SymbolId>,
+    pub scope:Option<FileInitScopePosition>,
+    pub variable:Option<SymbolId>, pub destructor:Option<SymbolId>,
+    pub lifetime:Option<u32>, pub expression_lifetime:Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeControlChildCount {
     pub function:String, pub statement_path:String, pub role:u32,
@@ -5080,10 +5100,31 @@ fn valid_file_init_identity(d:&NativeFileInitIdentity)->bool {
 /// Reconcile declarations, ordered scope entries, expression wrappers and
 /// nested leaves without guessing by variable/destructor names or ID order.
 fn validate_file_init_identities(il:&Il)->Result<(),Error> {
-    let mut variables:HashMap<_,_>=il.dynamic_initializers.iter()
-        .map(|d|(d.symbol,d.kind)).collect();
-    let mut schedules:HashMap<_,_>=il.scope_dynamic_initializers.iter()
-        .map(|d|((d.scope.as_str(),d.position),(d.kind,d.variable,d.destructor))).collect();
+    // Explicit insertion is required here: collect() would quietly swallow
+    // a duplicate declaration or scope ordinal in a hand-built/public Il.
+    let mut variables=HashMap::new();
+    for d in &il.dynamic_initializers {
+        if variables.insert(d.symbol,d.kind).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    let mut schedules=HashMap::new();
+    for d in &il.scope_dynamic_initializers {
+        if schedules.insert((d.scope.as_str(),d.position),
+                            (d.kind,d.variable,d.destructor)).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
+    // Event 119 is an independent source-ownership witness. A caller can
+    // construct or mutate an Il without having gone through the C callback.
+    // Check original field roles instead of accepting any existing symbol.
+    let mut symbol_kinds=HashMap::new();
+    for symbol in &il.symbols {
+        if symbol.id==SymbolId(0) ||
+           symbol_kinds.insert(symbol.id,symbol.kind).is_some() {
+            return Err(Error::MalformedCallback);
+        }
+    }
     let mut nested=HashMap::new();
     for e in &il.native_expression_variants {
         if let (NativeExpressionOwner::Initializer{owner},NativeExpressionPayload::DynamicInitializer{kind,..})=(&e.owner,&e.payload) {
@@ -5102,16 +5143,26 @@ fn validate_file_init_identities(il:&Il)->Result<(),Error> {
     }
     let mut identities=HashMap::new();
     let mut declaration_ids=HashMap::new();
+    let mut claimed_declaration_ids=HashSet::new();
     let mut scheduled_ids=HashSet::new();
     for d in &il.native_file_init_identities {
-        if !valid_file_init_identity(d) {return Err(Error::MalformedCallback);}
+        if !valid_file_init_identity(d) ||
+           d.variable.is_some_and(|s|symbol_kinds.get(&s)!=Some(&2)) ||
+           d.destructor.is_some_and(|s|symbol_kinds.get(&s)!=Some(&1)) ||
+           (d.context==0 &&
+            d.owner.is_some_and(|s|symbol_kinds.get(&s)!=Some(&2))) {
+            return Err(Error::MalformedCallback);
+        }
         let facts=(d.kind,d.variable,d.destructor,d.lifetime,d.expression_lifetime);
         if identities.insert(d.id,facts).is_some_and(|old|old!=facts) {return Err(Error::MalformedCallback);}
         match d.context {
             0=>{
                 let owner=d.owner.unwrap();
                 if variables.remove(&owner)!=Some(d.kind) ||
-                    declaration_ids.insert(owner,d.id).is_some() {return Err(Error::MalformedCallback);}
+                    declaration_ids.insert(owner,d.id).is_some() ||
+                    !claimed_declaration_ids.insert(d.id) {
+                    return Err(Error::MalformedCallback);
+                }
                 if d.variable.is_some_and(|v|v!=owner) {return Err(Error::MalformedCallback);}
             }
             1=>{
@@ -5133,6 +5184,49 @@ fn validate_file_init_identities(il:&Il)->Result<(),Error> {
     // declaration event. Only equate entries when the original pointer
     // identity agrees; a variable name alone cannot prove identity.
     Ok(())
+}
+
+/// Correlate original file-region initializer declarations and surviving EDG
+/// scope-list entries by their *same opaque native pointer ID*, never by
+/// name, destructor, byte image, schedule position or callback order.
+///
+/// An unmatched side remains None: this is a partial diagnostic census, not
+/// an authoritative original roster, runtime registration or ELF schedule.
+/// The returned vector preserves first recorded occurrence order, which
+/// must not be interpreted as execution order.
+pub fn collect_file_init_identity_associations(
+    il:&Il,
+) -> Result<Vec<FileInitIdentityAssociation>,Error> {
+    validate_file_init_identities(il)?;
+    let mut index=HashMap::new();
+    let mut associations:Vec<FileInitIdentityAssociation>=Vec::new();
+    for d in &il.native_file_init_identities {
+        if !matches!(d.context,0|1) {continue;}
+        let slot=match index.get(&d.id).copied() {
+            Some(slot)=>slot,
+            None=>{
+                let slot=associations.len();
+                index.insert(d.id,slot);
+                associations.push(FileInitIdentityAssociation {
+                    id:d.id,kind:d.kind,
+                    declaration:None,scope:None,
+                    variable:d.variable,destructor:d.destructor,
+                    lifetime:d.lifetime,expression_lifetime:d.expression_lifetime,
+                });
+                slot
+            }
+        };
+        let entry=&mut associations[slot];
+        match d.context {
+            0=>entry.declaration=d.owner,
+            1=>entry.scope=Some(FileInitScopePosition {
+                scope:d.scope.as_ref().unwrap().clone(),
+                position:d.position,
+            }),
+            _=>unreachable!("context checked above"),
+        }
+    }
+    Ok(associations)
 }
 
 fn validate_complete_native_snapshot(il:&Il) -> Result<(),Error> {
