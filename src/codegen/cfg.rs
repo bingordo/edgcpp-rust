@@ -2,7 +2,7 @@
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
     native_object_size_fits,
-    MAX_CFG_LOCALS, bounded_array_bytes,
+    bounded_array_bytes,
 };
 
 fn valid_aggregate_image_len(size: usize) -> bool {
@@ -3139,7 +3139,9 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
         let parameter_accesses=ids.iter().map(|sym|
             parameter_memory_access(il,*sym)).collect::<Result<Vec<_>,_>>()?;
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
-        if locals.len() > MAX_CFG_LOCALS { return Err(invalid("too many locals")); }
+        if locals.len().checked_add(ids.len()).is_none_or(|n|u32::try_from(n).is_err()) {
+            return Err(invalid("local/parameter variable IDs not representable"));
+        }
         let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
             .collect::<Result<Vec<_>,_>>()?;
         let mut local_storage=locals.iter().map(|v| {
@@ -4642,6 +4644,9 @@ fn emit_routines_with_globals(
                 func.parameters
             } else { 0 } {
                 return Err(invalid("local/parameter SSA slot count mismatch"));
+            }
+            if u32::try_from(local_types.len()).is_err() {
+                return Err(invalid("local/parameter variable IDs not representable"));
             }
             let vars: Vec<_> = (0..local_types.len()).map(|i| {
                 let v = Variable::from_u32(i as u32);
