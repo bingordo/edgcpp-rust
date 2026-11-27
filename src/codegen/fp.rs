@@ -1578,147 +1578,122 @@ fn safe_scalar_external_name(name:&str)->bool {
     b[1..].iter().all(|c|c.is_ascii_alphanumeric()||*c==b'_')
 }
 /// Prevalidate all source-authorized external prototypes before ELF emission.
-fn validate_fp_calls_expr(
-    expr:&FloatExpr,
+fn validate_fp_calls_stmts<'a>(
+    stmts:&'a [FloatStmt],
     declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
     imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
     source_imports:bool,
-    depth:usize,
 )->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("FP call expression exceeds depth limit"));}
-    match expr {
-        FloatExpr::Call {callee,parameters,return_type,arguments}=>{
-            let declared=declarations.get(callee)
-                .ok_or_else(||reject("FP direct call has no defined routine"))?;
-            if declared.0!=*parameters ||
-                declared.1!=ScalarType::Float(*return_type) ||
-                arguments.len()!=parameters.len() {
-                return Err(reject("FP direct call signature differs from defined routine"));
-            }
-            for arg in arguments {
-                if let ScalarCallArg::Float(arg)=arg {
-                    validate_fp_calls_expr(arg,declarations,imports,source_imports,depth+1)?;
-                }
-            }
-        }
-        FloatExpr::CallExternal {callee,parameters,return_type,arguments}=>{
-            if !source_imports || !safe_scalar_external_name(callee) ||
-                declarations.contains_key(callee) ||
-                arguments.len()!=parameters.len() ||
-                parameters.iter().any(|ty|matches!(ty,ScalarType::FunctionPointer(_))) {
-                return Err(reject("FP external call lacks an authorized C prototype"));
-            }
-            let sig=(parameters.clone(),ScalarType::Float(*return_type));
-            if let Some(previous)=imports.get(callee) {
-                if previous!=&sig {
-                    return Err(reject("conflicting native FP external-call prototypes"));
-                }
-            } else {imports.insert(callee.clone(),sig);}
-            for arg in arguments {
-                if let ScalarCallArg::Float(e)=arg {
-                    validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?;
-                }
-            }
-        }
-        FloatExpr::CallIndirect {arguments,..}=>{
-            for arg in arguments {
-                if let ScalarCallArg::Float(arg)=arg {
-                    validate_fp_calls_expr(arg,declarations,imports,source_imports,depth+1)?;
-                }
-            }
-        }
-        FloatExpr::Conditional {condition,yes,no}=>{
-            validate_fp_calls_cond(condition,declarations,imports,source_imports,depth+1)?;
-            validate_fp_calls_expr(yes,declarations,imports,source_imports,depth+1)?;
-            validate_fp_calls_expr(no,declarations,imports,source_imports,depth+1)?;
-        }
-        FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>
-            validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
-        FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
-        FloatExpr::Mul(a,b)|FloatExpr::Div(a,b)=>{
-            validate_fp_calls_expr(a,declarations,imports,source_imports,depth+1)?;
-            validate_fp_calls_expr(b,declarations,imports,source_imports,depth+1)?;
-        }
-        FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
-        FloatExpr::IntegerConstantCast {..}|FloatExpr::IntegerLocalCast {..}|
-        FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
-        FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
-        FloatExpr::LoadIndexed {..}|
-        FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
+    // Explicit worklist preserves preorder validation, including the source
+    // order of external prototype conflicts. No recursive Rust stack use.
+    enum Task<'a> {
+        Expr(&'a FloatExpr),
+        Cond(&'a FloatCondition),
+        Stmts(&'a [FloatStmt]),
     }
-    Ok(())
-}
-fn validate_fp_calls_cond(
-    cond:&FloatCondition,
-    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
-    imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
-    source_imports:bool,
-    depth:usize,
-)->Result<(),CodegenError> {
-    validate_fp_calls_expr(&cond.left,declarations,imports,source_imports,depth)?;
-    validate_fp_calls_expr(&cond.right,declarations,imports,source_imports,depth)
-}
-fn validate_fp_calls_stmts(
-    stmts:&[FloatStmt],
-    declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
-    imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
-    source_imports:bool,
-    depth:usize,
-)->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("FP call statements exceed depth limit"));}
-    for stmt in stmts {
-        match stmt {
-            FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
-            FloatStmt::ReturnInteger(e,_)=>
-                validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?,
-            FloatStmt::StoreGlobal {value,..}|
-            FloatStmt::StorePointerParameter {value,..}|
-            FloatStmt::StorePointerLocal {value,..}|
-            FloatStmt::StoreIndexed {value,..}=>
-                validate_fp_calls_expr(value,declarations,imports,source_imports,depth+1)?,
-            FloatStmt::ReturnIndirectInteger {arguments,..}=>{
-                for arg in arguments {
-                    if let ScalarCallArg::Float(e)=arg {
-                        validate_fp_calls_expr(e,declarations,imports,
-                            source_imports,depth+1)?;
+    let mut pending=vec![Task::Stmts(stmts)];
+    fn push_args<'a>(pending:&mut Vec<Task<'a>>,args:&'a [ScalarCallArg]) {
+        for arg in args.iter().rev() {
+            if let ScalarCallArg::Float(e)=arg {pending.push(Task::Expr(e));}
+        }
+    }
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Cond(c)=>{
+                pending.push(Task::Expr(&c.right));
+                pending.push(Task::Expr(&c.left));
+            }
+            Task::Expr(expr)=>match expr {
+                FloatExpr::Call {callee,parameters,return_type,arguments}=>{
+                    let declared=declarations.get(callee)
+                        .ok_or_else(||reject("FP direct call has no defined routine"))?;
+                    if declared.0!=*parameters ||
+                        declared.1!=ScalarType::Float(*return_type) ||
+                        arguments.len()!=parameters.len() {
+                        return Err(reject("FP direct call signature differs from defined routine"));
                     }
+                    push_args(&mut pending,arguments);
+                }
+                FloatExpr::CallExternal {callee,parameters,return_type,arguments}=>{
+                    if !source_imports || !safe_scalar_external_name(callee) ||
+                        declarations.contains_key(callee) ||
+                        arguments.len()!=parameters.len() ||
+                        parameters.iter().any(|ty|matches!(ty,ScalarType::FunctionPointer(_))) {
+                        return Err(reject("FP external call lacks an authorized C prototype"));
+                    }
+                    let sig=(parameters.clone(),ScalarType::Float(*return_type));
+                    if let Some(previous)=imports.get(callee) {
+                        if previous!=&sig {
+                            return Err(reject("conflicting native FP external-call prototypes"));
+                        }
+                    } else {imports.insert(callee.clone(),sig);}
+                    push_args(&mut pending,arguments);
+                }
+                FloatExpr::CallIndirect {arguments,..}=>push_args(&mut pending,arguments),
+                FloatExpr::Conditional {condition,yes,no}=>{
+                    pending.push(Task::Expr(no));
+                    pending.push(Task::Expr(yes));
+                    pending.push(Task::Cond(condition));
+                }
+                FloatExpr::Neg(e)|FloatExpr::Convert(_,e)=>pending.push(Task::Expr(e)),
+                FloatExpr::Add(a,b)|FloatExpr::Sub(a,b)|
+                FloatExpr::Mul(a,b)|FloatExpr::Div(a,b)=>{
+                    pending.push(Task::Expr(b));
+                    pending.push(Task::Expr(a));
+                }
+                FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
+                FloatExpr::IntegerConstantCast {..}|FloatExpr::IntegerLocalCast {..}|
+                FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
+                FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
+                FloatExpr::LoadIndexed {..}|
+                FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
+            },
+            Task::Stmts(stmts)=>{
+                let Some((stmt,tail))=stmts.split_first() else {continue;};
+                if !tail.is_empty() {pending.push(Task::Stmts(tail));}
+                match stmt {
+                    FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
+                    FloatStmt::ReturnInteger(e,_)=>pending.push(Task::Expr(e)),
+                    FloatStmt::StoreGlobal {value,..}|
+                    FloatStmt::StorePointerParameter {value,..}|
+                    FloatStmt::StorePointerLocal {value,..}|
+                    FloatStmt::StoreIndexed {value,..}=>pending.push(Task::Expr(value)),
+                    FloatStmt::ReturnIndirectInteger {arguments,..}=>push_args(&mut pending,arguments),
+                    FloatStmt::IfReturn(cond,yes,no)=>{
+                        pending.push(Task::Expr(no));
+                        pending.push(Task::Expr(yes));
+                        pending.push(Task::Cond(cond));
+                    }
+                    FloatStmt::IfAssign(cond,yes,no)=>{
+                        for (_,e) in yes.iter().chain(no).rev() {
+                            pending.push(Task::Expr(e));
+                        }
+                        pending.push(Task::Cond(cond));
+                    }
+                    FloatStmt::IfBlock(cond,yes,no)=>{
+                        pending.push(Task::Stmts(no));
+                        pending.push(Task::Stmts(yes));
+                        pending.push(Task::Cond(cond));
+                    }
+                    FloatStmt::While(cond,body)=>{
+                        pending.push(Task::Stmts(body));
+                        pending.push(Task::Cond(cond));
+                    }
+                    FloatStmt::DoWhile(body,cond)=>{
+                        pending.push(Task::Cond(cond));
+                        pending.push(Task::Stmts(body));
+                    }
+                    FloatStmt::For {init,condition,increment,body}=>{
+                        pending.push(Task::Stmts(increment));
+                        pending.push(Task::Stmts(body));
+                        if let Some(cond)=condition {pending.push(Task::Cond(cond));}
+                        pending.push(Task::Stmts(init));
+                    }
+                    FloatStmt::AssignPointer {..}|FloatStmt::AssignDataPointer {..}|
+                    FloatStmt::AssignInteger {..}|
+                    FloatStmt::Break|FloatStmt::Continue=>{},
                 }
             }
-            FloatStmt::IfReturn(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_expr(yes,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_expr(no,declarations,imports,source_imports,depth+1)?;
-            }
-            FloatStmt::IfAssign(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-                for (_,e) in yes.iter().chain(no) {
-                    validate_fp_calls_expr(e,declarations,imports,source_imports,depth+1)?;
-                }
-            }
-            FloatStmt::IfBlock(cond,yes,no)=>{
-                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_stmts(yes,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_stmts(no,declarations,imports,source_imports,depth+1)?;
-            }
-            FloatStmt::While(cond,body)=>{
-                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
-            }
-            FloatStmt::DoWhile(body,cond)=>{
-                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-            }
-            FloatStmt::For {init,condition,increment,body}=>{
-                validate_fp_calls_stmts(init,declarations,imports,source_imports,depth+1)?;
-                if let Some(cond)=condition {
-                    validate_fp_calls_cond(cond,declarations,imports,source_imports,depth+1)?;
-                }
-                validate_fp_calls_stmts(body,declarations,imports,source_imports,depth+1)?;
-                validate_fp_calls_stmts(increment,declarations,imports,source_imports,depth+1)?;
-            }
-            FloatStmt::AssignPointer {..}|FloatStmt::AssignDataPointer {..}|
-            FloatStmt::AssignInteger {..}|
-            FloatStmt::Break|FloatStmt::Continue=>{},
         }
     }
     Ok(())
@@ -1799,7 +1774,7 @@ fn emit_scalar_float_bodies_with_globals(
     let mut imports=HashMap::new();
     for f in functions {
         validate_fp_calls_stmts(&f.statements,&declared,&mut imports,
-            source_imports,0)?;
+            source_imports)?;
     }
     // Every import has been checked against actual EDG callsites, target
     // classes and local definitions; no unknown extern is silently emitted.
@@ -4662,6 +4637,29 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    #[test]
+    fn deep_fp_call_prevalidation_preserves_prototype_checks() {
+        let callee="external_fp".to_owned();
+        let call=|ty|FloatExpr::CallExternal {
+            callee:callee.clone(),parameters:vec![],return_type:ty,arguments:vec![],
+        };
+        let mut e=call(FloatType::F64);
+        for _ in 0..256 {e=FloatExpr::Neg(Box::new(e));}
+        let cond=||FloatCondition {
+            op:FloatPredicate::Eq,left:FloatExpr::Constant64(0),
+            right:FloatExpr::Constant64(0),
+        };
+        let mut body=vec![FloatStmt::Return(e)];
+        for _ in 0..256 {body=vec![FloatStmt::IfBlock(cond(),body,vec![])];}
+        let declared=HashMap::new();
+        let mut imports=HashMap::new();
+        validate_fp_calls_stmts(&body,&declared,&mut imports,true).unwrap();
+        assert_eq!(imports.get(&callee),Some(&(vec![],ScalarType::Float(FloatType::F64))));
+        assert!(validate_fp_calls_stmts(&body,&declared,&mut HashMap::new(),false).is_err());
+        body.push(FloatStmt::Return(call(FloatType::F32)));
+        assert!(validate_fp_calls_stmts(&body,&declared,&mut HashMap::new(),true).is_err());
+    }
 
     #[test]
     fn large_fp_signature_locals_and_flat_body_emit() {
