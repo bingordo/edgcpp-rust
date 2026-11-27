@@ -423,10 +423,10 @@ static bool tagless_cpp_storage_only(a_type_ptr type) {
          extra->subobject_partner==type)) return false;
 #endif
 #if MAINTAIN_CLASS_MEMBER_LIST
-    unsigned count=0;
+    if (!edg_bridge::acyclic_next_list(extra->member_declarations)) return false;
     for (an_il_entity_list_entry_ptr m=extra->member_declarations;
          m!=nullptr; m=m->next) {
-      if (++count>128 || m->entity.kind != iek_field) return false;
+      if (m->entity.kind != iek_field) return false;
     }
 #endif
   }
@@ -457,18 +457,17 @@ static bool plain_cpp_record(a_type_ptr type) {
     return false;
   }
 #if MAINTAIN_CLASS_MEMBER_LIST
-  unsigned declarations = 0;
+  if (!edg_bridge::acyclic_next_list(extra->member_declarations)) return false;
   for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
        entry != nullptr; entry = entry->next) {
-    if (++declarations > 512 ||
-        (entry->entity.kind != iek_field &&
-         entry->entity.kind != iek_routine)) return false;
+    if (entry->entity.kind != iek_field &&
+        entry->entity.kind != iek_routine) return false;
   }
 #endif
-  unsigned count = 0;
+  if (!edg_bridge::acyclic_next_list(extra->assoc_scope->routines)) return false;
   for (a_routine_ptr method = extra->assoc_scope->routines;
        method != nullptr; method = method->next) {
-    if (++count > 256 || method->is_virtual) return false;
+    if (method->is_virtual) return false;
     switch (method->special_kind) {
       case sfk_constructor:
         if (special_member_is_user_provided(method) ||
@@ -526,12 +525,11 @@ static bool bounded_cpp_scalar_lifetime(a_type_ptr type) {
       field->offset != 0 || field->offset_bit_remainder != 0 ||
       field->is_bit_field) return false;
 #if MAINTAIN_CLASS_MEMBER_LIST
-  unsigned declarations = 0;
+  if (!edg_bridge::acyclic_next_list(extra->member_declarations)) return false;
   for (an_il_entity_list_entry_ptr entry = extra->member_declarations;
        entry != nullptr; entry = entry->next) {
-    if (++declarations > 128 ||
-        (entry->entity.kind != iek_field &&
-         entry->entity.kind != iek_routine)) return false;
+    if (entry->entity.kind != iek_field &&
+        entry->entity.kind != iek_routine) return false;
   }
 #endif
   // EDG may prune the class routine list before this type is serialized:
@@ -4646,13 +4644,9 @@ static void collect_scope(a_scope_ptr root,const std::string &root_prefix)
   // declaration list once before either pass so a cycle cannot hang
   // symbol collection or manufacture repeated declarations.
   auto acyclic_list=[](auto first) {
-    auto slow=first,fast=first;
-    while (fast!=nullptr && fast->next!=nullptr) {
-      slow=slow->next;
-      fast=fast->next->next;
-      if (slow==fast) {report_incomplete_snapshot();return false;}
-    }
-    return true;
+    if (edg_bridge::acyclic_next_list(first)) return true;
+    report_incomplete_snapshot();
+    return false;
   };
   auto enter=[&](a_scope_ptr scope) {
     if (scope==nullptr || visited_scopes.find(scope)!=visited_scopes.end())
