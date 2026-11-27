@@ -903,9 +903,7 @@ impl Graph {
         for proof in &il.native_record_shapes {
             let kind=kinds.get(&proof.owner).copied()
                 .ok_or(GraphError::MissingType(proof.owner))?;
-            if !matches!(kind,7..=9) || proof.field_count>10000 ||
-               proof.direct_base_count>10000 ||
-               (kind==9 && proof.direct_base_count!=0) {
+            if !matches!(kind,7..=9) || (kind==9 && proof.direct_base_count!=0) {
                 return Err(GraphError::InvalidNativeRecordShape(proof.owner));
             }
             if proofs.insert(proof.owner,(proof.field_count,proof.direct_base_count)).is_some() {
@@ -976,8 +974,7 @@ impl Graph {
                 Some(&2)=>{},
                 _=>return Err(GraphError::InvalidRoutineSupplement(proof.owner)),
             }
-            if proof.parameter_count>10000 ||
-               (!proof.has_extra_info && proof.parameter_count!=0) {
+            if (!proof.has_extra_info && proof.parameter_count!=0) {
                 return Err(GraphError::InvalidRoutineParameterCount(proof.owner));
             }
             if proofs.insert(proof.owner,(proof.has_extra_info,proof.parameter_count)).is_some() {
@@ -1510,7 +1507,6 @@ impl Graph {
                 return Err(GraphError::InvalidRoutineSupplement(proof.owner));
             }
             if (!proof.has_extra_info && proof.parameter_count!=0) ||
-               proof.parameter_count>10000 ||
                parameter_positions.get(&proof.owner).map_or(0,Vec::len)
                     != proof.parameter_count as usize {
                 return Err(GraphError::InvalidRoutineParameterCount(proof.owner));
