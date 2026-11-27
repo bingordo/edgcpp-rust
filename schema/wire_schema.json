@@ -58,7 +58,8 @@
     "RECORD_NATIVE_CATCH_HANDLER": 115,
     "RECORD_NATIVE_EH_CLEANUP_STATE": 116,
     "RECORD_NATIVE_EH_OWNER": 117,
-    "RECORD_NATIVE_EH_ACTION_TARGET": 118
+    "RECORD_NATIVE_EH_ACTION_TARGET": 118,
+    "RECORD_NATIVE_FILE_INIT_IDENTITY": 119
   },
   "record_arities": {
     "1": 1,
@@ -178,7 +179,8 @@
     "115": 8,
     "116": 7,
     "117": 6,
-    "118": 6
+    "118": 6,
+    "119": 11
   },
   "record_field_tags": {
     "1": [
@@ -946,6 +948,19 @@
       "TEXT",
       "UNSIGNED",
       "UNSIGNED"
+    ],
+    "119": [
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED",
+      "ABSENT|UNSIGNED"
     ]
   }
 }

@@ -999,6 +999,45 @@ static expression_children dynamic_init_expression_children(a_dynamic_init_ptr i
 // Export native constant structure, not an executable byte image. A repeat
 // retains one child and its native count, even for runtime-sized arrays.
 // Dynamic and unsupported leaves are explicit and carry no invented value.
+// Only file-region entries are indexed here. Routine-local IL can be
+// recycled and must never share these maps. Opaque IDs preserve identity,
+// not a proof that a lifetime is executable or globally ordered.
+thread_local std::unordered_map<const void *,uint32_t> file_init_ids;
+thread_local std::unordered_map<const void *,uint32_t> file_lifetime_ids;
+static uint32_t file_identity(std::unordered_map<const void *,uint32_t> &ids,const void *ptr) {
+  if (ptr==nullptr) return 0;
+  auto found=ids.find(ptr);
+  if (found!=ids.end()) return found->second;
+  if (ids.size()>=std::numeric_limits<uint32_t>::max()) {
+    report_incomplete_snapshot();return 0;
+  }
+  return ids.emplace(ptr,static_cast<uint32_t>(ids.size()+1)).first->second;
+}
+static void emit_file_init_identity(a_dynamic_init_ptr d,unsigned context,
+    uint32_t owner,const std::string &scope,uint32_t position,const std::string &path)
+{
+  if (d==nullptr) {report_incomplete_snapshot();return;}
+  uint32_t variable=0,destructor=0;
+  if (d->variable!=nullptr) {
+    auto v=d->variable;
+    const char *raw=source_name(v->source_corresp);
+    variable=emit_symbol(v,2,raw?declaration_name(v->source_corresp,false):"<EDG-global-init-variable>");
+  }
+  if (d->destructor!=nullptr) {
+    auto r=d->destructor;
+    const char *raw=source_name(r->source_corresp);
+    destructor=emit_symbol(r,1,raw?declaration_name(r->source_corresp,true,true):"<EDG-global-init-destructor>");
+  }
+  auto lifetime=file_identity(file_lifetime_ids,d->lifetime);
+  auto expression=file_identity(file_lifetime_ids,d->init_expr_lifetime);
+  emit_record(RECORD_NATIVE_FILE_INIT_IDENTITY,
+      {num(context),owner?num(owner):absent(),scope.empty()?absent():txt(scope),
+       num(position),path.empty()?absent():txt(path),
+       num(file_identity(file_init_ids,d)),num(static_cast<unsigned>(d->kind)),
+       variable?num(variable):absent(),destructor?num(destructor):absent(),
+       lifetime?num(lifetime):absent(),expression?num(expression):absent()});
+}
+
 static uint32_t native_dynamic_init_id(a_dynamic_init_ptr d);
 static void emit_dynamic_init_identity(a_dynamic_init_ptr d,uint32_t context,
     uint32_t position,const std::string &path,uint32_t destruction_region=0);
@@ -1093,7 +1132,10 @@ static bool emit_initializer_constant_node(a_constant_ptr c,
       if ((d->kind==dik_constant || d->kind==dik_nonconstant_aggregate ||
            d->kind==dik_lambda) && d->variant.constant.ptr!=nullptr)
         child_count=1;
-      if (owner.context!=2 && owner.context!=5)
+      if (owner.context==2 || owner.context==5)
+        emit_file_init_identity(d,owner.context==2?3:4,owner.symbol,"",0,
+            owner.expression.empty()?path:owner.expression+":"+path);
+      else
         emit_dynamic_init_identity(d,7,0,
             std::to_string(owner.context)+":"+std::to_string(owner.position)+":"+
             owner.statement+":"+owner.expression+":"+path);
@@ -2495,6 +2537,8 @@ static void emit_expression_variant(an_expr_node_ptr node, uint32_t context,
         emit_dynamic_init_identity(init,context+3,position,statement+":"+path);
       else if (context==3)
         emit_dynamic_init_identity(init,6,position,path);
+      else if (context==2)
+        emit_file_init_identity(init,2,owner,"",0,path);
       emit_initializer_constant_root(init,
           {context<2 ? current_dynamic_init_routine : owner,
            position,context+3,statement,path});
@@ -3998,6 +4042,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
             declaration_name(r->source_corresp, true, true) :
             "<EDG-global-init-destructor>");
       }
+      emit_file_init_identity(init,1,0,scope_key,static_cast<uint32_t>(position),"");
       emit_record(68, {txt(scope_key),num(static_cast<unsigned>(position)),
                        variable_id ? num(variable_id) : absent(),
                        destructor_id ? num(destructor_id) : absent(),
@@ -4589,6 +4634,7 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
         if (dyn->kind == dik_expression || dyn->kind == dik_class_result_via_ctor) {
           expr = dyn->variant.expression;
         }
+        emit_file_init_identity(dyn,0,symbol_id,"",0,"");
         emit_initializer_constant_root(dyn,{symbol_id,0,2,"",""});
         emit_record(16, {num(symbol_id), num(static_cast<unsigned>(dyn->kind)),
                          expr != nullptr ? num(static_cast<unsigned>(expr->kind)) : absent(),
@@ -4832,6 +4878,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  edg::file_init_ids.clear();
+  edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
   current_eh_owner_ids.clear();
   current_dynamic_init_routine=0;
@@ -4858,6 +4906,8 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  edg::file_init_ids.clear();
+  edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
   current_eh_owner_ids.clear();
   current_dynamic_init_routine=0;
