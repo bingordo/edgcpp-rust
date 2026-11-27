@@ -9,15 +9,6 @@
 /// Maximum number of explicitly supported scalar arguments in one signature.
 pub(crate) const MAX_SUPPORTED_PARAMETERS: usize = 256;
 
-/// Maximum representable native object size in CFG reference lowering.
-pub(crate) const MAX_NATIVE_OBJECT_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Conservative upper bound on *explicit* Cranelift stack slots per CFG
-/// function, including materialized aggregate call results. This does not
-/// account for final register spills or outgoing call frames, which Cranelift
-/// chooses later. It is not a C automatic-storage or ABI limit.
-pub(crate) const MAX_FUNCTION_EXPLICIT_STACK_BYTES: u64 = 16 * 1024 * 1024;
-
 /// Maximum local variables per scalar FP reference function.
 pub(crate) const MAX_FP_LOCALS: usize = 4096;
 
@@ -27,33 +18,34 @@ pub(crate) const MAX_FP_STATEMENTS: usize = 10_000;
 /// Maximum locals exposed by the integer CFG/reference expression backend.
 pub(crate) const MAX_CFG_LOCALS: usize = 10_000;
 
-/// Return the byte size of a bounded native array, rejecting overflow or zero.
-pub(crate) fn bounded_array_bytes(element_bytes: u64, elements: u64) -> Option<u64> {
-    element_bytes.checked_mul(elements)
-        .filter(|&n| n > 0 && n <= MAX_NATIVE_OBJECT_BYTES)
+/// The CFG uses signed 64-bit pointer displacements/strides and host
+/// slices for materialized object data. Do not conflate layout sizes with
+/// Cranelift's narrower stack slot representation.
+pub(crate) fn native_object_size_fits(bytes:u64)->bool {
+    bytes!=0 && i64::try_from(bytes).is_ok() && usize::try_from(bytes).is_ok()
 }
 
-/// Bound the explicit stack slots of a single CFG function before creating
-/// any slots in Cranelift. Add worst-case padding for each slot alignment.
-/// Temporary call-result bytes are already aligned/padded by their collector.
+pub(crate) fn bounded_array_bytes(element_bytes:u64,elements:u64)->Option<u64> {
+    element_bytes.checked_mul(elements).filter(|&n|native_object_size_fits(n))
+}
+
+/// The current x86-64 stack lowering uses signed 32-bit displacements.
+/// Check a conservative worst-case explicitly allocated frame extent,
+/// including alignment padding and the 16-byte ABI rounding. Cranelift
+/// remains responsible for register spills, callee saves and final layout.
+/// This is not a language limit or a runtime stack-capacity check.
 pub(crate) fn bounded_explicit_stack_bytes(
-    slots: impl IntoIterator<Item = (u32, u8)>,
-    temporary_bytes: u64,
-) -> Option<u64> {
-    if temporary_bytes > MAX_FUNCTION_EXPLICIT_STACK_BYTES { return None; }
-    let mut total = temporary_bytes;
-    for (bytes, log2_alignment) in slots {
-        let alignment = 1u64.checked_shl(u32::from(log2_alignment))?;
-        if bytes == 0 || alignment > MAX_NATIVE_OBJECT_BYTES
-            || u64::from(bytes) > MAX_NATIVE_OBJECT_BYTES {
-            return None;
-        }
-        // Padding by alignment-1 is an upper bound on the physical
-        // displacement caused by placing this slot after other slots.
-        total = total.checked_add(u64::from(bytes))?
-            .checked_add(alignment - 1)?;
-        if total > MAX_FUNCTION_EXPLICIT_STACK_BYTES { return None; }
+    slots:impl IntoIterator<Item=(u32,u8)>,
+    temporary_bytes:u64,
+)->Option<u64> {
+    let mut total=temporary_bytes;
+    for (bytes,log2_alignment) in slots {
+        let alignment=1u64.checked_shl(u32::from(log2_alignment))?;
+        if bytes==0 || u32::try_from(alignment).is_err() {return None;}
+        total=total.checked_add(u64::from(bytes))?.checked_add(alignment-1)?;
     }
+    let rounded=total.checked_add(15)? & !15;
+    i32::try_from(rounded).ok()?;
     Some(total)
 }
 
@@ -68,43 +60,32 @@ mod tests {
         assert_eq!(MAX_FP_LOCALS, 4096);
         assert_eq!(MAX_FP_STATEMENTS, 10_000);
         assert_eq!(MAX_CFG_LOCALS, 10_000);
-        assert_eq!(MAX_NATIVE_OBJECT_BYTES, 16 * 1024 * 1024);
-        assert_eq!(MAX_FUNCTION_EXPLICIT_STACK_BYTES, 16 * 1024 * 1024);
     }
 
-    /// Enforce a budget over the sum, not only over each slot.
     #[test]
     fn explicit_stack_slot_sum_checks_alignment_and_overflow() {
-        let max = MAX_FUNCTION_EXPLICIT_STACK_BYTES;
-        assert_eq!(bounded_explicit_stack_bytes([(max as u32, 0)], 0), Some(max));
-        assert_eq!(bounded_explicit_stack_bytes([(max as u32, 0), (1, 0)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes(
-            [((max / 2) as u32, 0), ((max / 2) as u32, 0)], 0), Some(max));
-        assert_eq!(bounded_explicit_stack_bytes(
-            [((max / 2) as u32, 0), ((max / 2) as u32, 0)], 1), None);
-        assert_eq!(bounded_explicit_stack_bytes([(max as u32 - 7, 3)], 0), Some(max));
-        assert_eq!(bounded_explicit_stack_bytes([(max as u32 - 6, 3)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes([(8, 3)], max - 15), Some(max));
-        assert_eq!(bounded_explicit_stack_bytes([(8, 3)], max - 14), None);
-        assert_eq!(bounded_explicit_stack_bytes([(1, 0)], u64::MAX), None);
-        assert_eq!(bounded_explicit_stack_bytes([(0, 0)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes([(1, u8::MAX)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes([(1, 25)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes([(u32::MAX, 0)], 0), None);
-        assert_eq!(bounded_explicit_stack_bytes(std::iter::empty(), 0), Some(0));
+        let max=(i32::MAX as u64)&!15;
+        assert_eq!(bounded_explicit_stack_bytes([(32*1024*1024,0)],0),Some(32*1024*1024));
+        assert_eq!(bounded_explicit_stack_bytes([(max as u32,0)],0),Some(max));
+        assert_eq!(bounded_explicit_stack_bytes([(max as u32,0),(1,0)],0),None);
+        assert_eq!(bounded_explicit_stack_bytes([(8,3)],max-15),Some(max));
+        assert_eq!(bounded_explicit_stack_bytes([(8,3)],max-14),None);
+        assert_eq!(bounded_explicit_stack_bytes([(1,0)],u64::MAX),None);
+        assert_eq!(bounded_explicit_stack_bytes([(0,0)],0),None);
+        assert_eq!(bounded_explicit_stack_bytes([(1,u8::MAX)],0),None);
+        assert_eq!(bounded_explicit_stack_bytes([(u32::MAX,0)],0),None);
+        assert_eq!(bounded_explicit_stack_bytes(std::iter::empty(),0),Some(0));
     }
 
-    /// Reject multiplication overflow and objects outside the native cap.
     #[test]
     fn array_layout_multiplication_checks_exact_boundaries() {
-        assert_eq!(bounded_array_bytes(1, MAX_NATIVE_OBJECT_BYTES),
-                   Some(MAX_NATIVE_OBJECT_BYTES));
-        assert_eq!(bounded_array_bytes(8, MAX_NATIVE_OBJECT_BYTES / 8),
-                   Some(MAX_NATIVE_OBJECT_BYTES));
-        assert_eq!(bounded_array_bytes(8, MAX_NATIVE_OBJECT_BYTES / 8 + 1), None);
-        assert_eq!(bounded_array_bytes(1, MAX_NATIVE_OBJECT_BYTES + 1), None);
-        assert_eq!(bounded_array_bytes(0, 5), None);
-        assert_eq!(bounded_array_bytes(8, 0), None);
-        assert_eq!(bounded_array_bytes(u64::MAX, 2), None);
+        let max=(i64::MAX as u64).min(usize::MAX as u64);
+        assert_eq!(bounded_array_bytes(1,64*1024*1024),Some(64*1024*1024));
+        assert_eq!(bounded_array_bytes(1,max),Some(max));
+        assert_eq!(bounded_array_bytes(1,max+1),None);
+        assert_eq!(bounded_array_bytes(8,max/8+1),None);
+        assert_eq!(bounded_array_bytes(0,5),None);
+        assert_eq!(bounded_array_bytes(8,0),None);
+        assert_eq!(bounded_array_bytes(u64::MAX,2),None);
     }
 }

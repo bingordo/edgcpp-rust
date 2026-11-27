@@ -1,7 +1,7 @@
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
-    MAX_NATIVE_OBJECT_BYTES,
+    native_object_size_fits,
     MAX_CFG_LOCALS, bounded_array_bytes,
 };
 
@@ -1289,7 +1289,7 @@ fn storage_alignment(il:&Il,ty:crate::TypeId)->Result<u64,CodegenError> {
         .ok_or_else(||invalid("object missing native EDG size/alignment"))?;
     if layout.bytes!=size || layout.alignment==0 ||
         !layout.alignment.is_power_of_two() ||
-        layout.alignment>MAX_NATIVE_OBJECT_BYTES || size%layout.alignment!=0 {
+        size%layout.alignment!=0 {
         return Err(invalid("object size/alignment disagrees with native EDG layout"));
     }
     Ok(layout.alignment)
@@ -1335,20 +1335,19 @@ fn validate_record_fields(
     let native_size = il.type_object_sizes.iter()
         .find(|layout| layout.owner == owner)
         .ok_or_else(|| invalid("record has no native EDG object size"))?.bytes;
-    if native_size == 0 || native_size > MAX_NATIVE_OBJECT_BYTES {
+    if !native_object_size_fits(native_size) {
         return Err(invalid("record has invalid native EDG object size"));
     }
     let native_alignment = il.type_object_sizes.iter()
         .find(|layout| layout.owner == owner)
         .ok_or_else(|| invalid("record has no native EDG alignment"))?.alignment;
-    if native_alignment == 0 || !native_alignment.is_power_of_two()
-        || native_alignment > MAX_NATIVE_OBJECT_BYTES {
+    if native_alignment == 0 || !native_alignment.is_power_of_two() {
         return Err(invalid("record has invalid native EDG alignment"));
     }
     if native_size % native_alignment != 0 {
         return Err(invalid("record size is not a multiple of native alignment"));
     }
-    let mut previous_end_bit = 0u64;
+    let mut previous_end_bit = 0u128;
     for (index, field) in fields.iter().enumerate() {
         if field.position != index as u32 {
             return Err(invalid("record field positions are not contiguous"));
@@ -1391,11 +1390,8 @@ fn validate_record_fields(
             let byte_count=u64::from((field.bit_offset+field.bit_width).div_ceil(8));
             let end=field.byte_offset.checked_add(byte_count)
                 .ok_or_else(||invalid("bitfield byte range overflows"))?;
-            let bit_start=field.byte_offset.checked_mul(8)
-                .and_then(|n|n.checked_add(u64::from(field.bit_offset)))
-                .ok_or_else(||invalid("bitfield bit offset overflows"))?;
-            let bit_end=bit_start.checked_add(u64::from(field.bit_width))
-                .ok_or_else(||invalid("bitfield bit extent overflows"))?;
+            let bit_start=u128::from(field.byte_offset)*8+u128::from(field.bit_offset);
+            let bit_end=bit_start+u128::from(field.bit_width);
             (end,bit_start,bit_end)
         } else {
             if !matches!(field_kind,1|5|6|7|9) {
@@ -1404,10 +1400,8 @@ fn validate_record_fields(
             let width=*sizes.get(&field_type).ok_or_else(||invalid("missing validated field size"))?;
             let end=field.byte_offset.checked_add(width)
                 .ok_or_else(||invalid("record field offset overflows"))?;
-            let start_bit=field.byte_offset.checked_mul(8)
-                .ok_or_else(||invalid("record bit position overflows"))?;
-            let end_bit=end.checked_mul(8)
-                .ok_or_else(||invalid("record bit extent overflows"))?;
+            let start_bit=u128::from(field.byte_offset)*8;
+            let end_bit=u128::from(end)*8;
             (end,start_bit,end_bit)
         };
         if is_union {
@@ -1421,7 +1415,7 @@ fn validate_record_fields(
             }
             previous_end_bit=bit_end;
         }
-        if end>native_size || end>MAX_NATIVE_OBJECT_BYTES {
+        if end>native_size {
             return Err(invalid("record field exceeds native EDG object size"));
         }
         if field.name.is_empty() {
@@ -4701,7 +4695,7 @@ fn emit_routines_with_globals(
             }).collect::<Result<Vec<_>,CodegenError>>()?;
             crate::limits::bounded_explicit_stack_bytes(
                 slots.into_iter(),addressed.temporary_bytes)
-                .ok_or_else(||invalid("explicit stack slots exceed per-function budget"))?;
+                .ok_or_else(||invalid("explicit stack slots exceed x86-64 displacement representation"))?;
             let mut stack=HashMap::new();
             for index in addressed.locals {
                 let bytes=storage[index];
@@ -5349,10 +5343,10 @@ mod audit_resource_limits_tests {
             [(8,0)],collected.temporary_bytes),Some(8+2*(16+7)));
     }
 
-    /// Reject multiple large addressable locals before creating Cranelift slots.
+    /// Admit large frames and reject unrepresentable explicit stack displacements.
     #[test]
     fn aggregate_stack_budget_rejects_sum_of_individually_valid_objects() {
-        let half=(crate::limits::MAX_FUNCTION_EXPLICIT_STACK_BYTES/2) as u32;
+        let half=16*1024*1024u32;
         let make=|second:u32|Routine {
             name:"stack_budget_unit".into(),parameters:0,locals:2,
             body:vec![
@@ -5365,9 +5359,11 @@ mod audit_resource_limits_tests {
             local_alignments:Some(vec![0,0]),
             parameter_accesses:vec![],
         };
-        let err=emit_routines(&[make(half+1)]).unwrap_err();
+        let obj=emit_routines(&[make(half+1)]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        let err=emit_routines(&[make(i32::MAX as u32)]).unwrap_err();
         assert!(matches!(err,CodegenError::InvalidFunction(msg)
-            if msg.contains("explicit stack slots exceed per-function budget")));
+            if msg.contains("explicit stack slots exceed x86-64 displacement representation")));
         // An unused, unaddressed local is SSA-only and does not reserve
         // the supplied source object's entire storage as an explicit slot.
         let mut only_one=make(half+1);
@@ -5468,7 +5464,7 @@ mod audit_deep_native_array_layout_tests {
         assert!(byte_size(&missing,outer).is_err());
         assert!(flattened_copy_fields(&missing,outer).is_err());
 
-        for count in [0,crate::limits::MAX_NATIVE_OBJECT_BYTES] {
+        for count in [0,u64::MAX] {
             let mut oversized=il.clone();
             oversized.array_bounds.last_mut().unwrap().elements=count;
             assert!(byte_size(&oversized,outer).is_err());
