@@ -59,7 +59,8 @@
     "RECORD_NATIVE_EH_CLEANUP_STATE": 116,
     "RECORD_NATIVE_EH_OWNER": 117,
     "RECORD_NATIVE_EH_ACTION_TARGET": 118,
-    "RECORD_NATIVE_FILE_INIT_IDENTITY": 119
+    "RECORD_NATIVE_FILE_INIT_IDENTITY": 119,
+    "RECORD_LITERAL_IDENTITY": 120
   },
   "record_arities": {
     "1": 1,
@@ -180,7 +181,8 @@
     "116": 7,
     "117": 6,
     "118": 6,
-    "119": 11
+    "119": 11,
+    "120": 6
   },
   "record_field_tags": {
     "1": [
@@ -961,6 +963,14 @@
       "ABSENT|UNSIGNED",
       "ABSENT|UNSIGNED",
       "ABSENT|UNSIGNED"
+    ],
+    "120": [
+      "UNSIGNED",
+      "ABSENT|TEXT",
+      "ABSENT|TEXT",
+      "ABSENT|TEXT",
+      "UNSIGNED",
+      "UNSIGNED"
     ]
   }
 }
