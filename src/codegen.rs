@@ -189,12 +189,12 @@ fn emit_expr(
         })?,
         Expr::StoreLocal(index, value, body) => {
             let value = emit_expr(value, builder, params, locals)?;
-            if *index >= crate::limits::MAX_CFG_LOCALS {
-                return Err(CodegenError::InvalidFunction(format!(
-                    "local index {index} exceeds reference backend limit")));
-            }
             if *index >= locals.len() {
-                locals.resize(*index + 1, None);
+                let length=index.checked_add(1).ok_or_else(||
+                    CodegenError::InvalidFunction("local index overflow".into()))?;
+                locals.try_reserve(length-locals.len()).map_err(|e|
+                    CodegenError::InvalidFunction(format!("local storage allocation: {e}")))?;
+                locals.resize(length, None);
             }
             locals[*index] = Some(value);
             emit_expr(body, builder, params, locals)?

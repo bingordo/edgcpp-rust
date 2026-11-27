@@ -2,7 +2,7 @@
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
     native_object_size_fits,
-    MAX_CFG_LOCALS, bounded_array_bytes,
+    bounded_array_bytes,
 };
 
 fn valid_aggregate_image_len(size: usize) -> bool {
@@ -3139,7 +3139,9 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
         let parameter_accesses=ids.iter().map(|sym|
             parameter_memory_access(il,*sym)).collect::<Result<Vec<_>,_>>()?;
         let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
-        if locals.len() > MAX_CFG_LOCALS { return Err(invalid("too many locals")); }
+        if locals.len().checked_add(ids.len()).is_none_or(|n|u32::try_from(n).is_err()) {
+            return Err(invalid("local/parameter variable IDs not representable"));
+        }
         let mut local_types = locals.iter().map(|v| cfg_local_type(il,v))
             .collect::<Result<Vec<_>,_>>()?;
         let mut local_storage=locals.iter().map(|v| {
@@ -4643,6 +4645,9 @@ fn emit_routines_with_globals(
             } else { 0 } {
                 return Err(invalid("local/parameter SSA slot count mismatch"));
             }
+            if u32::try_from(local_types.len()).is_err() {
+                return Err(invalid("local/parameter variable IDs not representable"));
+            }
             let vars: Vec<_> = (0..local_types.len()).map(|i| {
                 let v = Variable::from_u32(i as u32);
                 fb.declare_var(v,types::I64);
@@ -5205,6 +5210,23 @@ mod tests {
         assert_eq!(&obj[..4],b"\x7fELF");
         assert!(obj.len()<16_384,"unexpected copy object size {}",obj.len());
         if let Some(path)=std::env::var_os("EDG_BULK_COPY_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
+    }
+
+    #[test]
+    fn large_integer_signature_and_locals_emit() {
+        let count=10_001;
+        let body=vec![Stmt::Store(count-1,Expr::Parameter(299)),
+            Stmt::Return(Expr::Local(count-1))];
+        assert!(!check(&body,&mut HashSet::new(),300,count,0).unwrap());
+        let obj=emit_routines(&[Routine {
+            name:"large_integer_body".into(),parameters:300,locals:count,
+            body,abi:None,local_types:None,local_storage:None,
+            local_alignments:None,parameter_accesses:vec![],
+        }]).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_LARGE_INTEGER_TEST_OBJECT") {
             std::fs::write(path,obj).unwrap();
         }
     }
