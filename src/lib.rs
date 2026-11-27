@@ -1881,7 +1881,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(function),Some(statement_path),Some(path),Some(count))=
                 (t(0),t(1),t(2),n(3)) else {return;};
             if function.is_empty() || statement_path.is_empty() ||
-               path.is_empty() || count>10000 {return;}
+               path.is_empty() {return;}
             output.native_expression_child_counts.push(NativeExpressionChildCount {
                 function,statement_path,path,count,
             });
@@ -1889,7 +1889,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         84 => {
             let (Some(function),Some(edge),Some(count))=
                 (t(0),t(2),n(3)) else {return;};
-            if function.is_empty() || count>10000 {return;}
+            if function.is_empty() {return;}
             let parent=if fields[1].present() {
                 let Some(parent)=t(1) else {return;};
                 if parent.is_empty() {return;}
@@ -2022,7 +2022,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                     NativeExpressionPayload::DynamicInitializer {kind,flags}
                 }
                 6=>{
-                    let Some(ordinal)=n(8).filter(|v|*v>0 && *v<10000) else {return;};
+                    let Some(ordinal)=n(8).filter(|v|*v>0) else {return;};
                     NativeExpressionPayload::GenericSelectedOperand(ordinal)
                 }
                 _=>return,
@@ -2140,7 +2140,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             };
             if !valid_exec_owner(&owner) {return;}
             if kind==112 {
-                let Some(count)=n(6).filter(|n|*n<=10000) else {return;};
+                let Some(count)=n(6) else {return;};
                 let constructor=n(7).map(SymbolId);
                 if constructor.is_some_and(|id|!seen.symbols.contains(&id)) {return;}
                 output.native_initializer_exec_roots.push(NativeInitializerExecRoots {
@@ -2209,7 +2209,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 let Some(kind)=n(2).filter(|k|*k<=255) else {return;};
                 Some(kind)
             } else {None};
-            if routine==0 || count>10000 || source>1 || shared>1 || selected>2 {
+            if routine==0 || source>1 || shared>1 || selected>2 {
                 return;
             }
             let record=NativeConstructorInitProvenance {
@@ -2664,8 +2664,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         74 => {
             let (Some(owner), Some(field_count), Some(direct_base_count)) =
                 (n(0),n(1),n(2)) else { return; };
-            if owner==0 || field_count>10000 || direct_base_count>10000 ||
-                !seen.native_record_shapes.insert(TypeId(owner)) {return;}
+            if owner==0 || !seen.native_record_shapes.insert(TypeId(owner)) {return;}
             output.native_record_shapes.push(NativeRecordShape {
                 owner:TypeId(owner),field_count,direct_base_count,
             });
@@ -2691,8 +2690,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         71 => {
             let (Some(owner), Some(present), Some(parameter_count)) =
                 (n(0),n(1),n(2)) else {return;};
-            if owner==0 || present>1 || parameter_count>10000 ||
-                (present==0 && parameter_count!=0) ||
+            if owner==0 || present>1 || (present==0 && parameter_count!=0) ||
                 !seen.routine_supplements.insert(TypeId(owner)) {return;}
             output.routine_supplements.push(NativeRoutineSupplement {
                 owner:TypeId(owner),has_extra_info:present==1,parameter_count,
@@ -2985,7 +2983,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         93 => {
             let (Some(routine),Some(lifetime),Some(count))=(n(0),n(1),n(2))
                 else {return;};
-            if routine==0 || count>10000 {return;}
+            if routine==0 {return;}
             output.native_lifetime_destruction_counts.push(NativeLifetimeDestructionCount {
                 routine:SymbolId(routine),lifetime,count,
             });
@@ -2993,7 +2991,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         94 => {
             let (Some(routine),Some(lifetime),Some(count),Some(edge))=
                 (n(0),n(1),n(2),n(3)) else {return;};
-            if routine==0 || count>10000 || edge>1 {return;}
+            if routine==0 || edge>1 {return;}
             output.native_lifetime_child_counts.push(NativeLifetimeChildCount {
                 routine:SymbolId(routine),lifetime,count,native_child_edge:edge==1,
             });
@@ -3015,7 +3013,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         97 => {
             let (Some(routine),Some(scope),Some(count))=
                 (n(0),n(1),n(2)) else {return;};
-            if routine==0 || count>10000 {return;}
+            if routine==0 {return;}
             output.native_scope_child_counts.push(NativeScopeChildCount {
                 routine:SymbolId(routine),scope,count,
             });
@@ -3023,7 +3021,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         98 => {
             let (Some(routine),Some(scope),Some(count))=
                 (n(0),n(1),n(2)) else {return;};
-            if routine==0 || count>10000 {return;}
+            if routine==0 {return;}
             output.native_scope_local_counts.push(NativeScopeLocalCount {
                 routine:SymbolId(routine),scope,count,
             });
@@ -3031,14 +3029,14 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         99 => {
             let (Some(routine),Some(explicit),Some(implicit_this))=
                 (n(0),n(1),n(2)) else {return;};
-            if routine==0 || explicit>10000 || implicit_this>1 {return;}
+            if routine==0 || implicit_this>1 {return;}
             output.native_function_parameter_counts.push(NativeFunctionParameterCount {
                 routine:SymbolId(routine),explicit,implicit_this:implicit_this==1,
             });
         }
         92 => {
             let (Some(routine),Some(count))=(n(0),n(1)) else {return;};
-            if routine==0 || count>10000 {return;}
+            if routine==0 {return;}
             output.native_constructor_initializer_counts.push(NativeConstructorInitializerCount {
                 routine:SymbolId(routine),count,
             });
@@ -3055,7 +3053,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             let (Some(function),Some(statement_path),Some(role),Some(path),Some(count))=
                 (t(0),t(1),n(2),t(3),n(4)) else {return;};
             if function.is_empty() || statement_path.is_empty() || path.is_empty() ||
-                count>10000 || role==0 {return;}
+                role==0 {return;}
             output.native_control_child_counts.push(NativeControlChildCount {
                 function,statement_path,role,path,count,
             });
@@ -3063,7 +3061,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         88 => {
             let (Some(owner),Some(path),Some(count))=
                 (n(0),t(1),n(2)) else {return;};
-            if owner==0 || path.is_empty() || count>10000 {return;}
+            if owner==0 || path.is_empty() {return;}
             output.native_initializer_child_counts.push(NativeInitializerChildCount {
                 owner:SymbolId(owner),path,count,
             });
@@ -3071,7 +3069,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         89 => {
             let (Some(routine),Some(position),Some(path),Some(count))=
                 (n(0),n(1),t(2),n(3)) else {return;};
-            if routine==0 || path.is_empty() || count>10000 {return;}
+            if routine==0 || path.is_empty() {return;}
             output.native_constructor_child_counts.push(NativeConstructorChildCount {
                 routine:SymbolId(routine),position,path,count,
             });
@@ -3079,8 +3077,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         86 => {
             let (Some(function),Some(statement_path),Some(count))=
                 (t(0),t(1),n(2)) else {return;};
-            if function.is_empty() || statement_path.is_empty() ||
-                count>10000 {return;}
+            if function.is_empty() || statement_path.is_empty() {return;}
             output.native_try_handler_counts.push(NativeTryHandlerCount {
                 function,statement_path,count,
             });
@@ -3753,7 +3750,7 @@ fn validate_native_statement_attribute_coverage(il:&Il) -> Result<(),Error> {
 fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     use std::collections::HashMap;
     let mut expression_keys=HashSet::with_capacity(il.expressions.len());
-    let mut child_counts:HashMap<(String,String,String),u32>=HashMap::new();
+    let mut child_counts:HashMap<(String,String,String),usize>=HashMap::new();
     for expr in &il.expressions {
         let key=(expr.function.clone(),expr.statement_path.clone(),expr.path.clone());
         if !expression_keys.insert(key) {return Err(Error::MalformedCallback);}
@@ -3765,9 +3762,9 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     let mut expr_proofs=HashSet::new();
     for proof in &il.native_expression_child_counts {
         let key=(proof.function.clone(),proof.statement_path.clone(),proof.path.clone());
-        if proof.count>10000 || !expression_keys.contains(&key) ||
+        if !expression_keys.contains(&key) ||
            !expr_proofs.insert(key.clone()) ||
-           child_counts.get(&key).copied().unwrap_or(0)!=proof.count {
+           child_counts.get(&key).copied().unwrap_or(0)!=proof.count as usize {
             return Err(Error::MalformedCallback);
         }
     }
@@ -3810,7 +3807,7 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     let mut seen=HashSet::new();
     for proof in &il.native_statement_sibling_counts {
         let key=(proof.function.clone(),proof.parent.clone(),proof.edge.clone());
-        if proof.count>10000 || !seen.insert(key.clone()) ||
+        if !seen.insert(key.clone()) ||
             proof.parent.as_ref().is_some_and(|parent|
                 !statements.contains(&(proof.function.as_str(),parent.as_str()))) {
             return Err(Error::MalformedCallback);
@@ -3828,25 +3825,15 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
     let mut handlers=HashMap::new();
     for proof in &il.native_try_handler_counts {
         let key=(proof.function.as_str(),proof.statement_path.as_str());
-        if proof.count>10000 ||
-            statement_kinds.get(&key)!=Some(&19) ||
+        if statement_kinds.get(&key)!=Some(&19) ||
             handlers.insert(key,proof.count).is_some() {
             return Err(Error::MalformedCallback);
         }
     }
-    for stmt in &il.statements {
-        if graph::native_statement_kind(stmt.kind)!=19 {continue;}
-        let Some(&count)=handlers.get(&(stmt.function.as_str(),stmt.path.as_str()))
-            else {return Err(Error::MalformedCallback);};
-        for i in 0..count {
-            if !seen.contains(&(stmt.function.clone(),Some(stmt.path.clone()),
-                                format!("catch{i}"))) {
-                return Err(Error::MalformedCallback);
-            }
-        }
-    }
-    // Reject extra or malformed catch edges beyond the independently
-    // recorded count, not just missing ones.
+    // Count only actual catch-edge witnesses. Unique canonical ordinals
+    // in range plus exact cardinality prove the dense set without walking
+    // a potentially enormous count claimed by a malformed callback.
+    let mut observed_handlers:HashMap<(&str,&str),usize>=HashMap::new();
     for proof in &il.native_statement_sibling_counts {
         if !proof.edge.starts_with("catch") {continue;}
         let Some(parent)=proof.parent.as_deref() else {
@@ -3861,6 +3848,15 @@ fn validate_native_tree_count_coverage(il:&Il)->Result<(),Error> {
             return Err(Error::MalformedCallback);
         };
         if proof.edge!=format!("catch{index}") || index>=count {
+            return Err(Error::MalformedCallback);
+        }
+        *observed_handlers.entry(key).or_default()+=1;
+    }
+    for stmt in &il.statements {
+        if graph::native_statement_kind(stmt.kind)!=19 {continue;}
+        let key=(stmt.function.as_str(),stmt.path.as_str());
+        let Some(&count)=handlers.get(&key) else {return Err(Error::MalformedCallback);};
+        if observed_handlers.get(&key).copied().unwrap_or(0)!=count as usize {
             return Err(Error::MalformedCallback);
         }
     }
@@ -3933,7 +3929,7 @@ fn validate_native_child_witnesses<K:Eq+std::hash::Hash+Clone>(
 )->Result<(),Error> {
     use std::collections::HashMap;
     let mut keys=HashSet::new();
-    let mut counts:HashMap<K,u32>=HashMap::new();
+    let mut counts:HashMap<K,usize>=HashMap::new();
     for (key,parent) in nodes {
         if !keys.insert(key) {return Err(Error::MalformedCallback);}
         if let Some(parent)=parent {
@@ -3945,8 +3941,8 @@ fn validate_native_child_witnesses<K:Eq+std::hash::Hash+Clone>(
     }
     let mut seen=HashSet::new();
     for (key,count) in proofs {
-        if count>10000 || !keys.contains(&key) || !seen.insert(key.clone()) ||
-            counts.get(&key).copied().unwrap_or(0)!=count {
+        if !keys.contains(&key) || !seen.insert(key.clone()) ||
+            counts.get(&key).copied().unwrap_or(0)!=count as usize {
             return Err(Error::MalformedCallback);
         }
     }
@@ -4091,7 +4087,7 @@ fn validate_native_constructor_initializer_lists(il:&Il)->Result<(),Error> {
     if defined_routines.len()!=defined.len() {return Err(Error::MalformedCallback);}
     let mut proofs=HashMap::new();
     for witness in &il.native_constructor_initializer_counts {
-        if witness.count>10000 || !defined_routines.contains(&witness.routine) ||
+        if !defined_routines.contains(&witness.routine) ||
             proofs.insert(witness.routine,witness.count).is_some() {
             return Err(Error::MalformedCallback);
         }
@@ -4129,7 +4125,7 @@ fn validate_native_lifetime_destruction_counts(il:&Il)->Result<(),Error> {
     let mut witnesses=HashMap::new();
     for proof in &il.native_lifetime_destruction_counts {
         let key=(proof.routine,proof.lifetime);
-        if proof.count>10000 || !lifetimes.contains(&key) ||
+        if !lifetimes.contains(&key) ||
             witnesses.insert(key,proof.count).is_some() {
             return Err(Error::MalformedCallback);
         }
@@ -4168,7 +4164,7 @@ fn validate_native_lifetime_child_counts(il:&Il)->Result<(),Error> {
     let mut witnessed=HashMap::new();
     for proof in &il.native_lifetime_child_counts {
         let owner=(proof.routine,proof.lifetime);
-        if proof.count>10000 || !lifetimes.contains(&owner) ||
+        if !lifetimes.contains(&owner) ||
             witnessed.insert(owner,(proof.count,proof.native_child_edge)).is_some() {
             return Err(Error::MalformedCallback);
         }
@@ -4297,13 +4293,13 @@ fn validate_native_lifetime_scope_owners(il:&Il)->Result<(),Error> {
     let mut child_counts=HashMap::new();
     for proof in &il.native_scope_child_counts {
         let key=(proof.routine,proof.scope);
-        if proof.count>10000 || !scope_keys.contains(&key) ||
+        if !scope_keys.contains(&key) ||
             child_counts.insert(key,proof.count).is_some() {
             return Err(Error::MalformedCallback);
         }
     }
     if child_counts.len()!=scope_keys.len() {return Err(Error::MalformedCallback);}
-    let mut observed:HashMap<(SymbolId,u32),u32>=HashMap::new();
+    let mut observed:HashMap<(SymbolId,u32),usize>=HashMap::new();
     for scope in &il.local_scopes {
         if let Some(parent)=scope.parent {
             if parent>=scope.id || !scope_keys.contains(&(scope.routine,parent)) {
@@ -4313,7 +4309,7 @@ fn validate_native_lifetime_scope_owners(il:&Il)->Result<(),Error> {
         }
     }
     for (key,count) in child_counts {
-        if observed.get(&key).copied().unwrap_or(0)!=count {
+        if observed.get(&key).copied().unwrap_or(0)!=count as usize {
             return Err(Error::MalformedCallback);
         }
     }
@@ -4340,7 +4336,7 @@ fn validate_native_function_declaration_counts(il:&Il)->Result<(),Error> {
 
     let mut parameter_proofs=HashMap::new();
     for proof in &il.native_function_parameter_counts {
-        if proof.explicit>10000 || !routines.contains(&proof.routine) ||
+        if !routines.contains(&proof.routine) ||
             parameter_proofs.insert(proof.routine,
                 (proof.explicit,proof.implicit_this)).is_some() {
             return Err(Error::MalformedCallback);
@@ -4386,13 +4382,13 @@ fn validate_native_function_declaration_counts(il:&Il)->Result<(),Error> {
     let mut local_proofs=HashMap::new();
     for proof in &il.native_scope_local_counts {
         let key=(proof.routine,proof.scope);
-        if proof.count>10000 || !scopes.contains(&key) ||
+        if !scopes.contains(&key) ||
             local_proofs.insert(key,proof.count).is_some() {
             return Err(Error::MalformedCallback);
         }
     }
     if local_proofs.len()!=scopes.len() {return Err(Error::MalformedCallback);}
-    let mut local_count:HashMap<(SymbolId,u32),u32>=HashMap::new();
+    let mut local_count:HashMap<(SymbolId,u32),usize>=HashMap::new();
     let mut local_symbols=HashSet::new();
     for local in &il.local_variables {
         let key=(local.routine,local.scope);
@@ -4403,7 +4399,7 @@ fn validate_native_function_declaration_counts(il:&Il)->Result<(),Error> {
         *local_count.entry(key).or_default()+=1;
     }
     for (key,count) in local_proofs {
-        if local_count.get(&key).copied().unwrap_or(0)!=count {
+        if local_count.get(&key).copied().unwrap_or(0)!=count as usize {
             return Err(Error::MalformedCallback);
         }
     }
@@ -4507,7 +4503,7 @@ fn validate_native_expression_variant_coverage(il:&Il)->Result<(),Error> {
             NativeExpressionPayload::SizeOrAlignmentType(_)=>4,
             NativeExpressionPayload::DynamicInitializer{..}=>5,
             NativeExpressionPayload::GenericSelectedOperand(ordinal)=>{
-                if ordinal==0 || ordinal>=10000 {return Err(Error::MalformedCallback);}
+                if ordinal==0 {return Err(Error::MalformedCallback);}
                 let child=(record.owner.clone(),format!("{}.{}",record.path,ordinal));
                 let Some((child_kind,parent))=nodes.get(&child) else {
                     return Err(Error::MalformedCallback);
@@ -4562,8 +4558,7 @@ fn validate_constructor_init_provenance(il:&Il)->Result<(),Error> {
 /// Local structural invariants, deliberately not an execution certificate.
 fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
     use NativeCtorConstantPayload::Unsigned;
-    if n.routine.0==0 || n.path.is_empty() || n.child_count>10000 ||
-        !valid_constant_owner(n.context,n.position,n.owner_statement.as_deref(),n.owner_expression.as_deref()) ||
+    if n.routine.0==0 || n.path.is_empty() || !valid_constant_owner(n.context,n.position,n.owner_statement.as_deref(),n.owner_expression.as_deref()) ||
         n.parent.as_ref().is_some_and(String::is_empty) {return false;}
     match n.family {
         0=>n.child_count==0 && n.payload.is_none() && n.flags==0,
@@ -4573,7 +4568,7 @@ fn valid_ctor_constant_node(n:&NativeCtorConstantNode)->bool {
             if n.flags&1!=0 {n.payload.is_none()}
             else {matches!(n.payload,Some(Unsigned(v)) if n.flags&2==0 || v!=0)},
         4=>n.child_count==0 && n.flags==0,
-        5=>n.child_count<=1 && n.flags<=10000 &&
+        5=>n.child_count<=1 &&
             matches!(n.payload,Some(Unsigned(v)) if v<=255),
         _=>false,
     }
@@ -4677,7 +4672,7 @@ fn validate_ctor_constant_trees(il:&Il)->Result<(),Error> {
 }
 
 fn valid_dynamic_init_identity(d:&NativeDynamicInitIdentity)->bool {
-    d.routine.0!=0 && d.id!=0 && d.id<=10000 && d.kind<=255 &&
+    d.routine.0!=0 && d.id!=0 && d.kind<=255 &&
     d.flags<=7 && (d.lifetime.is_none() || d.flags&1!=0) &&
     (d.expression_lifetime.is_none() || d.flags&2!=0) &&
     match d.context {
@@ -4790,7 +4785,7 @@ fn valid_exec_owner(o:&NativeInitializerExecOwner)->bool {
     valid_constant_owner(o.context,o.position,o.statement.as_deref(),o.expression.as_deref())
 }
 fn valid_exec_node(n:&NativeInitializerExecNode)->bool {
-    valid_exec_owner(&n.owner) && !n.path.is_empty() && n.child_count<=10000 &&
+    valid_exec_owner(&n.owner) && !n.path.is_empty() &&
     n.parent.as_deref()!=Some("") &&
     n.embedded_statement==(graph::native_expression_kind(n.kind)==4)
 }
@@ -4817,8 +4812,7 @@ fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
     let mut counts=HashMap::new();
     for r in &il.native_initializer_exec_roots {
         let Some(prior)=expected.remove(&r.owner) else {return Err(Error::MalformedCallback);};
-        if !valid_exec_owner(&r.owner) || r.count>10000 ||
-            prior.is_some_and(|n|n!=r.count) ||
+        if !valid_exec_owner(&r.owner) || prior.is_some_and(|n|n!=r.count) ||
             counts.insert(&r.owner,r.count).is_some() {return Err(Error::MalformedCallback);}
         if r.owner.context==0 && r.owner.nested.is_none() {
             let Some(proof)=il.native_constructor_init_provenance.iter()
@@ -4864,8 +4858,7 @@ fn validate_initializer_exec_trees(il:&Il)->Result<(),Error> {
 
 fn valid_supplemental_block_node(n:&NativeSupplementalBlockNode)->bool {
     if !valid_exec_owner(&n.owner.initializer) || n.owner.expression_path.is_empty() ||
-        n.path.is_empty() || n.edge.is_empty() || n.count>10000 ||
-        n.parent.as_deref()==Some("") {return false;}
+        n.path.is_empty() || n.edge.is_empty() || n.parent.as_deref()==Some("") {return false;}
     match n.category {
         0=>n.kind==0 && n.ty.is_none() && n.symbol.is_none() &&
             n.operator.is_none() && n.integer.is_none() && n.flags==0,
