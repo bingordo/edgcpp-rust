@@ -176,3 +176,63 @@ fn action_targets_join_native_owners_not_lexical_paths() {
     il.native_eh_action_targets.push(target);
     assert!(validate_native_eh_action_targets(&il).is_err());
 }
+
+#[test]
+fn ordered_catch_dispatch_binds_native_protected_and_handler_bodies() {
+    use edgcpp::{RoutineIdentity,Symbol,SymbolId,SymbolType,TypeDef,TypeId,
+        NativeTryHandlerCount,NativeStatementSiblingCount,Statement,
+        retained_eh::{NativeCatchHandler,NativeEhOwner,CatchMatch,checked_catch_dispatch}};
+    let mut il=Il::default();
+    il.routine_identities.push(RoutineIdentity{routine:SymbolId(1),function:"f".into()});
+    il.types.push(TypeDef{id:TypeId(1),kind:0,related_role:None,related:None});
+    for id in [SymbolId(2),SymbolId(3)] {
+        il.symbols.push(Symbol{id,kind:2,name:"v".into()});
+        il.symbol_types.push(SymbolType{symbol:id,ty:TypeId(1)});
+    }
+    il.native_try_handler_counts.push(NativeTryHandlerCount{function:"f".into(),statement_path:"0".into(),count:2});
+    il.statements.push(Statement{function:"f".into(),path:"0".into(),parent:None,kind:0});
+    for edge in ["try","catch0","catch1"] {
+        il.native_statement_sibling_counts.push(NativeStatementSiblingCount{
+            function:"f".into(),parent:Some("0".into()),edge:edge.into(),count:1,
+        });
+        il.statements.push(Statement{
+            function:"f".into(),path:format!("0.{edge}.0"),parent:Some("0".into()),kind:0,
+        });
+    }
+    for (position,id,initialization) in [(None,1,None),(Some(0),2,Some(9)),(Some(1),3,None)] {
+        il.native_eh_owners.push(NativeEhOwner{function:"f".into(),statement_path:"0".into(),
+            routine:SymbolId(1),position,id,initialization});
+    }
+    let typed=NativeCatchHandler{function:"f".into(),statement_path:"0".into(),position:0,
+        parameter:Some(SymbolId(2)),parameter_type:Some(TypeId(1)),typeinfo:Some(SymbolId(3)),
+        has_initialization:true,function_try:false};
+    let any=NativeCatchHandler{position:1,parameter:None,parameter_type:None,typeinfo:None,
+        has_initialization:false,..typed.clone()};
+    // Wire collection order is not the dispatch order.
+    il.native_catch_handlers.extend([any,typed]);
+    il.native_eh_owners.reverse();
+    {
+        let regions=checked_catch_dispatch(&il).unwrap();
+        assert_eq!(regions.len(),1);
+        let r=&regions[0];
+        assert_eq!(r.protected_body.path,"0.try.0");
+        assert_eq!(r.clauses[0].body.path,"0.catch0.0");
+        assert_eq!(r.clauses[0].owner.initialization,Some(9));
+        assert_eq!(r.clauses[0].matcher,CatchMatch::Typed{
+            parameter:SymbolId(2),ty:TypeId(1),typeinfo:Some(SymbolId(3))});
+        assert_eq!(r.clauses[1].matcher,CatchMatch::Any);
+        assert_eq!(r.clauses[1].body.path,"0.catch1.0");
+    }
+    let mut bad=il.clone();
+    bad.statements.pop();
+    assert!(checked_catch_dispatch(&bad).is_err());
+    let mut bad=il.clone();
+    bad.native_statement_sibling_counts[1].count=0;
+    assert!(checked_catch_dispatch(&bad).is_err());
+    let mut bad=il.clone();
+    bad.statements[2].parent=Some("other".into());
+    assert!(checked_catch_dispatch(&bad).is_err());
+    let mut bad=il.clone();
+    bad.native_eh_owners.pop();
+    assert!(checked_catch_dispatch(&bad).is_err());
+}
