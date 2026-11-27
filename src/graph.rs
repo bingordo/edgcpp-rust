@@ -3351,7 +3351,7 @@ impl Graph {
                         by_symbol
                     });
                     if let Some(record)=indexed.get(&symbol) {
-                        let record=record.ok_or(()) .ok()?;
+                        let record=record.as_ref()?;
                         if record.name=="__vptr" {
                             if node.data.reference.as_deref()!=Some("__vptr") ||
                                field.is_some() || record.bit_width!=0 {
