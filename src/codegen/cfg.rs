@@ -1,7 +1,7 @@
 //! EDG structured statements -> Cranelift CFG with typed C integer SSA locals.
 // Shared defensive resource policy; these are not language or ABI limits.
 use crate::limits::{
-    MAX_NATIVE_OBJECT_BYTES, MAX_AGGREGATE_SCALAR_ELEMENTS,
+    MAX_NATIVE_OBJECT_BYTES,
     MAX_AGGREGATE_LAYOUT_DEPTH, MAX_CFG_LOCALS, bounded_array_bytes,
 };
 
@@ -584,7 +584,7 @@ fn check_expr(e: &Expr, vars: &mut HashSet<usize>, params: usize) -> Result<(), 
         Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
+        Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) => {
             check_expr(a,vars,params)?;
             check_expr(b,vars,params)
@@ -1468,6 +1468,39 @@ fn checked_record_fields_depth<'a>(
 /// C aggregate assignment may copy padding and bitfield storage units as
 /// bytes. Never copy a bitfield by reloading its *declared* integer type:
 /// that would clobber adjacent fields and could overread a packed record.
+fn checked_aggregate_copy_size(il:&Il,ty:crate::TypeId)->Result<u32,CodegenError> {
+    // Validate every distinct by-value type, not every array occurrence.
+    // A qualified typeref is checked before canonical identity deduplication.
+    let bytes=u32::try_from(byte_size(il,ty)?)
+        .map_err(|_|invalid("aggregate copy size is not representable"))?;
+    if bytes==0 {return Err(invalid("empty aggregate copy"));}
+    let mut seen=HashSet::new();
+    let mut work=vec![ty];
+    while let Some(raw)=work.pop() {
+        check_plain_storage_type(il,raw)?;
+        let ty=canonical_abi_type(il,raw)?;
+        if !seen.insert(ty) {continue;}
+        let def=il.types.iter().find(|d|d.id==ty)
+            .ok_or_else(||invalid("missing aggregate copy type"))?;
+        match semantic(4,def.kind) {
+            1|5=>{
+                let abi=call_type_abi(il,ty)?;
+                if !matches!(abi.bits,8|16|32|64) {
+                    return Err(invalid("unsupported aggregate copy element width"));
+                }
+            }
+            6=>work.push(checked_native_pointer_element(il,ty)?),
+            7|9=>{
+                for field in checked_record_fields(il,ty)? {
+                    work.push(field.ty);
+                }
+            }
+            _=>return Err(invalid("unsupported aggregate copy element type")),
+        }
+    }
+    Ok(bytes)
+}
+#[cfg(test)]
 fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
     ->Result<bool,CodegenError> {
     // Only record nesting consumes the bounded layout-recursion policy.
@@ -1522,6 +1555,7 @@ fn has_native_bitfield(il:&Il,ty:crate::TypeId,depth:usize)
 /// byte offsets. This copies array elements and nested records without
 /// touching indeterminate C struct padding. The bound also keeps generated
 /// machine code and Cranelift SSA temporaries predictable.
+#[cfg(test)]
 fn flattened_copy_fields(il:&Il,ty:crate::TypeId)
     ->Result<Vec<(CAbiInt,i64)>,CodegenError> {
     byte_size(il,ty)?;
@@ -1530,6 +1564,7 @@ fn flattened_copy_fields(il:&Il,ty:crate::TypeId)
     if out.is_empty() {return Err(invalid("aggregate has no copyable fields"));}
     Ok(out)
 }
+#[cfg(test)]
 fn flatten_copy_type(
     il:&Il,ty:crate::TypeId,offset:u64,depth:usize,
     out:&mut Vec<(CAbiInt,i64)>,
@@ -1559,9 +1594,6 @@ fn flatten_copy_type(
         }
         match kind {
             1|5=>{
-                if out.len() as u64>=MAX_AGGREGATE_SCALAR_ELEMENTS {
-                    return Err(invalid("aggregate copy has over 256 scalar elements"));
-                }
                 let field_offset=i64::try_from(offset)
                     .map_err(|_|invalid("aggregate copy offset overflow"))?;
                 let abi=call_type_abi(il,ty)?;
@@ -1574,7 +1606,7 @@ fn flatten_copy_type(
                 let element=checked_native_pointer_element(il,ty)?;
                 let count=il.array_bounds.iter().find(|b|b.array==ty)
                     .ok_or_else(||invalid("aggregate array lacks fixed bound"))?.elements;
-                if count==0 || count>MAX_AGGREGATE_SCALAR_ELEMENTS {
+                if count==0 {
                     return Err(invalid("aggregate copy array bound unsupported"));
                 }
                 let stride=byte_size(il,element)?;
@@ -2608,20 +2640,12 @@ fn lower_c_expression(
                 }
             }
             check_plain_storage_type(il,expression_type_id(graph,id)?)?;
-            let kind=il.types.iter().find(|d|d.id==ty)
-                .map(|d|semantic(4,d.kind)).ok_or_else(||
-                    invalid("missing aggregate assignment type"))?;
+            let bytes=checked_aggregate_copy_size(il,ty)?;
             let dst=lower_address(graph,node.operands[0],params,locals,il, catalog)?;
             let src=lower_address(graph,node.operands[1],params,locals,il, catalog)?;
-            if kind==9 || has_native_bitfield(il,ty,0)? {
-                let bytes=byte_size(il,ty)?;
-                if bytes==0 || bytes>512 {
-                    return Err(invalid("bitfield/union byte copy exceeds 512-byte limit"));
-                }
-                return Ok(Expr::CopyBytes(bytes as u32,Box::new(dst),Box::new(src)));
-            }
-            let layout=flattened_copy_fields(il,ty)?;
-            return Ok(Expr::CopyStruct(layout,Box::new(dst),Box::new(src)));
+            // C allows copying the complete object representation, including
+            // padding. Qualified members were rejected by the layout check.
+            return Ok(Expr::CopyBytes(bytes,Box::new(dst),Box::new(src)));
         }
     }
     let output = integer_expression_type(il, graph, id)?;
@@ -3266,7 +3290,7 @@ fn addressed_expr(expr:&Expr,found:&mut AddressedStorage) {
         Expr::StoreBitField(_,a,b) |
         Expr::CompoundBitField(_,_,_,a,b) |
         Expr::CompoundAddress(_,_,_,a,b) |
-        Expr::CopyStruct(_,a,b) | Expr::CopyBytes(_,a,b) |
+        Expr::CopyBytes(_,a,b) |
         Expr::PointerOffset(a,b,_) | Expr::Add(a,b) | Expr::Sub(a,b) |
         Expr::Mul(a,b) | Expr::BitAnd(a,b) | Expr::BitOr(a,b) |
         Expr::BitXor(a,b) | Expr::Compare(_,a,b) | Expr::UnsignedCompare(_,a,b) |
@@ -3704,45 +3728,11 @@ fn emit_expr(
             super::memory::store_bitfield(fb,address,next,*layout);
             before
         }
-        Expr::CopyStruct(fields,destination,source) => {
-            let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
-            let src=emit_expr(source,fb,params,vars,globals,stack,local_types,calls)?;
-            // Materialize all source field values before writing anything.
-            // This also handles identical or overlapping source/destination
-            // without assuming C struct padding bytes are observable values.
-            let mut values=Vec::with_capacity(fields.len());
-            for &(ty,offset) in fields {
-                let addr=if offset==0 {src} else {fb.ins().iadd_imm(src,offset)};
-                values.push(super::memory::load_integer(fb,addr,ty));
-            }
-            for (&(ty,offset),value) in fields.iter().zip(values) {
-                let addr=if offset==0 {dst} else {fb.ins().iadd_imm(dst,offset)};
-                super::memory::store_integer(fb,addr,value,ty);
-            }
-            dst
-        }
         Expr::CopyBytes(bytes,destination,source) => {
-            if *bytes==0 || *bytes>512 {
-                return Err(invalid("union byte copy exceeds supported size"));
-            }
+            if *bytes==0 {return Err(invalid("empty aggregate byte copy"));}
             let dst=emit_expr(destination,fb,params,vars,globals,stack,local_types,calls)?;
             let src=emit_expr(source,fb,params,vars,globals,stack,local_types,calls)?;
-            // Read the object representation as bytes, not typed inactive
-            // union members. Read all bytes before any write to handle self
-            // assignments and overlapping regions conservatively.
-            let mut values=Vec::with_capacity(*bytes as usize);
-            for offset in 0..*bytes {
-                let addr=if offset==0 {src} else {
-                    fb.ins().iadd_imm(src,i64::from(offset))
-                };
-                values.push(fb.ins().load(types::I8,MemFlags::new(),addr,0));
-            }
-            for (offset,value) in values.into_iter().enumerate() {
-                let addr=if offset==0 {dst} else {
-                    fb.ins().iadd_imm(dst,offset as i64)
-                };
-                fb.ins().store(MemFlags::new(),value,addr,0);
-            }
+            emit_object_copy(fb,dst,src,*bytes as usize);
             dst
         }
         Expr::CompoundAddress(ty,compute_ty,op,pointer,rhs) => {
@@ -3983,6 +3973,96 @@ fn local_constant_images(body:&[Stmt])->HashSet<&[u8]> {
         }
     }
     images
+}
+
+// Copy an object representation without touching bytes outside its extent.
+// A small copy loads all chunks before any store; a large copy chooses
+// direction as memmove would, including overlapping and identical objects.
+fn emit_object_copy(
+    fb:&mut FunctionBuilder<'_>,dst:cranelift_codegen::ir::Value,
+    src:cranelift_codegen::ir::Value,size:usize,
+) {
+    if !use_bulk_initializer(size) {
+        let mut values=Vec::new();
+        let mut offset=0;
+        while offset<size {
+            let ty=copy_chunk_type(size-offset);
+            let value=fb.ins().load(ty,MemFlags::new(),src,offset as i32);
+            values.push((offset,value));
+            offset+=ty.bytes() as usize;
+        }
+        for (offset,value) in values {
+            fb.ins().store(MemFlags::new(),value,dst,offset as i32);
+        }
+        return;
+    }
+    let reverse=fb.create_block();
+    let forward=fb.create_block();
+    let done=fb.create_block();
+    let higher=fb.ins().icmp(IntCC::UnsignedGreaterThan,dst,src);
+    let distance=fb.ins().isub(dst,src);
+    let overlaps=fb.ins().icmp_imm(IntCC::UnsignedLessThan,distance,size as i64);
+    let backward=fb.ins().band(higher,overlaps);
+    fb.ins().brif(backward,reverse,&[],forward,&[]);
+    let bulk=size & !7;
+    fb.switch_to_block(forward);
+    fb.seal_block(forward);
+    emit_copy_words(fb,dst,src,bulk,false);
+    let mut offset=bulk;
+    while offset<size {
+        let ty=copy_chunk_type(size-offset);
+        let from=fb.ins().iadd_imm(src,offset as i64);
+        let to=fb.ins().iadd_imm(dst,offset as i64);
+        let value=fb.ins().load(ty,MemFlags::new(),from,0);
+        fb.ins().store(MemFlags::new(),value,to,0);
+        offset+=ty.bytes() as usize;
+    }
+    fb.ins().jump(done,&[]);
+    fb.switch_to_block(reverse);
+    fb.seal_block(reverse);
+    // Copy the high partial word first, in descending address order.
+    let mut offset=size;
+    while offset>bulk {
+        let ty=copy_chunk_type(offset-bulk);
+        offset-=ty.bytes() as usize;
+        let from=fb.ins().iadd_imm(src,offset as i64);
+        let to=fb.ins().iadd_imm(dst,offset as i64);
+        let value=fb.ins().load(ty,MemFlags::new(),from,0);
+        fb.ins().store(MemFlags::new(),value,to,0);
+    }
+    emit_copy_words(fb,dst,src,bulk,true);
+    fb.ins().jump(done,&[]);
+    fb.switch_to_block(done);
+    fb.seal_block(done);
+}
+fn copy_chunk_type(remaining:usize)->cranelift_codegen::ir::Type {
+    if remaining>=8 {types::I64} else if remaining>=4 {types::I32}
+    else if remaining>=2 {types::I16} else {types::I8}
+}
+fn emit_copy_words(
+    fb:&mut FunctionBuilder<'_>,dst:cranelift_codegen::ir::Value,
+    src:cranelift_codegen::ir::Value,bulk:usize,reverse:bool,
+) {
+    if bulk==0 {return;}
+    let head=fb.create_block();
+    let done=fb.create_block();
+    fb.append_block_param(head,types::I64);
+    let start=fb.ins().iconst(types::I64,if reverse {bulk as i64} else {0});
+    fb.ins().jump(head,&[start.into()]);
+    fb.switch_to_block(head);
+    let index=fb.block_params(head)[0];
+    let offset=if reverse {fb.ins().iadd_imm(index,-8)} else {index};
+    let from=fb.ins().iadd(src,offset);
+    let to=fb.ins().iadd(dst,offset);
+    let value=fb.ins().load(types::I64,MemFlags::new(),from,0);
+    fb.ins().store(MemFlags::new(),value,to,0);
+    let next=if reverse {offset} else {fb.ins().iadd_imm(offset,8)};
+    let more=if reverse {fb.ins().icmp_imm(IntCC::NotEqual,next,0)}
+        else {fb.ins().icmp_imm(IntCC::UnsignedLessThan,next,bulk as i64)};
+    fb.ins().brif(more,head,&[next.into()],done,&[]);
+    fb.seal_block(head);
+    fb.switch_to_block(done);
+    fb.seal_block(done);
 }
 
 fn emit_local_image(
@@ -5168,6 +5248,27 @@ mod tests {
             std::fs::write(path,obj).unwrap();
         }
     }
+    #[test]
+    fn bulk_aggregate_copy_has_compact_code_and_overlap_semantics() {
+        let mut routines=Vec::new();
+        for bytes in [7,63,64,65,65_541] {
+            routines.push(Routine {
+                name:format!("copy_{bytes}"),parameters:2,locals:0,
+                body:vec![Stmt::Eval(Expr::CopyBytes(bytes,
+                    Box::new(Expr::Parameter(0)),Box::new(Expr::Parameter(1)))),
+                    Stmt::Return(Expr::Constant(0))],
+                abi:None,local_types:None,local_storage:None,
+                local_alignments:None,parameter_accesses:vec![],
+            });
+        }
+        let obj=emit_routines(&routines).unwrap();
+        assert_eq!(&obj[..4],b"\x7fELF");
+        assert!(obj.len()<16_384,"unexpected copy object size {}",obj.len());
+        if let Some(path)=std::env::var_os("EDG_BULK_COPY_TEST_OBJECT") {
+            std::fs::write(path,obj).unwrap();
+        }
+    }
+
     #[test]
     fn rejects_nondefinite_local_initialization() {
         let mut vars = HashSet::new();
