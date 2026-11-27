@@ -193,6 +193,8 @@ pub struct Il {
     /// Source-keyed exact byte images of narrow EDG C string literals.
     /// These are owned constant objects, not reinterpretations of pointers.
     pub string_literals: Vec<ExpressionStringLiteral>,
+    /// Native object identity shared by expression literals and static relocation targets.
+    pub literal_identities: Vec<LiteralIdentity>,
     /// Identity-preserving types captured during this compilation.
     pub types: Vec<TypeDef>,
     /// EDG-verified signed, non-enum 64-bit integer ABI types (event 43).
@@ -1121,6 +1123,13 @@ pub struct GlobalLiteralObject {
     pub bytes: Vec<u8>,
 }
 
+/// Shared EDG constant identity; no pointer bits or content hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiteralIdentity {
+    Expression { function:String, statement_path:String, path:String, identity:u32 },
+    Static { literal_id:u32, identity:u32 },
+}
+
 /// A symbolic pointer in a source-owned file-scope global initializer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalLiteralRelocation {
@@ -1676,6 +1685,13 @@ struct WireSeen {
     file_scope_dynamic_init_owner_variables: HashSet<SymbolId>,
     native_retained_eh_construct_keys: HashSet<(String,String,u32,String)>,
     native_expression_variant_keys: HashSet<(NativeExpressionOwner,String)>,
+    /// Source-keyed event-62 literal locations, maintained as they arrive.
+    literal_expression_sites: HashSet<(String,String,String)>,
+    /// Each source location may carry exactly one event-120 identity.
+    literal_identity_expression_sites: HashSet<(String,String,String)>,
+    /// Event-120 static object and original-object ID uniqueness.
+    literal_identity_static_objects: HashSet<u32>,
+    literal_identity_static_sources: HashSet<u32>,
     /// Event 73: each native lowered startup routine has exactly one priority.
     file_scope_lowered_startup_routines: HashSet<SymbolId>,
 }
@@ -1842,6 +1858,7 @@ fn callback_record_count(il: &Il, kind: u32) -> Option<usize> {
         117 => Some(il.native_eh_owners.len()),
         118 => Some(il.native_eh_action_targets.len()),
         119 => Some(il.native_file_init_identities.len()),
+        120 => Some(il.literal_identities.len()),
         53 => Some(il.statement_switch_cases.len()),
         18 => Some(il.calls.len()),
         70 => Some(il.implicit_pointer_casts.len()),
@@ -2090,6 +2107,33 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
             output.native_eh_owners.push(retained_eh::NativeEhOwner {
                 function,statement_path,routine,position,id,initialization,
             });
+        }
+        120 => {
+            let (Some(context),Some(literal_id),Some(identity))=(n(0),n(4),n(5))
+                else {return;};
+            if identity==0 {return;}
+            let entry=match context {
+                0 if literal_id==0=>{
+                    let (Some(function),Some(statement_path),Some(path))=
+                        (t(1),t(2),t(3)) else {return;};
+                    let site=(function.clone(),statement_path.clone(),path.clone());
+                    if !seen.literal_expression_sites.contains(&site) ||
+                       !seen.literal_identity_expression_sites.insert(site) {return;}
+                    LiteralIdentity::Expression{function,statement_path,path,identity}
+                }
+                1 if literal_id!=0 &&
+                     t(1).is_none() && t(2).is_none() && t(3).is_none()=>{
+                    let Some(index)=literal_id.checked_sub(1)
+                        .and_then(|id|usize::try_from(id).ok()) else {return;};
+                    if output.global_literal_objects.get(index)
+                        .is_none_or(|obj|obj.id!=literal_id) ||
+                       !seen.literal_identity_static_objects.insert(literal_id) ||
+                       !seen.literal_identity_static_sources.insert(identity) {return;}
+                    LiteralIdentity::Static{literal_id,identity}
+                }
+                _=>return,
+            };
+            output.literal_identities.push(entry);
         }
         119 => {
             let (Some(context),Some(position),Some(id),Some(node_kind))=
@@ -2480,6 +2524,9 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
                 path.is_empty() || ty==0 {return;}
             let Some(bytes)=decode_aggregate_hex(&hex) else {return;};
             if bytes.last()!=Some(&0) {return;}
+            if !seen.literal_expression_sites.insert((
+                function.clone(),statement_path.clone(),path.clone()
+            )) {return;}
             output.string_literals.push(ExpressionStringLiteral {
                 function, statement_path, path, ty:TypeId(ty), bytes,
             });
@@ -9492,6 +9539,9 @@ mod separate_file_scope_initializer_owner_wire_tests {
         assert!(state.malformed && !state.panicked);
     }
 }
+
+#[cfg(test)]
+mod literal_identity_tests;
 
 #[cfg(test)]
 mod bootstrap_literal_global_wire_tests {
