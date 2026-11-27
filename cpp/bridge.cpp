@@ -46,6 +46,8 @@ thread_local std::unordered_map<const void *, uint32_t> symbol_ids;
 // Original EDG constant pointer identity, used only as an in-memory lookup
 // key. Stable per-snapshot IDs, never native pointer values, cross the wire.
 thread_local std::unordered_map<const void *, uint32_t> static_literal_ids;
+// Shared original constant identity across static and expression references.
+thread_local std::unordered_map<const void *, uint32_t> literal_identity_ids;
 thread_local unsigned weak_image_diagnostic_count = 0;
 thread_local std::unordered_set<const void *> visited_scopes;
 thread_local std::unordered_set<const void *> emitted_symbol_types;
@@ -1673,6 +1675,19 @@ struct NativeAggregateReloc {
   int64_t addend;
 };
 
+// Assign one wire identity per original constant, never per byte image.
+static uint32_t literal_identity(a_constant_ptr literal) {
+  const auto found=literal_identity_ids.find(literal);
+  if (found!=literal_identity_ids.end()) return found->second;
+  if (literal==nullptr || literal_identity_ids.size()>=std::numeric_limits<uint32_t>::max()) {
+    report_incomplete_snapshot();
+    return 0;
+  }
+  const uint32_t id=static_cast<uint32_t>(literal_identity_ids.size()+1);
+  literal_identity_ids.emplace(literal,id);
+  return id;
+}
+
 // Maintain source emission order while indexing occupied relocation bytes.
 // A relocation covers exactly eight bytes on this target. Check the
 // entire range, including unaligned/partially overlapping slots.
@@ -2654,6 +2669,11 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
           }
           emit_record(62, {txt(function), txt(stmt_path), txt(path),
                            num(type_id), txt(hex)});
+          if (C_mode()) {
+            const auto id=literal_identity(constant);
+            if (id!=0) emit_record(RECORD_LITERAL_IDENTITY,
+                {num(0),txt(function),txt(stmt_path),txt(path),num(0),num(id)});
+          }
         }
       }
     }
@@ -2663,10 +2683,10 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
   // explicitly assigns stable identity to that constant in memory.
   // Capture only this exact direct address with zero displacement;
   // arbitrary constant pointers and temporary/global addresses remain
-  // unsupported. This intentionally excludes string address comparisons
-  // until source identity is modeled across all occurrences.
-  if (has_constant && type_id != 0 && node->type != nullptr &&
-      node->type->kind == tk_pointer &&
+  // unsupported. Inspect canonical pointer layout but preserve original TypeId.
+  a_type_ptr literal_pointer_type=object_initializer_type(node->type);
+  if (has_constant && type_id != 0 && literal_pointer_type != nullptr &&
+      literal_pointer_type->kind == tk_pointer &&
       node->variant.constant.ptr->kind == ck_address) {
     const auto &address=node->variant.constant.ptr->variant.address;
     if (address.kind == abk_constant && address.offset == 0 &&
@@ -2675,15 +2695,16 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
         address.variant.constant != nullptr &&
         address.variant.constant->kind == ck_string) {
       a_constant_ptr original=address.variant.constant;
-      a_type_ptr array=original->type;
+      a_type_ptr array=object_initializer_type(original->type);
       a_type_ptr pointee=object_initializer_type(
-          node->type->variant.pointer.type);
+          literal_pointer_type->variant.pointer.type);
       a_type_ptr element=array!=nullptr && array->kind==tk_array
           ? object_initializer_type(array->variant.array.element_type)
           : nullptr;
       if (array != nullptr && array->kind == tk_array &&
           !array->incomplete && pointee != nullptr &&
-          pointee->size == 1 && element != nullptr &&
+          (pointee->size == 1 || (C_mode() && pointee->kind == tk_void)) &&
+          element != nullptr &&
           element->size == 1 &&
           native_image_size_fits(array->size)) {
         const size_t size=static_cast<size_t>(array->size);
@@ -2701,6 +2722,11 @@ static bool emit_expr_node(an_expr_node_ptr node, const std::string &function,
             }
             emit_record(62,{txt(function),txt(stmt_path),txt(path),
                             num(type_id),txt(hex)});
+            if (C_mode()) {
+              const auto id=literal_identity(original);
+              if (id!=0) emit_record(RECORD_LITERAL_IDENTITY,
+                  {num(0),txt(function),txt(stmt_path),txt(path),num(0),num(id)});
+            }
           }
         }
       }
@@ -4590,6 +4616,12 @@ static void collect_scope_contents(a_scope_ptr scope,const std::string &prefix)
                 static_literal_ids.emplace(reloc.literal,id);
                 emit_record(RECORD_STATIC_LITERAL_OBJECT,
                             {num(id),num(ty),txt(image)});
+                if (C_mode()) {
+                  const auto identity=literal_identity(reloc.literal);
+                  if (identity==0) break;
+                  emit_record(RECORD_LITERAL_IDENTITY,
+                      {num(1),absent(),absent(),absent(),num(id),num(identity)});
+                }
               } else {
                 id=found->second;
               }
@@ -4878,6 +4910,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  literal_identity_ids.clear();
   edg::file_init_ids.clear();
   edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
@@ -4906,6 +4939,7 @@ extern "C" int edgcpp_compile(int argc, char **argv,
   type_ids.clear();
   symbol_ids.clear();
   static_literal_ids.clear();
+  literal_identity_ids.clear();
   edg::file_init_ids.clear();
   edg::file_lifetime_ids.clear();
   current_dynamic_init_ids.clear();
