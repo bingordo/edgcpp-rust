@@ -3265,7 +3265,7 @@ unsafe fn collect_event(output: &mut Il, seen: &mut WireSeen, kind: u32,
         61 => {
             let (Some(symbol),Some(link_name),Some(mangled)) =
                 (n(0),t(1),n(2)) else {return;};
-            if symbol==0 || link_name.is_empty() || link_name.len()>4096 ||
+            if symbol==0 || link_name.is_empty() ||
                 link_name.contains('\0') || mangled>1 ||
                 !seen.linkable_symbols.contains(&SymbolId(symbol)) ||
                 !seen.source_link_names.insert(SymbolId(symbol)) {
@@ -7148,6 +7148,41 @@ mod wire_tag_audit_tests {
 #[cfg(test)]
 mod audit_wire_record_count_tests {
     use super::*;
+
+    #[test]
+    fn linker_names_have_no_arbitrary_length_limit() {
+        let number = |value: u64| WireField {
+            data:std::ptr::null(),length:0,value,tag:wire_tags::UNSIGNED,
+        };
+        let text = |bytes: &[u8]| WireField {
+            data:bytes.as_ptr(),length:bytes.len(),value:0,tag:wire_tags::TEXT,
+        };
+        let check = |name: &[u8], mangled: u64, id: u64| {
+            let mut state=Collector::default();
+            let symbol=[number(42),number(1),text(b"f")];
+            let link=[number(id),text(name),number(mangled)];
+            unsafe {
+                let userdata=(&mut state as *mut Collector).cast();
+                collect(userdata,13,symbol.as_ptr(),symbol.len(),0);
+                collect(userdata,61,link.as_ptr(),link.len(),0);
+            }
+            state
+        };
+        for length in [4096,4097,65537] {
+            let mut name=vec![b'x';length];
+            name[..2].copy_from_slice(b"_Z");
+            let state=check(&name,1,42);
+            assert!(!state.malformed);
+            assert_eq!(state.il.symbol_link_names.len(),1);
+            assert_eq!(state.il.symbol_link_names[0].link_name.as_bytes(),name.as_slice());
+            assert!(state.il.symbol_link_names[0].edg_mangled);
+            assert!(check(&name,2,42).malformed);
+            assert!(check(&name,1,43).malformed);
+            name[length-1]=0;
+            assert!(check(&name,1,42).malformed);
+        }
+        assert!(check(b"",1,42).malformed);
+    }
 
     #[test]
     fn invalid_link_names_and_string_literals_fail_closed() {
