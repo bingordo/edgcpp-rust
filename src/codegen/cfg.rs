@@ -1107,8 +1107,12 @@ fn scalar_global(
        !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
         return Err(invalid(format!("non-C or ambiguous global linkage name: {name}")));
     }
-    let mut ty = il.symbol_types.iter().find(|s| s.symbol == symbol)
+    let ty = il.symbol_types.iter().find(|s| s.symbol == symbol)
         .ok_or_else(|| invalid("global has no declared type"))?.ty;
+    let scalar=scalar_global_type(il,ty,&name)?;
+    Ok((name,scalar))
+}
+fn scalar_global_type(il:&Il,ty:crate::TypeId,name:&str)->Result<CAbiInt,CodegenError> {
     let access=scalar_memory_access(il,ty)?;
     let ty = canonical_abi_type(il,ty)?;
     if access==MemoryAccess::Atomic &&
@@ -1123,11 +1127,11 @@ fn scalar_global(
         }
     }
     if il.types.iter().any(|d|d.id==ty && semantic(4,d.kind)==5) {
-        return Ok((name,CAbiInt { bits:64,signed:false,is_bool:false }));
+        return Ok(CAbiInt { bits:64,signed:false,is_bool:false });
     }
     let integer = il.c_integer_types.iter().find(|x| x.id == ty)
         .ok_or_else(|| invalid(format!("unsupported global scalar type: {name}")))?;
-    Ok((name,checked_integer_abi(integer)?))
+    checked_integer_abi(integer)
 }
 /// Validate a global's linkage and return either a scalar layout or
 /// the size of a fixed array. Array expressions decay to an address rather
@@ -3120,16 +3124,19 @@ fn lower_qualified_initializers(
 fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Result<Vec<Routine>, CodegenError> {
     let graph = Graph::from_il(il).map_err(|e| invalid(format!("EDG graph: {e:?}")))?;
     let mut out = Vec::new();
+    let mut parameters_by_routine=HashMap::<_,Vec<_>>::new();
+    for p in &il.function_parameters {parameters_by_routine.entry(p.routine).or_default().push(p);}
+    let mut locals_by_routine=HashMap::<_,Vec<_>>::new();
+    for v in &il.local_variables {locals_by_routine.entry(v.routine).or_default().push(v);}
     for entity in &il.entities {
         let crate::Entity::Routine { name, has_definition: true } = entity else { continue };
         let roots: Vec<_> = graph.roots(name).map(|(id,_)| id).collect();
         if roots.len() != 1 { return Err(invalid(format!("{name}: expected one root"))); }
         let routine = graph.routine_for_function(name).ok_or_else(|| invalid("missing routine id"))?;
-        if il.function_parameters.iter().any(|p| p.routine == routine && p.implicit_this) {
+        let mut args=parameters_by_routine.get(&routine).cloned().unwrap_or_default();
+        if args.iter().any(|p|p.implicit_this) {
             return Err(invalid("implicit this parameter unsupported"));
         }
-        let mut args: Vec<_> = il.function_parameters.iter()
-            .filter(|p| p.routine == routine).collect();
         args.sort_by_key(|p| p.position);
         if args.iter().enumerate().any(|(i,p)| p.position != Some(i as u32)) {
             return Err(invalid("non-contiguous function parameters"));
@@ -3138,7 +3145,7 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
         let ids: Vec<_> = args.iter().map(|p| p.symbol).collect();
         let parameter_accesses=ids.iter().map(|sym|
             parameter_memory_access(il,*sym)).collect::<Result<Vec<_>,_>>()?;
-        let locals: Vec<_> = il.local_variables.iter().filter(|v| v.routine == routine).collect();
+        let locals=locals_by_routine.get(&routine).cloned().unwrap_or_default();
         if locals.len().checked_add(ids.len()).is_none_or(|n|u32::try_from(n).is_err()) {
             return Err(invalid("local/parameter variable IDs not representable"));
         }
@@ -4407,6 +4414,38 @@ impl<'a> GlobalInitializerIndex<'a> {
         }
     }
 }
+#[derive(Clone,Copy)]
+struct CfgGlobalLayout {
+    scalar:Option<CAbiInt>,
+    bytes:usize,
+    alignment:u64,
+    access:MemoryAccess,
+}
+fn cfg_global_layout(il:&Il,declared:crate::TypeId,name:&str)
+    ->Result<CfgGlobalLayout,CodegenError> {
+    let canonical=canonical_abi_type(il,declared)?;
+    let scalar=if il.types.iter().any(|t|t.id==canonical && matches!(semantic(4,t.kind),6|7|9)) {
+        None
+    } else {
+        Some(scalar_global_type(il,declared,name)?)
+    };
+    let alignment=storage_alignment(il,declared)?;
+    let bytes=if let Some(ty)=scalar {
+        let bytes=usize::from(ty.bits/8);
+        if bytes==0 || ty.bits%8!=0 {
+            return Err(invalid("global scalar has invalid storage width"));
+        }
+        bytes
+    } else {
+        usize::try_from(byte_size(il,declared)?)
+            .map_err(|_|invalid("global layout exceeds host size representation"))?
+    };
+    let access=scalar_memory_access(il,declared)?;
+    if access!=MemoryAccess::Ordinary && scalar.is_none() {
+        return Err(invalid("qualified aggregate globals unsupported"));
+    }
+    Ok(CfgGlobalLayout {scalar,bytes,alignment,access})
+}
 /// Resolve referenced globals, plus externally visible C definitions.
 /// Omit unsupported unrelated C++ types until full C++ global lowering exists.
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
@@ -4417,6 +4456,12 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     for g in &il.global_variables {metadata.entry(g.symbol).or_insert(g);}
     let mut declared_types=HashMap::new();
     for t in &il.symbol_types {declared_types.entry(t.symbol).or_insert(t.ty);}
+    let mut names=HashMap::new();
+    for sym in &il.symbols {
+        if sym.kind==2 {names.entry(sym.id).or_insert(sym.name.as_str());}
+    }
+    let static_locals:HashSet<_>=il.static_local_owners.iter().map(|o|o.symbol).collect();
+    let mut layouts=HashMap::<crate::TypeId,CfgGlobalLayout>::new();
     // A referenced FP object still needs typed FP expression lowering; do
     // not accidentally expose its bytes through the integer CFG backend.
     let source_references: HashSet<_> = il.expressions.iter()
@@ -4459,20 +4504,22 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             });
             continue;
         }
-        let (name,scalar) = global_value_type(il,id)?;
+        if meta.thread_local || meta.local_to_function || static_locals.contains(&id) {
+            return Err(invalid("TLS/static function global unsupported"));
+        }
+        let name=*names.get(&id).ok_or_else(||invalid("global missing name"))?;
+        if name.is_empty() || !name.bytes().next().is_some_and(|c|c.is_ascii_alphabetic()||c==b'_') ||
+           !name.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_') {
+            return Err(invalid("global has non-C/ambiguous linkage name"));
+        }
         let declared=*declared_types.get(&id)
             .ok_or_else(||invalid("global missing declared type"))?;
-        let alignment=storage_alignment(il,declared)?;
+        let layout=match layouts.entry(declared) {
+            std::collections::hash_map::Entry::Occupied(e)=>*e.get(),
+            std::collections::hash_map::Entry::Vacant(e)=>*e.insert(cfg_global_layout(il,declared,name)?),
+        };
+        let CfgGlobalLayout {scalar,bytes:storage_bytes,alignment,access}=layout;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
-        let storage_bytes=if scalar.is_some() {
-            let bytes = usize::from(ty.bits / 8);
-            if bytes == 0 || ty.bits % 8 != 0 {
-                return Err(invalid("global scalar has invalid storage width"));
-            }
-            bytes
-        } else {
-                byte_size(il,declared)? as usize
-            };
         let defined = meta.linkage != 1 || meta.explicit_initializer;
         let linkage = if !defined { Linkage::Import }
             else if meta.linkage == 2 { Linkage::Local }
@@ -4509,12 +4556,8 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             }
             validate_aggregate_relocations(&mut relocations,storage_bytes)?;
         }
-        let access=scalar_memory_access(il,declared)?;
-        if access!=MemoryAccess::Ordinary && scalar.is_none() {
-            return Err(invalid("qualified aggregate globals unsupported"));
-        }
         result.push(ScalarGlobal {
-            symbol:id,name,ty,access,linkage,initializer,relocations,storage_bytes,alignment
+            symbol:id,name:name.to_owned(),ty,access,linkage,initializer,relocations,storage_bytes,alignment
         });
     }
     Ok(result)
@@ -4805,6 +4848,35 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_cfg_cached_global_layouts() {
+        let dir=std::env::temp_dir().join(format!("edg-cfg-global-layouts-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("globals.c");
+        let mut text=String::new();
+        for i in 0..256 {
+            text.push_str(&format!("long g{i} = {i};\n"));
+        }
+        text.push_str("long global_sum(long x) { g127 = x; return g0 + g127 + g255; }\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let globals=compile_globals(&compiled.il).unwrap();
+        assert_eq!(globals.len(),256);
+        for g in &globals {
+            let (name,scalar)=global_value_type(&compiled.il,g.symbol).unwrap();
+            assert_eq!(g.name,name);
+            assert_eq!(Some(g.ty),scalar);
+            assert_eq!(g.storage_bytes,8);
+            assert_eq!(g.alignment,8);
+        }
+        let object=emit_edg_cfg_object(&compiled.il).unwrap();
+        if let Some(path)=std::env::var_os("EDG_CFG_GLOBAL_LAYOUT_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn cfg_storage_analysis_collects_sparse_symbol_references() {
         let ty=CAbiInt{bits:64,signed:true,is_bool:false};
