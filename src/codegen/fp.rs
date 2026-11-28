@@ -2684,7 +2684,6 @@ impl<'a> FpMetadata<'a> {
 }
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
-    il:&'a Il,
     graph:&'a crate::graph::Graph,
     metadata:&'a FpMetadata<'a>,
     routine:crate::SymbolId,
@@ -2692,7 +2691,6 @@ struct FpSourceCtx<'a> {
     locals:HashMap<crate::SymbolId,usize>,
     param_types:&'a [ScalarType],
     local_types:&'a [ScalarType],
-    global_symbols:&'a std::collections::HashSet<crate::SymbolId>,
 }
 /// Decode a source-owned integer constant, never a constant inferred
 /// from its printed name or a generic C integer expression. The IL stores
@@ -2939,7 +2937,7 @@ fn native_fp_plan(
                 }
                 return Ok(Some(FloatExpr::Local(i)));
             }
-            if ctx.global_symbols.contains(&symbol) {
+            if ctx.metadata.global_variables.contains_key(&symbol) {
                 let actual=ctx.metadata.global_type(symbol)?;
                 if actual!=ty || ctx.metadata.scalar(node.data.type_id.ok_or_else(||
                         reject("FP external global expression lacks native type"))?)?!=
@@ -3636,7 +3634,7 @@ fn lower_fp_leaf(
                 return Err(reject("FP assignment target is not direct scalar storage"));
             }
             if let Some(symbol)=left.data.symbol_id {
-                if ctx.global_symbols.contains(&symbol) {
+                if ctx.metadata.global_variables.contains_key(&symbol) {
                     let ty=ctx.metadata.global_type(symbol)?;
                     if ctx.metadata.scalar(left.data.type_id.ok_or_else(||
                         reject("FP global store lvalue has no native type"))?)?!=
@@ -3861,8 +3859,6 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             }
         }
     }
-    let global_symbols:std::collections::HashSet<_>=il.global_variables.iter()
-        .map(|g|g.symbol).collect();
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
         let routine=graph.routine_for_function(name)
@@ -3937,8 +3933,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             params_syms.entry(p.symbol).or_insert(i);
         }
         let ctx=FpSourceCtx {
-            il,graph:&graph,metadata:&metadata,routine,params:params_syms,locals:local_syms,
-            param_types:&params,local_types:&local_types,global_symbols:&global_symbols,
+            graph:&graph,metadata:&metadata,routine,params:params_syms,locals:local_syms,
+            param_types:&params,local_types:&local_types,
         };
         let mut statements=Vec::new();
         lower_fp_body(&ctx,roots[0],&mut statements)?;
@@ -3962,7 +3958,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     for expr in &il.expressions {
         if super::semantic(2,expr.kind)!=2 {continue;}
         let Some(symbol)=expr.symbol_id else {continue;};
-        if global_symbols.contains(&symbol) &&
+        if metadata.global_variables.contains_key(&symbol) &&
             seen.insert(symbol) {
             let (name,ty,linkage,initializer)=metadata.global(symbol)?;
             fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
@@ -5451,6 +5447,43 @@ mod audit_resource_budget_tests {
         if let Some(path)=std::env::var_os("EDG_INDEXED_FP_OBJECT") {
             std::fs::write(path,object).unwrap();
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_fp_indexed_global_images() {
+        let dir=std::env::temp_dir().join(format!("edg-fp-globals-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("globals.c");
+        let mut text=String::new();
+        for i in 0..256 {
+            text.push_str(&format!("double g{i} = {i}.25;\n"));
+        }
+        text.push_str("double indexed_globals(double x) { g127 = x; return g0 + g127 + g255; }\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let metadata=FpMetadata::new(&compiled.il);
+        for global in &compiled.il.global_variables {
+            let symbol=global.symbol;
+            assert_eq!(metadata.global(symbol).unwrap(),source_fp_global(&compiled.il,symbol).unwrap());
+        }
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        if let Some(path)=std::env::var_os("EDG_INDEXED_FP_GLOBAL_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        // Both paths must reject duplicate exact initializer and storage records.
+        let mut malformed=compiled.il.clone();
+        let image=malformed.global_float_initializers[0].clone();
+        let symbol=image.symbol;
+        malformed.global_float_initializers.push(image);
+        assert!(FpMetadata::new(&malformed).global(symbol).is_err());
+        assert!(source_fp_global(&malformed,symbol).is_err());
+        let mut malformed=compiled.il.clone();
+        let global=malformed.global_variables[0];
+        malformed.global_variables.push(global);
+        assert!(FpMetadata::new(&malformed).global(global.symbol).is_err());
+        assert!(source_fp_global(&malformed,global.symbol).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
