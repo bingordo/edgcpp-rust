@@ -3187,6 +3187,8 @@ fn compile_il(il: &Il, catalog: &HashMap<crate::SymbolId,CallDeclaration>) -> Re
 struct AddressedStorage {
     locals: HashSet<usize>,
     temporary_bytes: u64,
+    routines: HashSet<crate::SymbolId>,
+    globals: HashSet<crate::SymbolId>,
 }
 impl AddressedStorage {
     /// Include one 8-byte-aligned result slot for each 9–16 byte call value.
@@ -3201,7 +3203,8 @@ impl AddressedStorage {
 fn addressed_expr(expr:&Expr,found:&mut AddressedStorage) {
     match expr {
         Expr::AddressLocal(i) => {found.locals.insert(*i);}
-        Expr::Call(_,abi,args) => {
+        Expr::Call(symbol,abi,args) => {
+            found.routines.insert(*symbol);
             found.record_call(abi);
             for arg in args {addressed_expr(arg,found);}
         },
@@ -3246,13 +3249,19 @@ fn addressed_expr(expr:&Expr,found:&mut AddressedStorage) {
         Expr::PackAggregate(_,a) |
         Expr::LoadBitField(_,a) | Expr::Neg(a) |
         Expr::AssignLocal(_,_,a) | Expr::CompoundLocal(_,_,_,_,a) |
-        Expr::AssignGlobal(_,_,a) | Expr::CompoundGlobal(_,_,_,_,a) |
         Expr::PostAddress(_,_,a) | Expr::PostQualified(_,_,_,a) |
         Expr::PostBitField(_,_,a) =>
             addressed_expr(a,found),
-        Expr::PostLocal(..) | Expr::PostGlobal(..) | Expr::Constant(_) |
-        Expr::Parameter(_) | Expr::Local(_) | Expr::Global(_) |
-        Expr::AddressGlobal(_) | Expr::AddressFunction(_) => {}
+        Expr::AssignGlobal(symbol,_,a) | Expr::CompoundGlobal(symbol,_,_,_,a) => {
+            found.globals.insert(*symbol);
+            addressed_expr(a,found);
+        }
+        Expr::Global(symbol) | Expr::AddressGlobal(symbol) | Expr::PostGlobal(symbol,..) => {
+            found.globals.insert(*symbol);
+        }
+        Expr::AddressFunction(symbol) => {found.routines.insert(*symbol);}
+        Expr::PostLocal(..) | Expr::Constant(_) |
+        Expr::Parameter(_) | Expr::Local(_) => {}
     }
 }
 fn addressed_stmt(body:&[Stmt],found:&mut AddressedStorage) {
@@ -4577,6 +4586,7 @@ fn emit_routines_with_globals(
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         by_name.insert(callee.name.clone(),(id,callee.abi.clone()));
     }
+    let call_catalog:HashMap<_,_>=calls.iter().map(|call|(call.symbol,call)).collect();
     for func in functions {
         if func.name.is_empty() || func.name.as_bytes().contains(&0) {
             return Err(invalid("invalid export name"));
@@ -4599,14 +4609,28 @@ fn emit_routines_with_globals(
         }
         let id=by_name.get(&func.name)
             .ok_or_else(||invalid("undeclared function export"))?.0;
-        let call_values: CallValues = calls.iter().map(|call| {
+        // Reuse the existing storage analysis to collect only symbols
+        // referenced by this function. Module declarations remain complete,
+        // including external definitions and data relocation targets.
+        let mut addressed=AddressedStorage::default();
+        addressed_stmt(&func.body,&mut addressed);
+        let mut symbols:Vec<_>=addressed.routines.iter().copied().collect();
+        symbols.sort_unstable_by_key(|s|s.0);
+        let call_values: CallValues = symbols.into_iter().map(|symbol| {
+            let call=call_catalog.get(&symbol)
+                .ok_or_else(||invalid("undeclared direct call target"))?;
             let (id,abi)=by_name.get(&call.name)
                 .ok_or_else(||invalid("undeclared direct call target"))?;
             let reference=module.declare_func_in_func(*id,&mut context.func);
-            Ok((call.symbol,(reference,abi.clone())))
+            Ok((symbol,(reference,abi.clone())))
         }).collect::<Result<HashMap<_,_>,CodegenError>>()?;
-        let global_values: GlobalValues = declared.iter().map(|(symbol,(id,ty,access))|
-            (*symbol,(module.declare_data_in_func(*id,&mut context.func),*ty,*access))).collect();
+        let mut symbols:Vec<_>=addressed.globals.iter().copied().collect();
+        symbols.sort_unstable_by_key(|s|s.0);
+        let global_values: GlobalValues = symbols.into_iter().map(|symbol| {
+            let (id,ty,access)=declared.get(&symbol)
+                .ok_or_else(||invalid("undeclared global reference"))?;
+            Ok((symbol,(module.declare_data_in_func(*id,&mut context.func),*ty,*access)))
+        }).collect::<Result<HashMap<_,_>,CodegenError>>()?;
         let mut image_values=LocalImageValues::new();
         // Sort content before assigning anonymous object identities to keep
         // the generated object deterministic across randomized hash seeds.
@@ -4653,8 +4677,6 @@ fn emit_routines_with_globals(
                 fb.declare_var(v,types::I64);
                 v
             }).collect();
-            let mut addressed=AddressedStorage::default();
-            addressed_stmt(&func.body,&mut addressed);
             let label_ids=source_labels(&func.body)?;
             // A source goto may bypass lexical SSA initialization; address
             // all local/parameter slots so stores and reads preserve C memory
@@ -4763,6 +4785,32 @@ pub(super) fn emit_edg_cfg_object(il: &Il) -> Result<Vec<u8>, CodegenError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cfg_storage_analysis_collects_sparse_symbol_references() {
+        let ty=CAbiInt{bits:64,signed:true,is_bool:false};
+        let abi=CAbi {parameters:vec![ty],aggregate_parameters:vec![None],
+            aggregate_result:None,result:Some(ty)};
+        let call=crate::SymbolId(1);
+        let address=crate::SymbolId(2);
+        let read=crate::SymbolId(3);
+        let write=crate::SymbolId(4);
+        let update=crate::SymbolId(5);
+        let data=crate::SymbolId(6);
+        let body=vec![Stmt::If(Expr::Global(read),vec![
+            Stmt::Eval(Expr::AssignGlobal(write,ty,Box::new(Expr::Call(
+                call,abi,vec![Expr::AddressFunction(address)])))),
+            Stmt::Eval(Expr::PostGlobal(update,ty,1)),
+        ],vec![Stmt::Eval(Expr::CompoundGlobal(update,ty,ty,CCompoundOp::Add,
+            Box::new(Expr::AddressGlobal(data))))]),
+            Stmt::Return(Expr::AddressLocal(7))];
+        let mut found=AddressedStorage::default();
+        addressed_stmt(&body,&mut found);
+        assert_eq!(found.routines,HashSet::from([call,address]));
+        assert_eq!(found.globals,HashSet::from([read,write,update,data]));
+        assert_eq!(found.locals,HashSet::from([7]));
+        assert_eq!(found.temporary_bytes,0);
+    }
+
     /// Reproduce the pre-#152/#155 routine-declaration rescans against
     /// the current validated, compilation-local ABI declaration catalog.
     /// Snapshot setup is outside the timed region; the indexed timings
