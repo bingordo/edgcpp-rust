@@ -3102,141 +3102,174 @@ fn check_plain_fp_local(il:&Il,mut ty:crate::TypeId)->Result<(),CodegenError> {
 /// Memory effects, unverified nonloop gotos and mixed ABI remain rejected.
 fn lower_fp_body(
     ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
-    output:&mut Vec<FloatStmt>,depth:usize,
+    output:&mut Vec<FloatStmt>,
 )->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("FP source statement nesting too deep"));}
+    use crate::graph::StatementId;
+    enum Task {
+        Visit(StatementId),
+        // A structural arm is a separate sequence; source blocks inside
+        // that sequence are flattened directly into its output.
+        Arm(Option<StatementId>),
+        If(FloatCondition),
+        Loop(FloatCondition,bool),
+        For(Option<FloatCondition>),
+    }
+    let mut pending=vec![Task::Visit(id)];
+    let mut sequences=vec![Vec::<FloatStmt>::new()];
+    let mut seen=std::collections::HashSet::new();
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Arm(id)=>{
+                sequences.push(Vec::new());
+                if let Some(id)=id {pending.push(Task::Visit(id));}
+            }
+            Task::If(cond)=>{
+                let no=sequences.pop().expect("decoded else arm");
+                let yes=sequences.pop().expect("decoded then arm");
+                let output=sequences.last_mut().expect("parent FP sequence");
+                if yes.len()==1 && no.len()==1 &&
+                    matches!(yes[0],FloatStmt::Return(_)) &&
+                    matches!(no[0],FloatStmt::Return(_)) {
+                    let (FloatStmt::Return(yes),FloatStmt::Return(no))=
+                        (yes.into_iter().next().unwrap(),no.into_iter().next().unwrap())
+                        else {unreachable!()};
+                    output.push(FloatStmt::IfReturn(cond,yes,no));
+                } else if yes.iter().all(|s|matches!(s,FloatStmt::Assign(..))) &&
+                          no.iter().all(|s|matches!(s,FloatStmt::Assign(..))) {
+                    // Either side may do no work. An absent else and an explicit
+                    // empty else both keep the incoming values on that CFG edge.
+                    // No general nested CFG, branch termination or memory effect.
+                    let assignments=|stmts:Vec<FloatStmt>|->Vec<(usize,FloatExpr)> {
+                        stmts.into_iter().map(|s|match s {
+                            FloatStmt::Assign(n,e)=>(n,e),
+                            _=>unreachable!(),
+                        }).collect()
+                    };
+                    output.push(FloatStmt::IfAssign(
+                        cond,assignments(yes),assignments(no)));
+                } else {
+                    // The general CFG validator checks return/break/continue
+                    // reachability independently for each branch.
+                    output.push(FloatStmt::IfBlock(cond,yes,no));
+                }
+            }
+            Task::Loop(condition,is_do)=>{
+                let body=sequences.pop().expect("decoded loop body");
+                let output=sequences.last_mut().expect("parent FP sequence");
+                if is_do {output.push(FloatStmt::DoWhile(body,condition));}
+                else {output.push(FloatStmt::While(condition,body));}
+            }
+            Task::For(condition)=>{
+                let increment=sequences.pop().expect("decoded for increment");
+                let body=sequences.pop().expect("decoded for body");
+                let init=sequences.pop().expect("decoded for initializer");
+                sequences.last_mut().expect("parent FP sequence").push(
+                    FloatStmt::For {init,condition,increment,body});
+            }
+            Task::Visit(id)=>{
+                if !seen.insert(id) {
+                    return Err(reject("repeated native FP statement identity"));
+                }
+                let node=ctx.graph.statement(id).ok_or_else(||reject("missing FP statement"))?;
+                let path=&node.data.path;
+                match super::semantic(1,node.data.kind) {
+                    3 if node.expression.is_some() && (1..=2).contains(&node.children.len())=>{
+                        let cond=comparison_from_edg(ctx,node.expression.unwrap())?;
+                        let mut then_stmt=None;
+                        let mut else_stmt=None;
+                        let then_prefix=format!("{path}.then.");
+                        let else_prefix=format!("{path}.else.");
+                        for child in &node.children {
+                            let arm=ctx.graph.statement(*child)
+                                .ok_or_else(||reject("missing FP if arm"))?;
+                            if arm.data.path.starts_with(&then_prefix) {
+                                if then_stmt.replace(*child).is_some() {
+                                    return Err(reject("duplicate FP then branch"));
+                                }
+                            } else if arm.data.path.starts_with(&else_prefix) {
+                                if else_stmt.replace(*child).is_some() {
+                                    return Err(reject("duplicate FP else branch"));
+                                }
+                            } else {
+                                return Err(reject("unexpected FP if branch edge"));
+                            }
+                        }
+                        if then_stmt.is_none() {return Err(reject("FP if missing then branch"));}
+                        pending.push(Task::If(cond));
+                        pending.push(Task::Arm(else_stmt));
+                        pending.push(Task::Arm(then_stmt));
+                    }
+                    2 if node.expression.is_none()=>{
+                        pending.extend(node.children.iter().rev().copied().map(Task::Visit));
+                    }
+                    7|8=>{
+                        let condition=comparison_from_edg(ctx,node.expression
+                            .ok_or_else(||reject("FP loop missing comparison"))?)?;
+                        if node.children.len()!=1 {
+                            return Err(reject("FP while/do body must have one source child"));
+                        }
+                        let child=node.children[0];
+                        let body_node=ctx.graph.statement(child)
+                            .ok_or_else(||reject("FP loop missing child statement"))?;
+                        if !body_node.data.path.starts_with(&format!("{path}.body.")) {
+                            return Err(reject("FP loop body source path mismatch"));
+                        }
+                        pending.push(Task::Loop(condition,super::semantic(1,node.data.kind)==8));
+                        pending.push(Task::Arm(Some(child)));
+                    }
+                    9=>{
+                        let condition=node.expression
+                            .map(|e|comparison_from_edg(ctx,e)).transpose()?;
+                        let mut init=None;
+                        let mut body=None;
+                        let mut increment=None;
+                        let init_prefix=format!("{path}.init.");
+                        let body_prefix=format!("{path}.body.");
+                        let increment_path=format!("{path}.increment.0");
+                        for &child in &node.children {
+                            let found=ctx.graph.statement(child)
+                                .ok_or_else(||reject("FP for missing child"))?;
+                            let source=&found.data.path;
+                            if source.starts_with(&init_prefix) {
+                                if init.replace(child).is_some() {
+                                    return Err(reject("duplicate FP for initializer"));
+                                }
+                            } else if source.starts_with(&body_prefix) {
+                                if body.replace(child).is_some() {
+                                    return Err(reject("duplicate FP for body"));
+                                }
+                            } else if source==&increment_path {
+                                if increment.replace(child).is_some() {
+                                    return Err(reject("duplicate FP for increment"));
+                                }
+                            } else {
+                                return Err(reject("unexpected FP for source child"));
+                            }
+                        }
+                        let body=body.ok_or_else(||reject("FP for has no body"))?;
+                        pending.push(Task::For(condition));
+                        pending.push(Task::Arm(increment));
+                        pending.push(Task::Arm(Some(body)));
+                        pending.push(Task::Arm(init));
+                    }
+                    _=>lower_fp_leaf(ctx,id,sequences.last_mut().expect("active FP sequence"))?,
+                }
+            }
+        }
+    }
+    debug_assert_eq!(sequences.len(),1);
+    output.extend(sequences.pop().expect("decoded root FP sequence"));
+    Ok(())
+}
+fn lower_fp_leaf(
+    ctx:&FpSourceCtx<'_>,id:crate::graph::StatementId,
+    output:&mut Vec<FloatStmt>,
+)->Result<(),CodegenError> {
     let node=ctx.graph.statement(id).ok_or_else(||reject("missing FP statement"))?;
     let path=&node.data.path;
     let function=&node.data.function;
     let simple_children=node.children.is_empty();
     match super::semantic(1,node.data.kind) {
-        3 if node.expression.is_some() && (1..=2).contains(&node.children.len())=>{
-            let cond=comparison_from_edg(ctx,node.expression.unwrap())?;
-            let mut then_stmt=None;
-            let mut else_stmt=None;
-            let then_prefix=format!("{path}.then.");
-            let else_prefix=format!("{path}.else.");
-            for child in &node.children {
-                let arm=ctx.graph.statement(*child)
-                    .ok_or_else(||reject("missing FP if arm"))?;
-                if arm.data.path.starts_with(&then_prefix) {
-                    if then_stmt.replace(*child).is_some() {
-                        return Err(reject("duplicate FP then branch"));
-                    }
-                } else if arm.data.path.starts_with(&else_prefix) {
-                    if else_stmt.replace(*child).is_some() {
-                        return Err(reject("duplicate FP else branch"));
-                    }
-                } else {
-                    return Err(reject("unexpected FP if branch edge"));
-                }
-            }
-            let extract=|arm:Option<crate::graph::StatementId>|->
-                Result<Vec<FloatStmt>,CodegenError> {
-                let Some(arm)=arm else {return Ok(Vec::new());};
-                let mut statements=Vec::new();
-                lower_fp_body(ctx,arm,&mut statements,depth+1)?;
-                Ok(statements)
-            };
-            // EDG omits a null else statement entirely. It must remain an
-            // explicit no-op CFG predecessor, inheriting live-in locals.
-            if then_stmt.is_none() {return Err(reject("FP if missing then branch"));}
-            let yes=extract(then_stmt)?;
-            let no=extract(else_stmt)?;
-            if yes.len()==1 && no.len()==1 &&
-                matches!(yes[0],FloatStmt::Return(_)) &&
-                matches!(no[0],FloatStmt::Return(_)) {
-                let (FloatStmt::Return(yes),FloatStmt::Return(no))=
-                    (yes.into_iter().next().unwrap(),no.into_iter().next().unwrap())
-                    else {unreachable!()};
-                output.push(FloatStmt::IfReturn(cond,yes,no));
-            } else if yes.iter().all(|s|matches!(s,FloatStmt::Assign(..))) &&
-                      no.iter().all(|s|matches!(s,FloatStmt::Assign(..))) {
-                // Either side may do no work. An absent else and an explicit
-                // empty else both keep the incoming values on that CFG edge.
-                // No general nested CFG, branch termination or memory effect.
-                let assignments=|stmts:Vec<FloatStmt>|->Vec<(usize,FloatExpr)> {
-                    stmts.into_iter().map(|s|match s {
-                        FloatStmt::Assign(n,e)=>(n,e),
-                        _=>unreachable!(),
-                    }).collect()
-                };
-                output.push(FloatStmt::IfAssign(
-                    cond,assignments(yes),assignments(no)));
-            } else {
-                // The general CFG validator checks return/break/continue
-                // reachability independently for each branch.
-                output.push(FloatStmt::IfBlock(cond,yes,no));
-            }
-        }
-        2 if node.expression.is_none()=>{
-            for child in &node.children {
-                lower_fp_body(ctx,*child,output,depth+1)?;
-            }
-        }
-
-        7|8=>{
-            let condition=comparison_from_edg(ctx,node.expression
-                .ok_or_else(||reject("FP loop missing comparison"))?)?;
-            if node.children.len()!=1 {
-                return Err(reject("FP while/do body must have one source child"));
-            }
-            let child=node.children[0];
-            let body_node=ctx.graph.statement(child)
-                .ok_or_else(||reject("FP loop missing child statement"))?;
-            if !body_node.data.path.starts_with(&format!("{path}.body.")) {
-                return Err(reject("FP loop body source path mismatch"));
-            }
-            let mut body=Vec::new();
-            lower_fp_body(ctx,child,&mut body,depth+1)?;
-            if super::semantic(1,node.data.kind)==8 {
-                output.push(FloatStmt::DoWhile(body,condition));
-            } else {
-                output.push(FloatStmt::While(condition,body));
-            }
-        }
-        9=>{
-            let condition=node.expression
-                .map(|e|comparison_from_edg(ctx,e)).transpose()?;
-            let mut init=None;
-            let mut body=None;
-            let mut increment=None;
-            for &child in &node.children {
-                let found=ctx.graph.statement(child)
-                    .ok_or_else(||reject("FP for missing child"))?;
-                let source=&found.data.path;
-                if source.starts_with(&format!("{path}.init.")) {
-                    if init.replace(child).is_some() {
-                        return Err(reject("duplicate FP for initializer"));
-                    }
-                } else if source.starts_with(&format!("{path}.body.")) {
-                    if body.replace(child).is_some() {
-                        return Err(reject("duplicate FP for body"));
-                    }
-                } else if source==&format!("{path}.increment.0") {
-                    if increment.replace(child).is_some() {
-                        return Err(reject("duplicate FP for increment"));
-                    }
-                } else {
-                    return Err(reject("unexpected FP for source child"));
-                }
-            }
-            let mut init_stmts=Vec::new();
-            if let Some(id)=init {
-                lower_fp_body(ctx,id,&mut init_stmts,depth+1)?;
-            }
-            let mut body_stmts=Vec::new();
-            lower_fp_body(ctx,body.ok_or_else(||
-                reject("FP for has no body"))?,&mut body_stmts,depth+1)?;
-            let mut step_stmts=Vec::new();
-            if let Some(id)=increment {
-                lower_fp_body(ctx,id,&mut step_stmts,depth+1)?;
-            }
-            output.push(FloatStmt::For {
-                init:init_stmts,condition,increment:step_stmts,
-                body:body_stmts,
-            });
-        }
         10|11=>{
             let transfer:Vec<_>=ctx.il.loop_transfers.iter()
                 .filter(|t|t.function==*function && t.statement_path==*path)
@@ -3523,6 +3556,7 @@ fn lower_fp_body(
     }
     Ok(())
 }
+
 /// Source-checked narrow INTEGER-result indirect call slice. We accept an
 /// *exact* return expression `return fp(...);` with an EDG-verified function
 /// pointer formal. A separate expression tree is needed for integer arithmetic
@@ -3726,7 +3760,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             param_types:&params,local_types:&local_types,
         };
         let mut statements=Vec::new();
-        lower_fp_body(&ctx,roots[0],&mut statements,0)?;
+        lower_fp_body(&ctx,roots[0],&mut statements)?;
         functions.push(ScalarFloatBody {
             name:name.to_string(),parameters:params,result:ret,
             locals:local_types,statements,
@@ -5045,6 +5079,33 @@ mod audit_resource_budget_tests {
         let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
         assert_eq!(&object[..4],b"\x7fELF");
         if let Some(path)=std::env::var_os("EDG_DEEP_NATIVE_FP_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_deep_fp_statement_decode() {
+        let dir=std::env::temp_dir().join(format!("edg-deep-fp-stmts-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("deep.c");
+        let n=96;
+        let mut text=String::from("extern double bump(double); double deep_branches(double x) {\n");
+        for i in 0..n {
+            text.push_str(&format!("if (x > {i}.0) {{\n"));
+        }
+        text.push_str("return bump(x);\n");
+        for _ in 0..n {text.push_str("} else { return x; }\n");}
+        text.push_str("}\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        // Ensure EDG did not flatten the generated nest before the decoder.
+        assert!(compiled.il.statements.iter().any(|s|
+            s.path.split('.').filter(|part|*part=="then").count()>=n-1));
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_DEEP_NATIVE_FP_STMT_OBJECT") {
             std::fs::write(path,object).unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
