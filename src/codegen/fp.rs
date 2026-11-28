@@ -5085,6 +5085,33 @@ mod audit_resource_budget_tests {
     }
 
     #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_deep_fp_statement_decode() {
+        let dir=std::env::temp_dir().join(format!("edg-deep-fp-stmts-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("deep.c");
+        let n=96;
+        let mut text=String::from("extern double bump(double); double deep_branches(double x) {\n");
+        for i in 0..n {
+            text.push_str(&format!("if (x > {i}.0) {{\n"));
+        }
+        text.push_str("return bump(x);\n");
+        for _ in 0..n {text.push_str("} else { return x; }\n");}
+        text.push_str("}\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        // Ensure EDG did not flatten the generated nest before the decoder.
+        assert!(compiled.il.statements.iter().any(|s|
+            s.path.split('.').filter(|part|*part=="then").count()>=n-1));
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_DEEP_NATIVE_FP_STMT_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn deep_fp_expression_emission_preserves_calls_and_conditionals() {
         let ty=ScalarType::Float(FloatType::F64);
         let identity=ScalarFloatBody {
