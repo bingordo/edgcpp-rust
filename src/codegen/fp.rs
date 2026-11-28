@@ -33,7 +33,7 @@ struct FpScalarGlobal {
 }
 use cranelift_frontend::Variable;
 
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
 pub enum FloatType { F32,F64 }
 impl FloatType {
     fn machine(self)->cranelift_codegen::ir::Type {
@@ -42,7 +42,7 @@ impl FloatType {
 }
 /// Native scalar argument ABI classes; GPR and SSE registers are allocated
 /// independently by Cranelift's x86-64 SysV call-convention lowering.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash)]
 pub enum ScalarType {
     Float(FloatType),
     /// Only an automatic source-local whose address was actually taken.
@@ -2162,52 +2162,6 @@ fn checked_float_layout(bits:u8,bytes:u64,alignment:u64)->Result<FloatType,Codeg
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
     }
 }
-/// Only EDG-native *function* pointers are callable. Verify pointer
-/// layout, pointee role and actual prototype before accepting the ABI.
-fn function_pointer_type_from_edg(il:&Il,id:crate::TypeId)
-    ->Result<(crate::TypeId,crate::TypeId),CodegenError> {
-    let pointer=super::canonical_abi_type(il,id)?;
-    let ptr=il.types.iter().find(|t|t.id==pointer &&
-        super::semantic(4,t.kind)==5 && t.related_role==Some(1))
-        .ok_or_else(||reject("indirect FP call does not use a function pointer"))?;
-    let layout=il.type_object_sizes.iter().find(|x|x.owner==pointer)
-        .ok_or_else(||reject("indirect FP function pointer has no layout"))?;
-    if layout.bytes!=8 || layout.alignment!=8 {
-        return Err(reject("indirect FP function pointer has non-SysV layout"));
-    }
-    let target=super::canonical_abi_type(il,ptr.related.ok_or_else(||
-        reject("FP function pointer has no pointee type"))?)?;
-    if !il.types.iter().any(|t|t.id==target &&
-        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
-        return Err(reject("FP pointer does not point to a C routine prototype"));
-    }
-    let proto=il.function_signatures.iter().find(|p|p.owner==target)
-        .ok_or_else(||reject("indirect FP call lacks native prototype"))?;
-    if !proto.prototyped || proto.variadic {
-        return Err(reject("indirect FP unprototyped/variadic call unsupported"));
-    }
-    Ok((pointer,target))
-}
-/// A native 64-bit pointer to **unqualified standard C float/double**.
-/// Only a pointer to a scalar is accepted; arrays, function pointers,
-/// qualified pointees, void*, integers and pointer arithmetic remain rejected.
-fn fp_data_pointer_type_from_edg(
-    il:&Il,id:crate::TypeId,
-)->Result<FloatType,CodegenError> {
-    let pointer=super::canonical_abi_type(il,id)?;
-    let native=il.types.iter().find(|t|t.id==pointer &&
-        super::semantic(4,t.kind)==5 && t.related_role==Some(1))
-        .ok_or_else(||reject("FP memory formal is not a native C pointer"))?;
-    let size=il.type_object_sizes.iter().find(|t|t.owner==pointer)
-        .ok_or_else(||reject("FP memory pointer has no native layout"))?;
-    if size.bytes!=8 || size.alignment!=8 {
-        return Err(reject("FP data pointer does not have the x86-64 SysV layout"));
-    }
-    check_plain_fp_local(il,native.related.ok_or_else(||
-        reject("FP data pointer lacks pointee type"))?)?;
-    type_from_edg(il,native.related.ok_or_else(||
-        reject("FP memory pointer lacks native pointee"))?)
-}
 /// Resolve a direct checked pointer formal. No computed addresses, local
 /// pointer variables, casts or other memory provenance are accepted.
 /// Source-owned direct C data pointer variable, only a formal or a checked
@@ -2337,90 +2291,6 @@ fn source_fp_pointer_formal(
     Ok(n)
 }
 /// EDG may assign separate native type identities to a function designator
-/// and the pointee of a pointer-to-function, even when they have the same
-/// valid C prototype. Compare the *complete* source-verified scalar calling
-/// signature, never the numeric type-ID or only the argument count.
-fn source_callable_signature(
-    il:&Il,original:crate::TypeId,
-)->Result<(Vec<ScalarType>,ScalarType),CodegenError> {
-    let ty=super::canonical_abi_type(il,original)?;
-    let function_ty=if il.types.iter().any(|t|t.id==ty &&
-        super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
-        ty
-    } else {
-        let (_,fn_ty)=function_pointer_type_from_edg(il,ty)?;
-        fn_ty
-    };
-    let def=il.types.iter().find(|t|t.id==function_ty &&
-        super::semantic(4,t.kind)==2 && t.related_role==Some(3))
-        .ok_or_else(||reject("indirect designator is not a function prototype"))?;
-    let prototype=il.function_signatures.iter().find(|p|p.owner==function_ty)
-        .ok_or_else(||reject("indirect designator has no prototype metadata"))?;
-    if !prototype.prototyped || prototype.variadic {
-        return Err(reject("indirect designator is variadic/unprototyped"));
-    }
-    let ret_ty=def.related.ok_or_else(||
-        reject("indirect function has no native return type"))?;
-    if function_pointer_type_from_edg(il,ret_ty).is_ok() {
-        return Err(reject("nested pointer result is not a supported callable ABI"));
-    }
-    let returned=scalar_type_from_edg(il,ret_ty)?;
-    let mut declared:Vec<_>=il.type_parameters.iter()
-        .filter(|p|p.owner==function_ty).collect();
-    declared.sort_by_key(|p|p.position);
-    if u32::try_from(declared.len()).is_err() || declared.iter().enumerate()
-        .any(|(n,p)|p.position!=n as u32) {
-        return Err(reject("indirect function prototype has invalid positions"));
-    }
-    if declared.iter().any(|p|function_pointer_type_from_edg(il,p.ty).is_ok()) {
-        return Err(reject("nested function-pointer parameter ABI unsupported"));
-    }
-    let parameters=declared.iter().map(|p|scalar_type_from_edg(il,p.ty))
-        .collect::<Result<Vec<_>,_>>()?;
-    Ok((parameters,returned))
-}
-/// Reject a nonstandard ABI class, unsupported integer width, or synthetic
-/// type before generating code. Only standard signed/unsigned 32/64 bit C
-/// integer formals and native F32/F64 values enter this first mixed ABI slice.
-fn scalar_type_from_edg(il:&Il,id:crate::TypeId)
-    ->Result<ScalarType,CodegenError> {
-    if let Ok(t)=type_from_edg(il,id) {return Ok(ScalarType::Float(t));}
-    let canonical=super::canonical_abi_type(il,id)?;
-    if let Ok((pointer,_))=function_pointer_type_from_edg(il,canonical) {
-        // EDG can assign distinct native type IDs to structurally
-        // equivalent function pointers (e.g. a formal and an automatic
-        // local). Normalize *only* complete, nonvariadic, exact scalar
-        // callable prototypes so SSA copies/calls use the same identity.
-        // A data pointer, nested callback ABI or unknown type never aliases.
-        let signature=source_callable_signature(il,pointer)?;
-        let mut representative=pointer;
-        for ty in &il.types {
-            if ty.id.0>=representative.0 ||
-               super::semantic(4,ty.kind)!=5 ||
-               ty.related_role!=Some(1) {
-                continue;
-            }
-            if function_pointer_type_from_edg(il,ty.id).is_ok() &&
-                source_callable_signature(il,ty.id).ok()==Some(signature.clone()) {
-                representative=ty.id;
-            }
-        }
-        return Ok(ScalarType::FunctionPointer(representative));
-    }
-    if let Ok(t)=fp_data_pointer_type_from_edg(il,canonical) {
-        return Ok(ScalarType::DataPointer(t));
-    }
-    let info=il.c_integer_types.iter().find(|x|x.id==canonical)
-        .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
-    let layout=il.type_object_sizes.iter().find(|x|x.owner==canonical)
-        .ok_or_else(||reject("mixed INTEGER formal lacks native size/alignment"))?;
-    if info.is_bool || !matches!(info.bits,32|64) ||
-        layout.bytes!=u64::from(info.bits/8) ||
-        layout.alignment!=u64::from(info.bits/8) {
-        return Err(reject("unsupported mixed integer width or alignment"));
-    }
-    Ok(ScalarType::Int {bits:info.bits,signed:info.signed})
-}
 /// Only an unmodified EDG formal or automatic local can provide a callable
 /// pointer SSA value; aliases, casts, data-pointer coercions and memory loads
 /// require a separate provenance and lifetime model.
@@ -2538,13 +2408,15 @@ fn index_exact<K:std::hash::Hash+Eq,V>(
 }
 type NativeFpSignature=(Vec<ScalarType>,ScalarType);
 struct FpMetadata<'a> {
-    il:&'a Il,
     scalar:NativeTypeCache<ScalarType>,
     float:NativeTypeCache<FloatType>,
     data_pointer:NativeTypeCache<FloatType>,
     function_pointer:NativeTypeCache<(crate::TypeId,crate::TypeId)>,
     canonical:NativeTypeCache<crate::TypeId>,
     signatures:NativeTypeCache<NativeFpSignature>,
+    // Built only if the source actually uses a callable pointer.
+    callable_representatives:std::cell::OnceCell<HashMap<NativeFpSignature,crate::TypeId>>,
+    details:HashMap<crate::TypeId,&'a crate::TypeDetail>,
     plain:NativeTypeCache<()>,
     routine_symbols:HashMap<crate::SymbolId,&'a crate::Symbol>,
     variable_symbols:HashMap<crate::SymbolId,&'a str>,
@@ -2570,9 +2442,10 @@ struct FpMetadata<'a> {
 impl<'a> FpMetadata<'a> {
     fn new(il:&'a Il)->Self {
         let mut m=Self {
-            il,scalar:Default::default(),float:Default::default(),
+            scalar:Default::default(),float:Default::default(),
             data_pointer:Default::default(),function_pointer:Default::default(),
             canonical:Default::default(),signatures:Default::default(),plain:Default::default(),
+            callable_representatives:Default::default(),details:HashMap::new(),
             routine_symbols:HashMap::new(),symbol_types:HashMap::new(),types:HashMap::new(),
             variable_symbols:HashMap::new(),global_variables:HashMap::new(),
             global_initializers:HashMap::new(),static_locals:Default::default(),
@@ -2588,6 +2461,7 @@ impl<'a> FpMetadata<'a> {
         }
         for ty in &il.symbol_types {m.symbol_types.entry(ty.symbol).or_insert(ty.ty);}
         for ty in &il.types {m.types.entry(ty.id).or_insert(ty);}
+        for detail in &il.type_details {m.details.entry(detail.owner).or_insert(detail);}
         for ty in &il.c_float_types {m.float_types.entry(ty.id).or_insert(ty);}
         for ty in &il.c_integer_types {m.integer_types.entry(ty.id).or_insert(ty);}
         for layout in &il.type_object_sizes {m.layouts.entry(layout.owner).or_insert(layout);}
@@ -2639,7 +2513,41 @@ impl<'a> FpMetadata<'a> {
         Ok(image)
     }
     fn scalar(&self,id:crate::TypeId)->Result<ScalarType,CodegenError> {
-        cached_native_type(&self.scalar,id,||scalar_type_from_edg(self.il,id))
+        cached_native_type(&self.scalar,id,||{
+            if let Ok(t)=self.float(id) {return Ok(ScalarType::Float(t));}
+            let canonical=self.canonical(id)?;
+            if let Ok((pointer,target))=self.function_pointer(canonical) {
+                // Validate the complete scalar signature before normalizing.
+                // The signature decoder excludes nested callable classes,
+                // so building the representative table cannot re-enter it.
+                let signature=self.signature(target)?;
+                let representatives=self.callable_representatives.get_or_init(||{
+                    let mut representatives=HashMap::<NativeFpSignature,crate::TypeId>::new();
+                    for ty in self.types.values() {
+                        if super::semantic(4,ty.kind)!=5 || ty.related_role!=Some(1) {continue;}
+                        let Ok((candidate,target))=self.function_pointer(ty.id) else {continue;};
+                        let Ok(signature)=self.signature(target) else {continue;};
+                        representatives.entry(signature).and_modify(|old|{
+                            if candidate.0<old.0 {*old=candidate;}
+                        }).or_insert(candidate);
+                    }
+                    representatives
+                });
+                let representative=representatives.get(&signature).copied().unwrap_or(pointer);
+                return Ok(ScalarType::FunctionPointer(representative));
+            }
+            if let Ok(t)=self.data_pointer(canonical) {return Ok(ScalarType::DataPointer(t));}
+            let info=self.integer_types.get(&canonical)
+                .ok_or_else(||reject("unsupported mixed scalar parameter ABI type"))?;
+            let layout=self.layouts.get(&canonical)
+                .ok_or_else(||reject("mixed INTEGER formal lacks native size/alignment"))?;
+            if info.is_bool || !matches!(info.bits,32|64) ||
+                layout.bytes!=u64::from(info.bits/8) ||
+                layout.alignment!=u64::from(info.bits/8) {
+                return Err(reject("unsupported mixed integer width or alignment"));
+            }
+            Ok(ScalarType::Int {bits:info.bits,signed:info.signed})
+        })
     }
     fn float(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
         cached_native_type(&self.float,id,||{
@@ -2652,10 +2560,45 @@ impl<'a> FpMetadata<'a> {
         })
     }
     fn data_pointer(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
-        cached_native_type(&self.data_pointer,id,||fp_data_pointer_type_from_edg(self.il,id))
+        cached_native_type(&self.data_pointer,id,||{
+            let pointer=self.canonical(id)?;
+            let native=self.types.get(&pointer).filter(|t|
+                super::semantic(4,t.kind)==5 && t.related_role==Some(1))
+                .ok_or_else(||reject("FP memory formal is not a native C pointer"))?;
+            let size=self.layouts.get(&pointer)
+                .ok_or_else(||reject("FP memory pointer has no native layout"))?;
+            if size.bytes!=8 || size.alignment!=8 {
+                return Err(reject("FP data pointer does not have the x86-64 SysV layout"));
+            }
+            let pointee=native.related.ok_or_else(||reject("FP data pointer lacks pointee type"))?;
+            self.plain(pointee)?;
+            self.float(pointee)
+        })
     }
     fn function_pointer(&self,id:crate::TypeId)->Result<(crate::TypeId,crate::TypeId),CodegenError> {
-        cached_native_type(&self.function_pointer,id,||function_pointer_type_from_edg(self.il,id))
+        cached_native_type(&self.function_pointer,id,||{
+            let pointer=self.canonical(id)?;
+            let ptr=self.types.get(&pointer).filter(|t|
+                super::semantic(4,t.kind)==5 && t.related_role==Some(1))
+                .ok_or_else(||reject("indirect FP call does not use a function pointer"))?;
+            let layout=self.layouts.get(&pointer)
+                .ok_or_else(||reject("indirect FP function pointer has no layout"))?;
+            if layout.bytes!=8 || layout.alignment!=8 {
+                return Err(reject("indirect FP function pointer has non-SysV layout"));
+            }
+            let target=self.canonical(ptr.related.ok_or_else(||
+                reject("FP function pointer has no pointee type"))?)?;
+            if !self.types.get(&target).is_some_and(|t|
+                super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+                return Err(reject("FP pointer does not point to a C routine prototype"));
+            }
+            let proto=self.prototypes.get(&target)
+                .ok_or_else(||reject("indirect FP call lacks native prototype"))?;
+            if !proto.prototyped || proto.variadic {
+                return Err(reject("indirect FP unprototyped/variadic call unsupported"));
+            }
+            Ok((pointer,target))
+        })
     }
     fn canonical(&self,id:crate::TypeId)->Result<crate::TypeId,CodegenError> {
         cached_native_type(&self.canonical,id,||{
@@ -2673,10 +2616,55 @@ impl<'a> FpMetadata<'a> {
         })
     }
     fn signature(&self,id:crate::TypeId)->Result<NativeFpSignature,CodegenError> {
-        cached_native_type(&self.signatures,id,||source_callable_signature(self.il,id))
+        let ty=self.canonical(id)?;
+        let function_ty=if self.types.get(&ty).is_some_and(|t|
+            super::semantic(4,t.kind)==2 && t.related_role==Some(3)) {
+            ty
+        } else {
+            self.function_pointer(ty)?.1
+        };
+        cached_native_type(&self.signatures,function_ty,||{
+            let def=self.types.get(&function_ty).filter(|t|
+                super::semantic(4,t.kind)==2 && t.related_role==Some(3))
+                .ok_or_else(||reject("indirect designator is not a function prototype"))?;
+            let prototype=self.prototypes.get(&function_ty)
+                .ok_or_else(||reject("indirect designator has no prototype metadata"))?;
+            if !prototype.prototyped || prototype.variadic {
+                return Err(reject("indirect designator is variadic/unprototyped"));
+            }
+            let ret_ty=def.related.ok_or_else(||reject("indirect function has no native return type"))?;
+            if self.function_pointer(ret_ty).is_ok() {
+                return Err(reject("nested pointer result is not a supported callable ABI"));
+            }
+            let returned=self.scalar(ret_ty)?;
+            let declared=self.parameters(function_ty);
+            if u32::try_from(declared.len()).is_err() || declared.iter().enumerate()
+                .any(|(n,p)|p.position!=n as u32) {
+                return Err(reject("indirect function prototype has invalid positions"));
+            }
+            if declared.iter().any(|p|self.function_pointer(p.ty).is_ok()) {
+                return Err(reject("nested function-pointer parameter ABI unsupported"));
+            }
+            let parameters=declared.iter().map(|p|self.scalar(p.ty)).collect::<Result<Vec<_>,_>>()?;
+            Ok((parameters,returned))
+        })
     }
     fn plain(&self,id:crate::TypeId)->Result<(),CodegenError> {
-        cached_native_type(&self.plain,id,||check_plain_fp_local(self.il,id))
+        cached_native_type(&self.plain,id,||{
+            let mut ty=id;
+            for _ in 0..=self.types.len() {
+                if let Some(detail)=self.details.get(&ty) {
+                    if detail.is_reference || detail.is_rvalue_reference ||
+                        detail.qualifiers.unwrap_or(0)!=0 {
+                        return Err(reject("qualified/reference FP local needs memory effects"));
+                    }
+                }
+                let t=self.types.get(&ty).ok_or_else(||reject("missing native FP local type"))?;
+                if super::semantic(4,t.kind)!=3 {return Ok(());}
+                ty=t.related.ok_or_else(||reject("unresolved FP local type alias"))?;
+            }
+            Err(reject("cyclic FP local type aliases"))
+        })
     }
     fn parameters(&self,id:crate::TypeId)->&[&'a crate::TypeParameter] {
         self.parameters.get(&id).map(Vec::as_slice).unwrap_or(&[])
@@ -5484,6 +5472,49 @@ mod audit_resource_budget_tests {
         malformed.global_variables.push(global);
         assert!(FpMetadata::new(&malformed).global(global.symbol).is_err());
         assert!(source_fp_global(&malformed,global.symbol).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_fp_callable_signature_index() {
+        let dir=std::env::temp_dir().join(format!("edg-fp-callable-index-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("callbacks.c");
+        let mut text=String::from("typedef double (*same_a)(double); typedef double (*same_b)(double);\n");
+        for n in 1..=32 {
+            let params=std::iter::repeat("double").take(n).collect::<Vec<_>>().join(",");
+            let args=std::iter::repeat("x").take(n).collect::<Vec<_>>().join(",");
+            text.push_str(&format!("double callback_{n}(double (*p)({params}), double x) {{ return p({args}); }}\n"));
+        }
+        text.push_str("double callback_copy(same_a p, double x) { same_b q = p; return q(x); }\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let metadata=FpMetadata::new(&compiled.il);
+        let mut checked=0;
+        for ty in &compiled.il.types {
+            if super::semantic(4,ty.kind)!=5 || ty.related_role!=Some(1) {continue;}
+            let Ok((pointer,target))=metadata.function_pointer(ty.id) else {continue;};
+            let Ok(signature)=metadata.signature(target) else {continue;};
+            let ScalarType::FunctionPointer(representative)=metadata.scalar(pointer).unwrap() else {
+                panic!("checked callable did not classify as function pointer");
+            };
+            assert_eq!(metadata.signature(representative).unwrap(),signature);
+            assert!(representative.0<=pointer.0);
+            checked+=1;
+        }
+        assert!(checked>=32);
+        let table=metadata.callable_representatives.get().unwrap();
+        assert!(table.len()>=32);
+        for ty in &compiled.il.types {
+            let Ok((pointer,target))=metadata.function_pointer(ty.id) else {continue;};
+            let Ok(signature)=metadata.signature(target) else {continue;};
+            assert!(table[&signature].0<=pointer.0);
+        }
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        if let Some(path)=std::env::var_os("EDG_FP_CALLABLE_INDEX_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
