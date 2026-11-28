@@ -1832,9 +1832,16 @@ pub fn emit_float_bodies(functions:&[FloatBodyFunction])
 /// ordinary imported-function ABI path without verified special semantics.
 fn safe_scalar_external_name(name:&str)->bool {
     let b=name.as_bytes();
-    !b.is_empty() && b.len()<=256 && !name.starts_with("__") &&
+    !b.is_empty() && !name.starts_with("__") &&
     (b[0].is_ascii_alphabetic()||b[0]==b'_') &&
     b[1..].iter().all(|c|c.is_ascii_alphanumeric()||*c==b'_')
+}
+/// References actually needed by one function. Keep these borrowed from the
+/// validated body rather than declaring every module symbol in every function.
+#[derive(Default)]
+struct FpReferences<'a> {
+    functions:std::collections::HashSet<&'a str>,
+    globals:std::collections::HashSet<crate::SymbolId>,
 }
 /// Prevalidate all source-authorized external prototypes before ELF emission.
 fn validate_fp_calls_stmts<'a>(
@@ -1842,7 +1849,7 @@ fn validate_fp_calls_stmts<'a>(
     declarations:&HashMap<String,(Vec<ScalarType>,ScalarType)>,
     imports:&mut HashMap<String,(Vec<ScalarType>,ScalarType)>,
     source_imports:bool,
-)->Result<(),CodegenError> {
+)->Result<FpReferences<'a>,CodegenError> {
     // Explicit worklist preserves preorder validation, including the source
     // order of external prototype conflicts. No recursive Rust stack use.
     enum Task<'a> {
@@ -1850,6 +1857,7 @@ fn validate_fp_calls_stmts<'a>(
         Cond(&'a FloatCondition),
         Stmts(&'a [FloatStmt]),
     }
+    let mut references=FpReferences::default();
     let mut pending=vec![Task::Stmts(stmts)];
     fn push_args<'a>(pending:&mut Vec<Task<'a>>,args:&'a [ScalarCallArg]) {
         for arg in args.iter().rev() {
@@ -1871,6 +1879,7 @@ fn validate_fp_calls_stmts<'a>(
                         arguments.len()!=parameters.len() {
                         return Err(reject("FP direct call signature differs from defined routine"));
                     }
+                    references.functions.insert(callee.as_str());
                     push_args(&mut pending,arguments);
                 }
                 FloatExpr::CallExternal {callee,parameters,return_type,arguments}=>{
@@ -1886,6 +1895,7 @@ fn validate_fp_calls_stmts<'a>(
                             return Err(reject("conflicting native FP external-call prototypes"));
                         }
                     } else {imports.insert(callee.clone(),sig);}
+                    references.functions.insert(callee.as_str());
                     push_args(&mut pending,arguments);
                 }
                 FloatExpr::CallIndirect {arguments,..}=>push_args(&mut pending,arguments),
@@ -1900,9 +1910,10 @@ fn validate_fp_calls_stmts<'a>(
                     pending.push(Task::Expr(b));
                     pending.push(Task::Expr(a));
                 }
+                FloatExpr::ExternalGlobal {symbol,..}=>{references.globals.insert(*symbol);}
                 FloatExpr::Parameter(_)|FloatExpr::IntegerParameterCast {..}|
                 FloatExpr::IntegerConstantCast {..}|FloatExpr::IntegerLocalCast {..}|
-                FloatExpr::Local(_)|FloatExpr::ExternalGlobal {..}|
+                FloatExpr::Local(_)|
                 FloatExpr::LoadPointerParameter {..}|FloatExpr::LoadPointerLocal {..}|
                 FloatExpr::LoadIndexed {..}|
                 FloatExpr::Constant32(_)|FloatExpr::Constant64(_)=>{},
@@ -1913,7 +1924,10 @@ fn validate_fp_calls_stmts<'a>(
                 match stmt {
                     FloatStmt::Assign(_,e)|FloatStmt::Return(e)|
                     FloatStmt::ReturnInteger(e,_)=>pending.push(Task::Expr(e)),
-                    FloatStmt::StoreGlobal {value,..}|
+                    FloatStmt::StoreGlobal {symbol,value,..}=>{
+                        references.globals.insert(*symbol);
+                        pending.push(Task::Expr(value));
+                    }
                     FloatStmt::StorePointerParameter {value,..}|
                     FloatStmt::StorePointerLocal {value,..}|
                     FloatStmt::StoreIndexed {value,..}=>pending.push(Task::Expr(value)),
@@ -1955,7 +1969,7 @@ fn validate_fp_calls_stmts<'a>(
             }
         }
     }
-    Ok(())
+    Ok(references)
 }
 fn emit_scalar_float_bodies(functions:&[ScalarFloatBody])
     ->Result<Vec<u8>,CodegenError> {
@@ -2031,20 +2045,21 @@ fn emit_scalar_float_bodies_with_globals(
         }
     }
     let mut imports=HashMap::new();
+    let mut references=Vec::with_capacity(functions.len());
     for f in functions {
-        validate_fp_calls_stmts(&f.statements,&declared,&mut imports,
-            source_imports)?;
+        references.push(validate_fp_calls_stmts(&f.statements,&declared,&mut imports,
+            source_imports)?);
     }
     // Every import has been checked against actual EDG callsites, target
     // classes and local definitions; no unknown extern is silently emitted.
-    let mut import_ids=Vec::new();
+    let mut function_ids=HashMap::new();
     for (name,(params,ret)) in &imports {
         let mut sig=module.make_signature();
         for ty in params {sig.params.push(AbiParam::new(ty.machine()));}
         sig.returns.push(AbiParam::new(ret.machine()));
         let id=module.declare_function(name,Linkage::Import,&sig)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
-        import_ids.push((name.clone(),id));
+        function_ids.insert(name.as_str(),id);
     }
     let mut exports=Vec::new();
     for f in functions {
@@ -2066,27 +2081,32 @@ fn emit_scalar_float_bodies_with_globals(
         let id=module.declare_function(&f.name,Linkage::Export,&sig)
             .map_err(|e|CodegenError::Backend(e.to_string()))?;
         exports.push(id);
+        function_ids.insert(f.name.as_str(),id);
     }
-    for (f,id) in functions.iter().zip(exports.iter().copied()) {
+    for ((f,id),used) in functions.iter().zip(exports.iter().copied()).zip(references) {
         let mut ctx=module.make_context();
         for ty in &f.parameters {
             ctx.func.signature.params.push(AbiParam::new(ty.machine()));
         }
         ctx.func.signature.returns.push(AbiParam::new(f.result.machine()));
-        // Import every definition before lowering its body; this supports
-        // forward calls and checked recursive direct calls.
-        let mut refs=HashMap::new();
-        for (other,other_id) in functions.iter().zip(&exports) {
-            let reference=module.declare_func_in_func(*other_id,&mut ctx.func);
-            refs.insert(other.name.clone(),reference);
+        // Module declarations are complete, so forward and recursive calls
+        // still resolve. Per-function declarations scale with actual uses.
+        let mut names:Vec<_>=used.functions.into_iter().collect();
+        names.sort_unstable();
+        let mut refs=HashMap::with_capacity(names.len());
+        for name in names {
+            let id=*function_ids.get(name)
+                .ok_or_else(||reject("missing validated FP routine declaration"))?;
+            refs.insert(name.to_owned(),module.declare_func_in_func(id,&mut ctx.func));
         }
-        for (name,id) in &import_ids {
-            let reference=module.declare_func_in_func(*id,&mut ctx.func);
-            refs.insert(name.clone(),reference);
+        let mut symbols:Vec<_>=used.globals.into_iter().collect();
+        symbols.sort_unstable_by_key(|symbol|symbol.0);
+        let mut global_refs=FpGlobalRefs::with_capacity(symbols.len());
+        for symbol in symbols {
+            let (id,ty)=*global_ids.get(&symbol)
+                .ok_or_else(||reject("missing validated FP data declaration"))?;
+            global_refs.insert(symbol,(module.declare_data_in_func(id,&mut ctx.func),ty));
         }
-        let global_refs:FpGlobalRefs=global_ids.iter().map(|(symbol,(id,ty))|
-            (*symbol,(module.declare_data_in_func(*id,&mut ctx.func),*ty)))
-            .collect();
         let mut fctx=FunctionBuilderContext::new();
         {
             let mut fb=FunctionBuilder::new(&mut ctx.func,&mut fctx);
@@ -5245,6 +5265,45 @@ mod audit_resource_budget_tests {
         assert_eq!(expression_type(&conditional,&[],&[ty,ty]).unwrap(),FloatType::F64);
         assert!(check_local_reads(&conditional,&[true,false]).is_err());
         assert!(expression_type(&conditional,&[],&[ty,ScalarType::Float(FloatType::F32)]).is_err());
+    }
+
+    #[test]
+    fn fp_reference_sets_only_include_used_symbols() {
+        let t=FloatType::F64;
+        let ty=ScalarType::Float(t);
+        let long_name="external_".to_owned()+&"x".repeat(4096);
+        let global=crate::SymbolId(7);
+        let other=crate::SymbolId(8);
+        let call=||FloatExpr::CallExternal {
+            callee:long_name.clone(),parameters:vec![ty],return_type:t,
+            arguments:vec![ScalarCallArg::Float(FloatExpr::ExternalGlobal {symbol:global,ty:t})],
+        };
+        let body=vec![FloatStmt::StoreGlobal {symbol:other,ty:t,value:call()},
+            FloatStmt::Return(call())];
+        let mut declared=HashMap::new();
+        for i in 0..1024 {
+            declared.insert(format!("unused_{i}"),(vec![],ty));
+        }
+        let mut imports=HashMap::new();
+        let used=validate_fp_calls_stmts(&body,&declared,&mut imports,true).unwrap();
+        assert_eq!(used.functions.len(),1);
+        assert!(used.functions.contains(long_name.as_str()));
+        assert_eq!(used.globals.len(),2);
+        assert!(used.globals.contains(&global)&&used.globals.contains(&other));
+        assert_eq!(imports.len(),1);
+        assert!(!safe_scalar_external_name("__builtin_test"));
+        assert!(!safe_scalar_external_name("a-b"));
+        let f=ScalarFloatBody {
+            name:"reference_test".into(),parameters:vec![],result:ty,
+            locals:vec![],statements:body,
+        };
+        let globals=[FpScalarGlobal {symbol:global,name:"load_data".into(),ty:t,
+            linkage:Linkage::Import,initializer:None},
+            FpScalarGlobal {symbol:other,name:"store_data".into(),ty:t,
+            linkage:Linkage::Export,initializer:None}];
+        let object=emit_scalar_float_bodies_with_globals(&[f],true,&globals).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        assert!(object.windows(long_name.len()).any(|w|w==long_name.as_bytes()));
     }
 
     #[test]
