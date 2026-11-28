@@ -2570,19 +2570,35 @@ fn source_fp_integer_arg(
             ScalarCallArg::IntegerConstant {bits,ty}),
     }
 }
-fn expression_from_edg(
-    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,depth:usize,
-)->Result<FloatExpr,CodegenError> {
-    if depth>64 {return Err(reject("native EDG FP expression too deep"));}
+type NativeExprId=crate::graph::ExpressionId;
+enum NativeFpArg {
+    Float(NativeExprId),
+    Integer(ScalarCallArg),
+}
+enum NativeFpCall {
+    Named(String,bool),
+    Indirect(PointerSource,crate::TypeId),
+}
+enum NativeFpPlan {
+    Leaf(FloatExpr),
+    Unary(u32,NativeExprId),
+    Binary(u32,NativeExprId,NativeExprId),
+    Conditional(NativeExprId,NativeExprId,NativeExprId),
+    Call(NativeFpCall,Vec<ScalarType>,Vec<NativeFpArg>),
+}
+enum NativeFpCondition {
+    Truth(NativeExprId,bool),
+    Compare(FloatPredicate,NativeExprId,NativeExprId),
+}
+fn native_fp_plan(
+    ctx:&FpSourceCtx<'_>,id:NativeExprId,
+)->Result<(FloatType,NativeFpPlan),CodegenError> {
     let node=ctx.graph.expression(id)
         .ok_or_else(||reject("missing EDG FP expression"))?;
     let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
-    if let Some(site)=ctx.graph.calls.iter().find(|site|
-        site.function==node.data.function &&
-        site.statement_path==node.data.statement_path &&
-        site.path==node.data.path) {
+    if let Some(site)=ctx.graph.call_at(id) {
         if site.first_argument!=1 || node.operands.is_empty() {
             return Err(reject("FP direct call has unsupported implicit/member arguments"));
         }
@@ -2675,19 +2691,14 @@ fn expression_from_edg(
             declared.len()!=node.operands.len()-1 {
             return Err(reject("FP direct call argument count/position mismatch"));
         }
+
         let mut parameters=Vec::with_capacity(declared.len());
         let mut arguments=Vec::with_capacity(declared.len());
         for (param,&operand) in declared.iter().zip(&node.operands[1..]) {
             let target=scalar_type_from_edg(ctx.il,param.ty)?;
             let value=match target {
-                ScalarType::Float(t)=>{
-                    let e=expression_from_edg(ctx,operand,depth+1)?;
-                    if expression_type(&e,ctx.param_types,ctx.local_types)?!=t {
-                        return Err(reject("FP direct argument has unconverted type"));
-                    }
-                    ScalarCallArg::Float(e)
-                }
-                ScalarType::Int {..}=>source_fp_integer_arg(ctx,operand,target)?,
+                ScalarType::Float(_)=>NativeFpArg::Float(operand),
+                ScalarType::Int {..}=>NativeFpArg::Integer(source_fp_integer_arg(ctx,operand,target)?),
                 ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
                 ScalarType::StackFloat(_)=>return Err(reject(
                     "passing pointer arguments needs a separate typed call contract")),
@@ -2695,26 +2706,18 @@ fn expression_from_edg(
             parameters.push(target);
             arguments.push(value);
         }
-        return if let Some(callee)=callee_name {
-            if external_callee {
-                Ok(FloatExpr::CallExternal {
-                    callee,parameters,return_type:ty,arguments,
-                })
-            } else {
-                Ok(FloatExpr::Call {
-                    callee,parameters,return_type:ty,arguments,
-                })
-            }
+        let callee=if let Some(name)=callee_name {
+            NativeFpCall::Named(name,external_callee)
         } else {
-            Ok(FloatExpr::CallIndirect {
-                pointer:pointer_source.ok_or_else(||
-                    reject("FP indirect pointer source was not resolved"))?,
-                pointer_type:pointer_type.ok_or_else(||
-                    reject("FP indirect pointer type was not resolved"))?,
-                parameters,return_type:ty,arguments,
-            })
+            NativeFpCall::Indirect(
+                pointer_source.ok_or_else(||reject("FP indirect pointer source was not resolved"))?,
+                pointer_type.ok_or_else(||reject("FP indirect pointer type was not resolved"))?,
+            )
         };
+        return Ok((ty,NativeFpPlan::Call(callee,parameters,arguments)));
     }
+    // Leaf cases retain their exact native identity and type checks.
+    let leaf=(||->Result<Option<FloatExpr>,CodegenError> {
     if node.data.constant_kind.is_some() {
         if !node.operands.is_empty() || node.data.symbol_id.is_some() {
             return Err(reject("FP constant cannot carry operands or symbol identity"));
@@ -2731,13 +2734,13 @@ fn expression_from_edg(
         if Some(exact.ty)!=node.data.type_id {
             return Err(reject("EDG FP literal native type identity mismatch"));
         }
-        return match (ty,exact.width) {
+        return (match (ty,exact.width) {
             (FloatType::F32,32)=>
                 Ok(FloatExpr::Constant32(exact.bits as u32)),
             (FloatType::F64,64)=>
                 Ok(FloatExpr::Constant64(exact.bits)),
             _=>Err(reject("EDG FP literal width/source type mismatch")),
-        };
+        }).map(Some);
     }
     if kind==2 && node.operands.is_empty() {
         let symbol=node.data.symbol_id
@@ -2746,14 +2749,14 @@ fn expression_from_edg(
             if ctx.param_types[i]!=ScalarType::Float(ty) {
                 return Err(reject("FP formal rvalue type mismatch"));
             }
-            return Ok(FloatExpr::Parameter(i));
+            return Ok(Some(FloatExpr::Parameter(i)));
         }
         if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
             if !matches!(ctx.local_types[i],
                 ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
                 return Err(reject("FP local rvalue type mismatch"));
             }
-            return Ok(FloatExpr::Local(i));
+            return Ok(Some(FloatExpr::Local(i)));
         }
         if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
             let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
@@ -2762,7 +2765,7 @@ fn expression_from_edg(
                     ScalarType::Float(actual) {
                 return Err(reject("FP external global source expression type mismatch"));
             }
-            return Ok(FloatExpr::ExternalGlobal {symbol,ty});
+            return Ok(Some(FloatExpr::ExternalGlobal {symbol,ty}));
         }
         return Err(reject("FP global/address-taken rvalue requires memory lowering"));
     }
@@ -2774,11 +2777,11 @@ fn expression_from_edg(
     // are *not* silently accepted as scalar floating point values.
     if op==45 && node.operands.len()==2 {
         let (pointer,index)=source_fp_subscript(ctx,id,ty)?;
-        return Ok(FloatExpr::LoadIndexed {pointer,index,ty});
+        return Ok(Some(FloatExpr::LoadIndexed {pointer,index,ty}));
     }
     if op==44 && node.operands.len()==1 {
         let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
-        return match source {
+        return (match source {
             PointerSource::Parameter(n)=>{
                 // Keep the older stricter formal check as a regression gate.
                 if source_fp_pointer_formal(ctx,node.operands[0],ty)?!=n {
@@ -2790,7 +2793,7 @@ fn expression_from_edg(
                 Ok(FloatExpr::LoadPointerLocal {local,ty}),
             PointerSource::AddressedLocal(local)=>
                 Ok(FloatExpr::Local(local)),
-        };
+        }).map(Some);
     }
     if node.operands.len()==1 && matches!(op,11|12|16) {
         let source=ctx.graph.expression(node.operands[0])
@@ -2799,84 +2802,35 @@ fn expression_from_edg(
             reject("integer-to-FP cast operand has no native type"))?;
         let from=scalar_type_from_edg(ctx.il,source_ty)?;
         if let ScalarType::Int {bits:32|64,..}=from {
-            return match source_fp_integer_value(ctx,node.operands[0],from)? {
+            return (match source_fp_integer_value(ctx,node.operands[0],from)? {
                 FpIntegerSource::Parameter(parameter)=>
                     Ok(FloatExpr::IntegerParameterCast {parameter,to:ty}),
                 FpIntegerSource::Local(local)=>
                     Ok(FloatExpr::IntegerLocalCast {local,to:ty}),
                 FpIntegerSource::Constant {bits,ty:source}=>
                     Ok(FloatExpr::IntegerConstantCast {bits,source,to:ty}),
-            };
+            }).map(Some);
         }
     }
-    let arg=|i:usize|->Result<FloatExpr,CodegenError> {
-        expression_from_edg(ctx,*node.operands.get(i)
-            .ok_or_else(||reject("missing native FP operand"))?,depth+1)
+        Ok(None)
+    })()?;
+    if let Some(expr)=leaf {return Ok((ty,NativeFpPlan::Leaf(expr)));}
+    let op=node.data.operator.map(|v|super::semantic(3,v))
+        .ok_or_else(||reject("missing native FP operation"))?;
+    let plan=match (op,node.operands.as_slice()) {
+        (25,[cond,yes,no])=>NativeFpPlan::Conditional(*cond,*yes,*no),
+        (25,_)=>return Err(reject("C FP conditional expression requires three operands")),
+        (4|11|12|16,[child])=>NativeFpPlan::Unary(op,*child),
+        (1|2|3|19,[left,right])=>NativeFpPlan::Binary(op,*left,*right),
+        (_ ,[_])=>return Err(reject(format!("unsupported unary EDG FP operator {op}"))),
+        (_ ,[_,_])=>return Err(reject(format!("unsupported binary EDG FP operator {op}"))),
+        _=>return Err(reject("unsupported native EDG FP operation arity")),
     };
-    let out=if op==25 {
-        // This is the source EDG conditional operator, not a speculative
-        // floating select or the integer backend's own expression kind.
-        if node.operands.len()!=3 {
-            return Err(reject("C FP conditional expression requires three operands"));
-        }
-        let condition=comparison_from_edg(ctx,node.operands[0])?;
-        FloatExpr::Conditional {
-            condition:Box::new(condition),
-            yes:Box::new(arg(1)?),
-            no:Box::new(arg(2)?),
-        }
-    } else if node.operands.len()==1 {
-        match op {
-            4=>FloatExpr::Neg(Box::new(arg(0)?)),
-            // All type changes must be introduced by actual EDG nodes.
-            11|12|16=>FloatExpr::Convert(ty,Box::new(arg(0)?)),
-            _=>return Err(reject(format!("unsupported unary EDG FP operator {op}"))),
-        }
-    } else if node.operands.len()==2 {
-        let x=Box::new(arg(0)?);
-        let y=Box::new(arg(1)?);
-        match op {
-            1=>FloatExpr::Add(x,y),
-            2=>FloatExpr::Sub(x,y),
-            3=>FloatExpr::Mul(x,y),
-            19=>FloatExpr::Div(x,y),
-            _=>return Err(reject(format!("unsupported binary EDG FP operator {op}"))),
-        }
-    } else {
-        return Err(reject("unsupported native EDG FP operation arity"));
-    };
-    if expression_type(&out,ctx.param_types,ctx.local_types)?!=ty {
-        return Err(reject("EDG FP expression result type differs from operands"));
-    }
-    Ok(out)
+    Ok((ty,plan))
 }
-/// A scalar C floating condition is true exactly when it is *nonzero*.
-/// Both +0.0 and -0.0 compare equal to zero; NaN is true because unordered
-/// comparisons satisfy C != (and false for the logical negation). Keep the
-/// source expression as F32/F64; never interpret a bool-cast as FP bit data.
-fn truthiness_from_edg(
-    ctx:&FpSourceCtx<'_>,source:crate::graph::ExpressionId,negated:bool,
-)->Result<FloatCondition,CodegenError> {
-    let left=expression_from_edg(ctx,source,0)?;
-    let ty=expression_type(&left,ctx.param_types,ctx.local_types)?;
-    let zero=match ty {
-        FloatType::F32=>FloatExpr::Constant32(0.0f32.to_bits()),
-        FloatType::F64=>FloatExpr::Constant64(0.0f64.to_bits()),
-    };
-    let cond=FloatCondition {
-        op:if negated {FloatPredicate::Eq} else {FloatPredicate::Ne},
-        left,right:zero,
-    };
-    check_condition(&cond,ctx.param_types,ctx.local_types,
-        &vec![true;ctx.local_types.len()])?;
-    Ok(cond)
-}
-/// A C floating-point comparison has an integer/bool result, but its
-/// operands must both have verified native FP widths. Never lower it by
-/// first interpreting the result as a floating-point expression.
-fn comparison_from_edg(
-    ctx:&FpSourceCtx<'_>,id:crate::graph::ExpressionId,
-)->Result<FloatCondition,CodegenError> {
+fn native_fp_condition(
+    ctx:&FpSourceCtx<'_>,id:NativeExprId,
+)->Result<NativeFpCondition,CodegenError> {
     let node=ctx.graph.expression(id).ok_or_else(||
         reject("missing EDG floating comparison"))?;
     // A direct FP-valued source expression is a legal C scalar condition.
@@ -2890,7 +2844,7 @@ fn comparison_from_edg(
     // strict expression decoder below rejects calls/side effects we do not
     // model, but all verified F32/F64 values have C scalar truthiness.
     if node.data.type_id.is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok()) {
-        return truthiness_from_edg(ctx,id,false);
+        return Ok(NativeFpCondition::Truth(id,false));
     }
     let boolean_kind=kind==3 &&
         node.data.type_id.and_then(|ty|
@@ -2900,7 +2854,7 @@ fn comparison_from_edg(
     if boolean_kind && node.data.constant_kind.is_none() &&
         node.operands.len()==1 {
         if operator==Some(17) {
-            return truthiness_from_edg(ctx,node.operands[0],false);
+            return Ok(NativeFpCondition::Truth(node.operands[0],false));
         }
         if operator==Some(28) {
             let operand=ctx.graph.expression(node.operands[0]).ok_or_else(||
@@ -2909,13 +2863,13 @@ fn comparison_from_edg(
                 .is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok());
             if direct && super::semantic(2,operand.data.kind)==2 &&
                 operand.operands.is_empty() {
-                return truthiness_from_edg(ctx,node.operands[0],true);
+                return Ok(NativeFpCondition::Truth(node.operands[0],true));
             }
             if super::semantic(2,operand.data.kind)==3 &&
                 operand.data.operator.is_some_and(|op|
                     super::semantic(3,op)==17) && operand.operands.len()==1 &&
                 operand.data.constant_kind.is_none() {
-                return truthiness_from_edg(ctx,operand.operands[0],true);
+                return Ok(NativeFpCondition::Truth(operand.operands[0],true));
             }
         }
     }
@@ -2944,12 +2898,186 @@ fn comparison_from_edg(
         Some(10)=>FloatPredicate::Ge,
         _=>return Err(reject("unsupported EDG FP comparison predicate")),
     };
-    let left=expression_from_edg(ctx,node.operands[0],0)?;
-    let right=expression_from_edg(ctx,node.operands[1],0)?;
-    let cond=FloatCondition {op,left,right};
-    check_condition(&cond,ctx.param_types,ctx.local_types,
-        &vec![true;ctx.local_types.len()])?;
-    Ok(cond)
+    Ok(NativeFpCondition::Compare(op,node.operands[0],node.operands[1]))
+}
+enum NativeFpValue {
+    Expr(FloatExpr,FloatType),
+    Cond(FloatCondition),
+}
+fn decode_native_fp(
+    ctx:&FpSourceCtx<'_>,id:NativeExprId,condition:bool,
+)->Result<NativeFpValue,CodegenError> {
+    enum Task {
+        Expr(NativeExprId),
+        Cond(NativeExprId),
+        Unary(u32,FloatType),
+        Binary(u32,FloatType),
+        Conditional(FloatType),
+        Truth(bool),
+        Compare(FloatPredicate),
+        Call(NativeFpCall,Vec<ScalarType>,Vec<NativeFpArg>,FloatType),
+    }
+    let mut pending=vec![if condition {Task::Cond(id)} else {Task::Expr(id)}];
+    let mut values=Vec::<NativeFpValue>::new();
+    let mut seen=std::collections::HashSet::new();
+    fn pop_expr(values:&mut Vec<NativeFpValue>)->(FloatExpr,FloatType) {
+        match values.pop().expect("decoded FP operand") {
+            NativeFpValue::Expr(e,t)=>(e,t),
+            NativeFpValue::Cond(_)=>unreachable!("expected FP operand"),
+        }
+    }
+    while let Some(task)=pending.pop() {
+        let result=match task {
+            Task::Expr(id)=>{
+                if !seen.insert(id) {return Err(reject("repeated native FP expression identity"));}
+                let (ty,plan)=native_fp_plan(ctx,id)?;
+                match plan {
+                    NativeFpPlan::Leaf(e)=>{
+                        if expression_leaf_type(&e,ctx.param_types,ctx.local_types)?!=ty {
+                            return Err(reject("EDG FP leaf type differs from native expression"));
+                        }
+                        NativeFpValue::Expr(e,ty)
+                    }
+                    NativeFpPlan::Unary(op,child)=>{
+                        pending.push(Task::Unary(op,ty));
+                        pending.push(Task::Expr(child));
+                        continue;
+                    }
+                    NativeFpPlan::Binary(op,a,b)=>{
+                        pending.push(Task::Binary(op,ty));
+                        pending.push(Task::Expr(b));
+                        pending.push(Task::Expr(a));
+                        continue;
+                    }
+                    NativeFpPlan::Conditional(c,y,n)=>{
+                        pending.push(Task::Conditional(ty));
+                        pending.push(Task::Expr(n));
+                        pending.push(Task::Expr(y));
+                        pending.push(Task::Cond(c));
+                        continue;
+                    }
+                    NativeFpPlan::Call(callee,params,args)=>{
+                        let operands=args.iter().rev().filter_map(|arg|match arg {
+                            NativeFpArg::Float(id)=>Some(*id),NativeFpArg::Integer(_)=>None,
+                        }).collect::<Vec<_>>();
+                        pending.push(Task::Call(callee,params,args,ty));
+                        pending.extend(operands.into_iter().map(Task::Expr));
+                        continue;
+                    }
+                }
+            }
+            Task::Cond(id)=>{
+                match native_fp_condition(ctx,id)? {
+                    NativeFpCondition::Truth(id,negated)=>{
+                        pending.push(Task::Truth(negated));
+                        pending.push(Task::Expr(id));
+                    }
+                    NativeFpCondition::Compare(op,a,b)=>{
+                        pending.push(Task::Compare(op));
+                        pending.push(Task::Expr(b));
+                        pending.push(Task::Expr(a));
+                    }
+                }
+                continue;
+            }
+            Task::Unary(op,ty)=>{
+                let (e,actual)=pop_expr(&mut values);
+                let e=if op==4 {
+                    if actual!=ty {return Err(reject("EDG FP expression result type differs from operands"));}
+                    FloatExpr::Neg(Box::new(e))
+                } else {FloatExpr::Convert(ty,Box::new(e))};
+                NativeFpValue::Expr(e,ty)
+            }
+            Task::Binary(op,ty)=>{
+                let (b,bt)=pop_expr(&mut values);
+                let (a,at)=pop_expr(&mut values);
+                if at!=ty || bt!=ty {return Err(reject("EDG FP expression result type differs from operands"));}
+                let (a,b)=(Box::new(a),Box::new(b));
+                let e=match op {
+                    1=>FloatExpr::Add(a,b),2=>FloatExpr::Sub(a,b),
+                    3=>FloatExpr::Mul(a,b),19=>FloatExpr::Div(a,b),
+                    _=>unreachable!(),
+                };
+                NativeFpValue::Expr(e,ty)
+            }
+            Task::Conditional(ty)=>{
+                let (no,nt)=pop_expr(&mut values);
+                let (yes,yt)=pop_expr(&mut values);
+                if yt!=ty || nt!=ty {return Err(reject("C FP conditional value arms lack native conversion"));}
+                let NativeFpValue::Cond(condition)=values.pop().expect("decoded condition") else {
+                    unreachable!("expected decoded condition");
+                };
+                NativeFpValue::Expr(FloatExpr::Conditional {
+                    condition:Box::new(condition),yes:Box::new(yes),no:Box::new(no),
+                },ty)
+            }
+            Task::Truth(negated)=>{
+                let (left,ty)=pop_expr(&mut values);
+                let right=match ty {
+                    FloatType::F32=>FloatExpr::Constant32(0),
+                    FloatType::F64=>FloatExpr::Constant64(0),
+                };
+                NativeFpValue::Cond(FloatCondition {
+                    op:if negated {FloatPredicate::Eq} else {FloatPredicate::Ne},left,right,
+                })
+            }
+            Task::Compare(op)=>{
+                let (right,rt)=pop_expr(&mut values);
+                let (left,lt)=pop_expr(&mut values);
+                if lt!=rt {return Err(reject("unconverted mixed FP comparison"));}
+                NativeFpValue::Cond(FloatCondition {op,left,right})
+            }
+            Task::Call(callee,parameters,args,ty)=>{
+                checked_scalar_passing_plan(&parameters,ScalarType::Float(ty))?;
+                let mut arguments=Vec::with_capacity(args.len());
+                for (arg,target) in args.into_iter().zip(&parameters).rev() {
+                    let value=match arg {
+                        NativeFpArg::Integer(arg)=>arg,
+                        NativeFpArg::Float(_)=>{
+                            let (e,actual)=pop_expr(&mut values);
+                            if ScalarType::Float(actual)!=*target {
+                                return Err(reject("FP direct argument has unconverted type"));
+                            }
+                            ScalarCallArg::Float(e)
+                        }
+                    };
+                    arguments.push(value);
+                }
+                arguments.reverse();
+                let e=match callee {
+                    NativeFpCall::Named(callee,true)=>FloatExpr::CallExternal {
+                        callee,parameters,return_type:ty,arguments,
+                    },
+                    NativeFpCall::Named(callee,false)=>FloatExpr::Call {
+                        callee,parameters,return_type:ty,arguments,
+                    },
+                    NativeFpCall::Indirect(pointer,pointer_type)=>FloatExpr::CallIndirect {
+                        pointer,pointer_type,parameters,return_type:ty,arguments,
+                    },
+                };
+                NativeFpValue::Expr(e,ty)
+            }
+        };
+        values.push(result);
+    }
+    debug_assert_eq!(values.len(),1);
+    Ok(values.pop().expect("decoded native root"))
+}
+fn expression_from_edg(
+    ctx:&FpSourceCtx<'_>,id:NativeExprId,
+)->Result<FloatExpr,CodegenError> {
+    match decode_native_fp(ctx,id,false)? {
+        NativeFpValue::Expr(e,_)=>Ok(e),
+        NativeFpValue::Cond(_)=>unreachable!(),
+    }
+}
+fn comparison_from_edg(
+    ctx:&FpSourceCtx<'_>,id:NativeExprId,
+)->Result<FloatCondition,CodegenError> {
+    match decode_native_fp(ctx,id,true)? {
+        NativeFpValue::Cond(c)=>Ok(c),
+        NativeFpValue::Expr(..)=>unreachable!(),
+    }
 }
 /// EDG typedef wrappers may conceal qualifiers. No ordinary SSA value may
 /// represent an observable volatile or atomic local, or a C++ reference.
@@ -3213,7 +3341,7 @@ fn lower_fp_body(
                 3=>{
                     let source=node.expression
                         .ok_or_else(||reject("FP local initializer has no expression"))?;
-                    expression_from_edg(ctx,source,0)?
+                    expression_from_edg(ctx,source)?
                 }
                 // EDG dik_constant: no expression exists, so use exactly the
                 // original constant's IEEE image, not a decimal conversion.
@@ -3270,7 +3398,7 @@ fn lower_fp_body(
                 let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                     reject("FP indexed assignment lacks native lvalue type"))?)?;
                 let (pointer,index)=source_fp_subscript(ctx,operation.operands[0],ty)?;
-                let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                let value=expression_from_edg(ctx,operation.operands[1])?;
                 if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                     return Err(reject("FP indexed store RHS missing native conversion"));
                 }
@@ -3285,7 +3413,7 @@ fn lower_fp_body(
                 let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                     reject("FP memory assignment lacks native lvalue type"))?)?;
                 let source=source_fp_data_pointer_value(ctx,left.operands[0],ty)?;
-                let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                let value=expression_from_edg(ctx,operation.operands[1])?;
                 if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                     return Err(reject("FP pointer store missing source conversion"));
                 }
@@ -3314,7 +3442,7 @@ fn lower_fp_body(
                         ScalarType::Float(ty) {
                         return Err(reject("FP global store ABI type mismatch"));
                     }
-                    let value=expression_from_edg(ctx,operation.operands[1],0)?;
+                    let value=expression_from_edg(ctx,operation.operands[1])?;
                     if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                         return Err(reject("FP global store RHS needs conversion"));
                     }
@@ -3351,7 +3479,7 @@ fn lower_fp_body(
                 output.push(FloatStmt::AssignInteger {local,source});
                 return Ok(());
             }
-            let value=expression_from_edg(ctx,operation.operands[1],0)?;
+            let value=expression_from_edg(ctx,operation.operands[1])?;
             output.push(FloatStmt::Assign(local,value));
         }
         1 if simple_children=>{
@@ -3362,7 +3490,7 @@ fn lower_fp_body(
                 reject("FP return expression has no native type"))?;
             match scalar_type_from_edg(ctx.il,ty)? {
                 ScalarType::Float(_)=>
-                    output.push(FloatStmt::Return(expression_from_edg(ctx,source,0)?)),
+                    output.push(FloatStmt::Return(expression_from_edg(ctx,source)?)),
                 result @ ScalarType::Int {..}=>{
                     // Exact INTEGER-valued indirect calls preserve RAX/EAX;
                     // they are not FP-to-int numeric conversions.
@@ -3383,7 +3511,7 @@ fn lower_fp_body(
                         return Err(reject("integer return requires EDG FP conversion node"));
                     }
                     let operand=native.operands[0];
-                    let value=expression_from_edg(ctx,operand,0)?;
+                    let value=expression_from_edg(ctx,operand)?;
                     output.push(FloatStmt::ReturnInteger(value,result));
                 }
                 ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)|
@@ -3460,7 +3588,7 @@ fn lower_integer_indirect_return(
     for (target,&operand) in parameters.iter().zip(&node.operands[1..]) {
         let value=match target {
             ScalarType::Float(t)=>{
-                let expr=expression_from_edg(ctx,operand,1)?;
+                let expr=expression_from_edg(ctx,operand)?;
                 if expression_type(&expr,ctx.param_types,ctx.local_types)?!=*t {
                     return Err(reject("INTEGER indirect FP argument needs source conversion"));
                 }
