@@ -1074,234 +1074,299 @@ struct FpFlow {
 /// path through the first body execution.
 fn check_fp_statements(
     stmts:&[FloatStmt],f:&ScalarFloatBody,entry:Vec<bool>,
-    loop_depth:usize,depth:usize,
 )->Result<FpFlow,CodegenError> {
-    if depth>64 {
-        return Err(reject("FP CFG exceeds statement depth limit"));
+    // Each continuation owns the exact predecessor facts until its child
+    // finishes. A sequence retains only its unvisited slice, not a copy of
+    // all sibling statements. Loop transfers are consumed at their own loop.
+    struct Frame<'a> {
+        tail:&'a [FloatStmt],
+        flow:FpFlow,
+        in_loop:bool,
     }
-    let mut flow=FpFlow {normal:Some(entry),..FpFlow::default()};
-    for stmt in stmts {
-        // Preserve fail-closed rejection of unreachable trailing statements.
-        let Some(mut defined)=flow.normal.take() else {
-            return Err(reject("unreachable trailing FP statement"));
-        };
-        let next;
-        match stmt {
-            FloatStmt::AssignInteger {local,source}=>{
-                let ty=*f.locals.get(*local).ok_or_else(||
-                    reject("INTEGER SSA assignment local is out of range"))?;
-                if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
-                    checked_fp_integer_source(source,&f.parameters,&f.locals)?!=ty {
-                    return Err(reject("INTEGER SSA assignment source class/sign differs"));
-                }
-                check_fp_integer_source_reads(source,&defined)?;
-                defined[*local]=true;
-                next=Some(defined);
-            }
-            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
-                if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP indexed store pointee type mismatch"));
-                }
-                checked_fp_index(index,&f.parameters,&f.locals)?;
-                check_pointer_source_reads(*pointer,&defined)?;
-                if let FpIndex::Local {local,..}=index {
-                    if !defined.get(*local).copied().unwrap_or(false) {
-                        return Err(reject("FP indexed store uses uninitialized INTEGER local"));
-                    }
-                }
-                check_local_reads(value,&defined)?;
-                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP indexed store RHS has unconverted type"));
-                }
-                next=Some(defined);
-            }
-            FloatStmt::AssignDataPointer {local,ty,source}=>{
-                if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
-                    data_pointer_source_type(*source,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP data pointer SSA assignment pointee mismatch"));
-                }
-                check_pointer_source_reads(*source,&defined)?;
-                defined[*local]=true;
-                next=Some(defined);
-            }
-            FloatStmt::StorePointerLocal {local,ty,value}=>{
-                if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
-                    !defined.get(*local).copied().unwrap_or(false) {
-                    return Err(reject("FP store through uninitialized/wrong data pointer local"));
-                }
-                check_local_reads(value,&defined)?;
-                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP local pointer store RHS source type mismatch"));
-                }
-                next=Some(defined);
-            }
-            FloatStmt::AssignPointer {local,pointer_type,source}=>{
-                let actual=f.locals.get(*local).ok_or_else(||
-                    reject("pointer assignment local out of range"))?;
-                if *actual!=ScalarType::FunctionPointer(*pointer_type) ||
-                    pointer_source_type(*source,&f.parameters,&f.locals)?!=*pointer_type {
-                    return Err(reject("pointer local assignment has incorrect native ABI type"));
-                }
-                check_pointer_source_reads(*source,&defined)?;
-                defined[*local]=true;
-                next=Some(defined);
-            }
-            FloatStmt::StorePointerParameter {parameter,ty,value}=>{
-                if f.parameters.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
-                    return Err(reject("FP memory store pointer formal type mismatch"));
-                }
-                check_local_reads(value,&defined)?;
-                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP pointer store needs exact FP source type"));
-                }
-                next=Some(defined);
-            }
-            FloatStmt::StoreGlobal {ty,value,..}=>{
-                check_local_reads(value,&defined)?;
-                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
-                    return Err(reject("FP global store RHS native type mismatch"));
-                }
-                next=Some(defined);
-            }
-            FloatStmt::Assign(n,expr)=>{
-                let ty=*f.locals.get(*n)
-                    .ok_or_else(||reject("FP local index out of range"))?;
-                check_local_reads(expr,&defined)?;
-                let value_type=expression_type(expr,&f.parameters,&f.locals)?;
-                if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
-                    return Err(reject("FP assignment has an unconverted type"));
-                }
-                defined[*n]=true;
-                next=Some(defined);
-            }
-            FloatStmt::Return(expr)=>{
-                check_local_reads(expr,&defined)?;
-                if f.result!=ScalarType::Float(
-                    expression_type(expr,&f.parameters,&f.locals)?) {
-                    return Err(reject("FP return has an unconverted type"));
-                }
-                next=None;
-            }
-            FloatStmt::ReturnInteger(expr,to)=>{
-                if !matches!(to,ScalarType::Int {bits:32|64,..}) ||
-                    *to!=f.result {
-                    return Err(reject("FP-to-integer return class/signature mismatch"));
-                }
-                check_local_reads(expr,&defined)?;
-                expression_type(expr,&f.parameters,&f.locals)?;
-                next=None;
-            }
-            FloatStmt::ReturnIndirectInteger {
-                pointer,pointer_type,parameters,return_type,arguments,
-            }=>{
-                if !matches!(return_type,ScalarType::Int {bits:32|64,..}) ||
-                   *return_type!=f.result ||
-                   pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*pointer_type ||
-                   parameters.iter().any(|t|matches!(t,ScalarType::FunctionPointer(_))) {
-                    return Err(reject("indirect INTEGER return ABI/formal mismatch"));
-                }
-                checked_scalar_passing_plan(parameters,*return_type)?;
-                check_scalar_call_args(arguments,parameters,
-                    &f.parameters,&f.locals)?;
-                check_scalar_call_local_reads(arguments,&defined)?;
-                check_pointer_source_reads(*pointer,&defined)?;
-                next=None;
-            }
-            FloatStmt::IfReturn(cond,yes,no)=>{
-                check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                for expr in [yes,no] {
-                    check_local_reads(expr,&defined)?;
-                    if ScalarType::Float(
-                        expression_type(expr,&f.parameters,&f.locals)?)!=f.result {
-                        return Err(reject("FP conditional return has an unconverted type"));
-                    }
-                }
-                next=None;
-            }
-            FloatStmt::IfAssign(cond,yes,no)=>{
-                if yes.is_empty() && no.is_empty() {
-                    return Err(reject("FP conditional has no assignment on either path"));
-                }
-                check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                next=fp_join(
-                    Some(validate_fp_arm(yes,f,defined.clone())?),
-                    Some(validate_fp_arm(no,f,defined)?),
-                );
-            }
-            FloatStmt::IfBlock(cond,yes,no)=>{
-                if yes.is_empty() && no.is_empty() {
-                    return Err(reject("FP conditional has no statements"));
-                }
-                check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                let y=check_fp_statements(yes,f,defined.clone(),loop_depth,depth+1)?;
-                let n=check_fp_statements(no,f,defined,loop_depth,depth+1)?;
-                next=fp_join(y.normal,n.normal);
-                flow.breaks=fp_join(flow.breaks,fp_join(y.breaks,n.breaks));
-                flow.continues=fp_join(flow.continues,fp_join(y.continues,n.continues));
-            }
-            FloatStmt::While(cond,body)=>{
-                check_condition(cond,&f.parameters,&f.locals,&defined)?;
-                let exits=check_fp_statements(body,f,defined.clone(),loop_depth+1,depth+1)?;
-                // The header may exit before executing the loop once.
-                // Break edges may have additional writes but cannot make
-                // anything defined on the zero-iteration path.
-                next=fp_join(Some(defined),exits.breaks);
-            }
-            FloatStmt::For {init,condition,increment,body}=>{
-                let init_flow=check_fp_statements(init,f,defined,loop_depth,depth+1)?;
-                if init_flow.breaks.is_some()||init_flow.continues.is_some() {
-                    return Err(reject("FP for initializer cannot transfer loop control"));
-                }
-                let Some(at_header)=init_flow.normal else {
-                    next=None;
-                    flow.normal=next;
+    impl<'a> Frame<'a> {
+        fn new(tail:&'a [FloatStmt],entry:Vec<bool>,in_loop:bool)->Self {
+            Self {tail,flow:FpFlow {normal:Some(entry),..FpFlow::default()},in_loop}
+        }
+    }
+    enum Task<'a> {
+        Run(Frame<'a>),
+        IfYes(Frame<'a>,&'a [FloatStmt],Vec<bool>),
+        IfNo(Frame<'a>,FpFlow),
+        WhileBody(Frame<'a>,Vec<bool>),
+        DoBody(Frame<'a>,&'a FloatCondition),
+        ForInit(Frame<'a>,Option<&'a FloatCondition>,&'a [FloatStmt],&'a [FloatStmt]),
+        ForBody(Frame<'a>,Option<Vec<bool>>,&'a [FloatStmt]),
+        ForStep(Frame<'a>,Option<Vec<bool>>),
+    }
+    let mut pending=vec![Task::Run(Frame::new(stmts,entry,false))];
+    let mut finished=Vec::<FpFlow>::new();
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Run(mut frame)=>{
+                let Some((stmt,tail))=frame.tail.split_first() else {
+                    finished.push(frame.flow);
                     continue;
                 };
-                if let Some(c)=condition {
-                    check_condition(c,&f.parameters,&f.locals,&at_header)?;
-                }
-                let body_flow=check_fp_statements(body,f,at_header.clone(),
-                    loop_depth+1,depth+1)?;
-                let at_increment=fp_join(body_flow.normal,body_flow.continues);
-                if let Some(state)=at_increment {
-                    let step_flow=check_fp_statements(increment,f,state,
-                        loop_depth+1,depth+1)?;
-                    if step_flow.breaks.is_some()||step_flow.continues.is_some() {
-                        return Err(reject("FP for increment cannot transfer loop control"));
+                frame.tail=tail;
+                let Some(mut defined)=frame.flow.normal.take() else {
+                    return Err(reject("unreachable trailing FP statement"));
+                };
+                let next;
+                match stmt {
+                FloatStmt::AssignInteger {local,source}=>{
+                    let ty=*f.locals.get(*local).ok_or_else(||
+                        reject("INTEGER SSA assignment local is out of range"))?;
+                    if !matches!(ty,ScalarType::Int {bits:32|64,..}) ||
+                        checked_fp_integer_source(source,&f.parameters,&f.locals)?!=ty {
+                        return Err(reject("INTEGER SSA assignment source class/sign differs"));
                     }
+                    check_fp_integer_source_reads(source,&defined)?;
+                    defined[*local]=true;
+                    next=Some(defined);
                 }
-                // A for(;;) has no test-false exit. Only a break reaches
-                // the successor; otherwise it is an infinite/returning loop.
-                next=if condition.is_some() {
-                    fp_join(Some(at_header),body_flow.breaks)
-                } else {body_flow.breaks};
+                FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                    if data_pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP indexed store pointee type mismatch"));
+                    }
+                    checked_fp_index(index,&f.parameters,&f.locals)?;
+                    check_pointer_source_reads(*pointer,&defined)?;
+                    if let FpIndex::Local {local,..}=index {
+                        if !defined.get(*local).copied().unwrap_or(false) {
+                            return Err(reject("FP indexed store uses uninitialized INTEGER local"));
+                        }
+                    }
+                    check_local_reads(value,&defined)?;
+                    if expression_type(value,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP indexed store RHS has unconverted type"));
+                    }
+                    next=Some(defined);
+                }
+                FloatStmt::AssignDataPointer {local,ty,source}=>{
+                    if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
+                        data_pointer_source_type(*source,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP data pointer SSA assignment pointee mismatch"));
+                    }
+                    check_pointer_source_reads(*source,&defined)?;
+                    defined[*local]=true;
+                    next=Some(defined);
+                }
+                FloatStmt::StorePointerLocal {local,ty,value}=>{
+                    if f.locals.get(*local)!=Some(&ScalarType::DataPointer(*ty)) ||
+                        !defined.get(*local).copied().unwrap_or(false) {
+                        return Err(reject("FP store through uninitialized/wrong data pointer local"));
+                    }
+                    check_local_reads(value,&defined)?;
+                    if expression_type(value,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP local pointer store RHS source type mismatch"));
+                    }
+                    next=Some(defined);
+                }
+                FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                    let actual=f.locals.get(*local).ok_or_else(||
+                        reject("pointer assignment local out of range"))?;
+                    if *actual!=ScalarType::FunctionPointer(*pointer_type) ||
+                        pointer_source_type(*source,&f.parameters,&f.locals)?!=*pointer_type {
+                        return Err(reject("pointer local assignment has incorrect native ABI type"));
+                    }
+                    check_pointer_source_reads(*source,&defined)?;
+                    defined[*local]=true;
+                    next=Some(defined);
+                }
+                FloatStmt::StorePointerParameter {parameter,ty,value}=>{
+                    if f.parameters.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                        return Err(reject("FP memory store pointer formal type mismatch"));
+                    }
+                    check_local_reads(value,&defined)?;
+                    if expression_type(value,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP pointer store needs exact FP source type"));
+                    }
+                    next=Some(defined);
+                }
+                FloatStmt::StoreGlobal {ty,value,..}=>{
+                    check_local_reads(value,&defined)?;
+                    if expression_type(value,&f.parameters,&f.locals)?!=*ty {
+                        return Err(reject("FP global store RHS native type mismatch"));
+                    }
+                    next=Some(defined);
+                }
+                FloatStmt::Assign(n,expr)=>{
+                    let ty=*f.locals.get(*n)
+                        .ok_or_else(||reject("FP local index out of range"))?;
+                    check_local_reads(expr,&defined)?;
+                    let value_type=expression_type(expr,&f.parameters,&f.locals)?;
+                    if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
+                        return Err(reject("FP assignment has an unconverted type"));
+                    }
+                    defined[*n]=true;
+                    next=Some(defined);
+                }
+                FloatStmt::Return(expr)=>{
+                    check_local_reads(expr,&defined)?;
+                    if f.result!=ScalarType::Float(
+                        expression_type(expr,&f.parameters,&f.locals)?) {
+                        return Err(reject("FP return has an unconverted type"));
+                    }
+                    next=None;
+                }
+                FloatStmt::ReturnInteger(expr,to)=>{
+                    if !matches!(to,ScalarType::Int {bits:32|64,..}) ||
+                        *to!=f.result {
+                        return Err(reject("FP-to-integer return class/signature mismatch"));
+                    }
+                    check_local_reads(expr,&defined)?;
+                    expression_type(expr,&f.parameters,&f.locals)?;
+                    next=None;
+                }
+                FloatStmt::ReturnIndirectInteger {
+                    pointer,pointer_type,parameters,return_type,arguments,
+                }=>{
+                    if !matches!(return_type,ScalarType::Int {bits:32|64,..}) ||
+                       *return_type!=f.result ||
+                       pointer_source_type(*pointer,&f.parameters,&f.locals)?!=*pointer_type ||
+                       parameters.iter().any(|t|matches!(t,ScalarType::FunctionPointer(_))) {
+                        return Err(reject("indirect INTEGER return ABI/formal mismatch"));
+                    }
+                    checked_scalar_passing_plan(parameters,*return_type)?;
+                    check_scalar_call_args(arguments,parameters,
+                        &f.parameters,&f.locals)?;
+                    check_scalar_call_local_reads(arguments,&defined)?;
+                    check_pointer_source_reads(*pointer,&defined)?;
+                    next=None;
+                }
+                FloatStmt::IfReturn(cond,yes,no)=>{
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    for expr in [yes,no] {
+                        check_local_reads(expr,&defined)?;
+                        if ScalarType::Float(
+                            expression_type(expr,&f.parameters,&f.locals)?)!=f.result {
+                            return Err(reject("FP conditional return has an unconverted type"));
+                        }
+                    }
+                    next=None;
+                }
+                FloatStmt::IfAssign(cond,yes,no)=>{
+                    if yes.is_empty() && no.is_empty() {
+                        return Err(reject("FP conditional has no assignment on either path"));
+                    }
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    next=fp_join(
+                        Some(validate_fp_arm(yes,f,defined.clone())?),
+                        Some(validate_fp_arm(no,f,defined)?),
+                    );
+                }
+                FloatStmt::IfBlock(cond,yes,no)=>{
+                    if yes.is_empty() && no.is_empty() {
+                        return Err(reject("FP conditional has no statements"));
+                    }
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    let child=Frame::new(yes,defined.clone(),frame.in_loop);
+                    pending.push(Task::IfYes(frame,no,defined));
+                    pending.push(Task::Run(child));
+                    continue;
+                }
+                FloatStmt::While(cond,body)=>{
+                    check_condition(cond,&f.parameters,&f.locals,&defined)?;
+                    let child=Frame::new(body,defined.clone(),true);
+                    pending.push(Task::WhileBody(frame,defined));
+                    pending.push(Task::Run(child));
+                    continue;
+                }
+                FloatStmt::For {init,condition,increment,body}=>{
+                    let child=Frame::new(init,defined,frame.in_loop);
+                    pending.push(Task::ForInit(frame,condition.as_ref(),body,increment));
+                    pending.push(Task::Run(child));
+                    continue;
+                }
+                FloatStmt::DoWhile(body,cond)=>{
+                    pending.push(Task::DoBody(frame,cond));
+                    pending.push(Task::Run(Frame::new(body,defined,true)));
+                    continue;
+                }
+                FloatStmt::Break=>{
+                    if !frame.in_loop {return Err(reject("FP break outside loop"));}
+                    frame.flow.breaks=fp_join(frame.flow.breaks,Some(defined));
+                    next=None;
+                }
+                FloatStmt::Continue=>{
+                    if !frame.in_loop {return Err(reject("FP continue outside loop"));}
+                    frame.flow.continues=fp_join(frame.flow.continues,Some(defined));
+                    next=None;
+                }
+                }
+                frame.flow.normal=next;
+                pending.push(Task::Run(frame));
             }
-            FloatStmt::DoWhile(body,cond)=>{
-                let body_flow=check_fp_statements(body,f,defined,
-                    loop_depth+1,depth+1)?;
-                let at_test=fp_join(body_flow.normal,body_flow.continues);
+            Task::IfYes(frame,no,defined)=>{
+                let yes=finished.pop().expect("completed then arm");
+                let child=Frame::new(no,defined,frame.in_loop);
+                pending.push(Task::IfNo(frame,yes));
+                pending.push(Task::Run(child));
+            }
+            Task::IfNo(mut frame,yes)=>{
+                let no=finished.pop().expect("completed else arm");
+                frame.flow.normal=fp_join(yes.normal,no.normal);
+                frame.flow.breaks=fp_join(frame.flow.breaks,fp_join(yes.breaks,no.breaks));
+                frame.flow.continues=fp_join(frame.flow.continues,fp_join(yes.continues,no.continues));
+                pending.push(Task::Run(frame));
+            }
+            Task::WhileBody(mut frame,header)=>{
+                let exits=finished.pop().expect("completed while body");
+                // The test can fail before the first iteration.
+                frame.flow.normal=fp_join(Some(header),exits.breaks);
+                pending.push(Task::Run(frame));
+            }
+            Task::DoBody(mut frame,cond)=>{
+                let body=finished.pop().expect("completed do-while body");
+                let at_test=fp_join(body.normal,body.continues);
                 if let Some(state)=&at_test {
                     check_condition(cond,&f.parameters,&f.locals,state)?;
                 }
-                // First test happens after at least one body execution,
-                // unless an early break bypasses it. Every arriving edge
-                // participates in the definite-assignment intersection.
-                next=fp_join(at_test,body_flow.breaks);
+                frame.flow.normal=fp_join(at_test,body.breaks);
+                pending.push(Task::Run(frame));
             }
-            FloatStmt::Break=>{
-                if loop_depth==0 {return Err(reject("FP break outside loop"));}
-                flow.breaks=fp_join(flow.breaks,Some(defined));
-                next=None;
+            Task::ForInit(frame,condition,body,increment)=>{
+                let init=finished.pop().expect("completed for initializer");
+                if init.breaks.is_some()||init.continues.is_some() {
+                    return Err(reject("FP for initializer cannot transfer loop control"));
+                }
+                let Some(header)=init.normal else {
+                    pending.push(Task::Run(frame));
+                    continue;
+                };
+                if let Some(cond)=condition {
+                    check_condition(cond,&f.parameters,&f.locals,&header)?;
+                }
+                // Retain the zero-iteration facts only if a test exists.
+                let (child,test_exit)=if condition.is_some() {
+                    (Frame::new(body,header.clone(),true),Some(header))
+                } else {(Frame::new(body,header,true),None)};
+                pending.push(Task::ForBody(frame,test_exit,increment));
+                pending.push(Task::Run(child));
             }
-            FloatStmt::Continue=>{
-                if loop_depth==0 {return Err(reject("FP continue outside loop"));}
-                flow.continues=fp_join(flow.continues,Some(defined));
-                next=None;
+            Task::ForBody(mut frame,test_exit,increment)=>{
+                let body=finished.pop().expect("completed for body");
+                let at_increment=fp_join(body.normal,body.continues);
+                let exit=fp_join(test_exit,body.breaks);
+                if let Some(state)=at_increment {
+                    pending.push(Task::ForStep(frame,exit));
+                    pending.push(Task::Run(Frame::new(increment,state,true)));
+                } else {
+                    frame.flow.normal=exit;
+                    pending.push(Task::Run(frame));
+                }
+            }
+            Task::ForStep(mut frame,exit)=>{
+                let step=finished.pop().expect("completed for increment");
+                if step.breaks.is_some()||step.continues.is_some() {
+                    return Err(reject("FP for increment cannot transfer loop control"));
+                }
+                frame.flow.normal=exit;
+                pending.push(Task::Run(frame));
             }
         }
-        flow.normal=next;
     }
-    Ok(flow)
+    debug_assert_eq!(finished.len(),1);
+    Ok(finished.pop().expect("completed root statement sequence"))
 }
 #[derive(Clone,Copy)]
 struct FpLoopTargets<'a> {
@@ -1854,7 +1919,7 @@ fn emit_scalar_float_bodies_with_globals(
             f.parameters.len(), f.locals.len(), f.statements.len(),
         )?;
         let checked=check_fp_statements(&f.statements,f,
-            vec![false;f.locals.len()],0,0)?;
+            vec![false;f.locals.len()])?;
         if checked.normal.is_some() {
             return Err(reject("FP function has reachable fallthrough without return"));
         }
@@ -4694,6 +4759,51 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    #[test]
+    fn deep_fp_flow_preserves_loop_exits_and_definite_assignment() {
+        let ty=ScalarType::Float(FloatType::F64);
+        let f=ScalarFloatBody {
+            name:"flow".into(),parameters:vec![],result:ty,
+            locals:vec![ty],statements:vec![],
+        };
+        let cond=||FloatCondition {
+            op:FloatPredicate::Eq,left:FloatExpr::Constant64(0),
+            right:FloatExpr::Constant64(0),
+        };
+        let write=||FloatStmt::Assign(0,FloatExpr::Constant64(0));
+        let read=||FloatStmt::Return(FloatExpr::Local(0));
+        let check=|stmts:&[FloatStmt]|check_fp_statements(stmts,&f,vec![false]);
+        // Both arms of every nested branch initialize the local.
+        let mut body=vec![write()];
+        for _ in 0..256 {
+            body=vec![FloatStmt::IfBlock(cond(),body,vec![write()])];
+        }
+        body.push(read());
+        assert!(check(&body).unwrap().normal.is_none());
+        // Nested do-while executes the innermost write at least once.
+        let mut body=vec![write()];
+        for _ in 0..256 {body=vec![FloatStmt::DoWhile(body,cond())];}
+        body.push(read());
+        assert!(check(&body).unwrap().normal.is_none());
+        // A while loop can exit before the inner write.
+        let mut body=vec![write()];
+        for _ in 0..256 {body=vec![FloatStmt::While(cond(),body)];}
+        body.push(read());
+        assert!(check(&body).is_err());
+        let loop_with_break=FloatStmt::For {
+            init:vec![],condition:None,increment:vec![],
+            body:vec![write(),FloatStmt::Break],
+        };
+        assert!(check(&[loop_with_break,read()]).unwrap().normal.is_none());
+        let bad=FloatStmt::For {
+            init:vec![],condition:Some(cond()),increment:vec![FloatStmt::Break],
+            body:vec![FloatStmt::Continue],
+        };
+        assert!(check(&[bad]).is_err());
+        assert!(check(&[FloatStmt::Break]).is_err());
+        assert!(check(&[write(),read(),write()]).is_err());
+    }
 
     #[test]
     fn deep_fp_expression_checks_preserve_types_and_local_reads() {
