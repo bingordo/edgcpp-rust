@@ -5286,6 +5286,32 @@ mod audit_resource_budget_tests {
     }
 
     #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_fp_indexed_symbols_and_addresses() {
+        let dir=std::env::temp_dir().join(format!("edg-fp-symbols-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("symbols.c");
+        let mut text=String::new();
+        for f in 0..8 {
+            text.push_str(&format!("double indexed_{f}(double x) {{\n"));
+            for i in 0..128 {
+                let previous=if i==0 {"x".to_owned()} else {format!("v{}",i-1)};
+                text.push_str(&format!("double v{i} = {previous} + 1.0;\n"));
+            }
+            // The addressed variable must be reloaded after the aliased store.
+            text.push_str("double *p = &v63; *p = x + 2.0; return v63 + v127; }\n");
+        }
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_INDEXED_FP_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn fp_reference_sets_only_include_used_symbols() {
         let t=FloatType::F64;
         let ty=ScalarType::Float(t);
