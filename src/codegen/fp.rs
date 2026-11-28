@@ -724,30 +724,40 @@ fn emit_scalar_call_arguments(
                 if actual!=*t {return Err(reject("FP call argument needs conversion"));}
                 v
             }
-            (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
-                if params_ty.get(*n)!=Some(expected) {
-                    return Err(reject("FP call INTEGER formal ABI mismatch"));
-                }
-                *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
-            }
-            (ScalarCallArg::IntegerLocal(n),ScalarType::Int {..})=>{
-                if locals_ty.get(*n)!=Some(expected) {
-                    return Err(reject("FP call INTEGER automatic local source ABI mismatch"));
-                }
-                fb.use_var(*locals.get(*n)
-                    .ok_or_else(||reject("FP call missing INTEGER SSA local"))?)
-            }
-            (ScalarCallArg::IntegerConstant {bits,ty},ScalarType::Int {..})=>{
-                if ty!=expected {
-                    return Err(reject("FP call INTEGER literal source type mismatch"));
-                }
-                emit_integer_literal(fb,*ty,*bits)?
-            }
-            _=>return Err(reject("FP call crosses incompatible argument classes")),
+            _=>emit_integer_call_argument(arg,expected,fb,params,params_ty,locals,locals_ty)?,
         };
         values.push(value);
     }
     Ok(values)
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_integer_call_argument(
+    arg:&ScalarCallArg,expected:&ScalarType,fb:&mut FunctionBuilder<'_>,
+    params:&[Value],params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
+)->Result<Value,CodegenError> {
+    let value=match (arg,expected) {
+        (ScalarCallArg::IntegerParameter(n),ScalarType::Int {..})=>{
+            if params_ty.get(*n)!=Some(expected) {
+                return Err(reject("FP call INTEGER formal ABI mismatch"));
+            }
+            *params.get(*n).ok_or_else(||reject("FP call missing INTEGER formal"))?
+        }
+        (ScalarCallArg::IntegerLocal(n),ScalarType::Int {..})=>{
+            if locals_ty.get(*n)!=Some(expected) {
+                return Err(reject("FP call INTEGER automatic local source ABI mismatch"));
+            }
+            fb.use_var(*locals.get(*n)
+                .ok_or_else(||reject("FP call missing INTEGER SSA local"))?)
+        }
+        (ScalarCallArg::IntegerConstant {bits,ty},ScalarType::Int {..})=>{
+            if ty!=expected {
+                return Err(reject("FP call INTEGER literal source type mismatch"));
+            }
+            emit_integer_literal(fb,*ty,*bits)?
+        }
+        _=>return Err(reject("FP call crosses incompatible argument classes")),
+    };
+    Ok(value)
 }
 fn emit_expr(
     expr:&FloatExpr,
@@ -759,7 +769,177 @@ fn emit_expr(
     refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 ) -> Result<(Value,FloatType),CodegenError> {
     use FloatExpr::*;
-    let (value,ty)=match expr {
+    enum Task<'a> {
+        Visit(&'a FloatExpr),
+        Negate,
+        Convert(FloatType),
+        Binary(&'a FloatExpr),
+        Argument(&'a ScalarCallArg,&'a ScalarType),
+        FloatArgument(FloatType),
+        Direct(FuncRef,FloatType,usize),
+        Indirect(cranelift_codegen::ir::Signature,Value,FloatType,usize),
+        Branch(&'a FloatCondition,&'a FloatExpr,&'a FloatExpr),
+        Then(Block,Block,&'a FloatExpr),
+        Else(Block,FloatType),
+    }
+    let mut pending=vec![Task::Visit(expr)];
+    let mut results=Vec::<(Value,FloatType)>::new();
+    let mut call_values=Vec::<Value>::new();
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Visit(expr)=>match expr {
+                Call {callee,parameters,return_type,arguments}|
+                CallExternal {callee,parameters,return_type,arguments}=>{
+                    if arguments.len()!=parameters.len() {
+                        return Err(reject("invalid direct call argument count"));
+                    }
+                    let reference=*refs.get(callee)
+                        .ok_or_else(||reject("FP call target has no defined function ref"))?;
+                    pending.push(Task::Direct(reference,*return_type,call_values.len()));
+                    for (arg,ty) in arguments.iter().zip(parameters).rev() {
+                        pending.push(Task::Argument(arg,ty));
+                    }
+                }
+                CallIndirect {pointer,pointer_type,parameters,return_type,arguments}=>{
+                    let pointer=emit_pointer_source(*pointer,fb,
+                        params,params_ty,locals,locals_ty,*pointer_type)?;
+                    let mut signature=cranelift_codegen::ir::Signature::new(
+                        fb.func.signature.call_conv);
+                    for ty in parameters {
+                        if matches!(ty,ScalarType::FunctionPointer(_)) {
+                            return Err(reject("passing function pointers to FP callees unavailable"));
+                        }
+                        signature.params.push(AbiParam::new(ty.machine()));
+                    }
+                    signature.returns.push(AbiParam::new(return_type.machine()));
+                    if arguments.len()!=parameters.len() {
+                        return Err(reject("FP call argument arity invalid"));
+                    }
+                    pending.push(Task::Indirect(signature,pointer,*return_type,call_values.len()));
+                    for (arg,ty) in arguments.iter().zip(parameters).rev() {
+                        pending.push(Task::Argument(arg,ty));
+                    }
+                }
+                Neg(e)=>{
+                    pending.push(Task::Negate);
+                    pending.push(Task::Visit(e));
+                }
+                Convert(to,e)=>{
+                    pending.push(Task::Convert(*to));
+                    pending.push(Task::Visit(e));
+                }
+                Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
+                    pending.push(Task::Binary(expr));
+                    pending.push(Task::Visit(b));
+                    pending.push(Task::Visit(a));
+                }
+                Conditional {condition,yes,no}=>{
+                    pending.push(Task::Branch(condition,yes,no));
+                    pending.push(Task::Visit(&condition.right));
+                    pending.push(Task::Visit(&condition.left));
+                }
+                _=>results.push(emit_fp_leaf(expr,fb,params,params_ty,locals,locals_ty,global_refs)?),
+            },
+            Task::Negate=>{
+                let (v,t)=results.pop().expect("visited negation operand");
+                results.push((fb.ins().fneg(v),t));
+            }
+            Task::Convert(to)=>{
+                let (v,t)=results.pop().expect("visited conversion operand");
+                let value=match (t,to) {
+                    (FloatType::F32,FloatType::F64)=>fb.ins().fpromote(types::F64,v),
+                    (FloatType::F64,FloatType::F32)=>fb.ins().fdemote(types::F32,v),
+                    _=>v,
+                };
+                results.push((value,to));
+            }
+            Task::Binary(expr)=>{
+                let (y,u)=results.pop().expect("visited right operand");
+                let (x,t)=results.pop().expect("visited left operand");
+                if t!=u {return Err(reject("unconverted mixed FP arithmetic"));}
+                let value=match expr {
+                    Add(..)=>fb.ins().fadd(x,y),
+                    Sub(..)=>fb.ins().fsub(x,y),
+                    Mul(..)=>fb.ins().fmul(x,y),
+                    Div(..)=>fb.ins().fdiv(x,y),
+                    _=>unreachable!(),
+                };
+                results.push((value,t));
+            }
+            Task::Argument(arg,ty)=>match (arg,ty) {
+                (ScalarCallArg::Float(e),ScalarType::Float(t))=>{
+                    pending.push(Task::FloatArgument(*t));
+                    pending.push(Task::Visit(e));
+                }
+                _=>call_values.push(emit_integer_call_argument(arg,ty,fb,
+                    params,params_ty,locals,locals_ty)?),
+            },
+            Task::FloatArgument(expected)=>{
+                let (v,actual)=results.pop().expect("visited FP call argument");
+                if actual!=expected {return Err(reject("FP call argument needs conversion"));}
+                call_values.push(v);
+            }
+            Task::Direct(reference,ty,base)=>{
+                let inst=fb.ins().call(reference,&call_values[base..]);
+                call_values.truncate(base);
+                let result=*fb.inst_results(inst).first()
+                    .ok_or_else(||reject("FP direct call has no return value"))?;
+                results.push((result,ty));
+            }
+            Task::Indirect(signature,pointer,ty,base)=>{
+                let reference=fb.import_signature(signature);
+                let call=fb.ins().call_indirect(reference,pointer,&call_values[base..]);
+                call_values.truncate(base);
+                let result=*fb.inst_results(call).first()
+                    .ok_or_else(||reject("indirect FP call has no result"))?;
+                results.push((result,ty));
+            }
+            Task::Branch(condition,yes,no)=>{
+                let (y,u)=results.pop().expect("visited right comparison operand");
+                let (x,t)=results.pop().expect("visited left comparison operand");
+                if t!=u {return Err(reject("unconverted mixed FP comparison"));}
+                let test=fb.ins().fcmp(condition.op.cranelift(),x,y);
+                let then_block=fb.create_block();
+                let else_block=fb.create_block();
+                let merged=fb.create_block();
+                fb.ins().brif(test,then_block,&[],else_block,&[]);
+                fb.seal_block(then_block);
+                fb.seal_block(else_block);
+                fb.switch_to_block(then_block);
+                pending.push(Task::Then(else_block,merged,no));
+                pending.push(Task::Visit(yes));
+            }
+            Task::Then(else_block,merged,no)=>{
+                let (selected,ty)=results.pop().expect("visited conditional then arm");
+                // The merge has no predecessors yet. Use the already checked
+                // emitted type instead of rescanning the entire then subtree.
+                fb.append_block_param(merged,ty.machine());
+                fb.ins().jump(merged,&[selected.into()]);
+                fb.switch_to_block(else_block);
+                pending.push(Task::Else(merged,ty));
+                pending.push(Task::Visit(no));
+            }
+            Task::Else(merged,expected)=>{
+                let (selected,actual)=results.pop().expect("visited conditional else arm");
+                if actual!=expected {return Err(reject("FP conditional else arm type changed"));}
+                fb.ins().jump(merged,&[selected.into()]);
+                fb.seal_block(merged);
+                fb.switch_to_block(merged);
+                results.push((fb.block_params(merged)[0],expected));
+            }
+        }
+    }
+    debug_assert_eq!(results.len(),1);
+    debug_assert!(call_values.is_empty());
+    Ok(results.pop().expect("visited root expression"))
+}
+fn emit_fp_leaf(
+    expr:&FloatExpr,fb:&mut FunctionBuilder<'_>,params:&[Value],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
+    global_refs:&FpGlobalRefs,
+)->Result<(Value,FloatType),CodegenError> {
+    use FloatExpr::*;
+    let result=match expr {
         Parameter(n)=>{
             let value=*params.get(*n)
                 .ok_or_else(||reject("missing physical FP parameter"))?;
@@ -810,43 +990,6 @@ fn emit_expr(
             };
             (converted,*to)
         }
-        Call {callee,parameters,return_type,arguments}|
-        CallExternal {callee,parameters,return_type,arguments}=>{
-            if arguments.len()!=parameters.len() {
-                return Err(reject("invalid direct call argument count"));
-            }
-            let reference=*refs.get(callee)
-                .ok_or_else(||reject("FP call target has no defined function ref"))?;
-            let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                params,params_ty,locals,locals_ty,refs,global_refs)?;
-            let inst=fb.ins().call(reference,&values);
-            let result=*fb.inst_results(inst).first()
-                .ok_or_else(||reject("FP direct call has no return value"))?;
-            (result,*return_type)
-        }
-        CallIndirect {pointer,pointer_type,parameters,
-                      return_type,arguments}=>{
-            let pointer=emit_pointer_source(*pointer,fb,
-                params,params_ty,locals,locals_ty,*pointer_type)?;
-            // The signature is typed: every INTEGER/SSE piece uses its
-            // source class. The SysV call convention chooses the registers.
-            let mut signature=cranelift_codegen::ir::Signature::new(
-                fb.func.signature.call_conv);
-            for ty in parameters {
-                if matches!(ty,ScalarType::FunctionPointer(_)) {
-                    return Err(reject("passing function pointers to FP callees unavailable"));
-                }
-                signature.params.push(AbiParam::new(ty.machine()));
-            }
-            signature.returns.push(AbiParam::new(return_type.machine()));
-            let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                params,params_ty,locals,locals_ty,refs,global_refs)?;
-            let reference=fb.import_signature(signature);
-            let call=fb.ins().call_indirect(reference,pointer,&values);
-            let result=*fb.inst_results(call).first()
-                .ok_or_else(||reject("indirect FP call has no result"))?;
-            (result,*return_type)
-        }
         Local(n)=>{
             let var=*locals.get(*n).ok_or_else(||reject("missing FP local"))?;
             let ty=match locals_ty.get(*n) {
@@ -890,61 +1033,10 @@ fn emit_expr(
         }
         Constant32(bits)=>(fb.ins().f32const(Ieee32::with_bits(*bits)),FloatType::F32),
         Constant64(bits)=>(fb.ins().f64const(Ieee64::with_bits(*bits)),FloatType::F64),
-        Neg(e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-            (fb.ins().fneg(v),t)
-        }
-        Convert(to,e)=>{
-            let (v,t)=emit_expr(e,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-            let value=match (t,*to) {
-                (FloatType::F32,FloatType::F64)=>fb.ins().fpromote(types::F64,v),
-                (FloatType::F64,FloatType::F32)=>fb.ins().fdemote(types::F32,v),
-                _=>v,
-            };
-            (value,*to)
-        }
-        Conditional {condition,yes,no}=>{
-            // Do not emit select: only the chosen arm may be evaluated, as
-            // either arm can contain an external call or memory load.
-            let test=emit_condition(condition,fb,params,params_ty,locals,
-                locals_ty,refs,global_refs)?;
-            let then_block=fb.create_block();
-            let else_block=fb.create_block();
-            let merged=fb.create_block();
-            let expected=expression_type(yes,params_ty,locals_ty)?;
-            fb.append_block_param(merged,expected.machine());
-            fb.ins().brif(test,then_block,&[],else_block,&[]);
-            fb.seal_block(then_block);
-            fb.seal_block(else_block);
-            fb.switch_to_block(then_block);
-            let (selected,actual)=emit_expr(yes,fb,params,params_ty,
-                locals,locals_ty,refs,global_refs)?;
-            if actual!=expected {return Err(reject("FP conditional then arm type changed"));}
-            fb.ins().jump(merged,&[selected.into()]);
-            fb.switch_to_block(else_block);
-            let (selected,actual)=emit_expr(no,fb,params,params_ty,
-                locals,locals_ty,refs,global_refs)?;
-            if actual!=expected {return Err(reject("FP conditional else arm type changed"));}
-            fb.ins().jump(merged,&[selected.into()]);
-            fb.seal_block(merged);
-            fb.switch_to_block(merged);
-            (fb.block_params(merged)[0],expected)
-        }
-        Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let (x,t)=emit_expr(a,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-            let (y,u)=emit_expr(b,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-            if t!=u {return Err(reject("unconverted mixed FP arithmetic"));}
-            let value=match expr {
-                Add(..)=>fb.ins().fadd(x,y),
-                Sub(..)=>fb.ins().fsub(x,y),
-                Mul(..)=>fb.ins().fmul(x,y),
-                Div(..)=>fb.ins().fdiv(x,y),
-                _=>unreachable!(),
-            };
-            (value,t)
-        }
+        Call {..}|CallExternal {..}|CallIndirect {..}|Neg(_)|Convert(..)|
+        Add(..)|Sub(..)|Mul(..)|Div(..)|Conditional {..}=>unreachable!("non-leaf FP expression"),
     };
-    Ok((value,ty))
+    Ok(result)
 }
 /// Reject uninitialized local reads before passing values to Cranelift.
 /// No source expression may observe an undefined local, even speculatively.
@@ -4804,6 +4896,38 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    #[test]
+    fn deep_fp_expression_emission_preserves_calls_and_conditionals() {
+        let ty=ScalarType::Float(FloatType::F64);
+        let identity=ScalarFloatBody {
+            name:"identity".into(),parameters:vec![ty,ty],result:ty,
+            locals:vec![],statements:vec![FloatStmt::Return(FloatExpr::Parameter(1))],
+        };
+        let mut expr=FloatExpr::Parameter(0);
+        for i in 0..192 {
+            expr=match i%4 {
+                0=>FloatExpr::Neg(Box::new(expr)),
+                1=>FloatExpr::Add(Box::new(expr),Box::new(FloatExpr::Constant64(0))),
+                2=>FloatExpr::Call {
+                    callee:"identity".into(),parameters:vec![ty,ty],return_type:FloatType::F64,
+                    arguments:vec![ScalarCallArg::Float(FloatExpr::Constant64(0)),
+                        ScalarCallArg::Float(expr)],
+                },
+                _=>FloatExpr::Conditional {
+                    condition:Box::new(FloatCondition {
+                        op:FloatPredicate::Ne,left:FloatExpr::Parameter(0),
+                        right:FloatExpr::Constant64(0),
+                    }),yes:Box::new(expr),no:Box::new(FloatExpr::Constant64(0)),
+                },
+            };
+        }
+        let object=emit_scalar_float_bodies(&[identity,ScalarFloatBody {
+            name:"deep_fp_expr".into(),parameters:vec![ty],result:ty,
+            locals:vec![],statements:vec![FloatStmt::Return(expr)],
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+    }
 
     #[test]
     fn deep_fp_cfg_emission_preserves_structured_edges() {
