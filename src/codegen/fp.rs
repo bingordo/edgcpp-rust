@@ -2153,7 +2153,10 @@ fn type_from_edg(il:&Il,id:crate::TypeId)->Result<FloatType,CodegenError> {
         .ok_or_else(||reject("EDG type is not standard C float/double"))?;
     let layout=il.type_object_sizes.iter().find(|t|t.owner==canonical)
         .ok_or_else(||reject("EDG FP type has no native layout"))?;
-    match (info.bits,layout.bytes,layout.alignment) {
+    checked_float_layout(info.bits,layout.bytes,layout.alignment)
+}
+fn checked_float_layout(bits:u8,bytes:u64,alignment:u64)->Result<FloatType,CodegenError> {
+    match (bits,bytes,alignment) {
         (32,4,4)=>Ok(FloatType::F32),
         (64,8,8)=>Ok(FloatType::F64),
         _=>Err(reject("EDG FP width/alignment does not match x86-64 SysV")),
@@ -2459,45 +2462,29 @@ pub(super) fn is_standard_fp_global_type(il:&Il,symbol:crate::SymbolId)->bool {
 
 // Reused by the integer CFG emitter for unreferenced, externally visible
 // C float/double definitions that still need an ELF data symbol.
-pub(super) fn source_fp_global(
-    il:&Il,symbol:crate::SymbolId,
-)->Result<(String,FloatType,Linkage,Option<Vec<u8>>),CodegenError> {
-    let mut metas=il.global_variables.iter().filter(|g|g.symbol==symbol);
-    let meta=metas.next().ok_or_else(||
-        reject("FP global is not an EDG-classified file-scope object"))?;
-    if metas.next().is_some() {
-        return Err(reject("FP global has ambiguous native storage metadata"));
-    }
+type FpGlobalImage=(String,FloatType,Linkage,Option<Vec<u8>>);
+fn checked_fp_global_image(
+    meta:&crate::GlobalVariable,name:&str,declared:crate::TypeId,
+    ty:FloatType,static_local:bool,images:Option<Option<&crate::GlobalFloatInitializer>>,
+)->Result<FpGlobalImage,CodegenError> {
     if !matches!(meta.linkage,1|2|3) ||
-        meta.thread_local || meta.local_to_function ||
-        il.static_local_owners.iter().any(|s|s.symbol==symbol) {
+        meta.thread_local || meta.local_to_function || static_local {
         return Err(reject("FP globals need ordinary C storage and source metadata"));
     }
-    let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
-        .map(|s|s.name.clone())
-        .ok_or_else(||reject("FP global has no native variable identity"))?;
-    if !safe_scalar_external_name(&name) {
+    if !safe_scalar_external_name(name) {
         return Err(reject("FP external global has unsafe/non-C symbol name"));
     }
-    let declared=il.symbol_types.iter().find(|s|s.symbol==symbol)
-        .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
-    check_plain_fp_local(il,declared)?;
-    let ty=type_from_edg(il,declared)?;
     let initializer=if meta.explicit_initializer {
-        let mut images=il.global_float_initializers.iter()
-            .filter(|v|v.symbol==symbol);
-        let image=images.next().ok_or_else(||
-            reject("explicit FP global initializer lacks exact native IEEE image"))?;
-        if images.next().is_some() {
-            return Err(reject("ambiguous native FP global initializer image"));
-        }
+        let image=images.ok_or_else(||
+            reject("explicit FP global initializer lacks exact native IEEE image"))?
+            .ok_or_else(||reject("ambiguous native FP global initializer image"))?;
         let width=match ty {FloatType::F32=>32,FloatType::F64=>64};
         if image.ty!=declared || u32::from(image.width)!=width {
             return Err(reject("FP global initializer native type/width mismatch"));
         }
         Some(image.bits.to_le_bytes()[..(width/8) as usize].to_vec())
     } else {
-        if il.global_float_initializers.iter().any(|v|v.symbol==symbol) {
+        if images.is_some() {
             return Err(reject("native FP global image without explicit definition"));
         }
         None
@@ -2507,7 +2494,28 @@ pub(super) fn source_fp_global(
         1=>Linkage::Import,2=>Linkage::Local,3=>Linkage::Export,
         _=>return Err(reject("unknown FP global storage linkage")),
     };
-    Ok((name,ty,linkage,initializer))
+    Ok((name.to_owned(),ty,linkage,initializer))
+}
+pub(super) fn source_fp_global(
+    il:&Il,symbol:crate::SymbolId,
+)->Result<FpGlobalImage,CodegenError> {
+    let mut metas=il.global_variables.iter().filter(|g|g.symbol==symbol);
+    let meta=metas.next().ok_or_else(||
+        reject("FP global is not an EDG-classified file-scope object"))?;
+    if metas.next().is_some() {
+        return Err(reject("FP global has ambiguous native storage metadata"));
+    }
+    let name=il.symbols.iter().find(|s|s.id==symbol && s.kind==2)
+        .map(|s|s.name.as_str())
+        .ok_or_else(||reject("FP global has no native variable identity"))?;
+    let declared=il.symbol_types.iter().find(|s|s.symbol==symbol)
+        .ok_or_else(||reject("FP global declaration has no native source type"))?.ty;
+    check_plain_fp_local(il,declared)?;
+    let ty=type_from_edg(il,declared)?;
+    let mut images=il.global_float_initializers.iter().filter(|v|v.symbol==symbol);
+    let image=images.next().map(|image|if images.next().is_some() {None} else {Some(image)});
+    checked_fp_global_image(meta,name,declared,ty,
+        il.static_local_owners.iter().any(|s|s.symbol==symbol),image)
 }
 // Native FP metadata is immutable for one compilation. Cache only successful
 // type checks; an unsupported or malformed type keeps its original diagnostic.
@@ -2539,6 +2547,14 @@ struct FpMetadata<'a> {
     signatures:NativeTypeCache<NativeFpSignature>,
     plain:NativeTypeCache<()>,
     routine_symbols:HashMap<crate::SymbolId,&'a crate::Symbol>,
+    variable_symbols:HashMap<crate::SymbolId,&'a str>,
+    global_variables:HashMap<crate::SymbolId,Option<&'a crate::GlobalVariable>>,
+    global_initializers:HashMap<crate::SymbolId,Option<&'a crate::GlobalFloatInitializer>>,
+    static_locals:std::collections::HashSet<crate::SymbolId>,
+    global_images:std::cell::RefCell<HashMap<crate::SymbolId,FpGlobalImage>>,
+    float_types:HashMap<crate::TypeId,&'a crate::CFloatType>,
+    integer_types:HashMap<crate::TypeId,&'a crate::CIntegerType>,
+    layouts:HashMap<crate::TypeId,&'a crate::TypeObjectSize>,
     symbol_types:HashMap<crate::SymbolId,crate::TypeId>,
     types:HashMap<crate::TypeId,&'a crate::TypeDef>,
     prototypes:HashMap<crate::TypeId,&'a crate::FunctionSignature>,
@@ -2558,15 +2574,26 @@ impl<'a> FpMetadata<'a> {
             data_pointer:Default::default(),function_pointer:Default::default(),
             canonical:Default::default(),signatures:Default::default(),plain:Default::default(),
             routine_symbols:HashMap::new(),symbol_types:HashMap::new(),types:HashMap::new(),
+            variable_symbols:HashMap::new(),global_variables:HashMap::new(),
+            global_initializers:HashMap::new(),static_locals:Default::default(),
+            global_images:Default::default(),float_types:HashMap::new(),
+            integer_types:HashMap::new(),layouts:HashMap::new(),
             prototypes:HashMap::new(),parameters:HashMap::new(),definitions:Default::default(),
             declarations:Default::default(),literals:HashMap::new(),float_initializers:HashMap::new(),
             integer_initializers:HashMap::new(),transfers:HashMap::new(),local_types:HashMap::new(),
         };
         for symbol in &il.symbols {
             if symbol.kind==1 {m.routine_symbols.entry(symbol.id).or_insert(symbol);}
+            if symbol.kind==2 {m.variable_symbols.entry(symbol.id).or_insert(symbol.name.as_str());}
         }
         for ty in &il.symbol_types {m.symbol_types.entry(ty.symbol).or_insert(ty.ty);}
         for ty in &il.types {m.types.entry(ty.id).or_insert(ty);}
+        for ty in &il.c_float_types {m.float_types.entry(ty.id).or_insert(ty);}
+        for ty in &il.c_integer_types {m.integer_types.entry(ty.id).or_insert(ty);}
+        for layout in &il.type_object_sizes {m.layouts.entry(layout.owner).or_insert(layout);}
+        for v in &il.global_variables {index_exact(&mut m.global_variables,v.symbol,v);}
+        for v in &il.global_float_initializers {index_exact(&mut m.global_initializers,v.symbol,v);}
+        for v in &il.static_local_owners {m.static_locals.insert(v.symbol);}
         for sig in &il.function_signatures {m.prototypes.entry(sig.owner).or_insert(sig);}
         for p in &il.type_parameters {m.parameters.entry(p.owner).or_default().push(p);}
         for p in m.parameters.values_mut() {p.sort_by_key(|p|p.position);}
@@ -2591,11 +2618,38 @@ impl<'a> FpMetadata<'a> {
         for v in &il.local_variables {m.local_types.entry((v.routine,v.symbol)).or_insert(v.ty);}
         m
     }
+    fn global_type(&self,symbol:crate::SymbolId)->Result<FloatType,CodegenError> {
+        if let Some(image)=self.global_images.borrow().get(&symbol) {return Ok(image.1);}
+        Ok(self.global(symbol)?.1)
+    }
+    fn global(&self,symbol:crate::SymbolId)->Result<FpGlobalImage,CodegenError> {
+        if let Some(image)=self.global_images.borrow().get(&symbol) {return Ok(image.clone());}
+        let meta=self.global_variables.get(&symbol)
+            .ok_or_else(||reject("FP global is not an EDG-classified file-scope object"))?
+            .ok_or_else(||reject("FP global has ambiguous native storage metadata"))?;
+        let name=self.variable_symbols.get(&symbol)
+            .ok_or_else(||reject("FP global has no native variable identity"))?;
+        let declared=*self.symbol_types.get(&symbol)
+            .ok_or_else(||reject("FP global declaration has no native source type"))?;
+        self.plain(declared)?;
+        let ty=self.float(declared)?;
+        let image=checked_fp_global_image(meta,name,declared,ty,
+            self.static_locals.contains(&symbol),self.global_initializers.get(&symbol).copied())?;
+        self.global_images.borrow_mut().insert(symbol,image.clone());
+        Ok(image)
+    }
     fn scalar(&self,id:crate::TypeId)->Result<ScalarType,CodegenError> {
         cached_native_type(&self.scalar,id,||scalar_type_from_edg(self.il,id))
     }
     fn float(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
-        cached_native_type(&self.float,id,||type_from_edg(self.il,id))
+        cached_native_type(&self.float,id,||{
+            let canonical=self.canonical(id)?;
+            let info=self.float_types.get(&canonical)
+                .ok_or_else(||reject("EDG type is not standard C float/double"))?;
+            let layout=self.layouts.get(&canonical)
+                .ok_or_else(||reject("EDG FP type has no native layout"))?;
+            checked_float_layout(info.bits,layout.bytes,layout.alignment)
+        })
     }
     fn data_pointer(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
         cached_native_type(&self.data_pointer,id,||fp_data_pointer_type_from_edg(self.il,id))
@@ -2604,7 +2658,19 @@ impl<'a> FpMetadata<'a> {
         cached_native_type(&self.function_pointer,id,||function_pointer_type_from_edg(self.il,id))
     }
     fn canonical(&self,id:crate::TypeId)->Result<crate::TypeId,CodegenError> {
-        cached_native_type(&self.canonical,id,||super::canonical_abi_type(self.il,id))
+        cached_native_type(&self.canonical,id,||{
+            let mut ty=id;
+            for _ in 0..=self.types.len() {
+                let definition=self.types.get(&ty)
+                    .ok_or_else(||reject(format!("missing EDG type {}",ty.0)))?;
+                if super::semantic(4,definition.kind)!=3 {return Ok(ty);}
+                if definition.related_role!=Some(4) {
+                    return Err(reject(format!("malformed EDG typeref {}",ty.0)));
+                }
+                ty=definition.related.ok_or_else(||reject(format!("unresolved EDG typeref {}",ty.0)))?;
+            }
+            Err(reject("cyclic EDG typeref"))
+        })
     }
     fn signature(&self,id:crate::TypeId)->Result<NativeFpSignature,CodegenError> {
         cached_native_type(&self.signatures,id,||source_callable_signature(self.il,id))
@@ -2618,7 +2684,6 @@ impl<'a> FpMetadata<'a> {
 }
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
-    il:&'a Il,
     graph:&'a crate::graph::Graph,
     metadata:&'a FpMetadata<'a>,
     routine:crate::SymbolId,
@@ -2626,7 +2691,6 @@ struct FpSourceCtx<'a> {
     locals:HashMap<crate::SymbolId,usize>,
     param_types:&'a [ScalarType],
     local_types:&'a [ScalarType],
-    global_symbols:&'a std::collections::HashSet<crate::SymbolId>,
 }
 /// Decode a source-owned integer constant, never a constant inferred
 /// from its printed name or a generic C integer expression. The IL stores
@@ -2873,8 +2937,8 @@ fn native_fp_plan(
                 }
                 return Ok(Some(FloatExpr::Local(i)));
             }
-            if ctx.global_symbols.contains(&symbol) {
-                let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
+            if ctx.metadata.global_variables.contains_key(&symbol) {
+                let actual=ctx.metadata.global_type(symbol)?;
                 if actual!=ty || ctx.metadata.scalar(node.data.type_id.ok_or_else(||
                         reject("FP external global expression lacks native type"))?)?!=
                         ScalarType::Float(actual) {
@@ -2964,8 +3028,7 @@ fn native_fp_condition(
     let boolean_kind=kind==3 &&
         node.data.type_id.and_then(|ty|
             ctx.metadata.canonical(ty).ok()).is_some_and(|ty|
-            ctx.il.c_integer_types.iter().any(|k|k.id==ty &&
-                (k.is_bool || k.bits==32)));
+            ctx.metadata.integer_types.get(&ty).is_some_and(|k|k.is_bool || k.bits==32));
     if boolean_kind && node.data.constant_kind.is_none() &&
         node.operands.len()==1 {
         if operator==Some(17) {
@@ -2995,8 +3058,7 @@ fn native_fp_condition(
     let integer=ctx.metadata.canonical(
         node.data.type_id.ok_or_else(||
             reject("FP condition has no native result type"))?)?;
-    if !ctx.il.c_integer_types.iter().any(|ty|
-        ty.id==integer && (ty.is_bool || ty.bits==32)) {
+    if !ctx.metadata.integer_types.get(&integer).is_some_and(|ty|ty.is_bool || ty.bits==32) {
         return Err(reject(format!(
             "FP comparison must produce C int or bool: kind={kind}, operator={operator:?}, expr_type={:?}, canonical={integer:?}, operand_types={:?}",
             node.data.type_id,
@@ -3572,8 +3634,8 @@ fn lower_fp_leaf(
                 return Err(reject("FP assignment target is not direct scalar storage"));
             }
             if let Some(symbol)=left.data.symbol_id {
-                if ctx.global_symbols.contains(&symbol) {
-                    let (_,ty,_,_)=source_fp_global(ctx.il,symbol)?;
+                if ctx.metadata.global_variables.contains_key(&symbol) {
+                    let ty=ctx.metadata.global_type(symbol)?;
                     if ctx.metadata.scalar(left.data.type_id.ok_or_else(||
                         reject("FP global store lvalue has no native type"))?)?!=
                         ScalarType::Float(ty) {
@@ -3797,8 +3859,6 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             }
         }
     }
-    let global_symbols:std::collections::HashSet<_>=il.global_variables.iter()
-        .map(|g|g.symbol).collect();
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
         let routine=graph.routine_for_function(name)
@@ -3873,8 +3933,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             params_syms.entry(p.symbol).or_insert(i);
         }
         let ctx=FpSourceCtx {
-            il,graph:&graph,metadata:&metadata,routine,params:params_syms,locals:local_syms,
-            param_types:&params,local_types:&local_types,global_symbols:&global_symbols,
+            graph:&graph,metadata:&metadata,routine,params:params_syms,locals:local_syms,
+            param_types:&params,local_types:&local_types,
         };
         let mut statements=Vec::new();
         lower_fp_body(&ctx,roots[0],&mut statements)?;
@@ -3891,16 +3951,16 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     for g in &il.global_variables {
         if (g.linkage!=1 || g.explicit_initializer) && seen.insert(g.symbol) {
             let symbol=g.symbol;
-            let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
+            let (name,ty,linkage,initializer)=metadata.global(symbol)?;
             fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
         }
     }
     for expr in &il.expressions {
         if super::semantic(2,expr.kind)!=2 {continue;}
         let Some(symbol)=expr.symbol_id else {continue;};
-        if global_symbols.contains(&symbol) &&
+        if metadata.global_variables.contains_key(&symbol) &&
             seen.insert(symbol) {
-            let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
+            let (name,ty,linkage,initializer)=metadata.global(symbol)?;
             fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
         }
     }
@@ -5387,6 +5447,43 @@ mod audit_resource_budget_tests {
         if let Some(path)=std::env::var_os("EDG_INDEXED_FP_OBJECT") {
             std::fs::write(path,object).unwrap();
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_fp_indexed_global_images() {
+        let dir=std::env::temp_dir().join(format!("edg-fp-globals-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("globals.c");
+        let mut text=String::new();
+        for i in 0..256 {
+            text.push_str(&format!("double g{i} = {i}.25;\n"));
+        }
+        text.push_str("double indexed_globals(double x) { g127 = x; return g0 + g127 + g255; }\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let metadata=FpMetadata::new(&compiled.il);
+        for global in &compiled.il.global_variables {
+            let symbol=global.symbol;
+            assert_eq!(metadata.global(symbol).unwrap(),source_fp_global(&compiled.il,symbol).unwrap());
+        }
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        if let Some(path)=std::env::var_os("EDG_INDEXED_FP_GLOBAL_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        // Both paths must reject duplicate exact initializer and storage records.
+        let mut malformed=compiled.il.clone();
+        let image=malformed.global_float_initializers[0].clone();
+        let symbol=image.symbol;
+        malformed.global_float_initializers.push(image);
+        assert!(FpMetadata::new(&malformed).global(symbol).is_err());
+        assert!(source_fp_global(&malformed,symbol).is_err());
+        let mut malformed=compiled.il.clone();
+        let global=malformed.global_variables[0];
+        malformed.global_variables.push(global);
+        assert!(FpMetadata::new(&malformed).global(global.symbol).is_err());
+        assert!(source_fp_global(&malformed,global.symbol).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
