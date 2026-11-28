@@ -2221,7 +2221,7 @@ fn source_fp_data_pointer_value(
     if super::semantic(2,expr.data.kind)==3 &&
         expr.data.operator.is_some_and(|op|super::semantic(3,op)==43) &&
         expr.operands.len()==1 && expr.data.constant_kind.is_none() {
-        if fp_data_pointer_ctx.metadata.float(expr.data.type_id.ok_or_else(||
+        if ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
             reject("address-of FP local lacks native pointer type"))?)?!=ty {
             return Err(reject("address-of FP local pointee type mismatch"));
         }
@@ -2248,7 +2248,7 @@ fn source_fp_data_pointer_value(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("FP data pointer source has no native symbol"))?;
-    if fp_data_pointer_ctx.metadata.float(expr.data.type_id.ok_or_else(||
+    if ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
         reject("FP pointer expression has no native type"))?)?!=ty {
         return Err(reject("FP pointer expression native pointee mismatch"));
     }
@@ -2327,7 +2327,7 @@ fn source_fp_pointer_formal(
     let n=ctx.params.get(&symbol).copied().ok_or_else(||
         reject("FP memory load/store pointer not a source formal"))?;
     if ctx.param_types[n]!=ScalarType::DataPointer(ty) ||
-        fp_data_pointer_ctx.metadata.float(expr.data.type_id.ok_or_else(||
+        ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
             reject("FP memory pointer operand missing native type"))?)?!=ty {
         return Err(reject("FP memory pointer source pointee mismatch"));
     }
@@ -2775,7 +2775,7 @@ fn native_fp_plan(
                     ctx,if std::ptr::eq(pointer_expr,callee) {
                         node.operands[0]
                     } else {callee.operands[0]})?;
-                let (_,fn_ty)=function_pointer_ctx.metadata.float(pointer_type)?;
+                let (_,fn_ty)=ctx.metadata.function_pointer(pointer_type)?;
                 // The EDG expression must refer to the native pointer type,
                 // or be an actual function-designator dereference. Neither
                 // a cast to function pointer nor data-pointer coercion is safe.
@@ -3698,7 +3698,7 @@ fn lower_integer_indirect_return(
         ctx,if std::ptr::eq(pointer_expr,callee) {
             node.operands[0]
         } else {callee.operands[0]})?;
-    let (_,fn_ty)=function_pointer_ctx.metadata.float(pointer_type)?;
+    let (_,fn_ty)=ctx.metadata.function_pointer(pointer_type)?;
     if !std::ptr::eq(pointer_expr,callee) {
         let designator=ctx.metadata.canonical(
             callee.data.type_id.ok_or_else(||
@@ -5388,6 +5388,30 @@ mod audit_resource_budget_tests {
             std::fs::write(path,object).unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fp_native_metadata_cache_and_exact_duplicates() {
+        let cache=NativeTypeCache::<usize>::default();
+        let id=crate::TypeId(12);
+        let calls=std::cell::Cell::new(0);
+        for _ in 0..1024 {
+            assert_eq!(cached_native_type(&cache,id,||{
+                calls.set(calls.get()+1);
+                Ok(42)
+            }).unwrap(),42);
+        }
+        assert_eq!(calls.get(),1);
+        let bad=crate::TypeId(13);
+        assert!(cached_native_type(&cache,bad,||Err(reject("invalid native type"))).is_err());
+        assert!(!cache.borrow().contains_key(&bad));
+        let mut exact=HashMap::new();
+        index_exact(&mut exact,("f","0","0"),1);
+        assert_eq!(exact.get(&("f","0","0")),Some(&Some(1)));
+        index_exact(&mut exact,("f","0","0"),2);
+        index_exact(&mut exact,("f","0","0"),3);
+        assert_eq!(exact.get(&("f","0","0")),Some(&None));
+        assert!(!exact.contains_key(&("g","0","0")));
     }
 
     #[test]
