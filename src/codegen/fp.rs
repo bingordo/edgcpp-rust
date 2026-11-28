@@ -21,7 +21,6 @@ fn checked_fp_function_resources(
 use super::*;
 use cranelift_codegen::ir::{condcodes::FloatCC,immediates::{Ieee32,Ieee64},Block,FuncRef,Value};
 use std::collections::HashMap;
-use std::cell::Cell;
 use cranelift_codegen::ir::{GlobalValue,MemFlags};
 type FpGlobalRefs=HashMap<crate::SymbolId,(GlobalValue,FloatType)>;
 #[derive(Debug,Clone,PartialEq,Eq)]
@@ -1368,193 +1367,295 @@ fn check_fp_statements(
     debug_assert_eq!(finished.len(),1);
     Ok(finished.pop().expect("completed root statement sequence"))
 }
-#[derive(Clone,Copy)]
-struct FpLoopTargets<'a> {
+#[allow(clippy::too_many_arguments)]
+fn emit_fp_assignment(
+    n:usize,expr:&FloatExpr,fb:&mut FunctionBuilder<'_>,params:&[Value],
+    params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
+)->Result<(),CodegenError> {
+    let (v,actual)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+    match locals_ty.get(n) {
+        Some(ScalarType::Float(ty)) if *ty==actual=>
+            fb.def_var(locals[n],v),
+        Some(ScalarType::StackFloat(ty)) if *ty==actual=>{
+            // An address-taken automatic must never retain an
+            // out-of-date SSA copy after an aliased pointer store.
+            let address=fb.use_var(locals[n]);
+            fb.ins().store(MemFlags::new(),v,address,0);
+        }
+        _=>return Err(reject("FP local store type differs from native source")),
+    }
+    Ok(())
+}
+struct FpLoopTargets {
     break_to:Block,
     continue_to:Block,
-    saw_break:&'a Cell<bool>,
-    saw_continue:&'a Cell<bool>,
+    saw_break:bool,
+    saw_continue:bool,
 }
 /// Loops leave their headers unsealed until every continue/backedge exists.
-/// The Cranelift SSA builder then inserts the required F32/F64 block params.
+/// Explicit continuations preserve the original block creation/sealing order
+/// without recursive native-stack use. Loop state belongs to an active
+/// lexical loop and is popped once its final continuation completes.
 #[allow(clippy::too_many_arguments)]
 fn emit_fp_statements(
     stmts:&[FloatStmt],fb:&mut FunctionBuilder<'_>,params:&[Value],
     params_ty:&[ScalarType],locals:&[Variable],locals_ty:&[ScalarType],
-    outer:Option<FpLoopTargets<'_>>,
-    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,depth:usize,
+    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,
 )->Result<bool,CodegenError> {
-    if depth>64 {return Err(reject("FP CFG emission exceeds recursion limit"));}
+    #[derive(Clone,Copy)]
+    enum Arm<'a> {
+        Stmts(&'a [FloatStmt]),
+        Assignments(&'a [(usize,FloatExpr)]),
+    }
+    enum Task<'a> {
+        Run(Arm<'a>,Option<usize>),
+        IfYes(Arm<'a>,Option<usize>,Block),
+        IfNo(Option<Block>),
+        WhileEnd(Block,Block),
+        ForInit(Option<&'a FloatCondition>,&'a [FloatStmt],&'a [FloatStmt]),
+        ForBody(Block,Block,Block,bool,&'a [FloatStmt]),
+        ForEnd(Block,Block,bool),
+        DoEnd(Block,Block,Block,&'a FloatCondition),
+    }
+    let mut pending=vec![Task::Run(Arm::Stmts(stmts),None)];
+    let mut loops=Vec::<FpLoopTargets>::new();
     let mut live=true;
-    for stmt in stmts {
-        if !live {break;}
-        match stmt {
-            FloatStmt::AssignInteger {local,source}=>{
-                let (value,ty)=emit_fp_integer_source(source,fb,
-                    params,params_ty,locals,locals_ty)?;
-                if locals_ty.get(*local)!=Some(&ty) {
-                    return Err(reject("INTEGER SSA assignment native class mismatch"));
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Run(Arm::Assignments(writes),_)=>{
+                if live {
+                    for (n,expr) in writes {
+                        emit_fp_assignment(*n,expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                    }
                 }
-                fb.def_var(*locals.get(*local)
-                    .ok_or_else(||reject("INTEGER SSA destination has no variable"))?,value);
             }
-            FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
-                let address=emit_fp_index_address(*pointer,index,*ty,fb,
-                    params,params_ty,locals,locals_ty)?;
-                let (value,actual)=emit_expr(value,fb,params,params_ty,
-                    locals,locals_ty,refs,global_refs)?;
-                if actual!=*ty {return Err(reject("indexed FP store RHS class mismatch"));}
-                fb.ins().store(MemFlags::new(),value,address,0);
-            }
-            FloatStmt::AssignDataPointer {local,ty,source}=>{
-                let value=emit_data_pointer_source(*source,fb,
-                    params,params_ty,locals,locals_ty,*ty)?;
-                let var=*locals.get(*local).ok_or_else(||
-                    reject("FP data pointer local has no SSA slot"))?;
-                fb.def_var(var,value);
-            }
-            FloatStmt::StorePointerLocal {local,ty,value}=>{
-                let pointer=emit_data_pointer_source(PointerSource::Local(*local),fb,
-                    params,params_ty,locals,locals_ty,*ty)?;
-                let (v,actual)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
-                    refs,global_refs)?;
-                if actual!=*ty {return Err(reject("FP data pointer store needs conversion"));}
-                fb.ins().store(MemFlags::new(),v,pointer,0);
-            }
-            FloatStmt::AssignPointer {local,pointer_type,source}=>{
-                let value=emit_pointer_source(*source,fb,
-                    params,params_ty,locals,locals_ty,*pointer_type)?;
-                let var=*locals.get(*local).ok_or_else(||
-                    reject("pointer local has no SSA slot"))?;
-                fb.def_var(var,value);
-            }
-            FloatStmt::StorePointerParameter {parameter,ty,value}=>{
-                if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
-                    return Err(reject("FP pointer store uses unchecked formal"));
-                }
-                let pointer=*params.get(*parameter).ok_or_else(||
-                    reject("FP pointer store has no native formal value"))?;
-                let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
-                    refs,global_refs)?;
-                if source!=*ty {return Err(reject("FP memory store needs explicit conversion"));}
-                fb.ins().store(MemFlags::new(),v,pointer,0);
-            }
-            FloatStmt::StoreGlobal {symbol,ty,value}=>{
-                let (data,actual)=*global_refs.get(symbol).ok_or_else(||
-                    reject("FP global store lacks verified data symbol"))?;
-                if *ty!=actual {return Err(reject("FP global store native type mismatch"));}
-                let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
-                    refs,global_refs)?;
-                if source!=*ty {return Err(reject("FP global store RHS type differs"));}
-                let address=fb.ins().global_value(types::I64,data);
-                fb.ins().store(MemFlags::new(),v,address,0);
-            }
-            FloatStmt::Assign(n,expr)=>{
-                let (v,actual)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                match locals_ty.get(*n) {
-                    Some(ScalarType::Float(ty)) if *ty==actual=>
-                        fb.def_var(locals[*n],v),
-                    Some(ScalarType::StackFloat(ty)) if *ty==actual=>{
-                        // An address-taken automatic must never retain an
-                        // out-of-date SSA copy after an aliased pointer store.
-                        let address=fb.use_var(locals[*n]);
+            Task::Run(Arm::Stmts(stmts),outer)=>{
+                if !live {continue;}
+                let Some((stmt,tail))=stmts.split_first() else {continue;};
+                if !tail.is_empty() {pending.push(Task::Run(Arm::Stmts(tail),outer));}
+                match stmt {
+                    FloatStmt::AssignInteger {local,source}=>{
+                        let (value,ty)=emit_fp_integer_source(source,fb,
+                            params,params_ty,locals,locals_ty)?;
+                        if locals_ty.get(*local)!=Some(&ty) {
+                            return Err(reject("INTEGER SSA assignment native class mismatch"));
+                        }
+                        fb.def_var(*locals.get(*local)
+                            .ok_or_else(||reject("INTEGER SSA destination has no variable"))?,value);
+                    }
+                    FloatStmt::StoreIndexed {pointer,index,ty,value}=>{
+                        let address=emit_fp_index_address(*pointer,index,*ty,fb,
+                            params,params_ty,locals,locals_ty)?;
+                        let (value,actual)=emit_expr(value,fb,params,params_ty,
+                            locals,locals_ty,refs,global_refs)?;
+                        if actual!=*ty {return Err(reject("indexed FP store RHS class mismatch"));}
+                        fb.ins().store(MemFlags::new(),value,address,0);
+                    }
+                    FloatStmt::AssignDataPointer {local,ty,source}=>{
+                        let value=emit_data_pointer_source(*source,fb,
+                            params,params_ty,locals,locals_ty,*ty)?;
+                        let var=*locals.get(*local).ok_or_else(||
+                            reject("FP data pointer local has no SSA slot"))?;
+                        fb.def_var(var,value);
+                    }
+                    FloatStmt::StorePointerLocal {local,ty,value}=>{
+                        let pointer=emit_data_pointer_source(PointerSource::Local(*local),fb,
+                            params,params_ty,locals,locals_ty,*ty)?;
+                        let (v,actual)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                            refs,global_refs)?;
+                        if actual!=*ty {return Err(reject("FP data pointer store needs conversion"));}
+                        fb.ins().store(MemFlags::new(),v,pointer,0);
+                    }
+                    FloatStmt::AssignPointer {local,pointer_type,source}=>{
+                        let value=emit_pointer_source(*source,fb,
+                            params,params_ty,locals,locals_ty,*pointer_type)?;
+                        let var=*locals.get(*local).ok_or_else(||
+                            reject("pointer local has no SSA slot"))?;
+                        fb.def_var(var,value);
+                    }
+                    FloatStmt::StorePointerParameter {parameter,ty,value}=>{
+                        if params_ty.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
+                            return Err(reject("FP pointer store uses unchecked formal"));
+                        }
+                        let pointer=*params.get(*parameter).ok_or_else(||
+                            reject("FP pointer store has no native formal value"))?;
+                        let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                            refs,global_refs)?;
+                        if source!=*ty {return Err(reject("FP memory store needs explicit conversion"));}
+                        fb.ins().store(MemFlags::new(),v,pointer,0);
+                    }
+                    FloatStmt::StoreGlobal {symbol,ty,value}=>{
+                        let (data,actual)=*global_refs.get(symbol).ok_or_else(||
+                            reject("FP global store lacks verified data symbol"))?;
+                        if *ty!=actual {return Err(reject("FP global store native type mismatch"));}
+                        let (v,source)=emit_expr(value,fb,params,params_ty,locals,locals_ty,
+                            refs,global_refs)?;
+                        if source!=*ty {return Err(reject("FP global store RHS type differs"));}
+                        let address=fb.ins().global_value(types::I64,data);
                         fb.ins().store(MemFlags::new(),v,address,0);
                     }
-                    _=>return Err(reject("FP local store type differs from native source")),
-                }
-            }
-            FloatStmt::Return(expr)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.ins().return_(&[v]);
-                live=false;
-            }
-            FloatStmt::ReturnInteger(expr,to)=>{
-                let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                let converted=match to {
-                    ScalarType::Int {signed:true,..}=>
-                        fb.ins().fcvt_to_sint(to.machine(),v),
-                    ScalarType::Int {signed:false,..}=>
-                        fb.ins().fcvt_to_uint(to.machine(),v),
-                    _=>return Err(reject("non-integer FP conversion return")),
-                };
-                fb.ins().return_(&[converted]);
-                live=false;
-            }
-            FloatStmt::ReturnIndirectInteger {
-                pointer,pointer_type,parameters,return_type,arguments,
-            }=>{
-                let pointer=emit_pointer_source(*pointer,fb,
-                    params,params_ty,locals,locals_ty,*pointer_type)?;
-                let mut signature=cranelift_codegen::ir::Signature::new(
-                    fb.func.signature.call_conv);
-                for ty in parameters {
-                    if matches!(ty,ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)) {
-                        return Err(reject("nested pointer argument unsupported"));
+                    FloatStmt::Assign(n,expr)=>{
+                        emit_fp_assignment(*n,expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                     }
-                    signature.params.push(AbiParam::new(ty.machine()));
+                    FloatStmt::Return(expr)=>{
+                        let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        fb.ins().return_(&[v]);
+                        live=false;
+                    }
+                    FloatStmt::ReturnInteger(expr,to)=>{
+                        let (v,_)=emit_expr(expr,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        let converted=match to {
+                            ScalarType::Int {signed:true,..}=>
+                                fb.ins().fcvt_to_sint(to.machine(),v),
+                            ScalarType::Int {signed:false,..}=>
+                                fb.ins().fcvt_to_uint(to.machine(),v),
+                            _=>return Err(reject("non-integer FP conversion return")),
+                        };
+                        fb.ins().return_(&[converted]);
+                        live=false;
+                    }
+                    FloatStmt::ReturnIndirectInteger {
+                        pointer,pointer_type,parameters,return_type,arguments,
+                    }=>{
+                        let pointer=emit_pointer_source(*pointer,fb,
+                            params,params_ty,locals,locals_ty,*pointer_type)?;
+                        let mut signature=cranelift_codegen::ir::Signature::new(
+                            fb.func.signature.call_conv);
+                        for ty in parameters {
+                            if matches!(ty,ScalarType::FunctionPointer(_)|ScalarType::DataPointer(_)) {
+                                return Err(reject("nested pointer argument unsupported"));
+                            }
+                            signature.params.push(AbiParam::new(ty.machine()));
+                        }
+                        signature.returns.push(AbiParam::new(return_type.machine()));
+                        let values=emit_scalar_call_arguments(arguments,parameters,fb,
+                            params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        let reference=fb.import_signature(signature);
+                        let call=fb.ins().call_indirect(reference,pointer,&values);
+                        let returned=*fb.inst_results(call).first().ok_or_else(||
+                            reject("INTEGER indirect call has no return register"))?;
+                        fb.ins().return_(&[returned]);
+                        live=false;
+                    }
+                    FloatStmt::IfReturn(cond,yes,no)=>{
+                        let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        let t=fb.create_block();
+                        let f=fb.create_block();
+                        fb.ins().brif(flag,t,&[],f,&[]);
+                        fb.seal_block(t);
+                        fb.seal_block(f);
+                        fb.switch_to_block(t);
+                        let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        fb.ins().return_(&[v]);
+                        fb.switch_to_block(f);
+                        let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        fb.ins().return_(&[v]);
+                        live=false;
+                    }
+                    FloatStmt::IfBlock(cond,yes,no)=>{
+                        let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        let t=fb.create_block();
+                        let f=fb.create_block();
+                        fb.ins().brif(test,t,&[],f,&[]);
+                        fb.seal_block(t);
+                        fb.seal_block(f);
+                        fb.switch_to_block(t);
+                        pending.push(Task::IfYes(Arm::Stmts(no),outer,f));
+                        pending.push(Task::Run(Arm::Stmts(yes),outer));
+                    }
+                    FloatStmt::IfAssign(cond,yes,no)=>{
+                        let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        let t=fb.create_block();
+                        let f=fb.create_block();
+                        fb.ins().brif(test,t,&[],f,&[]);
+                        fb.seal_block(t);
+                        fb.seal_block(f);
+                        fb.switch_to_block(t);
+                        pending.push(Task::IfYes(Arm::Assignments(no),outer,f));
+                        pending.push(Task::Run(Arm::Assignments(yes),outer));
+                    }
+                    FloatStmt::While(cond,body)=>{
+                        let head=fb.create_block();
+                        let body_block=fb.create_block();
+                        let exit=fb.create_block();
+                        fb.ins().jump(head,&[]);
+                        fb.switch_to_block(head);
+                        let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
+                        fb.ins().brif(test,body_block,&[],exit,&[]);
+                        fb.seal_block(body_block);
+                        fb.switch_to_block(body_block);
+                        let inner=loops.len();
+                        loops.push(FpLoopTargets {break_to:exit,continue_to:head,
+                            saw_break:false,saw_continue:false});
+                        pending.push(Task::WhileEnd(head,exit));
+                        pending.push(Task::Run(Arm::Stmts(body),Some(inner)));
+                    }
+                    FloatStmt::For {init,condition,increment,body}=>{
+                        pending.push(Task::ForInit(condition.as_ref(),body,increment));
+                        pending.push(Task::Run(Arm::Stmts(init),outer));
+                    }
+                    FloatStmt::DoWhile(body,cond)=>{
+                        let body_block=fb.create_block();
+                        let test_block=fb.create_block();
+                        let exit=fb.create_block();
+                        fb.ins().jump(body_block,&[]);
+                        fb.switch_to_block(body_block);
+                        let inner=loops.len();
+                        loops.push(FpLoopTargets {break_to:exit,continue_to:test_block,
+                            saw_break:false,saw_continue:false});
+                        pending.push(Task::DoEnd(body_block,test_block,exit,cond));
+                        pending.push(Task::Run(Arm::Stmts(body),Some(inner)));
+                    }
+                    FloatStmt::Break=>{
+                        let target=outer.and_then(|i|loops.get_mut(i))
+                            .ok_or_else(||reject("FP break outside loop"))?;
+                        fb.ins().jump(target.break_to,&[]);
+                        target.saw_break=true;
+                        live=false;
+                    }
+                    FloatStmt::Continue=>{
+                        let target=outer.and_then(|i|loops.get_mut(i))
+                            .ok_or_else(||reject("FP continue outside loop"))?;
+                        fb.ins().jump(target.continue_to,&[]);
+                        target.saw_continue=true;
+                        live=false;
+                    }
                 }
-                signature.returns.push(AbiParam::new(return_type.machine()));
-                let values=emit_scalar_call_arguments(arguments,parameters,fb,
-                    params,params_ty,locals,locals_ty,refs,global_refs)?;
-                let reference=fb.import_signature(signature);
-                let call=fb.ins().call_indirect(reference,pointer,&values);
-                let returned=*fb.inst_results(call).first().ok_or_else(||
-                    reject("INTEGER indirect call has no return register"))?;
-                fb.ins().return_(&[returned]);
-                live=false;
             }
-            FloatStmt::IfReturn(cond,yes,no)=>{
-                let flag=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                let t=fb.create_block();
-                let f=fb.create_block();
-                fb.ins().brif(flag,t,&[],f,&[]);
-                fb.seal_block(t);
-                fb.seal_block(f);
-                fb.switch_to_block(t);
-                let (v,_)=emit_expr(yes,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.ins().return_(&[v]);
-                fb.switch_to_block(f);
-                let (v,_)=emit_expr(no,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.ins().return_(&[v]);
-                live=false;
+            Task::IfYes(no,outer,else_block)=>{
+                let join=if live {
+                    let b=fb.create_block();
+                    fb.ins().jump(b,&[]);
+                    Some(b)
+                } else {None};
+                fb.switch_to_block(else_block);
+                live=true;
+                pending.push(Task::IfNo(join));
+                pending.push(Task::Run(no,outer));
             }
-            FloatStmt::IfBlock(cond,yes,no)=>{
-                live=emit_fp_if(cond,yes,no,fb,params,params_ty,
-                    locals,locals_ty,outer,refs,global_refs,depth+1)?;
-            }
-            FloatStmt::IfAssign(cond,yes,no)=>{
-                let a:Vec<_>=yes.iter().map(|(n,e)|
-                    FloatStmt::Assign(*n,e.clone())).collect();
-                let b:Vec<_>=no.iter().map(|(n,e)|
-                    FloatStmt::Assign(*n,e.clone())).collect();
-                live=emit_fp_if(cond,&a,&b,fb,params,params_ty,
-                    locals,locals_ty,outer,refs,global_refs,depth+1)?;
-            }
-            FloatStmt::While(cond,body)=>{
-                let head=fb.create_block();
-                let body_block=fb.create_block();
-                let exit=fb.create_block();
-                fb.ins().jump(head,&[]);
-                fb.switch_to_block(head);
-                let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                fb.ins().brif(test,body_block,&[],exit,&[]);
-                fb.seal_block(body_block);
-                fb.switch_to_block(body_block);
-                let saw_break=Cell::new(false);
-                let saw_continue=Cell::new(false);
-                let inner=FpLoopTargets {break_to:exit,continue_to:head,
-                    saw_break:&saw_break,saw_continue:&saw_continue};
-                if emit_fp_statements(body,fb,params,params_ty,locals,
-                    locals_ty,Some(inner),refs,global_refs,depth+1)? {
-                    fb.ins().jump(head,&[]);
+            Task::IfNo(join)=>{
+                let join=if live {
+                    let b=join.unwrap_or_else(||fb.create_block());
+                    fb.ins().jump(b,&[]);
+                    Some(b)
+                } else {join};
+                live=join.is_some();
+                if let Some(b)=join {
+                    fb.seal_block(b);
+                    fb.switch_to_block(b);
                 }
+            }
+            Task::WhileEnd(head,exit)=>{
+                if live {fb.ins().jump(head,&[]);}
+                loops.pop().expect("active while loop");
                 fb.seal_block(head);
                 fb.seal_block(exit);
                 fb.switch_to_block(exit);
+                live=true;
             }
-            FloatStmt::For {init,condition,increment,body}=>{
-                if !emit_fp_statements(init,fb,params,params_ty,locals,
-                    locals_ty,outer,refs,global_refs,depth+1)? {live=false;continue;}
+            Task::ForInit(condition,body,increment)=>{
+                if !live {continue;}
                 let head=fb.create_block();
                 let body_block=fb.create_block();
                 let step=fb.create_block();
@@ -1567,104 +1668,52 @@ fn emit_fp_statements(
                 } else {fb.ins().jump(body_block,&[]);}
                 fb.seal_block(body_block);
                 fb.switch_to_block(body_block);
-                let saw_break=Cell::new(false);
-                let saw_continue=Cell::new(false);
-                let inner=FpLoopTargets {break_to:exit,continue_to:step,
-                    saw_break:&saw_break,saw_continue:&saw_continue};
-                let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),refs,global_refs,depth+1)?;
-                if body_live {fb.ins().jump(step,&[]);}
+                let inner=loops.len();
+                loops.push(FpLoopTargets {break_to:exit,continue_to:step,
+                    saw_break:false,saw_continue:false});
+                pending.push(Task::ForBody(head,step,exit,condition.is_some(),increment));
+                pending.push(Task::Run(Arm::Stmts(body),Some(inner)));
+            }
+            Task::ForBody(head,step,exit,has_test,increment)=>{
+                if live {fb.ins().jump(step,&[]);}
                 fb.seal_block(step);
-                if body_live||saw_continue.get() {
+                let inner=loops.len()-1;
+                if live||loops[inner].saw_continue {
                     fb.switch_to_block(step);
-                    if emit_fp_statements(increment,fb,params,params_ty,
-                        locals,locals_ty,Some(inner),refs,global_refs,depth+1)? {
-                        fb.ins().jump(head,&[]);
-                    }
+                    live=true;
+                    pending.push(Task::ForEnd(head,exit,has_test));
+                    pending.push(Task::Run(Arm::Stmts(increment),Some(inner)));
+                } else {
+                    pending.push(Task::ForEnd(head,exit,has_test));
                 }
+            }
+            Task::ForEnd(head,exit,has_test)=>{
+                if live {fb.ins().jump(head,&[]);}
+                let state=loops.pop().expect("active for loop");
                 fb.seal_block(head);
                 fb.seal_block(exit);
-                if condition.is_some()||saw_break.get() {
-                    fb.switch_to_block(exit);
-                } else {live=false;}
+                live=has_test||state.saw_break;
+                if live {fb.switch_to_block(exit);}
             }
-            FloatStmt::DoWhile(body,cond)=>{
-                let body_block=fb.create_block();
-                let test_block=fb.create_block();
-                let exit=fb.create_block();
-                fb.ins().jump(body_block,&[]);
-                fb.switch_to_block(body_block);
-                let saw_break=Cell::new(false);
-                let saw_continue=Cell::new(false);
-                let inner=FpLoopTargets {break_to:exit,continue_to:test_block,
-                    saw_break:&saw_break,saw_continue:&saw_continue};
-                let body_live=emit_fp_statements(body,fb,params,params_ty,
-                    locals,locals_ty,Some(inner),refs,global_refs,depth+1)?;
-                if body_live {fb.ins().jump(test_block,&[]);}
+            Task::DoEnd(body_block,test_block,exit,cond)=>{
+                let state=loops.pop().expect("active do-while loop");
+                if live {fb.ins().jump(test_block,&[]);}
                 fb.seal_block(test_block);
-                if body_live||saw_continue.get() {
+                let test_live=live||state.saw_continue;
+                if test_live {
                     fb.switch_to_block(test_block);
                     let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                     fb.ins().brif(test,body_block,&[],exit,&[]);
                 }
                 fb.seal_block(body_block);
                 fb.seal_block(exit);
-                if body_live||saw_continue.get()||saw_break.get() {
-                    fb.switch_to_block(exit);
-                } else {live=false;}
-            }
-            FloatStmt::Break=>{
-                let target=outer.ok_or_else(||reject("FP break outside loop"))?;
-                fb.ins().jump(target.break_to,&[]);
-                target.saw_break.set(true);
-                live=false;
-            }
-            FloatStmt::Continue=>{
-                let target=outer.ok_or_else(||reject("FP continue outside loop"))?;
-                fb.ins().jump(target.continue_to,&[]);
-                target.saw_continue.set(true);
-                live=false;
+                live=test_live||state.saw_break;
+                if live {fb.switch_to_block(exit);}
             }
         }
     }
+    debug_assert!(loops.is_empty());
     Ok(live)
-}
-#[allow(clippy::too_many_arguments)]
-fn emit_fp_if(
-    cond:&FloatCondition,yes:&[FloatStmt],no:&[FloatStmt],
-    fb:&mut FunctionBuilder<'_>,params:&[Value],params_ty:&[ScalarType],
-    locals:&[Variable],locals_ty:&[ScalarType],
-    outer:Option<FpLoopTargets<'_>>,
-    refs:&HashMap<String,FuncRef>,global_refs:&FpGlobalRefs,depth:usize,
-)->Result<bool,CodegenError> {
-    if depth>64 {return Err(reject("FP nested if exceeds recursion limit"));}
-    let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-    let t=fb.create_block();
-    let f=fb.create_block();
-    fb.ins().brif(test,t,&[],f,&[]);
-    fb.seal_block(t);
-    fb.seal_block(f);
-    fb.switch_to_block(t);
-    let t_live=emit_fp_statements(yes,fb,params,params_ty,
-        locals,locals_ty,outer,refs,global_refs,depth+1)?;
-    let join=if t_live {
-        let b=fb.create_block();
-        fb.ins().jump(b,&[]);
-        Some(b)
-    } else {None};
-    fb.switch_to_block(f);
-    let f_live=emit_fp_statements(no,fb,params,params_ty,
-        locals,locals_ty,outer,refs,global_refs,depth+1)?;
-    let join=if f_live {
-        let b=join.unwrap_or_else(||fb.create_block());
-        fb.ins().jump(b,&[]);
-        Some(b)
-    } else {join};
-    if let Some(b)=join {
-        fb.seal_block(b);
-        fb.switch_to_block(b);
-        Ok(true)
-    } else {Ok(false)}
 }
 /// Keep the original pure-return reference API, sharing the same typed
 /// statement emitter and ABI classification as local-bearing FP functions.
@@ -1976,7 +2025,7 @@ fn emit_scalar_float_bodies_with_globals(
                 var
             }).collect();
             if emit_fp_statements(&f.statements,&mut fb,&params,&f.parameters,
-                &vars,&f.locals,None,&refs,&global_refs,0)? {
+                &vars,&f.locals,&refs,&global_refs)? {
                 return Err(reject("FP emission ended with a reachable fallthrough"));
             }
             fb.finalize();
@@ -4759,6 +4808,34 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    #[test]
+    fn deep_fp_cfg_emission_preserves_structured_edges() {
+        let ty=ScalarType::Float(FloatType::F64);
+        let cond=||FloatCondition {
+            op:FloatPredicate::Ne,left:FloatExpr::Parameter(0),
+            right:FloatExpr::Constant64(0),
+        };
+        let write=||FloatStmt::Assign(0,FloatExpr::Constant64(0));
+        let mut body=vec![write()];
+        for i in 0..96 {
+            body=match i%4 {
+                0=>vec![FloatStmt::IfBlock(cond(),body,vec![write()])],
+                1=>vec![FloatStmt::DoWhile(body,cond())],
+                2=>vec![FloatStmt::While(cond(),body)],
+                _=>vec![FloatStmt::For {init:vec![],condition:Some(cond()),
+                    increment:vec![],body}],
+            };
+        }
+        body.insert(0,write());
+        body.push(FloatStmt::IfAssign(cond(),vec![(0,FloatExpr::Parameter(0))],vec![]));
+        body.push(FloatStmt::Return(FloatExpr::Local(0)));
+        let object=emit_scalar_float_bodies(&[ScalarFloatBody {
+            name:"deep_fp_cfg".into(),parameters:vec![ty],result:ty,
+            locals:vec![ty],statements:body,
+        }]).unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+    }
 
     #[test]
     fn deep_fp_flow_preserves_loop_exits_and_definite_assignment() {
