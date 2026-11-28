@@ -2718,100 +2718,100 @@ fn native_fp_plan(
     }
     // Leaf cases retain their exact native identity and type checks.
     let leaf=(||->Result<Option<FloatExpr>,CodegenError> {
-    if node.data.constant_kind.is_some() {
-        if !node.operands.is_empty() || node.data.symbol_id.is_some() {
-            return Err(reject("FP constant cannot carry operands or symbol identity"));
-        }
-        let mut literals=ctx.il.float_constants.iter().filter(|c|
-            c.function==node.data.function &&
-            c.statement_path==node.data.statement_path &&
-            c.path==node.data.path);
-        let exact=literals.next()
-            .ok_or_else(||reject("EDG floating-point constant has no exact bit image"))?;
-        if literals.next().is_some() {
-            return Err(reject("ambiguous duplicate EDG floating-point constant"));
-        }
-        if Some(exact.ty)!=node.data.type_id {
-            return Err(reject("EDG FP literal native type identity mismatch"));
-        }
-        return (match (ty,exact.width) {
-            (FloatType::F32,32)=>
-                Ok(FloatExpr::Constant32(exact.bits as u32)),
-            (FloatType::F64,64)=>
-                Ok(FloatExpr::Constant64(exact.bits)),
-            _=>Err(reject("EDG FP literal width/source type mismatch")),
-        }).map(Some);
-    }
-    if kind==2 && node.operands.is_empty() {
-        let symbol=node.data.symbol_id
-            .ok_or_else(||reject("FP variable missing native identity"))?;
-        if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
-            if ctx.param_types[i]!=ScalarType::Float(ty) {
-                return Err(reject("FP formal rvalue type mismatch"));
+        if node.data.constant_kind.is_some() {
+            if !node.operands.is_empty() || node.data.symbol_id.is_some() {
+                return Err(reject("FP constant cannot carry operands or symbol identity"));
             }
-            return Ok(Some(FloatExpr::Parameter(i)));
-        }
-        if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
-            if !matches!(ctx.local_types[i],
-                ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
-                return Err(reject("FP local rvalue type mismatch"));
+            let mut literals=ctx.il.float_constants.iter().filter(|c|
+                c.function==node.data.function &&
+                c.statement_path==node.data.statement_path &&
+                c.path==node.data.path);
+            let exact=literals.next()
+                .ok_or_else(||reject("EDG floating-point constant has no exact bit image"))?;
+            if literals.next().is_some() {
+                return Err(reject("ambiguous duplicate EDG floating-point constant"));
             }
-            return Ok(Some(FloatExpr::Local(i)));
-        }
-        if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
-            let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
-            if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
-                    reject("FP external global expression lacks native type"))?)?!=
-                    ScalarType::Float(actual) {
-                return Err(reject("FP external global source expression type mismatch"));
+            if Some(exact.ty)!=node.data.type_id {
+                return Err(reject("EDG FP literal native type identity mismatch"));
             }
-            return Ok(Some(FloatExpr::ExternalGlobal {symbol,ty}));
-        }
-        return Err(reject("FP global/address-taken rvalue requires memory lowering"));
-    }
-    if kind!=3 {return Err(reject("unsupported FP source expression form"));}
-    let op=node.data.operator.map(|v|super::semantic(3,v))
-        .ok_or_else(||reject("missing native FP operation"))?;
-    // Only an EDG-authoritative conversion from a direct integer formal is
-    // accepted. Integer expressions, local memory and implicit bitcasting
-    // are *not* silently accepted as scalar floating point values.
-    if op==45 && node.operands.len()==2 {
-        let (pointer,index)=source_fp_subscript(ctx,id,ty)?;
-        return Ok(Some(FloatExpr::LoadIndexed {pointer,index,ty}));
-    }
-    if op==44 && node.operands.len()==1 {
-        let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
-        return (match source {
-            PointerSource::Parameter(n)=>{
-                // Keep the older stricter formal check as a regression gate.
-                if source_fp_pointer_formal(ctx,node.operands[0],ty)?!=n {
-                    return Err(reject("FP pointer formal provenance mismatch"));
-                }
-                Ok(FloatExpr::LoadPointerParameter {parameter:n,ty})
-            }
-            PointerSource::Local(local)=>
-                Ok(FloatExpr::LoadPointerLocal {local,ty}),
-            PointerSource::AddressedLocal(local)=>
-                Ok(FloatExpr::Local(local)),
-        }).map(Some);
-    }
-    if node.operands.len()==1 && matches!(op,11|12|16) {
-        let source=ctx.graph.expression(node.operands[0])
-            .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
-        let source_ty=source.data.type_id.ok_or_else(||
-            reject("integer-to-FP cast operand has no native type"))?;
-        let from=scalar_type_from_edg(ctx.il,source_ty)?;
-        if let ScalarType::Int {bits:32|64,..}=from {
-            return (match source_fp_integer_value(ctx,node.operands[0],from)? {
-                FpIntegerSource::Parameter(parameter)=>
-                    Ok(FloatExpr::IntegerParameterCast {parameter,to:ty}),
-                FpIntegerSource::Local(local)=>
-                    Ok(FloatExpr::IntegerLocalCast {local,to:ty}),
-                FpIntegerSource::Constant {bits,ty:source}=>
-                    Ok(FloatExpr::IntegerConstantCast {bits,source,to:ty}),
+            return (match (ty,exact.width) {
+                (FloatType::F32,32)=>
+                    Ok(FloatExpr::Constant32(exact.bits as u32)),
+                (FloatType::F64,64)=>
+                    Ok(FloatExpr::Constant64(exact.bits)),
+                _=>Err(reject("EDG FP literal width/source type mismatch")),
             }).map(Some);
         }
-    }
+        if kind==2 && node.operands.is_empty() {
+            let symbol=node.data.symbol_id
+                .ok_or_else(||reject("FP variable missing native identity"))?;
+            if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+                if ctx.param_types[i]!=ScalarType::Float(ty) {
+                    return Err(reject("FP formal rvalue type mismatch"));
+                }
+                return Ok(Some(FloatExpr::Parameter(i)));
+            }
+            if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+                if !matches!(ctx.local_types[i],
+                    ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
+                    return Err(reject("FP local rvalue type mismatch"));
+                }
+                return Ok(Some(FloatExpr::Local(i)));
+            }
+            if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+                let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
+                if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+                        reject("FP external global expression lacks native type"))?)?!=
+                        ScalarType::Float(actual) {
+                    return Err(reject("FP external global source expression type mismatch"));
+                }
+                return Ok(Some(FloatExpr::ExternalGlobal {symbol,ty}));
+            }
+            return Err(reject("FP global/address-taken rvalue requires memory lowering"));
+        }
+        if kind!=3 {return Err(reject("unsupported FP source expression form"));}
+        let op=node.data.operator.map(|v|super::semantic(3,v))
+            .ok_or_else(||reject("missing native FP operation"))?;
+        // Only an EDG-authoritative conversion from a direct integer formal is
+        // accepted. Integer expressions, local memory and implicit bitcasting
+        // are *not* silently accepted as scalar floating point values.
+        if op==45 && node.operands.len()==2 {
+            let (pointer,index)=source_fp_subscript(ctx,id,ty)?;
+            return Ok(Some(FloatExpr::LoadIndexed {pointer,index,ty}));
+        }
+        if op==44 && node.operands.len()==1 {
+            let source=source_fp_data_pointer_value(ctx,node.operands[0],ty)?;
+            return (match source {
+                PointerSource::Parameter(n)=>{
+                    // Keep the older stricter formal check as a regression gate.
+                    if source_fp_pointer_formal(ctx,node.operands[0],ty)?!=n {
+                        return Err(reject("FP pointer formal provenance mismatch"));
+                    }
+                    Ok(FloatExpr::LoadPointerParameter {parameter:n,ty})
+                }
+                PointerSource::Local(local)=>
+                    Ok(FloatExpr::LoadPointerLocal {local,ty}),
+                PointerSource::AddressedLocal(local)=>
+                    Ok(FloatExpr::Local(local)),
+            }).map(Some);
+        }
+        if node.operands.len()==1 && matches!(op,11|12|16) {
+            let source=ctx.graph.expression(node.operands[0])
+                .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
+            let source_ty=source.data.type_id.ok_or_else(||
+                reject("integer-to-FP cast operand has no native type"))?;
+            let from=scalar_type_from_edg(ctx.il,source_ty)?;
+            if let ScalarType::Int {bits:32|64,..}=from {
+                return (match source_fp_integer_value(ctx,node.operands[0],from)? {
+                    FpIntegerSource::Parameter(parameter)=>
+                        Ok(FloatExpr::IntegerParameterCast {parameter,to:ty}),
+                    FpIntegerSource::Local(local)=>
+                        Ok(FloatExpr::IntegerLocalCast {local,to:ty}),
+                    FpIntegerSource::Constant {bits,ty:source}=>
+                        Ok(FloatExpr::IntegerConstantCast {bits,source,to:ty}),
+                }).map(Some);
+            }
+        }
         Ok(None)
     })()?;
     if let Some(expr)=leaf {return Ok((ty,NativeFpPlan::Leaf(expr)));}
@@ -5024,6 +5024,31 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    // Opt-in source-level test: the native EDG environment is supplied by
+    // compiler-ci. The C driver links separately to check the actual result.
+    #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_deep_fp_call_decode() {
+        let dir=std::env::temp_dir().join(format!("edg-deep-fp-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("deep.c");
+        let n=96;
+        let mut text=String::from("extern double bump(double); double deep(double x) { return ");
+        text.push_str(&"bump(".repeat(n));
+        text.push('x');
+        text.push_str(&")".repeat(n));
+        text.push_str("; }");
+        std::fs::write(&source,text).unwrap();
+        let input=source.to_str().unwrap();
+        let compiled=crate::compile(&["--c11",input]).unwrap();
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        assert_eq!(&object[..4],b"\x7fELF");
+        if let Some(path)=std::env::var_os("EDG_DEEP_NATIVE_FP_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn deep_fp_expression_emission_preserves_calls_and_conditionals() {
