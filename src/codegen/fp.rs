@@ -507,17 +507,11 @@ fn emit_fp_integer_source(
     };
     Ok((value,ty))
 }
-fn check_scalar_call_args(
-    arguments:&[ScalarCallArg],target_types:&[ScalarType],
-    params:&[ScalarType],locals:&[ScalarType],depth:usize,
-)->Result<(),CodegenError> {
-    if depth>64 || arguments.len()!=target_types.len() {
-        return Err(reject("scalar call arity/depth invalid"));
-    }
-    for (arg,target) in arguments.iter().zip(target_types) {
-        let source=match arg {
-            ScalarCallArg::Float(e)=>
-                ScalarType::Float(expression_type(e,params,locals,depth+1)?),
+fn integer_call_arg_type(
+    arg:&ScalarCallArg,params:&[ScalarType],locals:&[ScalarType],
+)->Result<ScalarType,CodegenError> {
+    let ty=match arg {
+        ScalarCallArg::Float(_)=>return Err(reject("expected INTEGER call argument")),
             ScalarCallArg::IntegerParameter(n)=>match params.get(*n) {
                 Some(ScalarType::Int {bits:32|64,..})=>params[*n],
                 _=>return Err(reject("call INTEGER argument is not a native formal")),
@@ -530,6 +524,20 @@ fn check_scalar_call_args(
                 checked_integer_literal(*ty,*bits)?;
                 *ty
             },
+    };
+    Ok(ty)
+}
+fn check_scalar_call_args(
+    arguments:&[ScalarCallArg],target_types:&[ScalarType],
+    params:&[ScalarType],locals:&[ScalarType],
+)->Result<(),CodegenError> {
+    if arguments.len()!=target_types.len() {
+        return Err(reject("scalar call arity invalid"));
+    }
+    for (arg,target) in arguments.iter().zip(target_types) {
+        let source=match arg {
+            ScalarCallArg::Float(e)=>ScalarType::Float(expression_type(e,params,locals)?),
+            _=>integer_call_arg_type(arg,params,locals)?,
         };
         if source!=*target {
             return Err(reject("scalar call argument type/class mismatch"));
@@ -542,7 +550,7 @@ fn check_scalar_call_local_reads(
 )->Result<(),CodegenError> {
     for arg in arguments {
         match arg {
-            ScalarCallArg::Float(expr)=>check_local_reads(expr,defined,0)?,
+            ScalarCallArg::Float(expr)=>check_local_reads(expr,defined)?,
             ScalarCallArg::IntegerLocal(n) if
                 !defined.get(*n).copied().unwrap_or(false)=>
                     return Err(reject("INTEGER call argument local is uninitialized")),
@@ -552,9 +560,96 @@ fn check_scalar_call_local_reads(
     Ok(())
 }
 fn expression_type(
-    expr:&FloatExpr,params:&[ScalarType],locals:&[ScalarType],depth:usize,
+    expr:&FloatExpr,params:&[ScalarType],locals:&[ScalarType],
 )->Result<FloatType,CodegenError> {
-    if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
+    use FloatExpr::*;
+    enum Task<'a> {
+        Visit(&'a FloatExpr),
+        Match(&'static str),
+        Discard,
+        Convert(FloatType),
+        Known(FloatType),
+        Argument(&'a ScalarCallArg,ScalarType),
+        Expect(ScalarType),
+    }
+    let mut pending=vec![Task::Visit(expr)];
+    let mut types=Vec::new();
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Known(ty)=>types.push(ty),
+            Task::Convert(ty)=>{
+                types.pop().expect("visited conversion operand");
+                types.push(ty);
+            }
+            Task::Discard=>{types.pop().expect("visited condition operands");}
+            Task::Match(message)=>{
+                let right=types.pop().expect("visited right operand");
+                let left=types.pop().expect("visited left operand");
+                if left!=right {return Err(reject(message));}
+                types.push(left);
+            }
+            Task::Expect(target)=>{
+                let source=ScalarType::Float(types.pop().expect("visited call argument"));
+                if source!=target {return Err(reject("scalar call argument type/class mismatch"));}
+            }
+            Task::Argument(arg,target)=>match arg {
+                ScalarCallArg::Float(e)=>{
+                    pending.push(Task::Expect(target));
+                    pending.push(Task::Visit(e));
+                }
+                _=>{
+                    if integer_call_arg_type(arg,params,locals)?!=target {
+                        return Err(reject("scalar call argument type/class mismatch"));
+                    }
+                }
+            },
+            Task::Visit(expr)=>match expr {
+                Call {parameters,return_type,arguments,..}|
+                CallExternal {parameters,return_type,arguments,..}|
+                CallIndirect {parameters,return_type,arguments,..}=>{
+                    if let CallIndirect {pointer,pointer_type,..}=expr {
+                        if pointer_source_type(*pointer,params,locals)?!=*pointer_type {
+                            return Err(reject("FP indirect call requires exact native callable type"));
+                        }
+                    }
+                    checked_scalar_passing_plan(parameters,ScalarType::Float(*return_type))?;
+                    if arguments.len()!=parameters.len() {
+                        return Err(reject("scalar call arity invalid"));
+                    }
+                    pending.push(Task::Known(*return_type));
+                    for (arg,target) in arguments.iter().zip(parameters).rev() {
+                        pending.push(Task::Argument(arg,*target));
+                    }
+                }
+                Neg(e)=>pending.push(Task::Visit(e)),
+                Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
+                    pending.push(Task::Match("FP binary operation operands differ in type"));
+                    pending.push(Task::Visit(b));
+                    pending.push(Task::Visit(a));
+                }
+                Conditional {condition,yes,no}=>{
+                    pending.push(Task::Match("C FP conditional value arms lack native conversion"));
+                    pending.push(Task::Visit(no));
+                    pending.push(Task::Visit(yes));
+                    pending.push(Task::Discard);
+                    pending.push(Task::Match("FP conditional operands have mismatched types"));
+                    pending.push(Task::Visit(&condition.right));
+                    pending.push(Task::Visit(&condition.left));
+                }
+                Convert(to,e)=>{
+                    pending.push(Task::Convert(*to));
+                    pending.push(Task::Visit(e));
+                }
+                _=>types.push(expression_leaf_type(expr,params,locals)?),
+            }
+        }
+    }
+    debug_assert_eq!(types.len(),1);
+    Ok(types.pop().expect("visited root expression"))
+}
+fn expression_leaf_type(
+    expr:&FloatExpr,params:&[ScalarType],locals:&[ScalarType],
+)->Result<FloatType,CodegenError> {
     use FloatExpr::*;
     match expr {
         Parameter(n)=>match params.get(*n).copied() {
@@ -580,18 +675,6 @@ fn expression_type(
                 Err(reject("FP INTEGER cast local is not source-checked 32/64-bit"))
             }
         },
-        Call {parameters,return_type,arguments,..}|
-        CallExternal {parameters,return_type,arguments,..}|
-        CallIndirect {parameters,return_type,arguments,..}=>{
-            if let CallIndirect {pointer,pointer_type,..}=expr {
-                if pointer_source_type(*pointer,params,locals)?!=*pointer_type {
-                    return Err(reject("FP indirect call requires exact native callable type"));
-                }
-            }
-            checked_scalar_passing_plan(parameters,ScalarType::Float(*return_type))?;
-            check_scalar_call_args(arguments,parameters,params,locals,depth+1)?;
-            Ok(*return_type)
-        }
         Local(n)=>match locals.get(*n).copied() {
             Some(ScalarType::Float(t)|ScalarType::StackFloat(t))=>Ok(t),
             _=>Err(reject("FP local out of range or is a callable pointer")),
@@ -618,30 +701,8 @@ fn expression_type(
         },
         Constant32(_)=>Ok(FloatType::F32),
         Constant64(_)=>Ok(FloatType::F64),
-        Neg(e)=>expression_type(e,params,locals,depth+1),
-        Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            let a=expression_type(a,params,locals,depth+1)?;
-            let b=expression_type(b,params,locals,depth+1)?;
-            if a!=b {return Err(reject("FP binary operation operands differ in type"));}
-            Ok(a)
-        }
-        Conditional {condition,yes,no}=>{
-            let left=expression_type(&condition.left,params,locals,depth+1)?;
-            let right=expression_type(&condition.right,params,locals,depth+1)?;
-            if left!=right {
-                return Err(reject("FP conditional operands have mismatched types"));
-            }
-            let y=expression_type(yes,params,locals,depth+1)?;
-            let n=expression_type(no,params,locals,depth+1)?;
-            if y!=n {
-                return Err(reject("C FP conditional value arms lack native conversion"));
-            }
-            Ok(y)
-        }
-        Convert(to,e)=>{
-            let _=expression_type(e,params,locals,depth+1)?;
-            Ok(*to)
-        }
+        Call {..}|CallExternal {..}|CallIndirect {..}|Neg(_)|Add(..)|
+        Sub(..)|Mul(..)|Div(..)|Conditional {..}|Convert(..)=>unreachable!("non-leaf expression"),
     }
 }
 /// Evaluate typed scalar arguments exactly once and in source order.
@@ -851,7 +912,7 @@ fn emit_expr(
             let then_block=fb.create_block();
             let else_block=fb.create_block();
             let merged=fb.create_block();
-            let expected=expression_type(yes,params_ty,locals_ty,0)?;
+            let expected=expression_type(yes,params_ty,locals_ty)?;
             fb.append_block_param(merged,expected.machine());
             fb.ins().brif(test,then_block,&[],else_block,&[]);
             fb.seal_block(then_block);
@@ -888,78 +949,74 @@ fn emit_expr(
 }
 /// Reject uninitialized local reads before passing values to Cranelift.
 /// No source expression may observe an undefined local, even speculatively.
-fn check_local_reads(expr:&FloatExpr,defined:&[bool],depth:usize)->Result<(),CodegenError> {
-    if depth>64 {return Err(reject("FP expression exceeds recursion limit"));}
+fn check_local_reads(expr:&FloatExpr,defined:&[bool])->Result<(),CodegenError> {
     use FloatExpr::*;
-    match expr {
-        Local(i) if !defined.get(*i).copied().unwrap_or(false)=>
-            Err(reject("read of uninitialized or invalid FP local")),
-        IntegerLocalCast {local,..} if
-            !defined.get(*local).copied().unwrap_or(false)=>
-            Err(reject("read of uninitialized INTEGER cast local")),
-        LoadPointerLocal {local,..} if !defined.get(*local).copied().unwrap_or(false)=>
-            Err(reject("FP load through uninitialized data pointer local")),
-        LoadIndexed {pointer,index,..}=>{
-            check_pointer_source_reads(*pointer,defined)?;
-            if let FpIndex::Local {local,..}=index {
-                if !defined.get(*local).copied().unwrap_or(false) {
-                    return Err(reject("FP index reads uninitialized INTEGER local"));
+    enum Task<'a> {
+        Expr(&'a FloatExpr),
+        Arg(&'a ScalarCallArg,bool),
+    }
+    let mut pending=vec![Task::Expr(expr)];
+    let initialized=|n:usize|defined.get(n).copied().unwrap_or(false);
+    while let Some(task)=pending.pop() {
+        match task {
+            Task::Arg(arg,indirect)=>match arg {
+                ScalarCallArg::Float(e)=>pending.push(Task::Expr(e)),
+                ScalarCallArg::IntegerLocal(n) if !initialized(*n)=>
+                    return Err(reject(if indirect {
+                        "FP indirect call reads uninitialized INTEGER local"
+                    } else {"FP call reads uninitialized INTEGER local"})),
+                _=>{},
+            },
+            Task::Expr(expr)=>match expr {
+                Local(i) if !initialized(*i)=>
+                    return Err(reject("read of uninitialized or invalid FP local")),
+                IntegerLocalCast {local,..} if !initialized(*local)=>
+                    return Err(reject("read of uninitialized INTEGER cast local")),
+                LoadPointerLocal {local,..} if !initialized(*local)=>
+                    return Err(reject("FP load through uninitialized data pointer local")),
+                LoadIndexed {pointer,index,..}=>{
+                    check_pointer_source_reads(*pointer,defined)?;
+                    if let FpIndex::Local {local,..}=index {
+                        if !initialized(*local) {
+                            return Err(reject("FP index reads uninitialized INTEGER local"));
+                        }
+                    }
                 }
-            }
-            Ok(())
-        },
-        Local(_)|Parameter(_)|IntegerParameterCast {..}|
-        IntegerConstantCast {..}|IntegerLocalCast {..}|
-        ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
-        Constant32(_)|Constant64(_)=>Ok(()),
-        Call {arguments,..}|CallExternal {arguments,..}=>{
-            for arg in arguments {
-                match arg {
-                    ScalarCallArg::Float(expr)=>
-                        check_local_reads(expr,defined,depth+1)?,
-                    ScalarCallArg::IntegerLocal(n) if
-                        !defined.get(*n).copied().unwrap_or(false)=>
-                        return Err(reject("FP call reads uninitialized INTEGER local")),
-                    _=>{},
+                Local(_)|Parameter(_)|IntegerParameterCast {..}|
+                IntegerConstantCast {..}|IntegerLocalCast {..}|
+                ExternalGlobal {..}|LoadPointerParameter {..}|LoadPointerLocal {..}|
+                Constant32(_)|Constant64(_)=>{},
+                Call {arguments,..}|CallExternal {arguments,..}=>{
+                    for arg in arguments.iter().rev() {pending.push(Task::Arg(arg,false));}
                 }
-            }
-            Ok(())
-        }
-        CallIndirect {pointer,arguments,..}=>{
-            check_pointer_source_reads(*pointer,defined)?;
-            for arg in arguments {
-                match arg {
-                    ScalarCallArg::Float(expr)=>
-                        check_local_reads(expr,defined,depth+1)?,
-                    ScalarCallArg::IntegerLocal(n) if
-                        !defined.get(*n).copied().unwrap_or(false)=>
-                        return Err(reject("FP indirect call reads uninitialized INTEGER local")),
-                    _=>{},
+                CallIndirect {pointer,arguments,..}=>{
+                    check_pointer_source_reads(*pointer,defined)?;
+                    for arg in arguments.iter().rev() {pending.push(Task::Arg(arg,true));}
                 }
-            }
-            Ok(())
-        },
-        Conditional {condition,yes,no}=>{
-            check_local_reads(&condition.left,defined,depth+1)?;
-            check_local_reads(&condition.right,defined,depth+1)?;
-            check_local_reads(yes,defined,depth+1)?;
-            check_local_reads(no,defined,depth+1)
-        }
-        Neg(e)|Convert(_,e)=>check_local_reads(e,defined,depth+1),
-        Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
-            check_local_reads(a,defined,depth+1)?;
-            check_local_reads(b,defined,depth+1)
+                Conditional {condition,yes,no}=>{
+                    pending.push(Task::Expr(no));
+                    pending.push(Task::Expr(yes));
+                    pending.push(Task::Expr(&condition.right));
+                    pending.push(Task::Expr(&condition.left));
+                }
+                Neg(e)|Convert(_,e)=>pending.push(Task::Expr(e)),
+                Add(a,b)|Sub(a,b)|Mul(a,b)|Div(a,b)=>{
+                    pending.push(Task::Expr(b));
+                    pending.push(Task::Expr(a));
+                }
+            },
         }
     }
+    Ok(())
 }
 fn check_condition(
     cond:&FloatCondition,params:&[ScalarType],locals:&[ScalarType],
     defined:&[bool],
 )->Result<(),CodegenError> {
-    check_local_reads(&cond.left,defined,0)?;
-    check_local_reads(&cond.right,defined,0)?;
-    let left=expression_type(&cond.left,params,locals,0)?;
-    let right=expression_type(&cond.right,params,locals,0)?;
+    check_local_reads(&cond.left,defined)?;
+    check_local_reads(&cond.right,defined)?;
+    let left=expression_type(&cond.left,params,locals)?;
+    let right=expression_type(&cond.right,params,locals)?;
     if left!=right {return Err(reject("unconverted mixed FP comparison"));}
     Ok(())
 }
@@ -982,8 +1039,8 @@ fn validate_fp_arm(
     for (n,expr) in writes {
         let ty=*f.locals.get(*n)
             .ok_or_else(||reject("FP branch local index out of range"))?;
-        check_local_reads(expr,&defined,0)?;
-        let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+        check_local_reads(expr,&defined)?;
+        let value_type=expression_type(expr,&f.parameters,&f.locals)?;
         if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
             return Err(reject("FP branch assignment has an unconverted type"));
         }
@@ -1052,8 +1109,8 @@ fn check_fp_statements(
                         return Err(reject("FP indexed store uses uninitialized INTEGER local"));
                     }
                 }
-                check_local_reads(value,&defined,0)?;
-                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                check_local_reads(value,&defined)?;
+                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP indexed store RHS has unconverted type"));
                 }
                 next=Some(defined);
@@ -1072,8 +1129,8 @@ fn check_fp_statements(
                     !defined.get(*local).copied().unwrap_or(false) {
                     return Err(reject("FP store through uninitialized/wrong data pointer local"));
                 }
-                check_local_reads(value,&defined,0)?;
-                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                check_local_reads(value,&defined)?;
+                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP local pointer store RHS source type mismatch"));
                 }
                 next=Some(defined);
@@ -1093,15 +1150,15 @@ fn check_fp_statements(
                 if f.parameters.get(*parameter)!=Some(&ScalarType::DataPointer(*ty)) {
                     return Err(reject("FP memory store pointer formal type mismatch"));
                 }
-                check_local_reads(value,&defined,0)?;
-                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                check_local_reads(value,&defined)?;
+                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP pointer store needs exact FP source type"));
                 }
                 next=Some(defined);
             }
             FloatStmt::StoreGlobal {ty,value,..}=>{
-                check_local_reads(value,&defined,0)?;
-                if expression_type(value,&f.parameters,&f.locals,0)?!=*ty {
+                check_local_reads(value,&defined)?;
+                if expression_type(value,&f.parameters,&f.locals)?!=*ty {
                     return Err(reject("FP global store RHS native type mismatch"));
                 }
                 next=Some(defined);
@@ -1109,8 +1166,8 @@ fn check_fp_statements(
             FloatStmt::Assign(n,expr)=>{
                 let ty=*f.locals.get(*n)
                     .ok_or_else(||reject("FP local index out of range"))?;
-                check_local_reads(expr,&defined,0)?;
-                let value_type=expression_type(expr,&f.parameters,&f.locals,0)?;
+                check_local_reads(expr,&defined)?;
+                let value_type=expression_type(expr,&f.parameters,&f.locals)?;
                 if !matches!(ty,ScalarType::Float(t)|ScalarType::StackFloat(t) if t==value_type) {
                     return Err(reject("FP assignment has an unconverted type"));
                 }
@@ -1118,9 +1175,9 @@ fn check_fp_statements(
                 next=Some(defined);
             }
             FloatStmt::Return(expr)=>{
-                check_local_reads(expr,&defined,0)?;
+                check_local_reads(expr,&defined)?;
                 if f.result!=ScalarType::Float(
-                    expression_type(expr,&f.parameters,&f.locals,0)?) {
+                    expression_type(expr,&f.parameters,&f.locals)?) {
                     return Err(reject("FP return has an unconverted type"));
                 }
                 next=None;
@@ -1130,8 +1187,8 @@ fn check_fp_statements(
                     *to!=f.result {
                     return Err(reject("FP-to-integer return class/signature mismatch"));
                 }
-                check_local_reads(expr,&defined,0)?;
-                expression_type(expr,&f.parameters,&f.locals,0)?;
+                check_local_reads(expr,&defined)?;
+                expression_type(expr,&f.parameters,&f.locals)?;
                 next=None;
             }
             FloatStmt::ReturnIndirectInteger {
@@ -1145,7 +1202,7 @@ fn check_fp_statements(
                 }
                 checked_scalar_passing_plan(parameters,*return_type)?;
                 check_scalar_call_args(arguments,parameters,
-                    &f.parameters,&f.locals,0)?;
+                    &f.parameters,&f.locals)?;
                 check_scalar_call_local_reads(arguments,&defined)?;
                 check_pointer_source_reads(*pointer,&defined)?;
                 next=None;
@@ -1153,9 +1210,9 @@ fn check_fp_statements(
             FloatStmt::IfReturn(cond,yes,no)=>{
                 check_condition(cond,&f.parameters,&f.locals,&defined)?;
                 for expr in [yes,no] {
-                    check_local_reads(expr,&defined,0)?;
+                    check_local_reads(expr,&defined)?;
                     if ScalarType::Float(
-                        expression_type(expr,&f.parameters,&f.locals,0)?)!=f.result {
+                        expression_type(expr,&f.parameters,&f.locals)?)!=f.result {
                         return Err(reject("FP conditional return has an unconverted type"));
                     }
                 }
@@ -2423,7 +2480,7 @@ fn expression_from_edg(
             let value=match target {
                 ScalarType::Float(t)=>{
                     let e=expression_from_edg(ctx,operand,depth+1)?;
-                    if expression_type(&e,ctx.param_types,ctx.local_types,0)?!=t {
+                    if expression_type(&e,ctx.param_types,ctx.local_types)?!=t {
                         return Err(reject("FP direct argument has unconverted type"));
                     }
                     ScalarCallArg::Float(e)
@@ -2586,7 +2643,7 @@ fn expression_from_edg(
     } else {
         return Err(reject("unsupported native EDG FP operation arity"));
     };
-    if expression_type(&out,ctx.param_types,ctx.local_types,0)?!=ty {
+    if expression_type(&out,ctx.param_types,ctx.local_types)?!=ty {
         return Err(reject("EDG FP expression result type differs from operands"));
     }
     Ok(out)
@@ -2599,7 +2656,7 @@ fn truthiness_from_edg(
     ctx:&FpSourceCtx<'_>,source:crate::graph::ExpressionId,negated:bool,
 )->Result<FloatCondition,CodegenError> {
     let left=expression_from_edg(ctx,source,0)?;
-    let ty=expression_type(&left,ctx.param_types,ctx.local_types,0)?;
+    let ty=expression_type(&left,ctx.param_types,ctx.local_types)?;
     let zero=match ty {
         FloatType::F32=>FloatExpr::Constant32(0.0f32.to_bits()),
         FloatType::F64=>FloatExpr::Constant64(0.0f64.to_bits()),
@@ -3012,7 +3069,7 @@ fn lower_fp_body(
                     reject("FP indexed assignment lacks native lvalue type"))?)?;
                 let (pointer,index)=source_fp_subscript(ctx,operation.operands[0],ty)?;
                 let value=expression_from_edg(ctx,operation.operands[1],0)?;
-                if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                     return Err(reject("FP indexed store RHS missing native conversion"));
                 }
                 output.push(FloatStmt::StoreIndexed {pointer,index,ty,value});
@@ -3027,7 +3084,7 @@ fn lower_fp_body(
                     reject("FP memory assignment lacks native lvalue type"))?)?;
                 let source=source_fp_data_pointer_value(ctx,left.operands[0],ty)?;
                 let value=expression_from_edg(ctx,operation.operands[1],0)?;
-                if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                     return Err(reject("FP pointer store missing source conversion"));
                 }
                 match source {
@@ -3056,7 +3113,7 @@ fn lower_fp_body(
                         return Err(reject("FP global store ABI type mismatch"));
                     }
                     let value=expression_from_edg(ctx,operation.operands[1],0)?;
-                    if expression_type(&value,ctx.param_types,ctx.local_types,0)?!=ty {
+                    if expression_type(&value,ctx.param_types,ctx.local_types)?!=ty {
                         return Err(reject("FP global store RHS needs conversion"));
                     }
                     output.push(FloatStmt::StoreGlobal {symbol,ty,value});
@@ -3202,7 +3259,7 @@ fn lower_integer_indirect_return(
         let value=match target {
             ScalarType::Float(t)=>{
                 let expr=expression_from_edg(ctx,operand,1)?;
-                if expression_type(&expr,ctx.param_types,ctx.local_types,0)?!=*t {
+                if expression_type(&expr,ctx.param_types,ctx.local_types)?!=*t {
                     return Err(reject("INTEGER indirect FP argument needs source conversion"));
                 }
                 ScalarCallArg::Float(expr)
@@ -4637,6 +4694,37 @@ int main(void) {
 #[cfg(test)]
 mod audit_resource_budget_tests {
     use super::*;
+
+    #[test]
+    fn deep_fp_expression_checks_preserve_types_and_local_reads() {
+        let ty=ScalarType::Float(FloatType::F64);
+        let mut expr=FloatExpr::Local(0);
+        for i in 0..256 {
+            expr=match i%3 {
+                0=>FloatExpr::Neg(Box::new(expr)),
+                1=>FloatExpr::Add(Box::new(expr),Box::new(FloatExpr::Constant64(0))),
+                _=>FloatExpr::Call {
+                    callee:"identity".into(),parameters:vec![ty],return_type:FloatType::F64,
+                    arguments:vec![ScalarCallArg::Float(expr)],
+                },
+            };
+        }
+        assert_eq!(expression_type(&expr,&[],&[ty]).unwrap(),FloatType::F64);
+        assert!(expression_type(&expr,&[],&[]).is_err());
+        assert!(check_local_reads(&expr,&[true]).is_ok());
+        assert!(check_local_reads(&expr,&[false]).is_err());
+        let bad=FloatExpr::Add(Box::new(expr),Box::new(FloatExpr::Constant32(0)));
+        assert!(expression_type(&bad,&[],&[ty]).is_err());
+        let conditional=FloatExpr::Conditional {
+            condition:Box::new(FloatCondition {
+                op:FloatPredicate::Eq,left:FloatExpr::Constant64(0),
+                right:FloatExpr::Constant64(0),
+            }),yes:Box::new(FloatExpr::Local(0)),no:Box::new(FloatExpr::Local(1)),
+        };
+        assert_eq!(expression_type(&conditional,&[],&[ty,ty]).unwrap(),FloatType::F64);
+        assert!(check_local_reads(&conditional,&[true,false]).is_err());
+        assert!(expression_type(&conditional,&[],&[ty,ScalarType::Float(FloatType::F32)]).is_err());
+    }
 
     #[test]
     fn deep_fp_call_prevalidation_preserves_prototype_checks() {
