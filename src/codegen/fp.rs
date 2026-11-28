@@ -2221,7 +2221,7 @@ fn source_fp_data_pointer_value(
     if super::semantic(2,expr.data.kind)==3 &&
         expr.data.operator.is_some_and(|op|super::semantic(3,op)==43) &&
         expr.operands.len()==1 && expr.data.constant_kind.is_none() {
-        if fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+        if ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
             reject("address-of FP local lacks native pointer type"))?)?!=ty {
             return Err(reject("address-of FP local pointee type mismatch"));
         }
@@ -2229,7 +2229,7 @@ fn source_fp_data_pointer_value(
             reject("address-of FP local missing source object"))?;
         if super::semantic(2,operand.data.kind)!=2 ||
             !operand.operands.is_empty() || operand.data.constant_kind.is_some() ||
-            scalar_type_from_edg(ctx.il,operand.data.type_id.ok_or_else(||
+            ctx.metadata.scalar(operand.data.type_id.ok_or_else(||
                 reject("address-of FP local lacks object type"))?)?!=ScalarType::Float(ty) {
             return Err(reject("address-of expression is not a native FP local object"));
         }
@@ -2248,7 +2248,7 @@ fn source_fp_data_pointer_value(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("FP data pointer source has no native symbol"))?;
-    if fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+    if ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
         reject("FP pointer expression has no native type"))?)?!=ty {
         return Err(reject("FP pointer expression native pointee mismatch"));
     }
@@ -2273,7 +2273,7 @@ fn source_fp_subscript_index(
 )->Result<FpIndex,CodegenError> {
     let expr=ctx.graph.expression(id).ok_or_else(||
         reject("FP indexed access lacks EDG integer expression"))?;
-    let ty=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+    let ty=ctx.metadata.scalar(expr.data.type_id.ok_or_else(||
         reject("FP subscript index lacks native type"))?)?;
     match source_fp_integer_value(ctx,id,ty)? {
         FpIntegerSource::Parameter(parameter)=>Ok(FpIndex::Parameter {parameter,ty}),
@@ -2289,7 +2289,7 @@ fn source_fp_subscript(
     if super::semantic(2,node.data.kind)!=3 ||
         node.data.operator.map(|op|super::semantic(3,op))!=Some(45) ||
         node.operands.len()!=2 || node.data.constant_kind.is_some() ||
-        type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+        ctx.metadata.float(node.data.type_id.ok_or_else(||
             reject("FP indexed lvalue has no native result type"))?)?!=ty {
         return Err(reject("FP indexed lvalue is not a checked C subscript"));
     }
@@ -2297,9 +2297,9 @@ fn source_fp_subscript(
         reject("FP subscript left operand missing"))?;
     let right=ctx.graph.expression(node.operands[1]).ok_or_else(||
         reject("FP subscript right operand missing"))?;
-    let left_ty=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+    let left_ty=ctx.metadata.scalar(left.data.type_id.ok_or_else(||
         reject("FP subscript left operand has no type"))?)?;
-    let right_ty=scalar_type_from_edg(ctx.il,right.data.type_id.ok_or_else(||
+    let right_ty=ctx.metadata.scalar(right.data.type_id.ok_or_else(||
         reject("FP subscript right operand has no type"))?)?;
     let (p,i)=match (left_ty,right_ty) {
         (ScalarType::DataPointer(p),ScalarType::Int {bits:32|64,..})
@@ -2327,7 +2327,7 @@ fn source_fp_pointer_formal(
     let n=ctx.params.get(&symbol).copied().ok_or_else(||
         reject("FP memory load/store pointer not a source formal"))?;
     if ctx.param_types[n]!=ScalarType::DataPointer(ty) ||
-        fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+        ctx.metadata.data_pointer(expr.data.type_id.ok_or_else(||
             reject("FP memory pointer operand missing native type"))?)?!=ty {
         return Err(reject("FP memory pointer source pointee mismatch"));
     }
@@ -2432,7 +2432,7 @@ fn pointer_source_from_edg(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("function-pointer value has no native EDG symbol"))?;
-    let ty=match scalar_type_from_edg(ctx.il,expr.data.type_id
+    let ty=match ctx.metadata.scalar(expr.data.type_id
         .ok_or_else(||reject("function-pointer value lacks native type"))?)? {
         ScalarType::FunctionPointer(ty)=>ty,
         _=>return Err(reject("source expression is not callable-pointer typed")),
@@ -2509,10 +2509,118 @@ pub(super) fn source_fp_global(
     };
     Ok((name,ty,linkage,initializer))
 }
+// Native FP metadata is immutable for one compilation. Cache only successful
+// type checks; an unsupported or malformed type keeps its original diagnostic.
+type NativeTypeCache<T>=std::cell::RefCell<HashMap<crate::TypeId,T>>;
+fn cached_native_type<T:Clone>(
+    cache:&NativeTypeCache<T>,id:crate::TypeId,
+    check:impl FnOnce()->Result<T,CodegenError>,
+)->Result<T,CodegenError> {
+    if let Some(value)=cache.borrow().get(&id) {return Ok(value.clone());}
+    let value=check()?;
+    cache.borrow_mut().insert(id,value.clone());
+    Ok(value)
+}
+// For records with exact identity witnesses, a duplicate is different from
+// an absent record. Preserve that distinction rather than picking a winner.
+fn index_exact<K:std::hash::Hash+Eq,V>(
+    map:&mut HashMap<K,Option<V>>,key:K,value:V,
+) {
+    map.entry(key).and_modify(|entry|*entry=None).or_insert(Some(value));
+}
+type NativeFpSignature=(Vec<ScalarType>,ScalarType);
+struct FpMetadata<'a> {
+    il:&'a Il,
+    scalar:NativeTypeCache<ScalarType>,
+    float:NativeTypeCache<FloatType>,
+    data_pointer:NativeTypeCache<FloatType>,
+    function_pointer:NativeTypeCache<(crate::TypeId,crate::TypeId)>,
+    canonical:NativeTypeCache<crate::TypeId>,
+    signatures:NativeTypeCache<NativeFpSignature>,
+    plain:NativeTypeCache<()>,
+    routine_symbols:HashMap<crate::SymbolId,&'a crate::Symbol>,
+    symbol_types:HashMap<crate::SymbolId,crate::TypeId>,
+    types:HashMap<crate::TypeId,&'a crate::TypeDef>,
+    prototypes:HashMap<crate::TypeId,&'a crate::FunctionSignature>,
+    parameters:HashMap<crate::TypeId,Vec<&'a crate::TypeParameter>>,
+    definitions:std::collections::HashSet<&'a str>,
+    declarations:std::collections::HashSet<&'a str>,
+    literals:HashMap<(&'a str,&'a str,&'a str),Option<&'a crate::FloatConstant>>,
+    float_initializers:HashMap<(&'a str,&'a str,crate::SymbolId),Option<&'a crate::FloatInitializer>>,
+    integer_initializers:HashMap<(&'a str,&'a str),Option<&'a crate::StatementIntegerInitializer>>,
+    transfers:HashMap<(&'a str,&'a str),Option<&'a crate::LoopTransfer>>,
+    local_types:HashMap<(crate::SymbolId,crate::SymbolId),crate::TypeId>,
+}
+impl<'a> FpMetadata<'a> {
+    fn new(il:&'a Il)->Self {
+        let mut m=Self {
+            il,scalar:Default::default(),float:Default::default(),
+            data_pointer:Default::default(),function_pointer:Default::default(),
+            canonical:Default::default(),signatures:Default::default(),plain:Default::default(),
+            routine_symbols:HashMap::new(),symbol_types:HashMap::new(),types:HashMap::new(),
+            prototypes:HashMap::new(),parameters:HashMap::new(),definitions:Default::default(),
+            declarations:Default::default(),literals:HashMap::new(),float_initializers:HashMap::new(),
+            integer_initializers:HashMap::new(),transfers:HashMap::new(),local_types:HashMap::new(),
+        };
+        for symbol in &il.symbols {
+            if symbol.kind==1 {m.routine_symbols.entry(symbol.id).or_insert(symbol);}
+        }
+        for ty in &il.symbol_types {m.symbol_types.entry(ty.symbol).or_insert(ty.ty);}
+        for ty in &il.types {m.types.entry(ty.id).or_insert(ty);}
+        for sig in &il.function_signatures {m.prototypes.entry(sig.owner).or_insert(sig);}
+        for p in &il.type_parameters {m.parameters.entry(p.owner).or_default().push(p);}
+        for p in m.parameters.values_mut() {p.sort_by_key(|p|p.position);}
+        for entity in &il.entities {
+            if let crate::Entity::Routine {name,has_definition}=entity {
+                if *has_definition {m.definitions.insert(name.as_str());}
+                else {m.declarations.insert(name.as_str());}
+            }
+        }
+        for c in &il.float_constants {
+            index_exact(&mut m.literals,(c.function.as_str(),c.statement_path.as_str(),c.path.as_str()),c);
+        }
+        for c in &il.float_initializers {
+            index_exact(&mut m.float_initializers,(c.function.as_str(),c.statement_path.as_str(),c.symbol),c);
+        }
+        for c in &il.statement_integer_initializers {
+            index_exact(&mut m.integer_initializers,(c.function.as_str(),c.statement_path.as_str()),c);
+        }
+        for t in &il.loop_transfers {
+            index_exact(&mut m.transfers,(t.function.as_str(),t.statement_path.as_str()),t);
+        }
+        for v in &il.local_variables {m.local_types.entry((v.routine,v.symbol)).or_insert(v.ty);}
+        m
+    }
+    fn scalar(&self,id:crate::TypeId)->Result<ScalarType,CodegenError> {
+        cached_native_type(&self.scalar,id,||scalar_type_from_edg(self.il,id))
+    }
+    fn float(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
+        cached_native_type(&self.float,id,||type_from_edg(self.il,id))
+    }
+    fn data_pointer(&self,id:crate::TypeId)->Result<FloatType,CodegenError> {
+        cached_native_type(&self.data_pointer,id,||fp_data_pointer_type_from_edg(self.il,id))
+    }
+    fn function_pointer(&self,id:crate::TypeId)->Result<(crate::TypeId,crate::TypeId),CodegenError> {
+        cached_native_type(&self.function_pointer,id,||function_pointer_type_from_edg(self.il,id))
+    }
+    fn canonical(&self,id:crate::TypeId)->Result<crate::TypeId,CodegenError> {
+        cached_native_type(&self.canonical,id,||super::canonical_abi_type(self.il,id))
+    }
+    fn signature(&self,id:crate::TypeId)->Result<NativeFpSignature,CodegenError> {
+        cached_native_type(&self.signatures,id,||source_callable_signature(self.il,id))
+    }
+    fn plain(&self,id:crate::TypeId)->Result<(),CodegenError> {
+        cached_native_type(&self.plain,id,||check_plain_fp_local(self.il,id))
+    }
+    fn parameters(&self,id:crate::TypeId)->&[&'a crate::TypeParameter] {
+        self.parameters.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
 /// Source expressions are checked using exact EDG symbol IDs and widths.
 struct FpSourceCtx<'a> {
     il:&'a Il,
     graph:&'a crate::graph::Graph,
+    metadata:&'a FpMetadata<'a>,
     routine:crate::SymbolId,
     params:HashMap<crate::SymbolId,usize>,
     locals:HashMap<crate::SymbolId,usize>,
@@ -2531,7 +2639,7 @@ fn source_integer_constant(
     if !node.operands.is_empty() || node.data.symbol_id.is_some() {
         return Err(reject("integer constant has operands or variable identity"));
     }
-    let actual=scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+    let actual=ctx.metadata.scalar(node.data.type_id.ok_or_else(||
         reject("integer literal has no native EDG type"))?)?;
     if actual!=expected {
         return Err(reject("integer literal native type differs from target ABI"));
@@ -2552,7 +2660,7 @@ fn source_fp_integer_value(
     }
     let expr=ctx.graph.expression(id).ok_or_else(||
         reject("FP INTEGER value lacks EDG expression"))?;
-    let native=scalar_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
+    let native=ctx.metadata.scalar(expr.data.type_id.ok_or_else(||
         reject("FP INTEGER value has no native EDG type"))?)?;
     if native!=expected {
         return Err(reject("FP INTEGER source type/sign differs from target"));
@@ -2616,7 +2724,7 @@ fn native_fp_plan(
 )->Result<(FloatType,NativeFpPlan),CodegenError> {
     let node=ctx.graph.expression(id)
         .ok_or_else(||reject("missing EDG FP expression"))?;
-    let ty=type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+    let ty=ctx.metadata.float(node.data.type_id.ok_or_else(||
         reject("EDG FP expression has no type"))?)?;
     let kind=super::semantic(2,node.data.kind);
     if let Some(site)=ctx.graph.call_at(id) {
@@ -2631,27 +2739,21 @@ fn native_fp_plan(
                 // Existing exact named routine path, including forward defs.
                 let symbol=callee.data.symbol_id.ok_or_else(||
                     reject("FP direct callee has no native symbol"))?;
-                let named=ctx.il.symbols.iter().find(|s|
-                    s.id==symbol && s.kind==1)
+                let named=ctx.metadata.routine_symbols.get(&symbol)
                     .ok_or_else(||reject("FP direct target is not a named routine"))?;
                 let name=named.name.clone();
-                let in_module=ctx.il.entities.iter().any(|e|matches!(e,
-                    crate::Entity::Routine{name,has_definition:true}
-                        if name==&named.name));
+                let in_module=ctx.metadata.definitions.contains(name.as_str());
                 if !in_module {
                     // An actual source C routine declaration, not a guessed
                     // linker name, is required before importing its symbol.
                     if !safe_scalar_external_name(&name) ||
-                        !ctx.il.entities.iter().any(|e|matches!(e,
-                            crate::Entity::Routine{name,has_definition:false}
-                                if name==&named.name)) {
+                        !ctx.metadata.declarations.contains(name.as_str()) {
                         return Err(reject("FP external call has no verified C declaration"));
                     }
                 }
-                let callee_ty=ctx.il.symbol_types.iter()
-                    .find(|p|p.symbol==symbol)
+                let callee_ty=ctx.metadata.symbol_types.get(&symbol).copied()
                     .ok_or_else(||reject("FP direct callee has no native type"))?;
-                let fn_ty=super::canonical_abi_type(ctx.il,callee_ty.ty)?;
+                let fn_ty=ctx.metadata.canonical(callee_ty)?;
                 (Some(name),!in_module,None,None,fn_ty)
             } else {
                 // Exactly a pointer-valued *function formal*, optionally
@@ -2673,41 +2775,38 @@ fn native_fp_plan(
                     ctx,if std::ptr::eq(pointer_expr,callee) {
                         node.operands[0]
                     } else {callee.operands[0]})?;
-                let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
+                let (_,fn_ty)=ctx.metadata.function_pointer(pointer_type)?;
                 // The EDG expression must refer to the native pointer type,
                 // or be an actual function-designator dereference. Neither
                 // a cast to function pointer nor data-pointer coercion is safe.
                 if !std::ptr::eq(pointer_expr,callee) {
-                    let designator=super::canonical_abi_type(ctx.il,
+                    let designator=ctx.metadata.canonical(
                         callee.data.type_id.ok_or_else(||
                             reject("indirect FP designator lacks type"))?)?;
                     // The native designator can have a distinct type ID.
                     // Its full source prototype must still agree with the
                     // exact pointee carried by the verified pointer formal.
-                    if source_callable_signature(ctx.il,designator)? !=
-                       source_callable_signature(ctx.il,fn_ty)? {
+                    if ctx.metadata.signature(designator)? !=
+                       ctx.metadata.signature(fn_ty)? {
                         return Err(reject("indirect FP designator prototype mismatch"));
                     }
                 }
                 (None,false,Some(source),Some(pointer_type),fn_ty)
             };
-        let func=ctx.il.types.iter().find(|p|p.id==fn_ty &&
+        let func=ctx.metadata.types.get(&fn_ty).filter(|p|
             super::semantic(4,p.kind)==2 && p.related_role==Some(3))
             .ok_or_else(||reject("FP callee requires a native function prototype"))?;
-        let proto=ctx.il.function_signatures.iter()
-            .find(|p|p.owner==fn_ty)
+        let proto=ctx.metadata.prototypes.get(&fn_ty)
             .ok_or_else(||reject("FP direct callee missing prototype metadata"))?;
         if !proto.prototyped || proto.variadic {
             return Err(reject("unprototyped/variadic FP direct call unsupported"));
         }
-        let returned=scalar_type_from_edg(ctx.il,func.related
+        let returned=ctx.metadata.scalar(func.related
             .ok_or_else(||reject("FP direct callee has no return type"))?)?;
         if returned!=ScalarType::Float(ty) {
             return Err(reject("FP direct-call result type/ABI differs from expression"));
         }
-        let mut declared:Vec<_>=ctx.il.type_parameters.iter()
-            .filter(|p|p.owner==fn_ty).collect();
-        declared.sort_by_key(|p|p.position);
+        let declared=ctx.metadata.parameters(fn_ty);
         if declared.iter().enumerate().any(|(i,p)|p.position!=i as u32) ||
             declared.len()!=node.operands.len()-1 {
             return Err(reject("FP direct call argument count/position mismatch"));
@@ -2716,7 +2815,7 @@ fn native_fp_plan(
         let mut parameters=Vec::with_capacity(declared.len());
         let mut arguments=Vec::with_capacity(declared.len());
         for (param,&operand) in declared.iter().zip(&node.operands[1..]) {
-            let target=scalar_type_from_edg(ctx.il,param.ty)?;
+            let target=ctx.metadata.scalar(param.ty)?;
             let value=match target {
                 ScalarType::Float(_)=>NativeFpArg::Float(operand),
                 ScalarType::Int {..}=>NativeFpArg::Integer(source_fp_integer_arg(ctx,operand,target)?),
@@ -2743,15 +2842,10 @@ fn native_fp_plan(
             if !node.operands.is_empty() || node.data.symbol_id.is_some() {
                 return Err(reject("FP constant cannot carry operands or symbol identity"));
             }
-            let mut literals=ctx.il.float_constants.iter().filter(|c|
-                c.function==node.data.function &&
-                c.statement_path==node.data.statement_path &&
-                c.path==node.data.path);
-            let exact=literals.next()
-                .ok_or_else(||reject("EDG floating-point constant has no exact bit image"))?;
-            if literals.next().is_some() {
-                return Err(reject("ambiguous duplicate EDG floating-point constant"));
-            }
+            let exact=ctx.metadata.literals.get(&(node.data.function.as_str(),
+                node.data.statement_path.as_str(),node.data.path.as_str()))
+                .ok_or_else(||reject("EDG floating-point constant has no exact bit image"))?
+                .ok_or_else(||reject("ambiguous duplicate EDG floating-point constant"))?;
             if Some(exact.ty)!=node.data.type_id {
                 return Err(reject("EDG FP literal native type identity mismatch"));
             }
@@ -2781,7 +2875,7 @@ fn native_fp_plan(
             }
             if ctx.global_symbols.contains(&symbol) {
                 let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
-                if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+                if actual!=ty || ctx.metadata.scalar(node.data.type_id.ok_or_else(||
                         reject("FP external global expression lacks native type"))?)?!=
                         ScalarType::Float(actual) {
                     return Err(reject("FP external global source expression type mismatch"));
@@ -2821,7 +2915,7 @@ fn native_fp_plan(
                 .ok_or_else(||reject("missing integer-to-FP cast operand"))?;
             let source_ty=source.data.type_id.ok_or_else(||
                 reject("integer-to-FP cast operand has no native type"))?;
-            let from=scalar_type_from_edg(ctx.il,source_ty)?;
+            let from=ctx.metadata.scalar(source_ty)?;
             if let ScalarType::Int {bits:32|64,..}=from {
                 return (match source_fp_integer_value(ctx,node.operands[0],from)? {
                     FpIntegerSource::Parameter(parameter)=>
@@ -2864,12 +2958,12 @@ fn native_fp_condition(
     // arithmetic, not just a variable) directly as the condition. The
     // strict expression decoder below rejects calls/side effects we do not
     // model, but all verified F32/F64 values have C scalar truthiness.
-    if node.data.type_id.is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok()) {
+    if node.data.type_id.is_some_and(|ty|ctx.metadata.float(ty).is_ok()) {
         return Ok(NativeFpCondition::Truth(id,false));
     }
     let boolean_kind=kind==3 &&
         node.data.type_id.and_then(|ty|
-            super::canonical_abi_type(ctx.il,ty).ok()).is_some_and(|ty|
+            ctx.metadata.canonical(ty).ok()).is_some_and(|ty|
             ctx.il.c_integer_types.iter().any(|k|k.id==ty &&
                 (k.is_bool || k.bits==32)));
     if boolean_kind && node.data.constant_kind.is_none() &&
@@ -2881,7 +2975,7 @@ fn native_fp_condition(
             let operand=ctx.graph.expression(node.operands[0]).ok_or_else(||
                 reject("logical-not FP condition has no operand"))?;
             let direct=operand.data.type_id
-                .is_some_and(|ty|type_from_edg(ctx.il,ty).is_ok());
+                .is_some_and(|ty|ctx.metadata.float(ty).is_ok());
             if direct && super::semantic(2,operand.data.kind)==2 &&
                 operand.operands.is_empty() {
                 return Ok(NativeFpCondition::Truth(node.operands[0],true));
@@ -2898,7 +2992,7 @@ fn native_fp_condition(
         node.data.constant_kind.is_some() {
         return Err(reject("FP condition requires a source-verified comparison or scalar truthiness"));
     }
-    let integer=super::canonical_abi_type(ctx.il,
+    let integer=ctx.metadata.canonical(
         node.data.type_id.ok_or_else(||
             reject("FP condition has no native result type"))?)?;
     if !ctx.il.c_integer_types.iter().any(|ty|
@@ -3292,15 +3386,15 @@ fn lower_fp_leaf(
     let simple_children=node.children.is_empty();
     match super::semantic(1,node.data.kind) {
         10|11=>{
-            let transfer:Vec<_>=ctx.il.loop_transfers.iter()
-                .filter(|t|t.function==*function && t.statement_path==*path)
-                .collect();
+            let transfer=ctx.metadata.transfers.get(&(function.as_str(),path.as_str()))
+                .copied().flatten();
             // Only native compiler-classified structured transfers. User
             // gotos and ordinary labels are not guessed from name or path.
-            if transfer.len()!=1 || ctx.graph.statement_label(id).is_none() {
+            if ctx.graph.statement_label(id).is_none() {
                 return Err(reject("unsupported FP user goto/label"));
             }
-            match (super::semantic(1,node.data.kind),transfer[0].kind) {
+            let transfer=transfer.ok_or_else(||reject("unsupported FP user goto/label"))?;
+            match (super::semantic(1,node.data.kind),transfer.kind) {
                 (10,1)=>output.push(FloatStmt::Break),
                 (10,2)=>output.push(FloatStmt::Continue),
                 (11,3|4|6)=>{},
@@ -3318,7 +3412,7 @@ fn lower_fp_leaf(
                     .ok_or_else(||reject("FP declaration local symbol missing"))?;
                 // StackFloat changes only the internal placement of a
                 // source C float/double, never its native declaration type.
-                let native=scalar_type_from_edg(ctx.il,decl.ty)?;
+                let native=ctx.metadata.scalar(decl.ty)?;
                 let expected=match ctx.local_types[index] {
                     ScalarType::StackFloat(t)=>ScalarType::Float(t),
                     other=>other,
@@ -3373,14 +3467,9 @@ fn lower_fp_leaf(
                         if node.expression.is_some() {
                             return Err(reject("INTEGER native constant initializer has expression"));
                         }
-                        let mut images=ctx.il.statement_integer_initializers.iter()
-                            .filter(|v|v.function==*function &&
-                                v.statement_path==*path);
-                        let image=images.next().ok_or_else(||
-                            reject("INTEGER automatic has no exact native constant image"))?;
-                        if images.next().is_some() {
-                            return Err(reject("duplicate INTEGER source initializer image"));
-                        }
+                        let image=ctx.metadata.integer_initializers.get(&(function.as_str(),path.as_str()))
+                            .ok_or_else(||reject("INTEGER automatic has no exact native constant image"))?
+                            .ok_or_else(||reject("duplicate INTEGER source initializer image"))?;
                         let bits=image.value as u64;
                         checked_integer_literal(ty,bits)?;
                         FpIntegerSource::Constant {bits,ty}
@@ -3403,17 +3492,11 @@ fn lower_fp_leaf(
                     if node.expression.is_some() {
                         return Err(reject("FP constant initializer has unexpected expression"));
                     }
-                    let mut matches=ctx.il.float_initializers.iter().filter(|v|
-                        v.function==*function && v.statement_path==*path &&
-                        v.symbol==symbol);
-                    let exact=matches.next().ok_or_else(||
-                        reject("FP constant initializer has no exact native image"))?;
-                    if matches.next().is_some() {
-                        return Err(reject("ambiguous FP constant initializer"));
-                    }
-                    let source_type=ctx.il.local_variables.iter().find(|v|
-                        v.routine==ctx.routine && v.symbol==symbol)
-                        .map(|v|v.ty).ok_or_else(||
+                    let exact=ctx.metadata.float_initializers.get(&(function.as_str(),path.as_str(),symbol))
+                        .ok_or_else(||reject("FP constant initializer has no exact native image"))?
+                        .ok_or_else(||reject("ambiguous FP constant initializer"))?;
+                    let source_type=ctx.metadata.local_types.get(&(ctx.routine,symbol))
+                        .copied().ok_or_else(||
                             reject("missing FP initializer target type"))?;
                     if exact.ty!=source_type {
                         return Err(reject("FP initializer native target type mismatch"));
@@ -3449,7 +3532,7 @@ fn lower_fp_leaf(
             if super::semantic(2,left.data.kind)==3 &&
                 left.data.operator.is_some_and(|op|super::semantic(3,op)==45) &&
                 left.operands.len()==2 {
-                let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                let ty=ctx.metadata.float(left.data.type_id.ok_or_else(||
                     reject("FP indexed assignment lacks native lvalue type"))?)?;
                 let (pointer,index)=source_fp_subscript(ctx,operation.operands[0],ty)?;
                 let value=expression_from_edg(ctx,operation.operands[1])?;
@@ -3464,7 +3547,7 @@ fn lower_fp_leaf(
             if super::semantic(2,left.data.kind)==3 &&
                 left.data.operator.is_some_and(|op|super::semantic(3,op)==44) &&
                 left.operands.len()==1 {
-                let ty=type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                let ty=ctx.metadata.float(left.data.type_id.ok_or_else(||
                     reject("FP memory assignment lacks native lvalue type"))?)?;
                 let source=source_fp_data_pointer_value(ctx,left.operands[0],ty)?;
                 let value=expression_from_edg(ctx,operation.operands[1])?;
@@ -3491,7 +3574,7 @@ fn lower_fp_leaf(
             if let Some(symbol)=left.data.symbol_id {
                 if ctx.global_symbols.contains(&symbol) {
                     let (_,ty,_,_)=source_fp_global(ctx.il,symbol)?;
-                    if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+                    if ctx.metadata.scalar(left.data.type_id.ok_or_else(||
                         reject("FP global store lvalue has no native type"))?)?!=
                         ScalarType::Float(ty) {
                         return Err(reject("FP global store ABI type mismatch"));
@@ -3506,7 +3589,7 @@ fn lower_fp_leaf(
             }
             let local=left.data.symbol_id.and_then(|symbol|ctx.locals.get(&symbol).copied())
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
-            let native=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
+            let native=ctx.metadata.scalar(left.data.type_id.ok_or_else(||
                 reject("missing native scalar lvalue type"))?)?;
             let checked=match ctx.local_types[local] {
                 ScalarType::StackFloat(t)=>ScalarType::Float(t),
@@ -3542,7 +3625,7 @@ fn lower_fp_leaf(
                 .ok_or_else(||reject("missing native FP return expression"))?;
             let ty=native.data.type_id.ok_or_else(||
                 reject("FP return expression has no native type"))?;
-            match scalar_type_from_edg(ctx.il,ty)? {
+            match ctx.metadata.scalar(ty)? {
                 ScalarType::Float(_)=>
                     output.push(FloatStmt::Return(expression_from_edg(ctx,source)?)),
                 result @ ScalarType::Int {..}=>{
@@ -3588,7 +3671,7 @@ fn lower_integer_indirect_return(
     }
     let node=ctx.graph.expression(id)
         .ok_or_else(||reject("missing INTEGER indirect-call expression"))?;
-    if scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
+    if ctx.metadata.scalar(node.data.type_id.ok_or_else(||
         reject("INTEGER indirect-call expression lacks native result type"))?)?!=result {
         return Err(reject("INTEGER indirect-call expression/result type mismatch"));
     }
@@ -3615,17 +3698,17 @@ fn lower_integer_indirect_return(
         ctx,if std::ptr::eq(pointer_expr,callee) {
             node.operands[0]
         } else {callee.operands[0]})?;
-    let (_,fn_ty)=function_pointer_type_from_edg(ctx.il,pointer_type)?;
+    let (_,fn_ty)=ctx.metadata.function_pointer(pointer_type)?;
     if !std::ptr::eq(pointer_expr,callee) {
-        let designator=super::canonical_abi_type(ctx.il,
+        let designator=ctx.metadata.canonical(
             callee.data.type_id.ok_or_else(||
                 reject("INTEGER indirect designator lacks native type"))?)?;
-        if source_callable_signature(ctx.il,designator)?!=
-           source_callable_signature(ctx.il,fn_ty)? {
+        if ctx.metadata.signature(designator)?!=
+           ctx.metadata.signature(fn_ty)? {
             return Err(reject("INTEGER indirect designator prototype mismatch"));
         }
     }
-    let (parameters,returned)=source_callable_signature(ctx.il,fn_ty)?;
+    let (parameters,returned)=ctx.metadata.signature(fn_ty)?;
     if returned!=result || parameters.len()!=node.operands.len()-1 {
         return Err(reject("INTEGER indirect return signature/arity mismatch"));
     }
@@ -3671,20 +3754,21 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     for p in &il.function_parameters {
         parameters_by_routine.entry(p.routine).or_default().push(p);
     }
+    let metadata=FpMetadata::new(il);
     let mut found_float=false;
     for name in &definitions {
         let routine=graph.routine_for_function(name)
             .ok_or_else(||reject("missing EDG routine identity"))?;
-        let sym_type=il.symbol_types.iter().find(|s|s.symbol==routine)
+        let sym_type=metadata.symbol_types.get(&routine).copied()
             .ok_or_else(||reject("missing native routine type"))?;
-        let func_ty=super::canonical_abi_type(il,sym_type.ty)?;
-        let func=il.types.iter().find(|t|t.id==func_ty)
+        let func_ty=metadata.canonical(sym_type)?;
+        let func=metadata.types.get(&func_ty)
             .ok_or_else(||reject("missing native function type"))?;
         if let Some(ret)=func.related {
-            if type_from_edg(il,ret).is_ok() {found_float=true;}
+            if metadata.float(ret).is_ok() {found_float=true;}
         }
         if parameters_by_routine.get(&routine).is_some_and(|params|
-            params.iter().any(|p|type_from_edg(il,p.ty).is_ok())) {
+            params.iter().any(|p|metadata.float(p.ty).is_ok())) {
             found_float=true;
         }
     }
@@ -3699,10 +3783,6 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     let mut locals_by_routine=HashMap::<_,Vec<_>>::new();
     for local in &il.local_variables {
         locals_by_routine.entry(local.routine).or_default().push(local);
-    }
-    let mut parameters_by_type=HashMap::<_,Vec<_>>::new();
-    for p in &il.type_parameters {
-        parameters_by_type.entry(p.owner).or_default().push(p);
     }
     let mut addressed=HashMap::<&str,std::collections::HashSet<crate::SymbolId>>::new();
     for node in &graph.expressions {
@@ -3723,18 +3803,17 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     for name in definitions {
         let routine=graph.routine_for_function(name)
             .ok_or_else(||reject("missing FP routine"))?;
-        let sym_type=il.symbol_types.iter().find(|s|s.symbol==routine)
+        let sym_type=metadata.symbol_types.get(&routine).copied()
             .ok_or_else(||reject("missing FP function declaration"))?;
-        let func_ty=super::canonical_abi_type(il,sym_type.ty)?;
-        let func=il.types.iter().find(|t|t.id==func_ty &&
-            super::semantic(4,t.kind)==2)
+        let func_ty=metadata.canonical(sym_type)?;
+        let func=metadata.types.get(&func_ty).filter(|t|super::semantic(4,t.kind)==2)
             .ok_or_else(||reject("FP function type not a routine"))?;
-        let sig=il.function_signatures.iter().find(|s|s.owner==func_ty)
+        let sig=metadata.prototypes.get(&func_ty)
             .ok_or_else(||reject("missing FP function prototype"))?;
         if sig.variadic || !sig.prototyped {
             return Err(reject("FP variadic/unprototyped ABI unsupported"));
         }
-        let ret=scalar_type_from_edg(il,func.related.ok_or_else(||
+        let ret=metadata.scalar(func.related.ok_or_else(||
             reject("missing FP return type"))?)?;
         let mut args=parameters_by_routine.remove(&routine).unwrap_or_default();
         args.sort_by_key(|p|p.position);
@@ -3742,9 +3821,9 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             p.position!=Some(i as u32) || p.implicit_this || p.compiler_generated) {
             return Err(reject("invalid FP explicit parameter list"));
         }
-        let params=args.iter().map(|p|scalar_type_from_edg(il,p.ty))
+        let params=args.iter().map(|p|metadata.scalar(p.ty))
             .collect::<Result<Vec<_>,_>>()?;
-        let declared=parameters_by_type.get(&func_ty).map(Vec::as_slice).unwrap_or(&[]);
+        let declared=metadata.parameters(func_ty);
         if declared.len()!=args.len() {
             return Err(reject("FP prototype/definition arity mismatch"));
         }
@@ -3755,7 +3834,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         for arg in &args {
             let d=arg.position.and_then(|position|by_position.get(&position))
                 .ok_or_else(||reject("FP prototype position missing"))?;
-            if scalar_type_from_edg(il,d.ty)?!=scalar_type_from_edg(il,arg.ty)? {
+            if metadata.scalar(d.ty)?!=metadata.scalar(arg.ty)? {
                 return Err(reject("FP prototype type mismatch"));
             }
         }
@@ -3769,8 +3848,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
                 local_syms.contains_key(&local.symbol) {
                 return Err(reject("unsupported FP local storage class"));
             }
-            check_plain_fp_local(il,local.ty)?;
-            let ty=scalar_type_from_edg(il,local.ty)?;
+            metadata.plain(local.ty)?;
+            let ty=metadata.scalar(local.ty)?;
             if !matches!(ty,ScalarType::Float(_)|ScalarType::FunctionPointer(_)|
                 ScalarType::DataPointer(_)|ScalarType::Int {bits:32|64,..}) {
                 return Err(reject("unsupported FP automatic local ABI class"));
@@ -3794,7 +3873,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             params_syms.entry(p.symbol).or_insert(i);
         }
         let ctx=FpSourceCtx {
-            il,graph:&graph,routine,params:params_syms,locals:local_syms,
+            il,graph:&graph,metadata:&metadata,routine,params:params_syms,locals:local_syms,
             param_types:&params,local_types:&local_types,global_symbols:&global_symbols,
         };
         let mut statements=Vec::new();
@@ -5309,6 +5388,30 @@ mod audit_resource_budget_tests {
             std::fs::write(path,object).unwrap();
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fp_native_metadata_cache_and_exact_duplicates() {
+        let cache=NativeTypeCache::<usize>::default();
+        let id=crate::TypeId(12);
+        let calls=std::cell::Cell::new(0);
+        for _ in 0..1024 {
+            assert_eq!(cached_native_type(&cache,id,||{
+                calls.set(calls.get()+1);
+                Ok(42)
+            }).unwrap(),42);
+        }
+        assert_eq!(calls.get(),1);
+        let bad=crate::TypeId(13);
+        assert!(cached_native_type(&cache,bad,||Err(reject("invalid native type"))).is_err());
+        assert!(!cache.borrow().contains_key(&bad));
+        let mut exact=HashMap::new();
+        index_exact(&mut exact,("f","0","0"),1);
+        assert_eq!(exact.get(&("f","0","0")),Some(&Some(1)));
+        index_exact(&mut exact,("f","0","0"),2);
+        index_exact(&mut exact,("f","0","0"),3);
+        assert_eq!(exact.get(&("f","0","0")),Some(&None));
+        assert!(!exact.contains_key(&("g","0","0")));
     }
 
     #[test]
