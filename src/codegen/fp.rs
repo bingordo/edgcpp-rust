@@ -5476,6 +5476,49 @@ mod audit_resource_budget_tests {
     }
 
     #[test]
+    #[ignore = "requires native EDG C frontend environment"]
+    fn native_fp_callable_signature_index() {
+        let dir=std::env::temp_dir().join(format!("edg-fp-callable-index-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source=dir.join("callbacks.c");
+        let mut text=String::from("typedef double (*same_a)(double); typedef double (*same_b)(double);\n");
+        for n in 1..=32 {
+            let params=std::iter::repeat("double").take(n).collect::<Vec<_>>().join(",");
+            let args=std::iter::repeat("x").take(n).collect::<Vec<_>>().join(",");
+            text.push_str(&format!("double callback_{n}(double (*p)({params}), double x) {{ return p({args}); }}\n"));
+        }
+        text.push_str("double callback_copy(same_a p, double x) { same_b q = p; return q(x); }\n");
+        std::fs::write(&source,text).unwrap();
+        let compiled=crate::compile(&["--c11",source.to_str().unwrap()]).unwrap();
+        let metadata=FpMetadata::new(&compiled.il);
+        let mut checked=0;
+        for ty in &compiled.il.types {
+            if super::semantic(4,ty.kind)!=5 || ty.related_role!=Some(1) {continue;}
+            let Ok((pointer,target))=metadata.function_pointer(ty.id) else {continue;};
+            let Ok(signature)=metadata.signature(target) else {continue;};
+            let ScalarType::FunctionPointer(representative)=metadata.scalar(pointer).unwrap() else {
+                panic!("checked callable did not classify as function pointer");
+            };
+            assert_eq!(metadata.signature(representative).unwrap(),signature);
+            assert!(representative.0<=pointer.0);
+            checked+=1;
+        }
+        assert!(checked>=32);
+        let table=metadata.callable_representatives.get().unwrap();
+        assert!(table.len()>=32);
+        for ty in &compiled.il.types {
+            let Ok((pointer,target))=metadata.function_pointer(ty.id) else {continue;};
+            let Ok(signature)=metadata.signature(target) else {continue;};
+            assert!(table[&signature].0<=pointer.0);
+        }
+        let object=maybe_emit_edg_float_object(&compiled.il).unwrap().unwrap();
+        if let Some(path)=std::env::var_os("EDG_FP_CALLABLE_INDEX_OBJECT") {
+            std::fs::write(path,object).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn fp_native_metadata_cache_and_exact_duplicates() {
         let cache=NativeTypeCache::<usize>::default();
         let id=crate::TypeId(12);
