@@ -4356,42 +4356,67 @@ fn requires_c_global_definition(meta: &crate::GlobalVariable, cpp: Option<bool>)
 /// byte. Reject any intersection with a previously accepted relocation:
 /// packed or malformed native layouts must not create overlapping writes.
 /// All operations are checked before passing offsets to the ELF backend.
-fn valid_aggregate_relocation_range(
-    prior: &[(usize,crate::SymbolId,i64)],
-    start: usize,
-    storage_bytes: usize,
-) -> bool {
-    const POINTER_BYTES: usize = 8;
-    let Some(end) = start.checked_add(POINTER_BYTES) else {return false;};
-    if end > storage_bytes {return false;}
-    prior.iter().all(|(earlier,_,_)| {
-        // Earlier entries were accepted only after the same bounds check.
-        let Some(earlier_end)=earlier.checked_add(POINTER_BYTES) else {
-            return false;
-        };
-        end<=*earlier || earlier_end<=start
-    })
-}
-
-/// Unlike aggregate and IEEE global initialization, scalar integer
-/// initialization previously took the first matching native event. Multiple
-/// events for one symbol are ambiguous IL, not a source-order overwrite.
-fn checked_global_integer_initializer(
-    il: &Il, symbol: crate::SymbolId,
-) -> Result<Option<i64>, CodegenError> {
-    let mut matches=il.initializer_integers.iter().filter(|v|v.symbol==symbol);
-    let first=matches.next().map(|v|v.value);
-    if matches.next().is_some() {
-        return Err(invalid("duplicate native integer global initializer"));
+fn validate_aggregate_relocations(
+    relocations:&mut [(usize,crate::SymbolId,i64)],storage_bytes:usize,
+)->Result<(),CodegenError> {
+    relocations.sort_unstable_by_key(|r|r.0);
+    let mut previous_end=0;
+    for &(start,_,_) in relocations.iter() {
+        let end=start.checked_add(8)
+            .ok_or_else(||invalid("aggregate relocation offset out of range"))?;
+        if start<previous_end || end>storage_bytes {
+            return Err(invalid("unsupported/overlapping aggregate pointer relocation"));
+        }
+        previous_end=end;
     }
-    Ok(first)
+    Ok(())
 }
 
+/// Index exact source identities, retaining ambiguity rather than accepting
+/// the first of multiple initializer records.
+fn index_global_initializer<T>(
+    map:&mut HashMap<crate::SymbolId,Option<T>>,symbol:crate::SymbolId,value:T,
+) {
+    map.entry(symbol).and_modify(|entry|*entry=None).or_insert(Some(value));
+}
+#[derive(Default)]
+struct GlobalInitializerIndex<'a> {
+    integers:HashMap<crate::SymbolId,Option<i64>>,
+    aggregates:HashMap<crate::SymbolId,Option<&'a crate::GlobalAggregateInitializer>>,
+    relocations:HashMap<crate::SymbolId,Vec<&'a crate::GlobalAggregateRelocation>>,
+}
+impl<'a> GlobalInitializerIndex<'a> {
+    fn new(il:&'a Il)->Self {
+        let mut index=Self::default();
+        for v in &il.initializer_integers {
+            index_global_initializer(&mut index.integers,v.symbol,v.value);
+        }
+        for v in &il.global_aggregate_initializers {
+            index_global_initializer(&mut index.aggregates,v.symbol,v);
+        }
+        for v in &il.global_aggregate_relocations {
+            index.relocations.entry(v.symbol).or_default().push(v);
+        }
+        index
+    }
+    fn integer(&self,symbol:crate::SymbolId)->Result<Option<i64>,CodegenError> {
+        match self.integers.get(&symbol) {
+            None=>Ok(None),
+            Some(Some(value))=>Ok(Some(*value)),
+            Some(None)=>Err(invalid("duplicate native integer global initializer")),
+        }
+    }
+}
 /// Resolve referenced globals, plus externally visible C definitions.
 /// Omit unsupported unrelated C++ types until full C++ global lowering exists.
 fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
+    let initializers=GlobalInitializerIndex::new(il);
+    let mut metadata=HashMap::new();
+    for g in &il.global_variables {metadata.entry(g.symbol).or_insert(g);}
+    let mut declared_types=HashMap::new();
+    for t in &il.symbol_types {declared_types.entry(t.symbol).or_insert(t.ty);}
     // A referenced FP object still needs typed FP expression lowering; do
     // not accidentally expose its bytes through the integer CFG backend.
     let source_references: HashSet<_> = il.expressions.iter()
@@ -4407,8 +4432,8 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             .filter(|meta| requires_c_global_definition(meta,il.cpp_language))
             .map(|meta|meta.symbol));
     for id in references {
-        if !il.global_variables.iter().any(|g|g.symbol==id) ||
-           !seen.insert(id) {continue;}
+        let Some(&meta)=metadata.get(&id) else {continue;};
+        if !seen.insert(id) {continue;}
         // The FP-only routine backend and the integer CFG must agree on
         // exact IEEE global data images. An unreferenced external C float
         // definition is still required by independently linked objects,
@@ -4435,8 +4460,8 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             continue;
         }
         let (name,scalar) = global_value_type(il,id)?;
-        let declared=il.symbol_types.iter().find(|t|t.symbol==id)
-            .ok_or_else(||invalid("global missing declared type"))?.ty;
+        let declared=*declared_types.get(&id)
+            .ok_or_else(||invalid("global missing declared type"))?;
         let alignment=storage_alignment(il,declared)?;
         let ty=scalar.unwrap_or(CAbiInt{bits:64,signed:false,is_bool:false});
         let storage_bytes=if scalar.is_some() {
@@ -4446,25 +4471,17 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             }
             bytes
         } else {
-                let declared=il.symbol_types.iter().find(|t|t.symbol==id)
-                    .ok_or_else(||invalid("array without declared type"))?.ty;
                 byte_size(il,declared)? as usize
             };
-        let meta = il.global_variables.iter().find(|g| g.symbol == id)
-            .ok_or_else(|| invalid("missing global metadata"))?;
         let defined = meta.linkage != 1 || meta.explicit_initializer;
         let linkage = if !defined { Linkage::Import }
             else if meta.linkage == 2 { Linkage::Local }
             else { Linkage::Export };
         let initializer = if meta.explicit_initializer {
             if scalar.is_none() {
-                let matches=il.global_aggregate_initializers.iter()
-                    .filter(|image|image.symbol==id).collect::<Vec<_>>();
-                if matches.len()!=1 {
-                    return Err(invalid(format!(
-                        "global {name} has no single supported aggregate initializer")));
-                }
-                let image=matches[0];
+                let image=initializers.aggregates.get(&id).copied().flatten()
+                    .ok_or_else(||invalid(format!(
+                        "global {name} has no single supported aggregate initializer")))?;
                 if canonical_abi_type(il,image.ty)?!=
                     canonical_abi_type(il,declared)? ||
                     image.bytes.len()!=storage_bytes {
@@ -4472,7 +4489,7 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
                 }
                 Some(image.bytes.clone())
             } else {
-                let value=checked_global_integer_initializer(il,id)?
+                let value=initializers.integer(id)?
                     .ok_or_else(|| invalid(format!(
                         "global {name} has unsupported non-integer initializer")))?;
                 let bytes = value.to_le_bytes();
@@ -4480,14 +4497,17 @@ fn compile_globals(il: &Il) -> Result<Vec<ScalarGlobal>, CodegenError> {
             }
         } else { None };
         let mut relocations=Vec::new();
-        for reloc in il.global_aggregate_relocations.iter().filter(|r|r.symbol==id) {
-            let start=usize::try_from(reloc.offset)
-                .map_err(|_|invalid("aggregate relocation offset out of range"))?;
-            if scalar.is_some() || !meta.explicit_initializer ||
-                !valid_aggregate_relocation_range(&relocations,start,storage_bytes) {
-                return Err(invalid("unsupported/overlapping aggregate pointer relocation"));
+        if let Some(records)=initializers.relocations.get(&id) {
+            if scalar.is_some() || !meta.explicit_initializer {
+                return Err(invalid("unsupported aggregate pointer relocation"));
             }
-            relocations.push((start,reloc.target,reloc.addend));
+            relocations.reserve(records.len());
+            for reloc in records {
+                let start=usize::try_from(reloc.offset)
+                    .map_err(|_|invalid("aggregate relocation offset out of range"))?;
+                relocations.push((start,reloc.target,reloc.addend));
+            }
+            validate_aggregate_relocations(&mut relocations,storage_bytes)?;
         }
         let access=scalar_memory_access(il,declared)?;
         if access!=MemoryAccess::Ordinary && scalar.is_none() {
@@ -5816,19 +5836,24 @@ mod audit_aggregate_relocation_range_tests {
     #[test]
     fn data_relocations_reject_all_overlaps_not_only_duplicate_starts() {
         let id=crate::SymbolId(1);
-        let prior=vec![(8usize,id,0i64)];
-        // Exactly adjacent eight-byte relocation slots are valid.
-        assert!(valid_aggregate_relocation_range(&prior,0,24));
-        assert!(valid_aggregate_relocation_range(&prior,16,24));
-        // Either direction of overlap is invalid, even if starts differ.
+        let check=|start,bytes| {
+            validate_aggregate_relocations(&mut [(8usize,id,0i64),(start,id,0)],bytes).is_ok()
+        };
+        assert!(check(0,24));
+        assert!(check(16,24));
         for start in [1,7,8,9,15] {
-            assert!(!valid_aggregate_relocation_range(&prior,start,24),
-                "overlapping relocation accepted at offset {start}");
+            assert!(!check(start,24),"overlapping relocation accepted at offset {start}");
         }
-        assert!(!valid_aggregate_relocation_range(&prior,17,24));
-        assert!(!valid_aggregate_relocation_range(&prior,usize::MAX,usize::MAX));
-        assert!(!valid_aggregate_relocation_range(&[],0,7));
-        assert!(valid_aggregate_relocation_range(&[],0,8));
+        assert!(!check(17,24));
+        assert!(validate_aggregate_relocations(&mut [(usize::MAX,id,0)],usize::MAX).is_err());
+        assert!(validate_aggregate_relocations(&mut [(0,id,0)],7).is_err());
+        assert!(validate_aggregate_relocations(&mut [(0,id,0)],8).is_ok());
+        let mut many:Vec<_>=(0..10000).rev().map(|n|(n*8,id,0)).collect();
+        validate_aggregate_relocations(&mut many,80000).unwrap();
+        assert_eq!(many[0].0,0);
+        assert_eq!(many[9999].0,79992);
+        many[5000].0-=1;
+        assert!(validate_aggregate_relocations(&mut many,80000).is_err());
     }
 }
 
@@ -6194,16 +6219,16 @@ mod audit_unique_scalar_global_initializer_tests {
     fn scalar_native_initializer_must_have_unambiguous_identity() {
         let id=crate::SymbolId(71);
         let mut il=Il::default();
-        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),None);
+        assert_eq!(GlobalInitializerIndex::new(&il).integer(id).unwrap(),None);
         il.initializer_integers.push(crate::InitializerInteger{symbol:id,value:-19});
-        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),Some(-19));
+        assert_eq!(GlobalInitializerIndex::new(&il).integer(id).unwrap(),Some(-19));
         il.initializer_integers.push(crate::InitializerInteger{
             symbol:crate::SymbolId(72),value:33,
         });
-        assert_eq!(checked_global_integer_initializer(&il,id).unwrap(),Some(-19));
+        assert_eq!(GlobalInitializerIndex::new(&il).integer(id).unwrap(),Some(-19));
         il.initializer_integers.push(crate::InitializerInteger{symbol:id,value:91});
-        assert!(checked_global_integer_initializer(&il,id).is_err());
-        assert_eq!(checked_global_integer_initializer(&il,crate::SymbolId(72)).unwrap(),Some(33));
+        assert!(GlobalInitializerIndex::new(&il).integer(id).is_err());
+        assert_eq!(GlobalInitializerIndex::new(&il).integer(crate::SymbolId(72)).unwrap(),Some(33));
     }
 }
 
