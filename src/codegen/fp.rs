@@ -1553,7 +1553,14 @@ fn emit_fp_statements(
                         fb.ins().return_(&[v]);
                         live=false;
                     }
-                    FloatStmt::IfBlock(cond,yes,no)=>{
+                    FloatStmt::IfBlock(..)|FloatStmt::IfAssign(..)=>{
+                        let (cond,yes,no)=match stmt {
+                            FloatStmt::IfBlock(cond,yes,no)=>
+                                (cond,Arm::Stmts(yes),Arm::Stmts(no)),
+                            FloatStmt::IfAssign(cond,yes,no)=>
+                                (cond,Arm::Assignments(yes),Arm::Assignments(no)),
+                            _=>unreachable!(),
+                        };
                         let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
                         let t=fb.create_block();
                         let f=fb.create_block();
@@ -1561,19 +1568,8 @@ fn emit_fp_statements(
                         fb.seal_block(t);
                         fb.seal_block(f);
                         fb.switch_to_block(t);
-                        pending.push(Task::IfYes(Arm::Stmts(no),outer,f));
-                        pending.push(Task::Run(Arm::Stmts(yes),outer));
-                    }
-                    FloatStmt::IfAssign(cond,yes,no)=>{
-                        let test=emit_condition(cond,fb,params,params_ty,locals,locals_ty,refs,global_refs)?;
-                        let t=fb.create_block();
-                        let f=fb.create_block();
-                        fb.ins().brif(test,t,&[],f,&[]);
-                        fb.seal_block(t);
-                        fb.seal_block(f);
-                        fb.switch_to_block(t);
-                        pending.push(Task::IfYes(Arm::Assignments(no),outer,f));
-                        pending.push(Task::Run(Arm::Assignments(yes),outer));
+                        pending.push(Task::IfYes(no,outer,f));
+                        pending.push(Task::Run(yes,outer));
                     }
                     FloatStmt::While(cond,body)=>{
                         let head=fb.create_block();
