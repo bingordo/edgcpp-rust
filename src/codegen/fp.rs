@@ -2235,7 +2235,7 @@ fn source_fp_data_pointer_value(
         }
         let symbol=operand.data.symbol_id.ok_or_else(||
             reject("address-of FP local has no native symbol"))?;
-        let index=ctx.locals.iter().position(|s|*s==symbol)
+        let index=ctx.locals.get(&symbol).copied()
             .ok_or_else(||reject("address-of FP requires an automatic local"))?;
         if ctx.local_types[index]!=ScalarType::StackFloat(ty) {
             return Err(reject("address-of FP local is not memory-backed"));
@@ -2252,9 +2252,9 @@ fn source_fp_data_pointer_value(
         reject("FP pointer expression has no native type"))?)?!=ty {
         return Err(reject("FP pointer expression native pointee mismatch"));
     }
-    let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+    let source=if let Some(i)=ctx.params.get(&symbol).copied() {
         PointerSource::Parameter(i)
-    } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+    } else if let Some(i)=ctx.locals.get(&symbol).copied() {
         PointerSource::Local(i)
     } else {
         return Err(reject("FP data pointer source is not a checked formal/local"));
@@ -2324,7 +2324,7 @@ fn source_fp_pointer_formal(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("FP memory pointer formal has no symbol"))?;
-    let n=ctx.params.iter().position(|p|*p==symbol).ok_or_else(||
+    let n=ctx.params.get(&symbol).copied().ok_or_else(||
         reject("FP memory load/store pointer not a source formal"))?;
     if ctx.param_types[n]!=ScalarType::DataPointer(ty) ||
         fp_data_pointer_type_from_edg(ctx.il,expr.data.type_id.ok_or_else(||
@@ -2437,9 +2437,9 @@ fn pointer_source_from_edg(
         ScalarType::FunctionPointer(ty)=>ty,
         _=>return Err(reject("source expression is not callable-pointer typed")),
     };
-    let source=if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+    let source=if let Some(i)=ctx.params.get(&symbol).copied() {
         PointerSource::Parameter(i)
-    } else if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+    } else if let Some(i)=ctx.locals.get(&symbol).copied() {
         PointerSource::Local(i)
     } else {
         return Err(reject("global, computed or nonlocal function-pointer unsupported"));
@@ -2514,10 +2514,11 @@ struct FpSourceCtx<'a> {
     il:&'a Il,
     graph:&'a crate::graph::Graph,
     routine:crate::SymbolId,
-    params:&'a [crate::SymbolId],
-    locals:&'a [crate::SymbolId],
+    params:HashMap<crate::SymbolId,usize>,
+    locals:HashMap<crate::SymbolId,usize>,
     param_types:&'a [ScalarType],
     local_types:&'a [ScalarType],
+    global_symbols:&'a std::collections::HashSet<crate::SymbolId>,
 }
 /// Decode a source-owned integer constant, never a constant inferred
 /// from its printed name or a generic C integer expression. The IL stores
@@ -2565,13 +2566,13 @@ fn source_fp_integer_value(
     }
     let symbol=expr.data.symbol_id.ok_or_else(||
         reject("FP INTEGER variable lacks source symbol"))?;
-    if let Some(parameter)=ctx.params.iter().position(|s|*s==symbol) {
+    if let Some(parameter)=ctx.params.get(&symbol).copied() {
         if ctx.param_types[parameter]!=expected {
             return Err(reject("FP INTEGER formal source class differs"));
         }
         return Ok(FpIntegerSource::Parameter(parameter));
     }
-    if let Some(local)=ctx.locals.iter().position(|s|*s==symbol) {
+    if let Some(local)=ctx.locals.get(&symbol).copied() {
         if ctx.local_types[local]!=expected {
             return Err(reject("FP INTEGER local source class differs"));
         }
@@ -2765,20 +2766,20 @@ fn native_fp_plan(
         if kind==2 && node.operands.is_empty() {
             let symbol=node.data.symbol_id
                 .ok_or_else(||reject("FP variable missing native identity"))?;
-            if let Some(i)=ctx.params.iter().position(|p|*p==symbol) {
+            if let Some(i)=ctx.params.get(&symbol).copied() {
                 if ctx.param_types[i]!=ScalarType::Float(ty) {
                     return Err(reject("FP formal rvalue type mismatch"));
                 }
                 return Ok(Some(FloatExpr::Parameter(i)));
             }
-            if let Some(i)=ctx.locals.iter().position(|p|*p==symbol) {
+            if let Some(i)=ctx.locals.get(&symbol).copied() {
                 if !matches!(ctx.local_types[i],
                     ScalarType::Float(t)|ScalarType::StackFloat(t) if t==ty) {
                     return Err(reject("FP local rvalue type mismatch"));
                 }
                 return Ok(Some(FloatExpr::Local(i)));
             }
-            if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+            if ctx.global_symbols.contains(&symbol) {
                 let (_,actual,_,_)=source_fp_global(ctx.il,symbol)?;
                 if actual!=ty || scalar_type_from_edg(ctx.il,node.data.type_id.ok_or_else(||
                         reject("FP external global expression lacks native type"))?)?!=
@@ -3310,10 +3311,10 @@ fn lower_fp_leaf(
             let mut found=false;
             for decl in ctx.graph.declarations_at(function,path) {
                 found=true;
-                if decl.is_vla || !ctx.locals.contains(&decl.symbol) {
+                if decl.is_vla || !ctx.locals.contains_key(&decl.symbol) {
                     return Err(reject("FP declaration is not a checked automatic scalar"));
                 }
-                let index=ctx.locals.iter().position(|p|*p==decl.symbol)
+                let index=ctx.locals.get(&decl.symbol).copied()
                     .ok_or_else(||reject("FP declaration local symbol missing"))?;
                 // StackFloat changes only the internal placement of a
                 // source C float/double, never its native declaration type.
@@ -3335,7 +3336,7 @@ fn lower_fp_leaf(
                 return Err(reject("unsupported FP initializer kind"));
             }
             let symbol=init.symbol.ok_or_else(||reject("FP initializer has no local"))?;
-            let local=ctx.locals.iter().position(|p|*p==symbol)
+            let local=ctx.locals.get(&symbol).copied()
                 .ok_or_else(||reject("FP initializer target is not an automatic local"))?;
             if let ScalarType::FunctionPointer(pointer_type)=ctx.local_types[local] {
                 if init.kind!=3 {
@@ -3488,7 +3489,7 @@ fn lower_fp_leaf(
                 return Err(reject("FP assignment target is not direct scalar storage"));
             }
             if let Some(symbol)=left.data.symbol_id {
-                if ctx.il.global_variables.iter().any(|g|g.symbol==symbol) {
+                if ctx.global_symbols.contains(&symbol) {
                     let (_,ty,_,_)=source_fp_global(ctx.il,symbol)?;
                     if scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                         reject("FP global store lvalue has no native type"))?)?!=
@@ -3503,7 +3504,7 @@ fn lower_fp_leaf(
                     return Ok(());
                 }
             }
-            let local=ctx.locals.iter().position(|p|Some(*p)==left.data.symbol_id)
+            let local=left.data.symbol_id.and_then(|symbol|ctx.locals.get(&symbol).copied())
                 .ok_or_else(||reject("FP assignment target is not a checked local"))?;
             let native=scalar_type_from_edg(ctx.il,left.data.type_id.ok_or_else(||
                 reject("missing native scalar lvalue type"))?)?;
@@ -3547,10 +3548,7 @@ fn lower_fp_leaf(
                 result @ ScalarType::Int {..}=>{
                     // Exact INTEGER-valued indirect calls preserve RAX/EAX;
                     // they are not FP-to-int numeric conversions.
-                    let is_call=ctx.graph.calls.iter().any(|site|
-                        site.function==native.data.function &&
-                        site.statement_path==native.data.statement_path &&
-                        site.path==native.data.path);
+                    let is_call=ctx.graph.call_at(source).is_some();
                     if is_call {
                         output.push(lower_integer_indirect_return(ctx,source,result)?);
                         return Ok(());
@@ -3594,13 +3592,9 @@ fn lower_integer_indirect_return(
         reject("INTEGER indirect-call expression lacks native result type"))?)?!=result {
         return Err(reject("INTEGER indirect-call expression/result type mismatch"));
     }
-    let mut calls=ctx.graph.calls.iter().filter(|site|
-        site.function==node.data.function &&
-        site.statement_path==node.data.statement_path &&
-        site.path==node.data.path);
-    let site=calls.next().ok_or_else(||
+    let site=ctx.graph.call_at(id).ok_or_else(||
         reject("INTEGER return is not a direct EDG-recorded call"))?;
-    if calls.next().is_some() || site.first_argument!=1 ||
+    if site.first_argument!=1 ||
         node.operands.is_empty() {
         return Err(reject("INTEGER indirect call has ambiguous/member argument layout"));
     }
@@ -3672,6 +3666,11 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     if definitions.is_empty() {return Ok(None);}
     let graph=crate::graph::Graph::from_il(il)
         .map_err(|e|reject(format!("invalid EDG graph: {e:?}")))?;
+    // Group source-owned metadata once per module, not once per routine.
+    let mut parameters_by_routine=HashMap::<_,Vec<_>>::new();
+    for p in &il.function_parameters {
+        parameters_by_routine.entry(p.routine).or_default().push(p);
+    }
     let mut found_float=false;
     for name in &definitions {
         let routine=graph.routine_for_function(name)
@@ -3684,8 +3683,8 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         if let Some(ret)=func.related {
             if type_from_edg(il,ret).is_ok() {found_float=true;}
         }
-        if il.function_parameters.iter().any(|p|
-            p.routine==routine && type_from_edg(il,p.ty).is_ok()) {
+        if parameters_by_routine.get(&routine).is_some_and(|params|
+            params.iter().any(|p|type_from_edg(il,p.ty).is_ok())) {
             found_float=true;
         }
     }
@@ -3697,6 +3696,29 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         g.thread_local || g.local_to_function) {
         return Err(reject("FP source module has unsupported TLS/local globals"));
     }
+    let mut locals_by_routine=HashMap::<_,Vec<_>>::new();
+    for local in &il.local_variables {
+        locals_by_routine.entry(local.routine).or_default().push(local);
+    }
+    let mut parameters_by_type=HashMap::<_,Vec<_>>::new();
+    for p in &il.type_parameters {
+        parameters_by_type.entry(p.owner).or_default().push(p);
+    }
+    let mut addressed=HashMap::<&str,std::collections::HashSet<crate::SymbolId>>::new();
+    for node in &graph.expressions {
+        if super::semantic(2,node.data.kind)!=3 ||
+            node.data.operator.map(|op|super::semantic(3,op))!=Some(43) ||
+            node.operands.len()!=1 {continue;}
+        if let Some(operand)=graph.expression(node.operands[0]) {
+            if super::semantic(2,operand.data.kind)==2 && operand.operands.is_empty() {
+                if let Some(symbol)=operand.data.symbol_id {
+                    addressed.entry(node.data.function.as_str()).or_default().insert(symbol);
+                }
+            }
+        }
+    }
+    let global_symbols:std::collections::HashSet<_>=il.global_variables.iter()
+        .map(|g|g.symbol).collect();
     let mut functions=Vec::with_capacity(definitions.len());
     for name in definitions {
         let routine=graph.routine_for_function(name)
@@ -3714,8 +3736,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
         let ret=scalar_type_from_edg(il,func.related.ok_or_else(||
             reject("missing FP return type"))?)?;
-        let mut args:Vec<_>=il.function_parameters.iter()
-            .filter(|p|p.routine==routine).collect();
+        let mut args=parameters_by_routine.remove(&routine).unwrap_or_default();
         args.sort_by_key(|p|p.position);
         if args.iter().enumerate().any(|(i,p)|
             p.position!=Some(i as u32) || p.implicit_this || p.compiler_generated) {
@@ -3723,27 +3744,29 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
         }
         let params=args.iter().map(|p|scalar_type_from_edg(il,p.ty))
             .collect::<Result<Vec<_>,_>>()?;
-        let declared:Vec<_>=il.type_parameters.iter()
-            .filter(|p|p.owner==func_ty).collect();
+        let declared=parameters_by_type.get(&func_ty).map(Vec::as_slice).unwrap_or(&[]);
         if declared.len()!=args.len() {
             return Err(reject("FP prototype/definition arity mismatch"));
         }
+        let mut by_position=HashMap::with_capacity(declared.len());
+        for d in declared {
+            by_position.entry(d.position).or_insert(*d);
+        }
         for arg in &args {
-            let d=declared.iter().find(|d|Some(d.position)==arg.position)
+            let d=arg.position.and_then(|position|by_position.get(&position))
                 .ok_or_else(||reject("FP prototype position missing"))?;
             if scalar_type_from_edg(il,d.ty)?!=scalar_type_from_edg(il,arg.ty)? {
                 return Err(reject("FP prototype type mismatch"));
             }
         }
-        let locals:Vec<_>=il.local_variables.iter()
-            .filter(|v|v.routine==routine).collect();
+        let locals=locals_by_routine.remove(&routine).unwrap_or_default();
         if u32::try_from(locals.len()).is_err() {return Err(reject("FP variable IDs not representable"));}
-        let mut local_syms=Vec::with_capacity(locals.len());
+        let mut local_syms=HashMap::with_capacity(locals.len());
         let mut local_types=Vec::with_capacity(locals.len());
         for local in locals {
             if local.static_storage || local.compiler_generated ||
                 local.structured_binding || local.handler_parameter ||
-                local_syms.contains(&local.symbol) {
+                local_syms.contains_key(&local.symbol) {
                 return Err(reject("unsupported FP local storage class"));
             }
             check_plain_fp_local(il,local.ty)?;
@@ -3756,28 +3779,23 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
             // address-of of this exact automatic object in this function.
             // An addressed FP scalar must reside in one real stack object
             // for its entire function lifetime, including all aliases.
-            let address_taken=graph.expressions.iter().any(|node|{
-                if node.data.function.as_str()!=name ||
-                    super::semantic(2,node.data.kind)!=3 ||
-                    node.data.operator.map(|op|super::semantic(3,op))!=Some(43) ||
-                    node.operands.len()!=1 {return false;}
-                graph.expression(node.operands[0]).is_some_and(|operand|
-                    super::semantic(2,operand.data.kind)==2 &&
-                    operand.data.symbol_id==Some(local.symbol) &&
-                    operand.operands.is_empty())
-            });
+            let address_taken=addressed.get(name).is_some_and(|symbols|
+                symbols.contains(&local.symbol));
+            local_syms.insert(local.symbol,local_types.len());
             local_types.push(match (ty,address_taken) {
                 (ScalarType::Float(t),true)=>ScalarType::StackFloat(t),
                 (other,_)=>other,
             });
-            local_syms.push(local.symbol);
         }
         let roots:Vec<_>=graph.roots(name).map(|(id,_)|id).collect();
         if roots.len()!=1 {return Err(reject("FP function must have one root"));}
-        let params_syms=args.iter().map(|p|p.symbol).collect::<Vec<_>>();
+        let mut params_syms=HashMap::with_capacity(args.len());
+        for (i,p) in args.iter().enumerate() {
+            params_syms.entry(p.symbol).or_insert(i);
+        }
         let ctx=FpSourceCtx {
-            il,graph:&graph,routine,params:&params_syms,locals:&local_syms,
-            param_types:&params,local_types:&local_types,
+            il,graph:&graph,routine,params:params_syms,locals:local_syms,
+            param_types:&params,local_types:&local_types,global_symbols:&global_symbols,
         };
         let mut statements=Vec::new();
         lower_fp_body(&ctx,roots[0],&mut statements)?;
@@ -3801,7 +3819,7 @@ pub(super) fn maybe_emit_edg_float_object(il:&Il)
     for expr in &il.expressions {
         if super::semantic(2,expr.kind)!=2 {continue;}
         let Some(symbol)=expr.symbol_id else {continue;};
-        if il.global_variables.iter().any(|g|g.symbol==symbol) &&
+        if global_symbols.contains(&symbol) &&
             seen.insert(symbol) {
             let (name,ty,linkage,initializer)=source_fp_global(il,symbol)?;
             fp_globals.push(FpScalarGlobal {symbol,name,ty,linkage,initializer});
